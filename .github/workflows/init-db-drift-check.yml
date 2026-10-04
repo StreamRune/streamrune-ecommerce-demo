@@ -29,11 +29,11 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: streamrune-ecommerce-demo
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: StreamRune/streamrune
           path: streamrune
