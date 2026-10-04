@@ -79,7 +79,7 @@ jobs:
           # Falls back to the default token once the repository is public.
           token: ${{ secrets.STREAMRUNE_CHECKOUT_TOKEN || github.token }}
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           java-version: '25'
           distribution: 'graalvm'
