@@ -69,7 +69,7 @@ jmh = "1.37"
 # Build plugins
 spotless = "7.1.0"
 jmh-plugin = "0.7.2"
-graalvm = "1.1.2"
+graalvm = "1.1.14"
 versions-plugin = "0.54.0"
 version-catalog-update = "0.8.4"
 
