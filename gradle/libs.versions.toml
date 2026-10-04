@@ -44,7 +44,7 @@ opentelemetry = "1.47.0"
 micrometer = "1.14.1"
 
 # Security
-spring-security = "6.5.0"
+spring-security = "7.1.1"
 
 # Jakarta
 jakarta-annotation = "3.0.0"
