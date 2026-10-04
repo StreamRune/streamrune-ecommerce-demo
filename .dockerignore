@@ -1,0 +1,10 @@
+.git
+.gradle
+**/build
+!spring-app/build/libs
+**/node_modules
+**/.next
+docs
+scripts
+.github
+.idea

@@ -1,0 +1,18 @@
+StreamRune E-Commerce Demo
+Copyright (c) 2026 Martin Bednář
+
+SPDX-License-Identifier: Apache-2.0
+
+This repository is licensed under the Apache License, Version 2.0.
+See LICENSE for the full license text.
+
+The demo is built on StreamRune, a separate work with its own license
+terms: the Business Source License 1.1, with a commercial license for
+organizations above its revenue threshold. The Apache License above covers
+the files of this repository only and does not change the terms under which
+StreamRune is licensed; see the LICENSE and NOTICE files that ship with
+StreamRune.
+
+The libraries and tools the demo uses (Spring Boot, Micronaut, Quarkus,
+Next.js and others) are not part of this repository and keep their own
+licenses.

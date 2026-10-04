@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: notifications-service
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+
+server:
+  port: 8090
+
+app:
+  integration:
+    queue: streamrune.integration

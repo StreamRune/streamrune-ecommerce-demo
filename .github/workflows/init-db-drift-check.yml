@@ -1,0 +1,49 @@
+name: init-db Drift Check
+
+# Fails if scripts/init-db.sql has drifted from the StreamRune framework Flyway
+# migrations. The demo's schema is hand-generated from those migrations, so it can
+# silently fall behind when StreamRune adds one. Triggers:
+#   - PRs / pushes that touch init-db.sql (catches a regeneration that dropped a column)
+#   - a weekly schedule + manual dispatch (catches UPSTREAM drift: StreamRune added a
+#     migration but the demo wasn't regenerated — the demo repo can't see those commits)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/init-db.sql'
+      - 'scripts/init-db-drift-check.sh'
+      - '.github/workflows/init-db-drift-check.yml'
+  pull_request:
+    paths:
+      - 'scripts/init-db.sql'
+      - 'scripts/init-db-drift-check.sh'
+      - '.github/workflows/init-db-drift-check.yml'
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC — detect upstream migration drift
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    name: init-db.sql ↔ Flyway migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: streamrune-ecommerce-demo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: StreamRune/streamrune
+          path: streamrune
+          # Falls back to the default token once the repository is public.
+          token: ${{ secrets.STREAMRUNE_CHECKOUT_TOKEN || github.token }}
+
+      # ubuntu-latest ships Docker; the check spins up a throwaway postgres:18-alpine.
+      - name: Verify Docker available
+        run: docker info
+
+      - name: Check init-db.sql against framework migrations
+        working-directory: streamrune-ecommerce-demo
+        run: bash scripts/init-db-drift-check.sh

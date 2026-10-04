@@ -1,0 +1,146 @@
+name: Native Image Smoke Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'domain/**'
+      - 'commands/**'
+      - 'queries/**'
+      - 'projections/**'
+      - 'spring-app/**'
+      - 'quarkus-app/**'
+      - 'micronaut-app/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'scripts/**'
+      - '.github/workflows/native-image-smoke-test.yml'
+  pull_request:
+    paths:
+      - 'domain/**'
+      - 'commands/**'
+      - 'queries/**'
+      - 'projections/**'
+      - 'spring-app/**'
+      - 'quarkus-app/**'
+      - 'micronaut-app/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'scripts/**'
+      - '.github/workflows/native-image-smoke-test.yml'
+  workflow_dispatch:
+
+jobs:
+  native-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [spring, quarkus, micronaut]
+    runs-on: ubuntu-latest
+    name: ${{ matrix.framework }}
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: streamrune_ecommerce
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        # All three binaries' outbox publishers open their AMQP channel at startup (Spring: AOT
+        # fixes the bean into the image), so the apps need a broker. No health-cmd: a root-run
+        # rabbitmq-diagnostics racing the broker's first start can write an Erlang cookie the
+        # broker cannot read; the smoke script waits for the broker's own startup log line instead.
+        image: rabbitmq:4-management-alpine
+        ports:
+          - 5672:5672
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: streamrune-ecommerce-demo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: StreamRune/streamrune
+          path: streamrune
+          # Falls back to the default token once the repository is public.
+          token: ${{ secrets.STREAMRUNE_CHECKOUT_TOKEN || github.token }}
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build native image (Spring)
+        if: matrix.framework == 'spring'
+        working-directory: streamrune-ecommerce-demo
+        run: |
+          ./gradlew :spring-app:nativeCompile \
+            -x test -x spotlessCheck --no-daemon
+
+      - name: Build native image (Quarkus)
+        if: matrix.framework == 'quarkus'
+        working-directory: streamrune-ecommerce-demo
+        run: |
+          ./gradlew :quarkus-app:build \
+            -Dquarkus.native.enabled=true \
+            -Dquarkus.package.jar.enabled=false \
+            -x test -x spotlessCheck --no-daemon
+
+      - name: Build native image (Micronaut)
+        if: matrix.framework == 'micronaut'
+        working-directory: streamrune-ecommerce-demo
+        run: |
+          ./gradlew :micronaut-app:nativeCompile \
+            -x test -x spotlessCheck --no-daemon
+
+      # The same script developers run locally, against the job's service containers and the
+      # binary built above: applies scripts/init-db.sql, then health, a command-to-read-model round
+      # trip, the replay of a dead-lettered command through its sealed root (DLQ registerCommand
+      # of a sealed root needs the root registered for reflection in the image; on Quarkus and
+      # Micronaut that is the app's reachability-metadata.json, since @RegisterForReflection and
+      # @TypeHint do not list permitted subclasses), and a 1.5 MiB read model written and read
+      # back. It then stops the binary with SIGTERM, waits for it to exit, and fails on any
+      # UnsupportedFeatureError in the binary's output, shutdown included (the Micronaut binary's
+      # Netty 4.2 needs -H:+SharedArenaSupport for that, see micronaut-app/build.gradle.kts).
+      - name: Smoke test (Spring)
+        if: matrix.framework == 'spring'
+        working-directory: streamrune-ecommerce-demo
+        env:
+          SMOKE_SKIP_BUILD: '1'
+          SMOKE_PG_CONTAINER: ${{ job.services.postgres.id }}
+          SMOKE_RABBIT_CONTAINER: ${{ job.services.rabbitmq.id }}
+        run: bash scripts/native-image-smoke-test.sh spring
+
+      - name: Smoke test (Quarkus)
+        if: matrix.framework == 'quarkus'
+        working-directory: streamrune-ecommerce-demo
+        env:
+          SMOKE_SKIP_BUILD: '1'
+          SMOKE_PG_CONTAINER: ${{ job.services.postgres.id }}
+          SMOKE_RABBIT_CONTAINER: ${{ job.services.rabbitmq.id }}
+        run: bash scripts/native-image-smoke-test.sh quarkus
+
+      - name: Smoke test (Micronaut)
+        if: matrix.framework == 'micronaut'
+        working-directory: streamrune-ecommerce-demo
+        env:
+          SMOKE_SKIP_BUILD: '1'
+          SMOKE_PG_CONTAINER: ${{ job.services.postgres.id }}
+          SMOKE_RABBIT_CONTAINER: ${{ job.services.rabbitmq.id }}
+        run: bash scripts/native-image-smoke-test.sh micronaut

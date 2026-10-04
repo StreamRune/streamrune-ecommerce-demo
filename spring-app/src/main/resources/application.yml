@@ -1,0 +1,70 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/streamrune_ecommerce
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+
+streamrune:
+  event-store:
+    type: postgres
+    schema:
+      # The demo's schema is created by scripts/init-db.sql (Docker initdb), not Flyway.
+      # The auto-configured event store defaults to running its Flyway series (classpath:db/
+      # streamrune-migration, on its own flyway_schema_history_streamrune table);
+      # disable it so it does not try to re-run V001's plain CREATE TABLE event_stream against the
+      # already-created table (baselineOnMigrate/baselineVersion=0 only tolerates a non-empty
+      # schema that holds the APPLICATION's own unrelated tables, not a hand-pre-created copy of
+      # the framework's own schema).
+      auto-initialize: false
+  projection:
+    type: polling
+    interval: 100
+  projections:
+    auto-discovery:
+      enabled: false
+  outbox:
+    enabled: true
+    retention-max-age: 7d
+    # SKIPPED rows (an operator's audited decision that an entry will never be delivered) are kept
+    # 30 days; FAILED rows are never pruned — they block their aggregate until replayed or skipped.
+    skipped-retention-max-age: 30d
+  security:
+    # Request identity, decided for this app: TRUSTED-GATEWAY MODE, not an authenticated resolver.
+    # The demo has no login (spring-security-core is on the classpath only for the framework's
+    # optional AuthenticatedUserResolver AOT wiring), so it stands in for a gateway that would
+    # authenticate every caller, overwrite X-User-Id with the authenticated id and strip any
+    # X-User-Id or X-User-Role a client sent. Nothing does that here: the frontend, the tutorial's
+    # curl examples and the integration tests send X-User-Id themselves, which is acceptable only
+    # for a local showcase. Never enable the flag in production unless such a gateway is in front.
+    # Without it the header is never the identity: spring-security-core's resolver would make every
+    # login-less request anonymous, and without Spring Security the app would refuse to start,
+    # because annotation authorization is configured. The flag covers X-User-Role too: the
+    # framework reads it into baggage `role` only in this mode, and HeaderUserRoleResolver
+    # authorizes on it, a demo shortcut a real deployment must not copy. Startup logs
+    # "Request identity: TRUSTED_GATEWAY ...".
+    trust-user-id-header: true
+  sse:
+    # The framework's auto-registered GET /api/sse/{aggregateType}/{aggregateId} endpoint is now
+    # default-off and requires an SseAuthorizer bean. This demo defines its own SseController
+    # (see spring-app SseController, kept for the @PathVariable name-binding workaround) which
+    # extends the framework controller and therefore also needs the authorizer; SseLiveE2EIT
+    # exercises it. See StreamRuneConfig#sseAuthorizer for the allow-all justification.
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics

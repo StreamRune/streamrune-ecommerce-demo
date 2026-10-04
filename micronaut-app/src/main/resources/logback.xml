@@ -1,0 +1,19 @@
+<configuration>
+  <!--
+    INFO by default, as the Spring and Quarkus apps log. Without this file Logback falls back to its
+    basic configuration, which logs everything at DEBUG. Beyond the noise, that broke the native
+    binary: at DEBUG, HikariCP's HikariConfig.logConfiguration() reads every pool setting through
+    reflection (PropertyElf), which the image does not register, so the DataSource failed with
+    "MissingReflectionRegistrationError: Cannot reflectively invoke method
+    'public boolean com.zaxxer.hikari.HikariConfig.isAllowPoolSuspension()'".
+  -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>

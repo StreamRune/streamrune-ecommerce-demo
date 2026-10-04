@@ -1,0 +1,14 @@
+{
+  "reflection": [
+    { "type": "org.streamrune.ecommerce.domain.product.ProductCommand" },
+    { "type": "org.streamrune.ecommerce.domain.order.OrderCommand" },
+    { "type": "org.streamrune.ecommerce.domain.customer.CustomerCommand" },
+    { "type": "org.streamrune.ecommerce.domain.payment.PaymentCommand" },
+    { "type": "org.streamrune.ecommerce.domain.inventory.InventoryCommand" },
+    { "type": "org.streamrune.ecommerce.domain.product.ProductEvent" },
+    { "type": "org.streamrune.ecommerce.domain.order.OrderEvent" },
+    { "type": "org.streamrune.ecommerce.domain.customer.CustomerEvent" },
+    { "type": "org.streamrune.ecommerce.domain.payment.PaymentEvent" },
+    { "type": "org.streamrune.ecommerce.domain.inventory.InventoryEvent" }
+  ]
+}

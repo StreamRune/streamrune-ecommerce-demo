@@ -1,0 +1,14 @@
+# Disable seed data runner in integration tests so E2E ITs can manage their own
+# fixture state without racing the seed commands.
+app:
+  seed:
+    enabled: false
+
+# Bind each test-context Micronaut server to a random port so test classes that
+# create separate application contexts (e.g. IntegrationOutboxE2EIT with its own
+# Postgres + RabbitMQ containers) don't collide with the shared-context server
+# that the AbstractIntegrationTest group holds open on the same port.
+# Micronaut Test wires @Client("/") to the actual running port automatically.
+micronaut:
+  server:
+    port: -1

@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# Node
+node_modules/
+.next/
+.env*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+pgdata/
