@@ -40,6 +40,16 @@ class OrderDeciderTest {
   }
 
   @Test
+  void placeOrder_existingOrder_throws() {
+    fixture
+        .given(placed(), new OrderEvent.OrderConfirmed("o-1"))
+        .when(
+            new OrderCommand.PlaceOrder(
+                "o-1", "c-2", List.of(new OrderCommand.OrderLine("p-9", 1, TEN_USD))))
+        .expectFailedWith(DomainException.class, "Order already exists: o-1");
+  }
+
+  @Test
   void confirmOrder_fromCreated() {
     fixture
         .given(placed())

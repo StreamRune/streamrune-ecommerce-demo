@@ -41,6 +41,18 @@ class ProductDeciderTest {
   }
 
   @Test
+  void createProduct_existingProduct_throws() {
+    fixture
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD"), 5))
+        .expectFailedWith(DomainException.class, "Product already exists: p-1");
+  }
+
+  @Test
   void createProduct_lowStock() {
     fixture
         .given()

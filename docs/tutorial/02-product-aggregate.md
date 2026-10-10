@@ -294,10 +294,16 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
     @Override
     public List<ProductEvent> decide(ProductCommand cmd, ProductState state) {
         return switch (cmd) {
-            case ProductCommand.CreateProduct c ->
-                List.of(new ProductEvent.ProductCreated(
+            case ProductCommand.CreateProduct c -> {
+                // A product id is created once. Without this check a second CreateProduct would
+                // append another ProductCreated, and evolve would replace the product's name,
+                // price and stock.
+                if (state.productId() != null)
+                    throw new DomainException("Product already exists: " + c.productId());
+                yield List.of(new ProductEvent.ProductCreated(
                     c.productId(), c.name(), c.description(), c.category(),
                     c.price(), c.initialStock()));
+            }
 
             case ProductCommand.UpdatePrice c ->
                 List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
@@ -353,11 +359,25 @@ Run the test again:
 
 It should pass now. Green phase.
 
+> **Why `CreateProduct` checks the state.** The command bus loads the stream the command names, folds its events into a state with `evolve`, and hands that state to `decide`. For an id nobody used, the state is still `initialState()` and `state.productId()` is `null`. For an id that already has a product, it is not — and that is the only place where "this product exists" is known. A decider that skipped the check would accept the second `CreateProduct`, append a second `ProductCreated` to the same stream, and `evolve` would then replace the name, price and stock of the product that was there. Every command that creates an aggregate needs this guard; you will write the same one for customers (chapter 6) and orders (chapter 8).
+
 ### Step 4 — Add the remaining tests
 
 Expand `ProductDeciderTest` with tests for every business rule. Add these test methods alongside `createProduct_emitsProductCreated`:
 
 ```java
+@Test
+void createProduct_existingProduct_throws() {
+    fixture
+        .given(new ProductEvent.ProductCreated(
+            "p-1", "Widget", null, null,
+            new Money(java.math.BigDecimal.TEN, "USD"), 100))
+        .when(new ProductCommand.CreateProduct(
+            "p-1", "Other", null, null,
+            new Money(java.math.BigDecimal.ONE, "USD"), 5))
+        .expectFailedWith(DomainException.class, "Product already exists: p-1");
+}
+
 @Test
 void createProduct_lowStock() {
     fixture
@@ -449,7 +469,7 @@ Run the full test class:
 ./gradlew :commands:test --tests "*.ProductDeciderTest"
 ```
 
-All eight tests should pass. Notice the `DeciderFixture` API:
+All ten tests should pass. Notice the `DeciderFixture` API:
 
 - `.given()` — no prior events; this is a brand-new aggregate.
 - `.given(event1, event2, ...)` — pre-load the aggregate with past events. `evolve` is called for each one before the command is processed.
@@ -457,6 +477,7 @@ All eight tests should pass. Notice the `DeciderFixture` API:
 - `.expectEvents(event1, ...)` — asserts the exact events emitted by `decide`.
 - `.expectState(consumer)` — runs assertions on the final state after `evolve` has been applied to every emitted event.
 - `.expectException(type)` — asserts that `decide` throws the given exception type.
+- `.expectFailedWith(type, text)` — the same, and the exception's message must contain the text.
 
 There are no Spring mocks, no Mockito, no in-memory databases. The entire aggregate lifecycle — load, decide, evolve — is exercised in a few milliseconds per test.
 
@@ -666,6 +687,16 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
 ```
 
 You should see one row: `product | p-1 | ProductCreated | 1`. (`version` is the per-stream sequence number, and `global_offset` is the store-wide ordering column — those are the actual columns on the `event_stream` table.)
+
+Send the same request a second time, with `-i` to see the status:
+
+```bash
+curl -i -X POST http://localhost:8080/api/products \
+  -H 'Content-Type: application/json' \
+  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+```
+
+It answers `400 Bad Request` with the body `Product already exists: p-1`: the command bus loaded the stream, the decider saw a state with a product id and threw `DomainException`, and the `GlobalExceptionHandler` from chapter 1 turned it into the 400. The `SELECT` above still returns the one row.
 
 Query the product list (returns an empty array until chapter 5):
 

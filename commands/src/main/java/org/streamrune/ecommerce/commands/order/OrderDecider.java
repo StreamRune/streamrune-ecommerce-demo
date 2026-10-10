@@ -17,6 +17,11 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
   public List<OrderEvent> decide(OrderCommand cmd, OrderState state) {
     return switch (cmd) {
       case OrderCommand.PlaceOrder c -> {
+        // An order id is placed once. Without this check a second PlaceOrder would append another
+        // OrderPlaced, and evolve would replace the order's lines and total and reset a confirmed
+        // or shipped order to CREATED.
+        if (state.orderId() != null)
+          throw new DomainException("Order already exists: " + c.orderId());
         List<OrderEvent.OrderLine> eventLines =
             c.lines().stream()
                 .map(l -> new OrderEvent.OrderLine(l.productId(), l.quantity(), l.unitPrice()))

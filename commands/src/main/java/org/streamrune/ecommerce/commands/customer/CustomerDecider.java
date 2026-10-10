@@ -15,10 +15,17 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
   @Override
   public List<CustomerEvent> decide(CustomerCommand cmd, CustomerState state) {
     return switch (cmd) {
-      case CustomerCommand.RegisterCustomer c ->
-          List.of(
-              new CustomerEvent.CustomerRegistered(
-                  c.customerId(), c.name(), c.email(), c.address(), c.phone()));
+      case CustomerCommand.RegisterCustomer c -> {
+        // A customer id is registered once. Without this check a second RegisterCustomer would
+        // replace the first customer's profile. A forgotten customer's id is not refused here but
+        // one step later, by the key store: it never issues a key for an erased subject again, so
+        // the event's encrypted fields cannot be written and the caller gets 410 Gone.
+        if (state.customerId() != null && state.status() != CustomerStatus.FORGOTTEN)
+          throw new DomainException("Customer already registered: " + c.customerId());
+        yield List.of(
+            new CustomerEvent.CustomerRegistered(
+                c.customerId(), c.name(), c.email(), c.address(), c.phone()));
+      }
 
       case CustomerCommand.UpdateProfile c -> {
         if (state.status() == CustomerStatus.FORGOTTEN)
