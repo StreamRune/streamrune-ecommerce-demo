@@ -29,12 +29,13 @@ All domain logic is framework-agnostic. The three application modules (Spring Bo
 | `spring-app/` | Spring Boot 4 REST application (port 8080) |
 | `micronaut-app/` | Micronaut REST application (port 8081) |
 | `quarkus-app/` | Quarkus REST application (port 8082) |
+| `notifications-service/` | Separate Spring Boot service that consumes the integration events the outbox publishes to RabbitMQ (port 8090) |
 | `frontend/` | Next.js frontend (port 3000) |
 
 ## Prerequisites
 
 - Java 25 (with `--enable-preview`)
-- Docker (for PostgreSQL and full-stack demo). The demo runs PostgreSQL 17 — the oldest version StreamRune supports (it requires 17 or newer and refuses an older server at startup)
+- Docker (for PostgreSQL, RabbitMQ and the full-stack demo). The demo runs PostgreSQL 17 — the oldest version StreamRune supports (it requires 17 or newer and refuses an older server at startup)
 - GraalVM CE 25.0.1 (for native builds only)
 
 ## Quick Start (Docker Compose)
@@ -42,22 +43,32 @@ All domain logic is framework-agnostic. The three application modules (Spring Bo
 The fastest way to run the full stack:
 
 ```bash
-./gradlew :spring-app:bootJar
+./gradlew :spring-app:bootJar :notifications-service:bootJar
 docker compose up
 ```
 
-This starts PostgreSQL, the Spring Boot backend (port 8080), and the Next.js frontend (port 3000). Open http://localhost:3000 in your browser.
+The two images copy the JARs the first command builds, so run it again before `docker compose up --build` whenever the code changes. Compose starts five services:
+
+| Service | Port | What it is |
+|---------|------|------------|
+| `postgres` | 5432 | PostgreSQL 17 with an empty `streamrune_ecommerce` database |
+| `rabbitmq` | 5672, 15672 | RabbitMQ broker for the transactional outbox; management UI on 15672 (`guest`/`guest`) |
+| `backend` | 8080 | The Spring Boot application |
+| `notifications-service` | 8090 | Consumer of the integration events the backend publishes |
+| `frontend` | 3000 | The Next.js frontend |
+
+Open http://localhost:3000 in your browser.
+
+The database needs no schema script. The backend creates the framework's tables itself when it starts: `streamrune.event-store.schema.auto-initialize=true` has StreamRune apply the Flyway baselines it ships (event store and crypto), each recorded in its own history table, and the read-model tables are created by the projections on first use. The Micronaut and Quarkus apps do the same.
 
 ## Running Individually
 
-### 1. Start PostgreSQL
+### 1. Start PostgreSQL and RabbitMQ
+
+All three apps need both: the database for the event store, and the broker because the outbox publisher opens its AMQP connection at startup.
 
 ```bash
-docker run -d --name sr-pg \
-  -e POSTGRES_DB=streamrune_ecommerce \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 postgres:17
+docker compose up -d postgres rabbitmq
 ```
 
 ### 2. Run the application
@@ -186,8 +197,9 @@ A smoke test script verifies the native binary end-to-end:
 bash scripts/native-image-smoke-test.sh spring
 ```
 
-It starts PostgreSQL (port 5433) and RabbitMQ (port 5672) in Docker, applies `scripts/init-db.sql`,
-runs the binary, and checks health, a command-to-read-model round trip, the replay of a
+It starts PostgreSQL (port 5433, an empty database) and RabbitMQ (port 5672) in Docker, runs the
+binary, and checks health, that the binary created the schema at startup (the framework registers
+its migration scripts as native-image resources), a command-to-read-model round trip, the replay of a
 dead-lettered `InventoryCommand$ReceiveShipment` through `POST /api/admin/dead-letters/{id}/retry`,
 and a product with a 1.5 MiB description written and read back. The replay check proves that the
 dead-letter runner's `registerCommand(InventoryCommand.class)` expanded the sealed root in the
@@ -216,6 +228,15 @@ startup walks would refuse the application with *"Sealed type … reports no per
 `EcommerceDomainReflectionConfigTest` checks on the JVM that every sealed supertype of a registered
 record is listed there.
 
+Creating the schema at startup takes two more settings in a Quarkus image, because Flyway finds
+parts of itself at run time and a Quarkus build does not apply the GraalVM reachability-metadata
+repository the other two builds get Flyway's metadata from.
+`quarkus.native.auto-service-loader-registration=true` in `application.properties` registers
+Flyway's plugins, which it loads with `ServiceLoader` (without it the binary fails at startup with a
+`NullPointerException` from Flyway's configuration), and `FlywayNativeImageConfig` registers the
+log creator Flyway instantiates by class name. The smoke test starts the binary on an empty
+database and requires the schema to exist afterwards, so it fails if either is missing.
+
 The Micronaut app too:
 
 ```bash
@@ -230,7 +251,11 @@ and the ten sealed command and event interfaces in the `reachability-metadata.js
 Micronaut's `@TypeHint` (or `@ReflectiveAccess`) on the sealed interfaces is not enough: it
 registers the type without its permitted subclasses, and the binary refused to start with *"Sealed
 type … reports no permitted subclasses"*. `NativeImageMetadataTest` checks on the JVM that every
-sealed supertype of a registered record is listed. The build sets
+sealed supertype of a registered record is listed. A second file,
+`micronaut-app-flyway/reachability-metadata.json` in the same `native-image` directory, registers
+the fields of Flyway's configuration extensions: Flyway copies them reflectively when the schema is
+created at startup, and without the registration the binary stopped there with a
+`MissingReflectionRegistrationError`. The build sets
 `graalvmNative.binaries.main.sharedLibrary = false` (otherwise native-build-tools produced a
 `micronaut-app.dylib`), and `logback.xml` keeps the app at INFO: at DEBUG, HikariCP reads every
 pool setting reflectively and the image's DataSource fails to start. The build also passes

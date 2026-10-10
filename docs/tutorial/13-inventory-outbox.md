@@ -855,7 +855,7 @@ rabbitmq:
     - "5672:5672"
     - "15672:15672"
   healthcheck:
-    test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+    test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
     interval: 5s
     timeout: 10s
     retries: 10
@@ -875,23 +875,25 @@ notifications-service:
       condition: service_healthy
 ```
 
-Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). Update the `backend` service too: add `RABBITMQ_HOST: rabbitmq`, `RABBITMQ_USERNAME: guest` and `RABBITMQ_PASSWORD: guest` to its `environment`, and `rabbitmq: condition: service_healthy` to its `depends_on`. Without `RABBITMQ_HOST` the backend's outbox publisher looks for the broker on `localhost` inside its own container and cannot connect.
+Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). The health check is `check_port_connectivity` rather than `ping`: `ping` succeeds as soon as the broker's Erlang node runs, several seconds before port 5672 accepts connections, and the services that wait for `service_healthy` connect the moment the check passes — the backend's outbox publisher would be refused and the container would exit. Update the `backend` service too: add `RABBITMQ_HOST: rabbitmq`, `RABBITMQ_USERNAME: guest` and `RABBITMQ_PASSWORD: guest` to its `environment`, and `rabbitmq: condition: service_healthy` to its `depends_on`. Without `RABBITMQ_HOST` the backend's outbox publisher looks for the broker on `localhost` inside its own container and cannot connect.
 
-Before running `docker compose up`, build the notifications JAR:
+Before running `docker compose up`, build the two JARs the images copy — the backend's and the notifications service's:
 
 ```bash
-./gradlew :notifications-service:bootJar
+./gradlew :spring-app:bootJar :notifications-service:bootJar
 docker compose up
 ```
+
+The repository's `.dockerignore` keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`. If you write your own, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
 
 The `notifications-service` deduplicates messages by `entryId` (the AMQP `messageId` property, set by `RabbitMqOutboxPublisher` to `entry.id().value()`). If the broker delivers a message twice — because the poller restarted after publishing but before marking it `DELIVERED` — the service discards the duplicate silently.
 
 ### Step 8: Verify End-to-End Delivery
 
-Start the full stack. Build the notifications-service JAR first (the Dockerfile copies a pre-built jar — see Step 7e):
+Start the full stack. Build both JARs first (the Dockerfiles copy pre-built jars — see Step 7e):
 
 ```bash
-./gradlew :notifications-service:bootJar
+./gradlew :spring-app:bootJar :notifications-service:bootJar
 docker compose up
 ```
 
