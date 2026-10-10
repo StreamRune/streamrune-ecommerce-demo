@@ -29,8 +29,19 @@ import reactor.core.publisher.Flux;
  * streamrune.sse.polling-interval}, the publisher enqueues onto a bounded per-subscriber queue and
  * a dedicated virtual-thread worker drains it. Every assertion therefore awaits rather than
  * checking synchronously.
+ *
+ * <p>The feed delivers only to clients that are subscribed when it reads an event. The tests
+ * therefore wait for the stream's opening comment before they send the command: the endpoint writes
+ * {@code : keepalive} as soon as the client is subscribed, and on Spring that write is also what
+ * commits the response. The wait is {@link #OPENS_WITHIN}, and the tests run with the periodic
+ * keepalive out of reach ({@code AbstractIntegrationTest} sets {@code
+ * streamrune.sse.keep-alive-interval} to an hour), so a stream that opened without that comment
+ * fails these tests.
  */
 class SseLiveE2EIT extends AbstractIntegrationTest {
+
+  /** How long a stream may take to answer and deliver its opening comment. */
+  private static final Duration OPENS_WITHIN = Duration.ofSeconds(5);
 
   private void placeOrder(String orderId, String customerId, String productId) {
     String body =
@@ -56,9 +67,10 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
   }
 
   /**
-   * Opens a real HTTP SSE subscription to {@code /api/sse/order/{orderId}} and collects received
-   * frames into a thread-safe list on a background Reactor subscription. The returned {@link
-   * Disposable} cancels the subscription (closing the connection) when the test is done.
+   * Opens a real HTTP SSE subscription to {@code /api/sse/order/{orderId}}, waits for its opening
+   * comment, and collects received frames into a thread-safe list on a background Reactor
+   * subscription. The returned {@link Disposable} cancels the subscription (closing the connection)
+   * when the test is done.
    *
    * <p>The subscriber is an operator. The tests subscribe before the order exists, and only an
    * {@code ADMIN} may do that: the order's customer is let in once the order read model names them
@@ -67,6 +79,9 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
   private Disposable subscribeSse(String orderId, List<ServerSentEvent<String>> sink) {
     Flux<ServerSentEvent<String>> events =
         client
+            .mutate()
+            .responseTimeout(OPENS_WITHIN)
+            .build()
             .get()
             .uri("/api/sse/order/{orderId}", orderId)
             .header("X-User-Id", "sse-operator")
@@ -77,10 +92,24 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
             .isOk()
             .returnResult(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
             .getResponseBody();
-    // exchange() has returned with the response head. The endpoint commits the response with its
-    // opening comment, which it writes once the client is subscribed, so the stream is live here:
-    // with the default keepalive interval of 30 seconds nothing else would have committed it.
-    return events.subscribe(sink::add);
+    // exchange() waited at most OPENS_WITHIN for the response head. Nothing but the opening
+    // comment commits the response within a test run (see the class documentation), so without it
+    // the call above has already failed. The comment itself is the first frame the client reads.
+    Disposable subscription = events.subscribe(sink::add);
+    try {
+      await()
+          .atMost(OPENS_WITHIN)
+          .untilAsserted(
+              () ->
+                  assertThat(sink)
+                      .as("the stream of %s opens with its ': keepalive' comment", orderId)
+                      .first()
+                      .satisfies(frame -> assertThat(frame.comment()).contains("keepalive")));
+    } catch (RuntimeException | Error notOpened) {
+      subscription.dispose();
+      throw notOpened;
+    }
+    return subscription;
   }
 
   @Test

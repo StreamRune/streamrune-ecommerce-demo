@@ -108,9 +108,10 @@ final class SseTestStream implements AutoCloseable {
   /**
    * Returns once the client has read the stream's opening comment. The endpoint writes that comment
    * as the last step of a subscription, whatever {@code streamrune.sse.keep-alive-interval} is, so
-   * an event stored from then on reaches this client. The applications run their tests with the
-   * default interval of 30 seconds, twice this wait: a stream that opened without the comment would
-   * fail here.
+   * an event stored from then on reaches this client. On Spring the periodic keepalive is one tick
+   * shared by every stream, so the application's tests run with an interval of an hour ({@code
+   * AbstractIntegrationTest}): the comment read here can only be the opening one, and a stream that
+   * opened without it fails here.
    */
   void awaitSubscribed() throws Exception {
     subscribed.get(15, TimeUnit.SECONDS);

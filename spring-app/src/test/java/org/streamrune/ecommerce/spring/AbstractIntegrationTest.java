@@ -119,6 +119,12 @@ public abstract class AbstractIntegrationTest {
     registry.add("spring.datasource.username", POSTGRES::getUsername);
     registry.add("spring.datasource.password", POSTGRES::getPassword);
     registry.add("streamrune.projections.auto-discovery.enabled", () -> "false");
+    // On Spring the periodic SSE keepalive is one tick shared by every stream, running since the
+    // application started: its first occurrence on a stream can come at any moment after the
+    // stream opens, and it commits the response exactly as the opening comment does. With the
+    // interval beyond any test run, the only ": keepalive" a test can read is the comment a stream
+    // opens with, so SseLiveE2EIT and SseStreamAccessIT fail when that comment is missing.
+    registry.add("streamrune.sse.keep-alive-interval", () -> "1h");
     // RabbitMQ broker for the outbox publisher (opened eagerly at startup by RabbitMqConfig).
     registry.add("spring.rabbitmq.host", RABBIT::getHost);
     registry.add("spring.rabbitmq.port", RABBIT::getAmqpPort);
