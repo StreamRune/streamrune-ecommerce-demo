@@ -33,6 +33,31 @@ class CustomerDeciderTest {
   }
 
   @Test
+  void registerCustomer_existingCustomer_throws() {
+    fixture
+        .given(registered())
+        .when(
+            new CustomerCommand.RegisterCustomer(
+                "c-1", "Mallory", "mallory@example.com", "1 Other St", "+1999999999"))
+        .expectFailedWith(DomainException.class, "Customer already registered: c-1");
+  }
+
+  /**
+   * The decider does not refuse a forgotten customer's id. The key store does, one step later: it
+   * never issues a key for an erased subject again, so the event's encrypted fields cannot be
+   * written and the caller gets 410 Gone (GdprForgetE2EIT in each app).
+   */
+  @Test
+  void registerCustomer_forgottenCustomer_isLeftToTheKeyStore() {
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(
+            new CustomerCommand.RegisterCustomer(
+                "c-1", "Alice", "alice@example.com", "123 Main St", "+1234567890"))
+        .expectEvents(registered());
+  }
+
+  @Test
   void updateProfile() {
     fixture
         .given(registered())

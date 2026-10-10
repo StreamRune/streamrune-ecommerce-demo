@@ -277,6 +277,16 @@ class OrderDeciderTest {
   }
 
   @Test
+  void placeOrder_existingOrder_throws() {
+    fixture
+        .given(placed(), new OrderEvent.OrderConfirmed("o-1"))
+        .when(
+            new OrderCommand.PlaceOrder(
+                "o-1", "c-2", List.of(new OrderCommand.OrderLine("p-9", 1, TEN_USD))))
+        .expectFailedWith(DomainException.class, "Order already exists: o-1");
+  }
+
+  @Test
   void confirmOrder_fromCreated() {
     fixture
         .given(placed())
@@ -369,6 +379,11 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
   public List<OrderEvent> decide(OrderCommand cmd, OrderState state) {
     return switch (cmd) {
       case OrderCommand.PlaceOrder c -> {
+        // An order id is placed once. Without this check a second PlaceOrder would append another
+        // OrderPlaced, and evolve would replace the order's lines and total and reset a confirmed
+        // or shipped order to CREATED.
+        if (state.orderId() != null)
+          throw new DomainException("Order already exists: " + c.orderId());
         List<OrderEvent.OrderLine> eventLines =
             c.lines().stream()
                 .map(l -> new OrderEvent.OrderLine(l.productId(), l.quantity(), l.unitPrice()))
@@ -423,7 +438,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 }
 ```
 
-The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
+The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
 
 Run the tests again:
 
@@ -431,7 +446,7 @@ Run the tests again:
 ./gradlew :commands:test
 ```
 
-All eight tests should pass. If `shipOrder_notConfirmed_throws` fails, check that the guard in `ShipOrder` checks for `CONFIRMED` (not `CREATED`).
+All nine tests should pass. If `shipOrder_notConfirmed_throws` fails, check that the guard in `ShipOrder` checks for `CONFIRMED` (not `CREATED`).
 
 ### Step 3 — Configure SnapshotPolicy in the CommandBus
 
