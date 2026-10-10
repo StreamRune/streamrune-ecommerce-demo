@@ -402,23 +402,25 @@ public final class OwnerOrAdminStreamAccess {
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return callerIsAdmin() || principal.value().equals(aggregateId);
+      return callerIsAdmin(principal) || principal.value().equals(aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return callerIsAdmin() || ownsOrder(principal, aggregateId);
+      return callerIsAdmin(principal) || ownsOrder(principal, aggregateId);
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return callerIsAdmin();
+      return callerIsAdmin(principal);
     }
     return false;
   }
 
-  /** The role baggage entry of the current request is ADMIN. */
-  private boolean callerIsAdmin() {
+  /** The current request context is the caller's own and its role baggage entry is ADMIN. */
+  private boolean callerIsAdmin(UserId principal) {
     StreamRuneContext.RequestContext context = requestContext.get();
-    return context != null && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
+    return context != null
+        && principal.equals(context.userId())
+        && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
   }
 
   /** The order read model has a row for the order and names the caller as its customer. */
@@ -443,7 +445,9 @@ The framework asks an `SseAuthorizer` one question, `isAuthorized(UserId princip
 
 Mind the `order` line: the read model is eventually consistent. `OrderProjection` writes the row a moment after `POST /api/orders` returns, and until it has, the order has no known owner — the customer is refused exactly as for an order that was never placed, and subscribes once `GET /api/orders/{id}` answers.
 
-`ADMIN` is decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the entry `AdminController.requireRole` and `requireAdminOrSelf` from Chapter 9 read. The authorizer is handed the caller but not the request, so the rule takes the request context as a `Supplier` and each app says where its context lives.
+`ADMIN` is decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the entry `AdminController.requireRole` and `requireAdminOrSelf` from Chapter 9 read. The authorizer is handed the caller but not the request, so the rule takes the request context as a `Supplier` and each app says where its context lives. The caller and the role therefore reach the rule by two ways, and `callerIsAdmin` ties them together: the role counts only when the supplied context names the same user as `principal`. On all three integrations both come from the same request, so the check changes no answer today; it keeps the one branch that opens every customer's data from depending on that.
+
+> **Demo shortcut — whose order is it?** "The customer the order read model names" is the `customerId` of the order, and `POST /api/orders` takes it from the request body: the demo does not tie it to the caller. Whoever places an order chooses its owner. Nobody but the customer so named (and an `ADMIN`) can open its stream, so the rule leaks nothing, but a real deployment places an order for the authenticated caller and never reads the owner from the body.
 
 Now the bean. Add these imports to `StreamRuneConfig`:
 

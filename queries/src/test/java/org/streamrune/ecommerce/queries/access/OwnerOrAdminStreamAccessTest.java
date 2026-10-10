@@ -128,6 +128,35 @@ class OwnerOrAdminStreamAccessTest {
     }
   }
 
+  /**
+   * The caller's id and the role reach the rule by two ways: the principal the framework hands it
+   * and the request context the application supplies. They belong to one request, and the rule does
+   * not take that on trust: the ADMIN role of a context that names another user, or no user, opens
+   * nothing.
+   */
+  @Test
+  void theAdminRoleCountsOnlyInTheCallersOwnRequestContext() {
+    OwnerOrAdminStreamAccess inAnOperatorsContext =
+        new OwnerOrAdminStreamAccess(() -> requestContext("ops-1", "ADMIN"), ORDERS::get);
+
+    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("customer:c-1")));
+    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("order:o-1")));
+    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("payment:pay-o-1")));
+    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("inventory:p-1")));
+    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("product:p-1")));
+    // What the caller owns needs no role, so it stays open.
+    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("c-1"), stream("customer:c-1")));
+    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("c-1"), stream("order:o-1")));
+    // The operator the context does name is still an operator.
+    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("ops-1"), stream("product:p-1")));
+
+    OwnerOrAdminStreamAccess inAContextWithoutAUser =
+        new OwnerOrAdminStreamAccess(() -> requestContext(null, "ADMIN"), ORDERS::get);
+
+    assertFalse(inAContextWithoutAUser.isAuthorized(UserId.of("ops-1"), stream("product:p-1")));
+    assertFalse(inAContextWithoutAUser.isAuthorized(UserId.of("ops-1"), stream("customer:c-1")));
+  }
+
   @Test
   void theOrderReadModelIsAskedOnlyForAnOrderStreamOfANonAdminCaller() {
     List<String> lookups = new ArrayList<>();

@@ -33,7 +33,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       OrderProjection} writes that read model after the event is stored, so for a moment after
  *       {@code POST /api/orders} the order has no row. An order without a row has no known owner
  *       and is refused, exactly like an order that was never placed; the customer subscribes once
- *       {@code GET /api/orders/{id}} answers.
+ *       {@code GET /api/orders/{id}} answers. The order's customer is the customer the order names:
+ *       see the second demo shortcut below.
  *   <li>{@code payment}: {@code ADMIN} only. The events carry the amount and the refund or failure
  *       reason of one customer's purchase, and no read model of the demo links a payment to its
  *       customer, so ownership cannot be shown.
@@ -52,12 +53,21 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  * supplier because each integration keeps it somewhere else: a {@code ScopedValue} on Spring, a
  * request-scoped holder on Quarkus, a {@code ScopedValue} or a {@code ThreadLocal} on Micronaut.
  * The caller's id is the {@code principal} the framework's SSE controller resolved with the same
- * identity policy its request filter uses.
+ * identity policy its request filter uses. The role is honoured only when the supplied context is
+ * the caller's own, that is when its user id equals the {@code principal}: the two come from the
+ * same request on all three integrations, and the {@code ADMIN} branch, the one that opens every
+ * customer's data, does not rely on that.
  *
  * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 of the tutorial describes: the demo runs in the
  * trusted-gateway mode without a gateway, so the id and the role are whatever the client put in
  * {@code X-User-Id} and {@code X-User-Role}. The rule is the one a real deployment keeps; the
  * identity it is handed must then come from real authentication.
+ *
+ * <p>DEMO SHORTCUT, the owner of an order: an order belongs to the customer it names, and {@code
+ * POST /api/orders} takes that {@code customerId} from the request body without tying it to the
+ * caller. Whoever places an order therefore chooses whose order it is. Nobody but the customer so
+ * named gains access to its stream, but a real deployment places an order for the authenticated
+ * caller.
  *
  * <p><b>Shape.</b> {@link #isAuthorized} has the signature of the framework's {@code
  * SseAuthorizer}, so each application registers {@code access::isAuthorized} as its {@code
@@ -107,23 +117,30 @@ public final class OwnerOrAdminStreamAccess {
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return callerIsAdmin() || principal.value().equals(aggregateId);
+      return callerIsAdmin(principal) || principal.value().equals(aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return callerIsAdmin() || ownsOrder(principal, aggregateId);
+      return callerIsAdmin(principal) || ownsOrder(principal, aggregateId);
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return callerIsAdmin();
+      return callerIsAdmin(principal);
     }
     return false;
   }
 
-  /** The {@code role} baggage entry of the current request is {@code ADMIN}. */
-  private boolean callerIsAdmin() {
+  /**
+   * The current request context is the caller's own and its {@code role} baggage entry is {@code
+   * ADMIN}. The caller's id and the role reach this class by two ways, the {@code principal}
+   * parameter and the supplied context; the role counts only when the context names the same user,
+   * so a context that belongs to another request can never make this caller an operator.
+   */
+  private boolean callerIsAdmin(UserId principal) {
     StreamRuneContext.RequestContext context = requestContext.get();
-    return context != null && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
+    return context != null
+        && principal.equals(context.userId())
+        && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
   }
 
   /** The order read model has a row for the order and names the caller as its customer. */

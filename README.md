@@ -129,7 +129,7 @@ All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` heade
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload |
-| `GET` | `/api/sse/{aggregateType}/{aggregateId}` | Live events of one stream (SSE). The framework's endpoint (`streamrune.sse.enabled`), fed by the framework from the head of the global stream: live, at-most-once, no replay. A frame carries the event **with its payload**, so the demo's `SseAuthorizer` lets in only an authenticated `ADMIN` or the customer the stream belongs to (their own `customer` stream, the streams of their own orders); `403` for everyone else |
+| `GET` | `/api/sse/{aggregateType}/{aggregateId}` | Live events of one stream (SSE). The framework's endpoint (`streamrune.sse.enabled`), fed by the framework from the head of the global stream: live, at-most-once, no replay. A frame carries the event **with its payload**, so the demo's `SseAuthorizer` lets in only an authenticated `ADMIN` or the customer the stream belongs to (their own `customer` stream, the streams of their own orders); `403` for everyone else. An order belongs to the customer it names: `POST /api/orders` takes `customerId` from the request body and does not tie it to the caller, one more demo shortcut |
 | `GET` | `/api/events?offset=0&limit=10` | Paginated event history with payloads. ADMIN only, `403` otherwise |
 | `GET` | `/api/events/{aggregateType}/{aggregateId}` | One stream's events with payloads. ADMIN only, `403` otherwise |
 
