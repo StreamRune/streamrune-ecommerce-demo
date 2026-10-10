@@ -128,8 +128,11 @@ All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` heade
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/events/sse` | Live event stream (SSE) |
-| `GET` | `/api/events?offset=0&limit=10` | Paginated event history |
+| `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload |
+| `GET` | `/api/events?offset=0&limit=10` | Paginated event history with payloads. ADMIN only, `403` otherwise |
+| `GET` | `/api/events/{aggregateType}/{aggregateId}` | One stream's events with payloads. ADMIN only, `403` otherwise |
+
+> **Demo shortcut, protect this in production.** The two history endpoints return each event as the event store reads it, which means `@Encrypted` fields come back **decrypted** until the subject's key is erased. They check the ADMIN role, but that role is the client-supplied `X-User-Role` header (see above), so the check documents the intent and protects nothing. Put an endpoint like this behind real authentication, or do not ship it. See [Chapter 15 of the tutorial](docs/tutorial/15-observability.md).
 
 ### Example
 

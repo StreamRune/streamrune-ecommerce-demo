@@ -85,6 +85,7 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
     return client
         .get()
         .uri(uri)
+        .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
         .isOk()

@@ -250,9 +250,10 @@ dlq_sealed_root_replay_smoke() {
     return 1
   fi
 
-  # The event explorer reads the same stream by its two key parts.
+  # The event explorer reads the same stream by its two key parts. It returns event payloads, so
+  # it answers only to the ADMIN role.
   local body
-  body=$(curl -s "$base/api/events/inventory/$pid")
+  body=$(curl -s -H 'X-User-Role: ADMIN' "$base/api/events/inventory/$pid")
   if ! printf '%s' "$body" | grep -q '"aggregateType":"inventory"'; then
     echo "  ✗ GET /api/events/inventory/$pid did not return the typed stream: $body"
     return 1

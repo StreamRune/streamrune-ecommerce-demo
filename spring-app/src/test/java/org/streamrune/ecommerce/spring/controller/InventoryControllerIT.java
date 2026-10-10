@@ -43,6 +43,7 @@ class InventoryControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/events/inventory/" + pid)
+                      .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
                       .isOk()

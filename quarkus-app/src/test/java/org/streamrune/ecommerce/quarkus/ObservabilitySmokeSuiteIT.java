@@ -303,12 +303,13 @@ class ObservabilitySmokeSuiteIT {
 
   @Test
   void eventsGlobalListReturnsArray() {
-    given().when().get("/api/events").then().statusCode(200);
+    given().header("X-User-Role", "ADMIN").when().get("/api/events").then().statusCode(200);
   }
 
   @Test
   void eventsGlobalListWithOffsetAndLimitReturnsArray() {
     given()
+        .header("X-User-Role", "ADMIN")
         .queryParam("offset", 0)
         .queryParam("limit", 10)
         .when()
@@ -342,6 +343,7 @@ class ObservabilitySmokeSuiteIT {
 
     io.restassured.path.json.JsonPath body =
         given()
+            .header("X-User-Role", "ADMIN")
             .when()
             .get("/api/events/product/" + pid)
             .then()
