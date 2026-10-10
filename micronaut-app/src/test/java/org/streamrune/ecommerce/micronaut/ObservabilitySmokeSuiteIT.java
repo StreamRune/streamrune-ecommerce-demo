@@ -477,7 +477,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events"),
+                HttpRequest.GET("/api/events").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -489,7 +489,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events?offset=0&limit=10"),
+                HttpRequest.GET("/api/events?offset=0&limit=10").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -522,7 +522,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events/product/" + pid),
+                HttpRequest.GET("/api/events/product/" + pid).header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(events).isNotEmpty();

@@ -44,6 +44,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/events")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -56,7 +57,13 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
 
   @Test
   void listEventsWithOffsetAndLimitReturnsOk() {
-    client.get().uri("/api/events?offset=0&limit=5").exchange().expectStatus().isOk();
+    client
+        .get()
+        .uri("/api/events?offset=0&limit=5")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
   }
 
   @Test
@@ -74,6 +81,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/events?offset=0&limit=200")
+                      .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
                       .isOk()
@@ -118,6 +126,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/events/product/" + pid)
+                      .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
                       .isOk()
@@ -140,6 +149,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/events/product/nonexistent-stream-" + System.nanoTime())
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -153,13 +163,31 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
 
   @Test
   void aNonConformingType_isA400() {
-    client.get().uri("/api/events/Order/x").exchange().expectStatus().isBadRequest();
-    client.get().uri("/api/events/order-line/x").exchange().expectStatus().isBadRequest();
+    client
+        .get()
+        .uri("/api/events/Order/x")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isBadRequest();
+    client
+        .get()
+        .uri("/api/events/order-line/x")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isBadRequest();
   }
 
   @Test
   void aSingleSegmentOtherThanSse_matchesNoRoute() {
-    client.get().uri("/api/events/o-1").exchange().expectStatus().isNotFound();
+    client
+        .get()
+        .uri("/api/events/o-1")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isNotFound();
   }
 
   @Test

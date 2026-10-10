@@ -44,9 +44,17 @@ class SharedIdStreamsIT {
         .statusCode(200);
 
     var product =
-        given().when().get("/api/events/product/" + id).then().statusCode(200).extract().jsonPath();
+        given()
+            .header("X-User-Role", "ADMIN")
+            .when()
+            .get("/api/events/product/" + id)
+            .then()
+            .statusCode(200)
+            .extract()
+            .jsonPath();
     var inventory =
         given()
+            .header("X-User-Role", "ADMIN")
             .when()
             .get("/api/events/inventory/" + id)
             .then()
@@ -63,9 +71,10 @@ class SharedIdStreamsIT {
 
   @Test
   void explorerRefusesANonConformingType_andMatchesNoSingleSegment() {
-    given().when().get("/api/events/Order/x").then().statusCode(400);
-    given().when().get("/api/events/o-1").then().statusCode(404);
+    given().header("X-User-Role", "ADMIN").when().get("/api/events/Order/x").then().statusCode(400);
+    given().header("X-User-Role", "ADMIN").when().get("/api/events/o-1").then().statusCode(404);
     given()
+        .header("X-User-Role", "ADMIN")
         .when()
         .get("/api/events/order/no-such-order")
         .then()

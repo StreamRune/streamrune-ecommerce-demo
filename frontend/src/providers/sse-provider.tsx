@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { EventEntry } from "@/lib/types";
+import type { LiveEvent } from "@/lib/types";
 import { API_URL } from "@/lib/api";
 
 const MAX_RECENT = 50;
@@ -18,7 +18,7 @@ const MAX_BACKOFF_MS = 30_000;
 
 interface SSEContextValue {
   connected: boolean;
-  recentEvents: EventEntry[];
+  recentEvents: LiveEvent[];
 }
 
 const SSEContext = createContext<SSEContextValue>({
@@ -92,7 +92,10 @@ function invalidationKeysFor(eventType: string): string[][] {
 export function SSEProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [connected, setConnected] = useState(false);
-  const [recentEvents, setRecentEvents] = useState<EventEntry[]>([]);
+  const [recentEvents, setRecentEvents] = useState<LiveEvent[]>([]);
+  // The feed starts at the first event of the store on every connection, so after a reconnect
+  // it repeats what was already received. Events up to this offset are known and skipped.
+  const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
   const esRef = useRef<EventSource | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -104,6 +107,10 @@ export function SSEProvider({ children }: { children: ReactNode }) {
         esRef.current = null;
       }
 
+      // An EventSource cannot send request headers, so the feed is the one endpoint the browser
+      // calls without X-User-Role. The backend keeps it open to everyone and sends frames
+      // without the event's payload (see LiveEvent); the frames are unnamed, so onmessage
+      // receives them all.
       const es = new EventSource(`${API_URL}/api/events/sse`);
       esRef.current = es;
 
@@ -114,7 +121,9 @@ export function SSEProvider({ children }: { children: ReactNode }) {
 
       es.onmessage = (event) => {
         try {
-          const entry = JSON.parse(event.data as string) as EventEntry;
+          const entry = JSON.parse(event.data as string) as LiveEvent;
+          if (entry.globalOffset <= lastOffsetRef.current) return;
+          lastOffsetRef.current = entry.globalOffset;
           setRecentEvents((prev) => [entry, ...prev].slice(0, MAX_RECENT));
 
           const keys = invalidationKeysFor(entry.eventType);

@@ -293,15 +293,25 @@ curl -s -X POST http://localhost:8080/api/customers \
 
 > **About the two headers.** They are what the frontend's `ADMIN` role sends. The backend takes `X-User-Id` as the identity because it runs in the trusted-gateway mode, and the role from `X-User-Role` through the demo's `HeaderUserRoleResolver` — stand-ins for a gateway and a real role source that a production deployment must not copy (Chapter 9 explains why). Every `curl` in this walkthrough plays the gateway's part.
 
-Now read the raw event from the event store to see the encrypted PII:
+Now read the event back through the Event Explorer (Chapter 15). It returns event payloads, so it answers only to the ADMIN role — the same two headers:
 
 ```bash
-curl -s "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[0].payload'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[0].payload'
 ```
 
 The stream id is `customer:cust-walkthrough` — the `CustomerCommand` registration in `StreamRuneConfig.java` names the aggregate type `customer` (`CustomerState.TYPE`) and its id extractor returns `c.customerId()`, so the URL carries the type and the id as two path segments.
 
-The `name`, `email`, and `address` fields in the `CustomerRegistered` event are AES-GCM ciphertext blobs, not plaintext. The `CustomerProjection` decrypts them on read, so the Customers page in the frontend shows `Alice Smith` — but the event store itself never holds plaintext personal data. This is the field encryption from Chapter 6.
+The payload shows `Alice Smith`, `alice@example.com` and `123 Main St` **in plain text**. That is not a leak in the storage: the explorer reads through the event store, and the store decrypts `@Encrypted` fields for whoever reads an event, just as it does for the `CustomerProjection` that fills the Customers page. What is encrypted is the row. Look at it where it rests:
+
+```bash
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT payload FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'cust-walkthrough';"
+```
+
+There the `name`, `email`, and `address` fields are AES-GCM ciphertext blobs, not plaintext — the field encryption from Chapter 6. The database never holds the personal data in the clear; anyone who can call the explorer as an admin sees it decrypted, until the customer's key is erased in Step 8.
+
+> **Demo shortcut — protect this in production.** The explorer's ADMIN check trusts the `X-User-Role` header, like every role check in this demo (see the note on the two headers above). Without the header the same request answers `403`; with it, anyone gets decrypted personal data. An endpoint that returns raw event payloads needs real authentication and a role derived from the authenticated identity, or it should not be deployed. Chapter 15 has the details.
 
 ### Step 4: Create Products — Events, Projection, Query
 
@@ -340,7 +350,8 @@ A product id can be created once. Send the first request again, with `-i` instea
 Read the events directly to see what was appended:
 
 ```bash
-curl -s "http://localhost:8080/api/events/product/prod-sprocket" | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/product/prod-sprocket" | jq .
 ```
 
 As with the customer stream, the product stream id is `product:prod-sprocket` — `ProductCommand` registers under `ProductState.TYPE` with `c.productId()` as the id.
@@ -471,10 +482,11 @@ curl -s -X POST http://localhost:8080/api/customers/cust-walkthrough/forget \
 Only an `ADMIN` or the customer themself may send this (Chapter 9); anyone else gets `403` and nothing is written. The `CustomerDecider` appends a `CustomerForgotten` event. The endpoint then calls `ForgetSubjectService.forget(...)`, which (1) crypto-shreds the subject's encryption key in the key store and (2) runs the registered `CustomerSubjectDataPurger` to delete the customer's read-model row. The answer is `200` only because `fullyErased` is `true`. Had the key deletion failed, or a purger, it would be `500` with `keyDeleted` or `failedPurgers` saying what is left, and you would send the same request again: the decider records nothing for a customer already forgotten, `deleteKey` is a no-op on a deleted key and each purger is idempotent, so the repeat finishes the erasure from wherever the last attempt stopped (Chapter 7, Step 2). Now read the raw events:
 
 ```bash
-curl -s "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[].payload | .name // .email // empty'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[].payload | .name // .email // empty'
 ```
 
-The `CustomerRegistered` event still exists in the append-only event store — it cannot be deleted — but its encrypted payload can no longer be decrypted because the key is gone. The read model is handled separately: both the `CustomerProjection` (on the `CustomerForgotten` event) and the `CustomerSubjectDataPurger` **delete the `customers_view` row entirely** rather than leaving a redacted shell. In the frontend, switch to the Customers page; Alice's walkthrough row is gone — `GET /api/customers/cust-walkthrough` now returns `404 Not Found`.
+Where Step 3 showed `Alice Smith`, the same request now prints `"[REDACTED]"`. The `CustomerRegistered` event still exists in the append-only event store — it cannot be deleted — but its encrypted fields can no longer be decrypted because the key is gone, for an admin as for anyone else. The read model is handled separately: both the `CustomerProjection` (on the `CustomerForgotten` event) and the `CustomerSubjectDataPurger` **delete the `customers_view` row entirely** rather than leaving a redacted shell. In the frontend, switch to the Customers page; Alice's walkthrough row is gone — `GET /api/customers/cust-walkthrough` now returns `404 Not Found`.
 
 The event history is intact and auditable, but the personal data is irrecoverably gone — the ciphertext can never be decrypted and the read-model row no longer exists. Both GDPR requirements are satisfied simultaneously.
 
@@ -499,10 +511,11 @@ The `OutboxPoller` drains entries every 5 seconds (the default `streamrune.outbo
 
 ### Step 10: Browse Events in the Event Explorer
 
-The Event Explorer page in the frontend provides a paginated view of the global event stream. You can also query it directly:
+The Event Explorer page in the frontend provides a paginated view of the global event stream when the role switcher is on `ADMIN`; for any other role its history panel says that it requires the ADMIN role. You can also query it directly, with the ADMIN headers:
 
 ```bash
-curl -s "http://localhost:8080/api/events?offset=0&limit=10" | \
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events?offset=0&limit=10" | \
   jq '.[] | "\(.globalOffset)  \(.eventType)  \(.aggregateType):\(.aggregateId)"'
 ```
 
@@ -514,7 +527,7 @@ Open a persistent SSE connection in a separate terminal to watch new events arri
 curl -N http://localhost:8080/api/events/sse
 ```
 
-Every command you dispatch from this point forward produces SSE frames here within one second.
+Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame names the event — global offset, type, stream, version, timestamp — and carries no payload.
 
 ---
 
