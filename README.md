@@ -231,14 +231,12 @@ startup walks would refuse the application with *"Sealed type … reports no per
 `EcommerceDomainReflectionConfigTest` checks on the JVM that every sealed supertype of a registered
 record is listed there.
 
-Creating the schema at startup takes two more settings in a Quarkus image, because Flyway finds
-parts of itself at run time and a Quarkus build does not apply the GraalVM reachability-metadata
-repository the other two builds get Flyway's metadata from.
-`quarkus.native.auto-service-loader-registration=true` in `application.properties` registers
-Flyway's plugins, which it loads with `ServiceLoader` (without it the binary fails at startup with a
-`NullPointerException` from Flyway's configuration), and `FlywayNativeImageConfig` registers the
-log creator Flyway instantiates by class name. The smoke test starts the binary on an empty
-database and requires the schema to exist afterwards, so it fails if either is missing.
+Creating the schema at startup takes no setting of the app's own. Flyway finds parts of itself at
+run time (its plugins with `ServiceLoader`, its log creator by class name, the fields of its
+configuration extensions), and `streamrune-quarkus` ships the native-image metadata for them, along
+with the build argument that initializes Flyway's `InsertRowLock` at run time. The smoke test starts
+the binary on an empty database and requires the schema to exist afterwards, so it fails if any of
+that is missing.
 
 The Micronaut app too:
 
@@ -254,11 +252,9 @@ and the ten sealed command and event interfaces in the `reachability-metadata.js
 Micronaut's `@TypeHint` (or `@ReflectiveAccess`) on the sealed interfaces is not enough: it
 registers the type without its permitted subclasses, and the binary refused to start with *"Sealed
 type … reports no permitted subclasses"*. `NativeImageMetadataTest` checks on the JVM that every
-sealed supertype of a registered record is listed. A second file,
-`micronaut-app-flyway/reachability-metadata.json` in the same `native-image` directory, registers
-the fields of Flyway's configuration extensions: Flyway copies them reflectively when the schema is
-created at startup, and without the registration the binary stopped there with a
-`MissingReflectionRegistrationError`. The build sets
+sealed supertype of a registered record is listed. Creating the schema at startup takes no
+metadata of the app's own: `streamrune-micronaut` registers the Flyway configuration extensions
+that Flyway copies reflectively, and its log creator. The build sets
 `graalvmNative.binaries.main.sharedLibrary = false` (otherwise native-build-tools produced a
 `micronaut-app.dylib`), and `logback.xml` keeps the app at INFO: at DEBUG, HikariCP reads every
 pool setting reflectively and the image's DataSource fails to start. The build also passes
