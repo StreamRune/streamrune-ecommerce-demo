@@ -21,7 +21,7 @@ The application is a Next.js 16 app with React 19. It talks to the single Spring
 | Audit | Audit log (ADMIN-only), with a row-count selector |
 | Admin | Circuit breaker state, DLQ, outbox, payment failure toggle |
 
-The technology choices are minimal on purpose. The stack is Next.js (16.2.4), React 19, TanStack Query v5, Tailwind CSS v4, shadcn-style components built on the `@base-ui/react` primitive layer, and the browser's native `EventSource` API — nothing exotic. One thing to note if you inspect the components: the `@base-ui/react` triggers use a render-prop pattern (e.g. `<DialogTrigger render={<Button />}>`) rather than `asChild`.
+The technology choices are minimal on purpose. The stack is Next.js (16.3.6), React 19, TanStack Query v5, Tailwind CSS v4, shadcn-style components built on the `@base-ui/react` primitive layer, and the browser's native `EventSource` API — nothing exotic. One thing to note if you inspect the components: the `@base-ui/react` triggers use a render-prop pattern (e.g. `<DialogTrigger render={<Button />}>`) rather than `asChild`.
 
 ---
 
