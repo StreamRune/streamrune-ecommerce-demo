@@ -3,18 +3,17 @@ package org.streamrune.ecommerce.quarkus;
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import java.util.Map;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.utility.MountableFile;
 
 /**
  * Starts a real PostgreSQL (Testcontainers) for {@code @QuarkusTest} runs and overrides the
- * datasource config to point at it. The schema — including the crypto-shredding tables ({@code
- * encryption_keys}, {@code forgotten_subjects}) the GDPR flow needs — is loaded from {@code
- * scripts/init-db.sql} via the container's docker-entrypoint-initdb.d hook, exactly as the Spring
- * app's {@code AbstractIntegrationTest} does.
+ * datasource config to point at it. The database starts empty: the application creates the schema
+ * itself at startup ({@code streamrune.event-store.schema.auto-initialize=true} in {@code
+ * application.properties}) — the event-store tables and the crypto-shredding tables ({@code
+ * encryption_keys}, {@code forgotten_subjects}, {@code erased_key_generations}) the GDPR flow needs
+ * — as it does outside the tests.
  *
- * <p>The container starts before the Quarkus application context, so {@code
- * JdbcProjectionRepository} (which auto-creates {@code *_view} tables on first write) and the wired
- * event store see a fully provisioned database.
+ * <p>The container starts before the Quarkus application context, so the datasource the event store
+ * factory migrates is reachable when the first bean asks for it.
  */
 public class PostgresTestResource implements QuarkusTestResourceLifecycleManager {
 
@@ -26,10 +25,7 @@ public class PostgresTestResource implements QuarkusTestResourceLifecycleManager
         new PostgreSQLContainer<>("postgres:17")
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
-            .withPassword("postgres")
-            .withCopyFileToContainer(
-                MountableFile.forHostPath("../scripts/init-db.sql"),
-                "/docker-entrypoint-initdb.d/init-db.sql");
+            .withPassword("postgres");
     postgres.start();
     return Map.of(
         "quarkus.datasource.jdbc.url", postgres.getJdbcUrl(),

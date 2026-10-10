@@ -22,7 +22,7 @@ In this chapter you will see how to configure `ProjectionErrorStrategy.DLQ` on i
 
 ### Step 1: Create the `PostgresProjectionDeadLetterStore` Bean (only with Step 4)
 
-This bean is needed only for the optional per-projection DLQ wiring in Step 4. The demo's `StreamRuneConfig` does **not** declare it — its projections keep the default `HALT` strategy — so add it only if you follow Step 4. It uses the same `DataSource` as the event store. The `projection_dead_letters` table is part of the demo schema created by `scripts/init-db.sql` (the Docker initdb script) — the same file that creates `event_stream` and `snapshot_store`. (`init-db.sql` is regenerated from StreamRune's `V001__streamrune_baseline.sql` via `scripts/regenerate-init-db.sh`, which defines this table, but the demo sets `streamrune.event-store.schema.auto-initialize: false` and does not run Flyway at startup; see Chapter 1.)
+This bean is needed only for the optional per-projection DLQ wiring in Step 4. The demo's `StreamRuneConfig` does **not** declare it — its projections keep the default `HALT` strategy — so add it only if you follow Step 4. It uses the same `DataSource` as the event store. The `projection_dead_letters` table is part of StreamRune's `V001__streamrune_baseline.sql` — the same baseline that creates `event_stream` and `snapshot_store`, applied by the event store factory on the application's first start (`streamrune.event-store.schema.auto-initialize: true`; see Chapter 1).
 
 ```java
 @Bean

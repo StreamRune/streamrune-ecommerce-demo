@@ -32,7 +32,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
-import org.testcontainers.utility.MountableFile;
 
 /**
  * End-to-end proof of the transactional outbox path in the Micronaut demo app, mirroring the Spring
@@ -67,10 +66,7 @@ class IntegrationOutboxE2EIT implements TestPropertyProvider {
       new PostgreSQLContainer<>("postgres:17")
           .withDatabaseName("streamrune_ecommerce")
           .withUsername("postgres")
-          .withPassword("postgres")
-          .withCopyFileToContainer(
-              MountableFile.forHostPath("../scripts/init-db.sql"),
-              "/docker-entrypoint-initdb.d/init-db.sql");
+          .withPassword("postgres");
 
   private static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3-management");
 

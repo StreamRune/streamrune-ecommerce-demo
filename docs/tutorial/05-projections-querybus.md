@@ -309,7 +309,7 @@ public OffsetStore offsetStore(DataSource ds) {
 }
 ```
 
-`PostgresOffsetStore` writes a row per projection name in the `projection_offset` table, which `scripts/init-db.sql` creates alongside `event_stream` when the PostgreSQL container first initializes. (The demo ships a hand-generated `init-db.sql` mounted at the container's `docker-entrypoint-initdb.d` rather than running Flyway at app startup — the SQL is regenerated from the framework's Flyway migrations.) Each `MultiProjectionRunner` projection advances its own offset independently, so a slow projection does not block the others.
+`PostgresOffsetStore` writes a row per projection name in the `projection_offset` table, which the framework's baseline created alongside `event_stream` on the application's first start (Chapter 1, Step 8). Each `MultiProjectionRunner` projection advances its own offset independently, so a slow projection does not block the others.
 
 ### Step 6 — Update `ProductQueryController`
 

@@ -391,8 +391,10 @@ import org.streamrune.crypto.postgres.PostgresCryptoEngine;
  * {@code CustomerEvent}. Wired into the event store by the auto-configured
  * {@code postgresEventStoreFactory}; deleting a subject's key crypto-shreds
  * all their PII across every event and projection at once.
- * Requires the {@code encryption_keys}, {@code forgotten_subjects}, and
- * {@code erased_key_generations} tables (see init-db.sql).
+ * Its {@code encryption_keys}, {@code forgotten_subjects} and
+ * {@code erased_key_generations} tables come from the framework's crypto
+ * migration series, which the event store factory applies at startup next to
+ * its own ({@code streamrune.event-store.schema.auto-initialize}).
  */
 @Bean
 public PostgresCryptoEngine cryptoEngine(DataSource ds) {
@@ -400,7 +402,7 @@ public PostgresCryptoEngine cryptoEngine(DataSource ds) {
 }
 ```
 
-`PostgresCryptoEngine` stores per-subject AES-256 keys in the `encryption_keys` table (created by `init-db.sql` in chapter 1). StreamRune's Spring auto-configuration discovers this bean via `ObjectProvider<CryptoEngine>` alongside the `EventTypeRegistry` and `EventUpcaster` beans from chapters 2 and 4, and builds a single `PostgresEventStore` with encryption active. Every event with `@Encrypted` components is then encrypted before it is written to `event_stream.payload` and decrypted when it is read back — transparently to your domain code. No changes to any other bean in `StreamRuneConfig` are needed.
+`PostgresCryptoEngine` stores per-subject AES-256 keys in the `encryption_keys` table. You do not create it: now that a crypto engine bean exists, the event store factory applies the crypto migration series bundled in `streamrune-postgres-crypto` (`db/crypto-migration/`, recorded in `flyway_schema_history_crypto`) on the next start, next to the event-store series from chapter 1, and `encryption_keys`, `forgotten_subjects` and `erased_key_generations` appear. StreamRune's Spring auto-configuration discovers this bean via `ObjectProvider<CryptoEngine>` alongside the `EventTypeRegistry` and `EventUpcaster` beans from chapters 2 and 4, and builds a single `PostgresEventStore` with encryption active. Every event with `@Encrypted` components is then encrypted before it is written to `event_stream.payload` and decrypted when it is read back — transparently to your domain code. No changes to any other bean in `StreamRuneConfig` are needed.
 
 ### Step 5 — Register Customer events in the EventTypeRegistry
 

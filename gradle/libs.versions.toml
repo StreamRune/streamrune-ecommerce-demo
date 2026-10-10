@@ -20,8 +20,8 @@ jackson = "2.18.3"
 hikaricp = "6.2.1"
 postgresql = "42.7.10"
 # Kept in step with the StreamRune framework build (13.9.0 accepts PostgreSQL 18 without the "Flyway upgrade
-# recommended" WARN 10.22.0 logged). The demo applies its schema through scripts/init-db.sql, so no demo module
-# declares these two aliases; Flyway reaches the apps through streamrune-postgres.
+# recommended" WARN 10.22.0 logged). The framework's event store applies its schema at startup, so no demo
+# module declares these two aliases; Flyway reaches the apps through streamrune-postgres.
 flyway = "13.9.0"
 slf4j = "2.0.16"
 caffeine = "3.2.0"

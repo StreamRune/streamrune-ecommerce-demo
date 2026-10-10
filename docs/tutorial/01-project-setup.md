@@ -492,20 +492,11 @@ dependencies {
 >
 > `opentelemetry-api` and `spring-security-core` are runtime requirements of StreamRune's Spring auto-configuration, not of your code. The `gradle/libs.versions.toml` catalog you copied from the real demo already defines both aliases (`opentelemetry` and `spring-security` versions). Omitting them compiles fine but fails at startup.
 
-### Step 5 — Start PostgreSQL and create the schema
+### Step 5 — Start PostgreSQL
 
-StreamRune's PostgreSQL EventStore needs a running database **with its tables already created**. This demo lets StreamRune auto-configure the event store (the Spring auto-configuration in `streamrune-spring` picks up the `EventTypeRegistry` bean you define, plus the crypto engine and upcaster beans added in later chapters). By default the auto-configured factory runs the bundled Flyway migrations from `db/streamrune-migration/` inside the `streamrune-postgres` jar — but this demo's schema comes from `scripts/init-db.sql` (mounted by `docker-compose.yml` into the container's init directory), so it sets `streamrune.event-store.schema.auto-initialize: false` to skip that and use the pre-existing schema instead. The schema is therefore **not** created on startup; it must already exist before the application starts.
+StreamRune's PostgreSQL EventStore needs a running database, and nothing more: an **empty** database is enough. This demo lets StreamRune auto-configure the event store (the Spring auto-configuration in `streamrune-spring` picks up the `EventTypeRegistry` bean you define, plus the crypto engine and upcaster beans added in later chapters), and the auto-configured factory creates the schema itself when the application starts. It runs the Flyway baseline bundled in the `streamrune-postgres` jar (`db/streamrune-migration/`) and records it in its own history table, `flyway_schema_history_streamrune`, so it never collides with migrations of your own. You write no DDL and copy no schema file.
 
-First, copy the schema file from the real demo into your project (it is regenerated from the framework's Flyway migrations and is the demo's source of truth for the schema):
-
-```bash
-mkdir -p scripts
-# Copy scripts/init-db.sql from your checkout of the real demo
-# (the same repository this tutorial lives in):
-cp /path/to/streamrune-ecommerce-demo/scripts/init-db.sql scripts/init-db.sql
-```
-
-Then start PostgreSQL, mounting that script so Postgres runs it automatically the first time the container initialises:
+Start PostgreSQL:
 
 ```bash
 docker run -d \
@@ -514,23 +505,20 @@ docker run -d \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  -v "$(pwd)/scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro" \
   postgres:17
 ```
 
-> **Why `postgres:17`:** StreamRune requires PostgreSQL 17 or newer (its CI tests 17 and 18) and refuses an older server at startup — `PostgresEventStoreFactory.create()` throws `UnsupportedServerVersionException` before it touches the schema, even with `streamrune.event-store.schema.auto-initialize: false`. The demo's containers, tests and `docker-compose.yml` all use 17, the oldest supported version.
+> **Why `postgres:17`:** StreamRune requires PostgreSQL 17 or newer (its CI tests 17 and 18) and refuses an older server at startup — `PostgresEventStoreFactory.create()` throws `UnsupportedServerVersionException` before it touches the schema, whatever `streamrune.event-store.schema.auto-initialize` says. The demo's containers, tests and `docker-compose.yml` all use 17, the oldest supported version.
 
-> The mount only runs on **first** initialisation of a fresh data volume. If the container already exists from an earlier run, remove it first (`docker rm -f streamrune-pg`) so the script runs against a clean database, or apply the script manually: `docker exec -i streamrune-pg psql -U postgres -d streamrune_ecommerce < scripts/init-db.sql`.
-
-Wait a few seconds for the container to initialise, then verify the tables exist:
+Wait a few seconds for the container to initialise, then check that the database answers:
 
 ```bash
 docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "\dt"
 ```
 
-You should see `event_stream`, `snapshot_store`, `projection_offset`, and several others.
+It prints `Did not find any relations.` — the database is empty until the application's first start (Step 8).
 
-> **Tip:** When you reach Chapter 17, `docker compose up` starts PostgreSQL (with this same `init-db.sql` mounted), the backend, and the frontend together. For the tutorial chapters, the standalone container above is simpler.
+> **Tip:** When you reach Chapter 17, `docker compose up` starts PostgreSQL, RabbitMQ, the backend, the notifications service and the frontend together. For the tutorial chapters, the standalone container above is simpler.
 
 ### Step 6 — Configure the datasource
 
@@ -554,12 +542,11 @@ streamrune:
   event-store:
     type: postgres
     schema:
-      # The demo's schema is created by scripts/init-db.sql (Docker initdb), not Flyway.
-      # The auto-configured event store defaults to running Flyway; disable it so it does not
-      # fail against the pre-existing schema. init-db.sql pre-creates the full framework schema by
-      # hand, so a real migrate would hit a raw "relation \"event_stream\" already exists" conflict
-      # on V001, not a Flyway validation error.
-      auto-initialize: false
+      # The framework creates its own schema at startup (this is also the default): the event
+      # store's Flyway series (classpath:db/streamrune-migration, history table
+      # flyway_schema_history_streamrune). The demo ships no DDL of its own; an empty database is
+      # all the app needs.
+      auto-initialize: true
   projection:
     type: polling
     interval: 100
@@ -715,18 +702,18 @@ Run the Spring Boot application:
 ./gradlew :spring-app:bootRun
 ```
 
-On startup you should see the application connect to PostgreSQL and finally log `Started SpringEcommerceApplication`. No projection runner starts yet: the application has no read side until Chapter 5 adds the `MultiProjectionRunner` bean, and `streamrune.projections.auto-discovery.enabled: false` keeps the framework from building one. There is **no** migration step in the log — the schema was already created in Step 5 by `init-db.sql`. The log does carry one expected warning, `Schema validation warning [flyway_schema_history_streamrune]: Flyway history table not found — schema may not be managed by Flyway`: the event store still checks the schema at startup, finds every table it needs, and notes that Flyway did not create them, which is true for a schema from `init-db.sql`.
+On startup you should see the application connect to PostgreSQL and finally log `Started SpringEcommerceApplication`. No projection runner starts yet: the application has no read side until Chapter 5 adds the `MultiProjectionRunner` bean, and `streamrune.projections.auto-discovery.enabled: false` keeps the framework from building one. On this first start the log also shows Flyway creating the schema: it finds the empty database, creates `flyway_schema_history_streamrune` and applies the baseline (`Migrating schema "public" to version "001 - streamrune baseline"`). On every later start it finds the baseline recorded and changes nothing.
 
-> **Where the schema comes from.** This demo uses the auto-configured event store: `postgresEventStoreFactory` builds `PostgresEventStore` from the `EventTypeRegistry`, crypto engine, and upcaster beans you define. By default that factory also runs the bundled Flyway migrations from `db/streamrune-migration/` inside the `streamrune-postgres` jar. Because the demo's schema comes from `scripts/init-db.sql` (mounted by `docker-compose.yml` at container init time), it sets `streamrune.event-store.schema.auto-initialize: false` to skip that migration and use the pre-existing schema instead. The tables must therefore already exist before startup — which is why Step 5 provisions them. The demo keeps `init-db.sql` in sync with the framework migrations via a drift check. `flyway-core` still arrives transitively as an `api` dependency of `streamrune-postgres`; you never add it yourself.
+> **Where the schema comes from.** This demo uses the auto-configured event store: `postgresEventStoreFactory` builds `PostgresEventStore` from the `EventTypeRegistry`, crypto engine, and upcaster beans you define. With `streamrune.event-store.schema.auto-initialize: true` (the default, spelled out in Step 6) that factory first applies the Flyway baseline bundled in the `streamrune-postgres` jar, then validates the schema and refuses to start if a table or column it needs is missing. Chapter 6 adds a crypto engine; from then on the factory applies a second bundled series, the crypto tables, on its own history table. `flyway-core` arrives transitively as an `api` dependency of `streamrune-postgres`; you never add it yourself. An application whose database user may not run DDL sets the property to `false` and applies the same scripts out of band — StreamRune's production guide covers that setup.
 
-You already verified the tables in Step 5. You can re-check them:
+Check the tables the first start created:
 
 ```bash
 docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
   -c "\dt"
 ```
 
-You should see several tables including `event_stream`, `snapshot_store`, `projection_offset`, and `audit_log`.
+You should see several tables including `event_stream`, `snapshot_store`, `projection_offset`, and `audit_log`, plus the history table `flyway_schema_history_streamrune`.
 
 The application exposes a health endpoint at `http://localhost:8080/actuator/health`. Open it in a browser or run:
 
@@ -744,7 +731,7 @@ A `{"status":"UP"}` response confirms the application is connected to the databa
 - **Event Sourcing** stores the sequence of events that led to the current state, rather than the state itself — enabling full audit trails and temporal queries.
 - **StreamRune** implements these patterns via the Decider pattern: a pure function that maps (State, Command) → [Events] and (State, Event) → State.
 - **EventStore** is the append-only log at the heart of the write side. StreamRune provides a PostgreSQL-backed implementation with optimistic concurrency built in.
-- **Schema provisioning** — StreamRune's PostgreSQL event store can run its bundled Flyway migrations on startup, but this demo sets `streamrune.event-store.schema.auto-initialize: false` and provisions the schema from `scripts/init-db.sql` instead, kept in sync with the framework migrations via a drift check.
+- **Schema provisioning** — StreamRune's PostgreSQL event store applies its bundled Flyway baseline on startup (`streamrune.event-store.schema.auto-initialize: true`, the default) and records it in its own history table. The demo starts from an empty database and ships no DDL.
 - **Multi-module project structure** keeps domain logic (`domain`, `commands`, `queries`, `projections`) cleanly separated from the infrastructure wiring (`spring-app`). Domain modules have zero framework dependencies; they only know about `streamrune-core`.
 
 ---

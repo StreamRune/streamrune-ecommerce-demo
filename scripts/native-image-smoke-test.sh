@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Native image smoke test for StreamRune e-commerce demo.
-# Builds a native binary for the chosen framework, starts it against Postgres (scripts/init-db.sql
-# applied) and RabbitMQ, and probes it: health, a command-to-read-model round trip, a dead-lettered
-# command replayed through its sealed root, and a read model larger than 1 MiB written and read back.
+# Builds a native binary for the chosen framework, starts it against an empty Postgres database and
+# RabbitMQ, and probes it: health, the schema the binary created at startup, a command-to-read-model
+# round trip, a dead-lettered command replayed through its sealed root, and a read model larger than
+# 1 MiB written and read back.
 # It then stops the binary with SIGTERM, waits for it to exit, prints its output, and fails the run
 # when that output (startup, requests and shutdown) holds a GraalVM UnsupportedFeatureError.
 #
@@ -16,8 +17,8 @@
 #
 # SMOKE_PG_CONTAINER=<name-or-id> reuses an already-running Postgres container published on
 # localhost:5433 (CI passes its `postgres` service container) instead of starting and removing
-# its own; the schema is still applied with `docker exec` into that container, so it supports one
-# framework per run (`all` would re-apply init-db.sql onto the initialised database and is refused).
+# its own. Its streamrune_ecommerce database must be empty: every binary has to create the schema
+# itself, so a reused container supports one framework per run (`all` is refused).
 # SMOKE_RABBIT_CONTAINER=<name-or-id> does the same for the RabbitMQ broker on localhost:5672
 # that all three binaries need.
 # SMOKE_SKIP_BUILD=1 smoke-tests the binary an earlier step already built instead of building the
@@ -98,29 +99,24 @@ start_postgres() {
       postgres:17 >/dev/null
   fi
 
-  # wait for ready
+  # Wait for the server on TCP. The postgres image first runs a temporary server for its init
+  # phase, on the Unix socket only, and then restarts; a readiness check over the socket could
+  # answer during that phase and let the binary connect into the restart.
   for i in $(seq 1 30); do
-    if docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+    if docker exec "$PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
       echo "  Postgres ready."
-      # Apply the demo schema. The apps own the schema via init-db.sql (the library's
-      # Flyway-on-startup would abort against a pre-created DB), so without this the
-      # event_stream / projection tables are absent and the CQRS round-trip below has
-      # nothing to write to — health alone would still pass, hiding the breakage.
-      echo "  Applying scripts/init-db.sql …"
-      # The postgres image restarts internally after its first-init phase, so a psql apply right
-      # after pg_isready can hit "the database system is shutting down" (a connection-time refusal,
-      # before any DDL runs). Retry until the container settles, then it applies cleanly on the
-      # empty DB.
-      for j in $(seq 1 15); do
-        if docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres \
-            -d streamrune_ecommerce < "$ROOT/scripts/init-db.sql" >/dev/null 2>&1; then
-          echo "  Schema applied."
-          return 0
-        fi
-        sleep 2
-      done
-      echo "  ✗ init-db.sql failed to apply after retries."
-      return 1
+      # The binary must find an empty database: it creates the schema itself at startup, and
+      # schema_smoke below requires that it did.
+      local tables
+      if ! tables=$(pg_sql "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'"); then
+        echo "  ✗ Could not query the streamrune_ecommerce database."
+        return 1
+      fi
+      if [ "$tables" != "0" ]; then
+        echo "  ✗ The streamrune_ecommerce database already holds $tables table(s); it must be empty."
+        return 1
+      fi
+      return 0
     fi
     sleep 1
   done
@@ -141,6 +137,32 @@ wait_for_health() {
   done
   echo "  ✗ Health check timed out after ${timeout}s."
   return 1
+}
+
+schema_smoke() {
+  # The database was empty when the binary started, so every table it now holds was created by the
+  # binary: the framework's event store factory applies its event-store and crypto migration series
+  # at startup (streamrune.event-store.schema.auto-initialize=true). In a native image that only
+  # works when the migration scripts were registered as resources at build time. Each series
+  # records its baseline in its own Flyway history table; one table of each series is checked too.
+  echo "  Checking the schema the binary created …"
+  local applied
+  for history in flyway_schema_history_streamrune flyway_schema_history_crypto; do
+    if ! applied=$(pg_sql "SELECT count(*) FROM $history WHERE success AND script LIKE 'V001%'" 2>/dev/null) \
+        || [ "$applied" != "1" ]; then
+      echo "  ✗ $history does not record the applied baseline (got: ${applied:-no such table})."
+      return 1
+    fi
+  done
+  local present
+  present=$(pg_sql "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'
+      AND tablename IN ('event_stream', 'encryption_keys')")
+  if [ "$present" != "2" ]; then
+    echo "  ✗ event_stream and encryption_keys are not both present (found $present of 2)."
+    return 1
+  fi
+  echo "  ✓ The binary created the event-store and crypto schema on the empty database."
+  return 0
 }
 
 functional_smoke() {
@@ -311,9 +333,11 @@ probe_and_stop() {
   # records the framework's result.
   local fw="$1" health_url="$2" base="$3" app_log="$4"
   local outcome="PASS"
-  local detail="health + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + clean output"
+  local detail="health + schema created at startup + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + clean output"
   if ! wait_for_health "$health_url"; then
     outcome="FAIL"; detail="health check timeout"
+  elif ! schema_smoke; then
+    outcome="FAIL"; detail="the binary did not create the schema"
   elif ! functional_smoke "$base"; then
     outcome="FAIL"; detail="CQRS round-trip failed"
   elif ! dlq_sealed_root_replay_smoke "$base"; then
@@ -500,7 +524,7 @@ case "$TARGET" in
   micronaut) smoke_micronaut ;;
   all)
     if [ -n "$PG_EXTERNAL" ]; then
-      echo "SMOKE_PG_CONTAINER supports one framework per run; pass spring, quarkus or micronaut."
+      echo "SMOKE_PG_CONTAINER supports one framework per run (each binary needs an empty database); pass spring, quarkus or micronaut."
       exit 1
     fi
     smoke_spring

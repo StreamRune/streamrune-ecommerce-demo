@@ -158,7 +158,9 @@ public class StreamRuneProducer {
    * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
    * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
    * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
-   * Requires the {@code encryption_keys} and {@code forgotten_subjects} tables (see init-db.sql).
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
    *
    * <p>Exposed as both {@link PostgresCryptoEngine} (the forget service needs its concrete API) and
    * {@link CryptoEngine} (what {@code CryptoShreddingModule} consumes). The {@code @Singleton}

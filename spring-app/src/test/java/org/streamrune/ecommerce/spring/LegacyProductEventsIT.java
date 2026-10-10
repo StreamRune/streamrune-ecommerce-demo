@@ -33,10 +33,10 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.spring.config.StreamRuneConfig;
 import org.streamrune.postgres.PostgresEventStore;
+import org.streamrune.postgres.PostgresEventStoreFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.MountableFile;
 
 /**
  * Tutorial chapter 4 against a real database and the demo's own event type registry and {@code
@@ -54,10 +54,7 @@ class LegacyProductEventsIT {
       new PostgreSQLContainer<>("postgres:17")
           .withDatabaseName("streamrune_ecommerce")
           .withUsername("postgres")
-          .withPassword("postgres")
-          .withCopyFileToContainer(
-              MountableFile.forHostPath("../scripts/init-db.sql"),
-              "/docker-entrypoint-initdb.d/init-db.sql");
+          .withPassword("postgres");
 
   private static PGSimpleDataSource dataSource;
   private static EventTypeRegistry registry;
@@ -73,6 +70,11 @@ class LegacyProductEventsIT {
     // The registry holds the customer events, whose @Encrypted fields a store refuses to write
     // without a crypto engine.
     cryptoEngine = new StreamRuneConfig().cryptoEngine(dataSource);
+    // The schema the application's event store factory creates at startup: the event-store series
+    // and, for the crypto engine, the crypto series.
+    new PostgresEventStoreFactory(dataSource, registry)
+        .cryptoEngine(cryptoEngine)
+        .initializeSchema();
   }
 
   /** The store as chapters 2 and 3 have it: no upcaster registered yet. */

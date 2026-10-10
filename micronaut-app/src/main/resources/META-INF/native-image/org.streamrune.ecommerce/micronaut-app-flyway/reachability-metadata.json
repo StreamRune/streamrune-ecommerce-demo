@@ -1,0 +1,12 @@
+{
+  "reflection": [
+    { "type": "org.flywaydb.core.api.migration.baseline.BaselineMigrationConfigurationExtension", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.core.internal.proprietaryStubs.CherryPickConfigurationExtensionStub", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.core.internal.proprietaryStubs.DryRunConfigurationExtensionStub", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.core.internal.proprietaryStubs.LicensingConfigurationExtensionStub", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.core.internal.proprietaryStubs.OfflinePermitConfigurationExtensionStub", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.core.internal.proprietaryStubs.PATTokenConfigurationExtensionStub", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.database.postgresql.PostgreSQLConfigurationExtension", "allDeclaredFields": true, "allDeclaredConstructors": true },
+    { "type": "org.flywaydb.database.postgresql.TransactionalModel", "allDeclaredFields": true, "allDeclaredConstructors": true }
+  ]
+}
