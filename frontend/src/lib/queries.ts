@@ -63,18 +63,28 @@ export function useCustomer(id: string) {
   });
 }
 
-export function useEvents(offset = 0, limit = 50) {
+/**
+ * The event history is ADMIN only on the backend (it returns decrypted
+ * payloads), so the caller passes `enabled: false` for any other role and no
+ * request is sent.
+ */
+export function useEvents(offset = 0, limit = 50, enabled = true) {
   return useQuery({
     queryKey: ["events", offset, limit],
     queryFn: () => fetchEvents(offset, limit),
+    enabled,
   });
 }
 
-export function useStreamEvents(aggregateType: string | null, aggregateId: string | null) {
+export function useStreamEvents(
+  aggregateType: string | null,
+  aggregateId: string | null,
+  enabled = true,
+) {
   return useQuery({
     queryKey: ["events", "stream", aggregateType, aggregateId],
     queryFn: () => fetchStreamEvents(aggregateType as string, aggregateId as string),
-    enabled: !!aggregateType && !!aggregateId,
+    enabled: enabled && !!aggregateType && !!aggregateId,
   });
 }
 

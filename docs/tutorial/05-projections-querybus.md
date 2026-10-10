@@ -309,7 +309,7 @@ public OffsetStore offsetStore(DataSource ds) {
 }
 ```
 
-`PostgresOffsetStore` writes a row per projection name in the `projection_offset` table, which `scripts/init-db.sql` creates alongside `event_stream` when the PostgreSQL container first initializes. (The demo ships a hand-generated `init-db.sql` mounted at the container's `docker-entrypoint-initdb.d` rather than running Flyway at app startup — the SQL is regenerated from the framework's Flyway migrations.) Each `MultiProjectionRunner` projection advances its own offset independently, so a slow projection does not block the others.
+`PostgresOffsetStore` writes a row per projection name in the `projection_offset` table, which the framework's baseline created alongside `event_stream` on the application's first start (Chapter 1, Step 8). Each `MultiProjectionRunner` projection advances its own offset independently, so a slow projection does not block the others.
 
 ### Step 6 — Update `ProductQueryController`
 
@@ -363,7 +363,7 @@ docker start streamrune-pg   # if the container exists but is stopped
 ./gradlew :spring-app:bootRun
 ```
 
-Create two products:
+Create two products. If your database still holds `p-1` from chapter 2, the first request answers `400 Product already exists: p-1` — the decider's creation guard — and that is fine: the product is in the event store, and the new projection reads the stream from its first event, so it lists `p-1` either way.
 
 ```bash
 curl -X POST http://localhost:8080/api/products \
@@ -381,7 +381,7 @@ List them:
 curl http://localhost:8080/api/products
 ```
 
-You should receive a JSON array with both products. The second one will have `"status":"LOW_STOCK"` because its initial stock of 5 is below the threshold.
+You should receive a JSON array that holds both products (and any other product you created in earlier chapters, such as `p-valid` from chapter 3). `p-2` has `"status":"LOW_STOCK"` because its initial stock of 5 is below the threshold.
 
 Fetch a single product:
 

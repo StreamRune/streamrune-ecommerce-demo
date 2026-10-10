@@ -4,13 +4,14 @@ import io.micronaut.test.support.TestPropertyProvider;
 import java.util.Map;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.utility.MountableFile;
 
 /**
  * Shared base for the Micronaut HTTP integration tests. Spins up a real PostgreSQL container once
- * for the whole suite (singleton-container pattern), loads the framework + crypto schema via {@code
- * scripts/init-db.sql}, and points the Micronaut {@code datasources.default} at it through {@link
- * TestPropertyProvider}.
+ * for the whole suite (singleton-container pattern) and points the Micronaut {@code
+ * datasources.default} at it through {@link TestPropertyProvider}. The database starts empty: the
+ * application creates the schema itself at startup ({@code
+ * streamrune.event-store.schema.auto-initialize: true} in {@code application.yml}), as it does
+ * outside the tests.
  *
  * <p>Because the container URL is identical for every subclass, Micronaut Test caches a single
  * application context across test classes — the embedded server, event store, crypto engine, and
@@ -37,9 +38,6 @@ public abstract class AbstractIntegrationTest implements TestPropertyProvider {
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
             .withPassword("postgres")
-            .withCopyFileToContainer(
-                MountableFile.forHostPath("../scripts/init-db.sql"),
-                "/docker-entrypoint-initdb.d/init-db.sql")
             .withReuse(true);
     POSTGRES.start();
   }
@@ -62,11 +60,6 @@ public abstract class AbstractIntegrationTest implements TestPropertyProvider {
         // The framework's OutboxPoller factory requires both OutboxStore + OutboxPublisher; with
         // the publisher absent (RabbitMqFactory gated on this property) the poller is not created.
         "streamrune.outbox.enabled",
-        "false",
-        // Demo schema is owned by scripts/init-db.sql (loaded via Testcontainers
-        // initdb); disable Flyway auto-init so the library-default EventStoreFactory
-        // does not attempt to run migrations against the pre-created schema.
-        "streamrune.event-store.schema.auto-initialize",
         "false",
         // The compensation retry sweeper the framework starts for the order-fulfillment SagaRunner
         // bean re-drives a stuck COMPENSATING saga every second instead of every minute, so

@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   backend-integration:
     name: Spring backend integration tests
@@ -21,8 +24,6 @@ jobs:
         with:
           repository: StreamRune/streamrune
           path: streamrune
-          # Falls back to the default token once the repository is public.
-          token: ${{ secrets.STREAMRUNE_CHECKOUT_TOKEN || github.token }}
 
       - uses: actions/setup-java@v6
         with:
@@ -49,6 +50,76 @@ jobs:
           path: |
             streamrune-ecommerce-demo/spring-app/build/reports/tests/
             streamrune-ecommerce-demo/spring-app/build/test-results/
+
+  run-paths:
+    name: README run paths (Docker Compose, bootRun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: streamrune-ecommerce-demo
+
+      - uses: actions/checkout@v7
+        with:
+          repository: StreamRune/streamrune
+          path: streamrune
+
+      - uses: actions/setup-java@v6
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The README's Quick Start, command for command: build the two JARs the images copy, then
+      # start all five services. --wait returns once every service runs (and is healthy where it
+      # has a health check) and fails when one exits, e.g. a backend that could not reach the
+      # broker or an image whose JAR was missing from the build context.
+      - name: Quick Start - build the JARs
+        working-directory: streamrune-ecommerce-demo
+        run: ./gradlew :spring-app:bootJar :notifications-service:bootJar --console=plain --no-daemon
+
+      - name: Quick Start - docker compose up
+        working-directory: streamrune-ecommerce-demo
+        run: docker compose up -d --wait
+
+      - name: Quick Start - backend, notifications service and frontend answer
+        working-directory: streamrune-ecommerce-demo
+        run: bash scripts/wait-for-http.sh http://localhost:8080/actuator/health '"status":"UP"' http://localhost:8090/received '' http://localhost:3000 ''
+
+      - name: Quick Start - logs on failure
+        if: failure()
+        working-directory: streamrune-ecommerce-demo
+        run: docker compose logs --no-color
+
+      - name: Quick Start - docker compose down
+        if: always()
+        working-directory: streamrune-ecommerce-demo
+        run: docker compose down -v
+
+      # "Running Individually": only the database and the broker in Docker, the application from
+      # Gradle, on an empty database it has to create the schema in.
+      - name: Running Individually - start PostgreSQL and RabbitMQ
+        working-directory: streamrune-ecommerce-demo
+        run: docker compose up -d --wait postgres rabbitmq
+
+      - name: Running Individually - bootRun answers
+        working-directory: streamrune-ecommerce-demo
+        run: |
+          ./gradlew :spring-app:bootRun --console=plain --no-daemon > bootrun.log 2>&1 &
+          bash scripts/wait-for-http.sh http://localhost:8080/actuator/health '"status":"UP"'
+
+      - name: Running Individually - application log on failure
+        if: failure()
+        working-directory: streamrune-ecommerce-demo
+        run: cat bootrun.log || true
+
+      - name: Running Individually - docker compose down
+        if: always()
+        working-directory: streamrune-ecommerce-demo
+        run: docker compose down -v
 
   frontend-e2e:
     name: Frontend Playwright smoke tests

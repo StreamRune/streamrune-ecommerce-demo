@@ -43,10 +43,12 @@ datasources:
 streamrune:
   event-store:
     type: postgres
-    # Demo schema is owned by scripts/init-db.sql; disable Flyway auto-init to avoid
-    # conflicts with the pre-created schema (mirrors spring-app and quarkus-app).
+    # The framework creates its own schema at startup (this is also the default): the event
+    # store's Flyway series and, because a PostgreSQL-backed CryptoEngine bean is present, the
+    # crypto series, each on its own history table. The demo ships no DDL of its own; an empty
+    # database is all the app needs (the same in spring-app and quarkus-app).
     schema:
-      auto-initialize: false
+      auto-initialize: true
   outbox:
     enabled: true
   security:

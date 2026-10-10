@@ -15,15 +15,20 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
   @Override
   public List<ProductEvent> decide(ProductCommand cmd, ProductState state) {
     return switch (cmd) {
-      case ProductCommand.CreateProduct c ->
-          List.of(
-              new ProductEvent.ProductCreated(
-                  c.productId(),
-                  c.name(),
-                  c.description(),
-                  c.category(),
-                  c.price(),
-                  c.initialStock()));
+      case ProductCommand.CreateProduct c -> {
+        // A product id is created once. Without this check a second CreateProduct would append
+        // another ProductCreated, and evolve would replace the product's name, price and stock.
+        if (state.productId() != null)
+          throw new DomainException("Product already exists: " + c.productId());
+        yield List.of(
+            new ProductEvent.ProductCreated(
+                c.productId(),
+                c.name(),
+                c.description(),
+                c.category(),
+                c.price(),
+                c.initialStock()));
+      }
 
       case ProductCommand.UpdatePrice c ->
           List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));

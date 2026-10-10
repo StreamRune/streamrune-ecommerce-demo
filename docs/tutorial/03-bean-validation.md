@@ -135,10 +135,10 @@ Start the application and confirm the happy path still passes through:
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+  -d '{"productId":"p-valid","name":"Sprocket","description":"A sturdy sprocket","category":"Gadgets","price":4.99,"initialStock":40}'
 ```
 
-Expected: `200 OK` with empty body. The interceptor validated the command, found no violations, and execution proceeded to the `Decider` as before.
+Expected: `200 OK` with empty body. The interceptor validated the command, found no violations, and execution proceeded to the `Decider` as before. (The request uses a new id because `p-1` exists since chapter 2: its decider would refuse a second `CreateProduct` with `400 Product already exists: p-1` — also a 400, but from the business rule, after validation passed.)
 
 ### Step 5 — Verify: the interceptor rejects an invalid command
 

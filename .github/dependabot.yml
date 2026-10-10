@@ -7,6 +7,22 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: build
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /notifications-service
+      - /frontend
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
   - package-ecosystem: github-actions
     directory: /
     schedule:

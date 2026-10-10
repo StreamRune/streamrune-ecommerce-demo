@@ -19,22 +19,20 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
-import org.testcontainers.utility.MountableFile;
 
 /**
  * Shared base class for HTTP integration tests. Spins up real PostgreSQL and RabbitMQ containers
- * once for all subclasses (singleton container pattern), loads the full schema via {@code
- * scripts/init-db.sql} (the hand-written DDL that covers all framework + demo tables), and exposes
- * a {@link WebTestClient} bound to the running Spring application's random port.
+ * once for all subclasses (singleton container pattern) and exposes a {@link WebTestClient} bound
+ * to the running Spring application's random port.
  *
  * <p>Because the container URLs are the same for every subclass, Spring's test context cache serves
  * a single application context to all test classes — avoiding the overhead of starting N separate
  * Spring Boot instances.
  *
- * <p>Flyway auto-initialization is disabled for tests ({@code
- * streamrune.event-store.schema.auto-initialize=false}): {@code init-db.sql} is applied by the
- * container's {@code initdb.d} mechanism instead. Mixing both would fail under Flyway 11, which
- * rejects a non-empty schema that has no {@code flyway_schema_history} table.
+ * <p>The database starts empty. The application creates the schema itself, as it does outside the
+ * tests: {@code streamrune.event-store.schema.auto-initialize=true} in {@code application.yml} has
+ * the event store factory apply the framework's event-store and crypto migration series when the
+ * context starts.
  *
  * <p>RabbitMQ is included so {@link
  * org.streamrune.ecommerce.spring.config.RabbitMqConfig#outboxRabbitConnection} can open the outbox
@@ -108,9 +106,6 @@ public abstract class AbstractIntegrationTest {
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
             .withPassword("postgres")
-            .withCopyFileToContainer(
-                MountableFile.forHostPath("../scripts/init-db.sql"),
-                "/docker-entrypoint-initdb.d/init-db.sql")
             .withReuse(true);
     POSTGRES.start();
 
@@ -124,9 +119,6 @@ public abstract class AbstractIntegrationTest {
     registry.add("spring.datasource.username", POSTGRES::getUsername);
     registry.add("spring.datasource.password", POSTGRES::getPassword);
     registry.add("streamrune.projections.auto-discovery.enabled", () -> "false");
-    // init-db.sql is applied by the container's initdb.d; skip the framework's own Flyway run to
-    // avoid the Flyway 11 "non-empty schema without schema history" error.
-    registry.add("streamrune.event-store.schema.auto-initialize", () -> "false");
     // RabbitMQ broker for the outbox publisher (opened eagerly at startup by RabbitMqConfig).
     registry.add("spring.rabbitmq.host", RABBIT::getHost);
     registry.add("spring.rabbitmq.port", RABBIT::getAmqpPort);

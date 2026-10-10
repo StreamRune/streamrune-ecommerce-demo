@@ -294,10 +294,16 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
     @Override
     public List<ProductEvent> decide(ProductCommand cmd, ProductState state) {
         return switch (cmd) {
-            case ProductCommand.CreateProduct c ->
-                List.of(new ProductEvent.ProductCreated(
+            case ProductCommand.CreateProduct c -> {
+                // A product id is created once. Without this check a second CreateProduct would
+                // append another ProductCreated, and evolve would replace the product's name,
+                // price and stock.
+                if (state.productId() != null)
+                    throw new DomainException("Product already exists: " + c.productId());
+                yield List.of(new ProductEvent.ProductCreated(
                     c.productId(), c.name(), c.description(), c.category(),
                     c.price(), c.initialStock()));
+            }
 
             case ProductCommand.UpdatePrice c ->
                 List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
@@ -353,11 +359,25 @@ Run the test again:
 
 It should pass now. Green phase.
 
+> **Why `CreateProduct` checks the state.** The command bus loads the stream the command names, folds its events into a state with `evolve`, and hands that state to `decide`. For an id nobody used, the state is still `initialState()` and `state.productId()` is `null`. For an id that already has a product, it is not — and that is the only place where "this product exists" is known. A decider that skipped the check would accept the second `CreateProduct`, append a second `ProductCreated` to the same stream, and `evolve` would then replace the name, price and stock of the product that was there. Every command that creates an aggregate needs this guard; you will write the same one for customers (chapter 6) and orders (chapter 8).
+
 ### Step 4 — Add the remaining tests
 
 Expand `ProductDeciderTest` with tests for every business rule. Add these test methods alongside `createProduct_emitsProductCreated`:
 
 ```java
+@Test
+void createProduct_existingProduct_throws() {
+    fixture
+        .given(new ProductEvent.ProductCreated(
+            "p-1", "Widget", null, null,
+            new Money(java.math.BigDecimal.TEN, "USD"), 100))
+        .when(new ProductCommand.CreateProduct(
+            "p-1", "Other", null, null,
+            new Money(java.math.BigDecimal.ONE, "USD"), 5))
+        .expectFailedWith(DomainException.class, "Product already exists: p-1");
+}
+
 @Test
 void createProduct_lowStock() {
     fixture
@@ -449,7 +469,7 @@ Run the full test class:
 ./gradlew :commands:test --tests "*.ProductDeciderTest"
 ```
 
-All eight tests should pass. Notice the `DeciderFixture` API:
+All ten tests should pass. Notice the `DeciderFixture` API:
 
 - `.given()` — no prior events; this is a brand-new aggregate.
 - `.given(event1, event2, ...)` — pre-load the aggregate with past events. `evolve` is called for each one before the command is processed.
@@ -457,6 +477,7 @@ All eight tests should pass. Notice the `DeciderFixture` API:
 - `.expectEvents(event1, ...)` — asserts the exact events emitted by `decide`.
 - `.expectState(consumer)` — runs assertions on the final state after `evolve` has been applied to every emitted event.
 - `.expectException(type)` — asserts that `decide` throws the given exception type.
+- `.expectFailedWith(type, text)` — the same, and the exception's message must contain the text.
 
 There are no Spring mocks, no Mockito, no in-memory databases. The entire aggregate lifecycle — load, decide, evolve — is exercised in a few milliseconds per test.
 
@@ -533,7 +554,7 @@ Three things worth noting here:
 
 1. `SimpleEventTypeRegistry` maps the string name used in the JSON payload (e.g. `"ProductCreated"`) to the Java class used for deserialisation. These names become part of your persisted data — choose them deliberately, because renaming them later requires an event upcaster (covered in chapter 4).
 
-2. The `EventStore` bean itself is **not** declared here. The `streamrune-spring` auto-configuration provides a `postgresEventStoreFactory` that discovers the `EventTypeRegistry` bean (via `ObjectProvider`) and constructs the `PostgresEventStore` automatically. It also discovers any `EventUpcaster` and `CryptoEngine` beans you declare in later chapters. You need to set `streamrune.event-store.schema.auto-initialize: false` in `application.yml` because the demo schema is created by `scripts/init-db.sql` (the Docker initdb script), not Flyway — without this flag the auto-config would attempt to run Flyway against the pre-existing schema and fail.
+2. The `EventStore` bean itself is **not** declared here. The `streamrune-spring` auto-configuration provides a `postgresEventStoreFactory` that discovers the `EventTypeRegistry` bean (via `ObjectProvider`) and constructs the `PostgresEventStore` automatically. It also discovers any `EventUpcaster` and `CryptoEngine` beans you declare in later chapters. The same factory created the schema on the application's first start (`streamrune.event-store.schema.auto-initialize: true` in `application.yml`, Chapter 1), so the tables this bean writes to are already there.
 
 3. The first argument to `.register(...)` on the command bus is the aggregate type — `ProductState.TYPE`, the name `product`: the stream a product's events live in is `product:p-1`. It is stored as two columns, `aggregate_type` and `aggregate_id`, and is permanent — renaming the type renames every stream. The second argument is the command root, the third the *aggregate ID extractor* — a function that extracts the aggregate ID from any subtype of `ProductCommand`. StreamRune uses this to load the correct event stream from the store before calling `decide`. The `switch` expression is exhaustive because `ProductCommand` is sealed. The extractor returns a typed `AggregateId`, built with `AggregateId.of(...)`. That factory is where a client-supplied id is checked: it throws `IllegalArgumentException` for a blank id, for one longer than 255 characters, or for one containing a control character (C0 `U+0000`–`U+001F` such as CR, LF, TAB and NUL, DEL `U+007F`, or C1 `U+0080`–`U+009F`). The aggregate id is stored verbatim in the `aggregate_id` column, beside the type, and in the audit and dead-letter rows, where a CR/LF would forge a line and a NUL would fail the PostgreSQL write. Those `aggregate_id` columns are `VARCHAR(255)`, so the length check turns an over-long id into a `400` rather than a failed SQL insert. A prefix added to an id counts toward the 255, as the fulfillment saga's `"fulfillment-"` will for an order id in chapter 8. The check runs inside the bus before any interceptor, so nothing is written, and the `IllegalArgumentException` handler from chapter 1 answers `400 Bad Request`. Keep the request fields as `String`s and let `AggregateId.of` build the id. The `AggregateId` constructor skips the control-character and length checks; it is meant for ids rebuilt from stored data (you will use it in the saga in chapter 11).
 
@@ -666,6 +687,16 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
 ```
 
 You should see one row: `product | p-1 | ProductCreated | 1`. (`version` is the per-stream sequence number, and `global_offset` is the store-wide ordering column — those are the actual columns on the `event_stream` table.)
+
+Send the same request a second time, with `-i` to see the status:
+
+```bash
+curl -i -X POST http://localhost:8080/api/products \
+  -H 'Content-Type: application/json' \
+  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+```
+
+It answers `400 Bad Request` with the body `Product already exists: p-1`: the command bus loaded the stream, the decider saw a state with a product id and threw `DomainException`, and the `GlobalExceptionHandler` from chapter 1 turned it into the 400. The `SELECT` above still returns the one row.
 
 Query the product list (returns an empty array until chapter 5):
 

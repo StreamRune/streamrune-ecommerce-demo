@@ -62,7 +62,7 @@ graph TB
 
 ## Create `SeedDataRunner`
 
-Until now you have been creating demo data manually via `curl`. `SeedDataRunner` automates this on every fresh boot so the frontend has data immediately and you can skip the manual setup commands.
+Until now you have been creating demo data manually via `curl`. `SeedDataRunner` automates this at startup so the frontend has data immediately and you can skip the manual setup commands.
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/SeedDataRunner.java`:
 
@@ -76,80 +76,166 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
+import org.streamrune.core.Command;
+import org.streamrune.core.DomainException;
+import org.streamrune.core.EventStore;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.customer.CustomerCommand;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/**
+ * Seeds the demo data at startup: three products with their opening stock, two customers and one
+ * order.
+ *
+ * <p>Seeding is idempotent, one command at a time. A product, a customer and an order are each
+ * created by a command its decider refuses when the aggregate already exists, so on a later start
+ * those commands are skipped. The opening stock is received only while the product's inventory
+ * stream is empty. A start that was interrupted halfway is therefore completed by the next one, and
+ * a complete seed is never applied twice.
+ */
 @Component
 public class SeedDataRunner implements ApplicationRunner {
 
   private static final Logger LOG = LoggerFactory.getLogger(SeedDataRunner.class);
 
   private final VirtualThreadCommandBus commandBus;
+  private final EventStore eventStore;
 
-  public SeedDataRunner(VirtualThreadCommandBus commandBus) {
+  public SeedDataRunner(VirtualThreadCommandBus commandBus, EventStore eventStore) {
     this.commandBus = commandBus;
+    this.eventStore = eventStore;
   }
 
   @Override
   public void run(ApplicationArguments args) {
+    int applied = seed();
+    if (applied == 0) {
+      LOG.info("Seed data skipped (already exists)");
+    } else {
+      LOG.info("Demo data seeded ({} commands)", applied);
+    }
+  }
+
+  /**
+   * Dispatches every seed command that has not been applied yet.
+   *
+   * @return the number of commands applied; 0 when the data was already there
+   */
+  public int seed() {
+    int applied = 0;
+
+    // Products
+    applied +=
+        dispatch(
+            new ProductCommand.CreateProduct(
+                "prod-widget",
+                "Widget",
+                "A versatile widget for all occasions",
+                "Electronics",
+                new Money(BigDecimal.valueOf(19.99), "USD"),
+                100));
+    applied +=
+        dispatch(
+            new ProductCommand.CreateProduct(
+                "prod-gadget",
+                "Gadget",
+                "The latest and greatest gadget",
+                "Electronics",
+                new Money(BigDecimal.valueOf(49.99), "USD"),
+                50));
+    applied +=
+        dispatch(
+            new ProductCommand.CreateProduct(
+                "prod-doohickey",
+                "Doohickey",
+                "Nobody knows what it does, but everybody wants one",
+                "Accessories",
+                new Money(BigDecimal.valueOf(9.99), "USD"),
+                200));
+
+    // Inventory (opening stock, before the seed order so the saga's ReserveStock succeeds)
+    applied += receiveOpeningStock("prod-widget", 100);
+    applied += receiveOpeningStock("prod-gadget", 50);
+    applied += receiveOpeningStock("prod-doohickey", 200);
+
+    // Customers (encrypted PII)
+    applied +=
+        dispatch(
+            new CustomerCommand.RegisterCustomer(
+                "cust-alice", "Alice Johnson", "alice@example.com", "123 Main St", "+1-555-0101"));
+    applied +=
+        dispatch(
+            new CustomerCommand.RegisterCustomer(
+                "cust-bob", "Bob Smith", "bob@example.com", "456 Oak Ave", "+1-555-0102"));
+
+    // One seed order; the fulfillment saga confirms it
+    applied +=
+        dispatch(
+            new OrderCommand.PlaceOrder(
+                "order-seed-1",
+                "cust-alice",
+                List.of(
+                    new OrderCommand.OrderLine(
+                        "prod-widget", 2, new Money(BigDecimal.valueOf(19.99), "USD")),
+                    new OrderCommand.OrderLine(
+                        "prod-gadget", 1, new Money(BigDecimal.valueOf(49.99), "USD")))));
+
+    return applied;
+  }
+
+  /**
+   * Dispatches one creation command. The decider refuses it with a {@link DomainException} when the
+   * aggregate already exists, which is how a later start finds the data seeded.
+   */
+  private int dispatch(Command command) {
     try {
-      LOG.info("Seeding demo data...");
+      commandBus.execute(command);
+      return 1;
+    } catch (DomainException e) {
+      LOG.info("Seed data skipped: {}", e.getMessage());
+      return 0;
+    } catch (RuntimeException e) {
+      LOG.warn("Seed command {} failed: {}", command.getClass().getSimpleName(), e.toString());
+      return 0;
+    }
+  }
 
-      // Products
-      commandBus.execute(
-          new ProductCommand.CreateProduct(
-              "prod-widget", "Widget",
-              "A versatile widget for all occasions", "Electronics",
-              new Money(BigDecimal.valueOf(19.99), "USD"), 100));
-      commandBus.execute(
-          new ProductCommand.CreateProduct(
-              "prod-gadget", "Gadget",
-              "The latest and greatest gadget", "Electronics",
-              new Money(BigDecimal.valueOf(49.99), "USD"), 50));
-      commandBus.execute(
-          new ProductCommand.CreateProduct(
-              "prod-doohickey", "Doohickey",
-              "Nobody knows what it does, but everybody wants one", "Accessories",
-              new Money(BigDecimal.valueOf(9.99), "USD"), 200));
-
-      // Inventory (initial stock)
-      commandBus.execute(new InventoryCommand.ReceiveShipment("prod-widget", 100));
-      commandBus.execute(new InventoryCommand.ReceiveShipment("prod-gadget", 50));
-      commandBus.execute(new InventoryCommand.ReceiveShipment("prod-doohickey", 200));
-
-      // Customers (encrypted PII — requires crypto to be configured)
-      commandBus.execute(
-          new CustomerCommand.RegisterCustomer(
-              "cust-alice", "Alice Johnson", "alice@example.com",
-              "123 Main St", "+1-555-0101"));
-      commandBus.execute(
-          new CustomerCommand.RegisterCustomer(
-              "cust-bob", "Bob Smith", "bob@example.com",
-              "456 Oak Ave", "+1-555-0102"));
-
-      // One seed order (for snapshot demo — walks through multiple events)
-      commandBus.execute(
-          new OrderCommand.PlaceOrder(
-              "order-seed-1", "cust-alice",
-              List.of(
-                  new OrderCommand.OrderLine(
-                      "prod-widget", 2, new Money(BigDecimal.valueOf(19.99), "USD")),
-                  new OrderCommand.OrderLine(
-                      "prod-gadget", 1, new Money(BigDecimal.valueOf(49.99), "USD")))));
-
-      LOG.info("Demo data seeded successfully");
-    } catch (Exception e) {
-      LOG.warn("Seed data skipped (likely already exists): {}", e.getMessage());
+  /**
+   * Receives a product's opening stock once. {@code ReceiveShipment} adds to the stock every time
+   * it runs and no decider rule can tell the opening shipment from a later one, so the runner
+   * dispatches it only while the product's inventory stream is still empty.
+   */
+  private int receiveOpeningStock(String productId, int quantity) {
+    try {
+      StreamId stream = StreamId.of(InventoryState.TYPE, AggregateId.of(productId));
+      if (!eventStore.load(stream).events().isEmpty()) {
+        LOG.info("Seed data skipped: inventory already stocked: {}", productId);
+        return 0;
+      }
+      commandBus.execute(new InventoryCommand.ReceiveShipment(productId, quantity));
+      return 1;
+    } catch (RuntimeException e) {
+      LOG.warn("Seed shipment for {} failed: {}", productId, e.toString());
+      return 0;
     }
   }
 }
 ```
 
-`SeedDataRunner` implements `ApplicationRunner` and is annotated `@Component` so Spring picks it up automatically. On the first boot it dispatches commands through the full interceptor chain (audit, authorization with `ADMIN` role not required for `CreateProduct`, validation). The `catch` block catches `DomainException` for duplicate aggregate IDs on subsequent starts and logs a warning rather than crashing the application. All seed data appears in the audit log and produces events visible in the Event Explorer.
+`SeedDataRunner` implements `ApplicationRunner` and is annotated `@Component` so Spring picks it up automatically. On the first boot it dispatches nine commands through the full interceptor chain (audit, authorization with `ADMIN` role not required for `CreateProduct`, validation), so all seed data appears in the audit log and produces events visible in the Event Explorer.
+
+The runner must not seed twice: the database outlives the application (the `pgdata` volume in `docker-compose.yml`), and every later start runs it again. It relies on two things, one command at a time:
+
+- **Products, customers and the order** are created by commands whose deciders refuse an id that already exists (the creation guards from chapters 2, 6 and 8). On a later start `dispatch` catches that `DomainException`, logs `Seed data skipped: Product already exists: prod-widget`, and moves on. The refused command went through the same bus as any other, so the audit log gains a `FAILURE` row for it on every restart — an honest record of a command that was sent and refused.
+- **The opening stock** has no such guard. `ReceiveShipment` is a command that is supposed to succeed every time — that is how a shop restocks — so a second run would add another 100 widgets. `receiveOpeningStock` therefore looks at the product's inventory stream first and dispatches the shipment only while that stream is empty.
+
+Because each command is skipped on its own evidence, a start that was interrupted halfway (say, after the products but before the customers) is completed by the next one, and a complete seed is never applied twice. When nothing was left to do, the runner logs `Seed data skipped (already exists)`; otherwise `Demo data seeded (9 commands)` with the number it applied. A command that fails for any other reason is logged as a warning and does not stop the application.
 
 ---
 
@@ -164,7 +250,7 @@ Build the Spring Boot and notifications-service JARs, then start all services:
 docker compose up
 ```
 
-Docker Compose starts five services: PostgreSQL (schema initialized via `scripts/init-db.sql`), RabbitMQ (ports 5672/15672), the Spring Boot backend (port 8080), the notifications-service outbox consumer (port 8090), and the Next.js frontend (port 3000). Wait for the backend to log `Started SpringEcommerceApplication`.
+Docker Compose starts five services: PostgreSQL (an empty database — the backend creates the schema when it starts), RabbitMQ (ports 5672/15672), the Spring Boot backend (port 8080), the notifications-service outbox consumer (port 8090), and the Next.js frontend (port 3000). Wait for the backend to log `Started SpringEcommerceApplication`.
 
 Verify that the application is healthy:
 
@@ -174,7 +260,7 @@ curl -s http://localhost:8080/actuator/health | jq .status
 
 Expected output: `"UP"`
 
-> **Alternative (without Docker Compose):** Start PostgreSQL with `docker run`, then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
+> **Alternative (backend and frontend outside Docker):** Start only the database and the broker with `docker compose up -d postgres rabbitmq` — the backend needs both, because its outbox publisher opens the AMQP connection at startup — then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
 
 ### Step 2: Open the Frontend
 
@@ -184,9 +270,9 @@ Open `http://localhost:3000` in your browser. The Dashboard page loads with four
 >
 > `SeedDataRunner` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/SeedDataRunner.java`) is a Spring `ApplicationRunner` that runs once during startup. It dispatches commands through the `VirtualThreadCommandBus` to create three products (`prod-widget` Widget $19.99, `prod-gadget` Gadget $49.99, `prod-doohickey` Doohickey $9.99), their initial inventory shipments (100 / 50 / 200 units), two customers (`cust-alice` Alice Johnson and `cust-bob` Bob Smith), and one seed order (`order-seed-1`) for Alice containing two widgets and one gadget.
 >
-> On subsequent startups the runner catches the resulting `DomainException` for duplicate aggregate IDs, logs `"Seed data skipped (likely already exists)"`, and continues. All seed data flows through the full interceptor chain — audit, authorization, validation, and circuit breaker — so it appears in the audit log and produces events visible in the Event Explorer.
+> On subsequent startups the deciders refuse the creation commands (`DomainException`, e.g. `Product already exists: prod-widget`), the runner finds the inventory streams already stocked, and it logs `Seed data skipped (already exists)` without appending anything. All seed data flows through the full interceptor chain — audit, authorization, validation, and circuit breaker — so it appears in the audit log and produces events visible in the Event Explorer.
 
-If you are running the demo manually (not via Docker Compose), seed data is created on the first `./gradlew :spring-app:bootRun`.
+If you are running the demo manually (not via Docker Compose), seed data is created on the first `./gradlew :spring-app:bootRun` against a database that does not hold it yet.
 
 ### Step 3: Register a Customer — Observe Encrypted PII
 
@@ -207,19 +293,29 @@ curl -s -X POST http://localhost:8080/api/customers \
 
 > **About the two headers.** They are what the frontend's `ADMIN` role sends. The backend takes `X-User-Id` as the identity because it runs in the trusted-gateway mode, and the role from `X-User-Role` through the demo's `HeaderUserRoleResolver` — stand-ins for a gateway and a real role source that a production deployment must not copy (Chapter 9 explains why). Every `curl` in this walkthrough plays the gateway's part.
 
-Now read the raw event from the event store to see the encrypted PII:
+Now read the event back through the Event Explorer (Chapter 15). It returns event payloads, so it answers only to the ADMIN role — the same two headers:
 
 ```bash
-curl -s "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[0].payload'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[0].payload'
 ```
 
 The stream id is `customer:cust-walkthrough` — the `CustomerCommand` registration in `StreamRuneConfig.java` names the aggregate type `customer` (`CustomerState.TYPE`) and its id extractor returns `c.customerId()`, so the URL carries the type and the id as two path segments.
 
-The `name`, `email`, and `address` fields in the `CustomerRegistered` event are AES-GCM ciphertext blobs, not plaintext. The `CustomerProjection` decrypts them on read, so the Customers page in the frontend shows `Alice Smith` — but the event store itself never holds plaintext personal data. This is the field encryption from Chapter 6.
+The payload shows `Alice Smith`, `alice@example.com` and `123 Main St` **in plain text**. That is not a leak in the storage: the explorer reads through the event store, and the store decrypts `@Encrypted` fields for whoever reads an event, just as it does for the `CustomerProjection` that fills the Customers page. What is encrypted is the row. Look at it where it rests:
+
+```bash
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT payload FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'cust-walkthrough';"
+```
+
+There the `name`, `email`, and `address` fields are AES-GCM ciphertext blobs, not plaintext — the field encryption from Chapter 6. The database never holds the personal data in the clear; anyone who can call the explorer as an admin sees it decrypted, until the customer's key is erased in Step 8.
+
+> **Demo shortcut — protect this in production.** The explorer's ADMIN check trusts the `X-User-Role` header, like every role check in this demo (see the note on the two headers above). Without the header the same request answers `403`; with it, anyone gets decrypted personal data. An endpoint that returns raw event payloads needs real authentication and a role derived from the authenticated identity, or it should not be deployed. Chapter 15 has the details.
 
 ### Step 4: Create Products — Events, Projection, Query
 
-Create two products:
+The seed already created `prod-widget`, `prod-gadget` and `prod-doohickey`. Create two more products:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/products \
@@ -227,9 +323,9 @@ curl -s -X POST http://localhost:8080/api/products \
   -H "X-User-Id: admin-1" \
   -H "X-User-Role: ADMIN" \
   -d '{
-    "productId": "prod-widget",
-    "name": "Widget",
-    "description": "A reliable widget",
+    "productId": "prod-sprocket",
+    "name": "Sprocket",
+    "description": "A reliable sprocket",
     "category": "General",
     "price": 29.99,
     "initialStock": 100
@@ -240,24 +336,27 @@ curl -s -X POST http://localhost:8080/api/products \
   -H "X-User-Id: admin-1" \
   -H "X-User-Role: ADMIN" \
   -d '{
-    "productId": "prod-gadget",
-    "name": "Gadget",
-    "description": "A handy gadget",
+    "productId": "prod-gizmo",
+    "name": "Gizmo",
+    "description": "A handy gizmo",
     "category": "General",
     "price": 49.99,
     "initialStock": 50
   }' | jq .
 ```
 
+A product id can be created once. Send the first request again, with `-i` instead of `-s` and without `| jq .`, and it answers `400 Bad Request` with the body `Product already exists: prod-sprocket` — the creation guard in `ProductDecider` (Chapter 2). The same request for a seeded id such as `prod-widget` is refused the same way, which is what keeps `SeedDataRunner` from seeding twice.
+
 Read the events directly to see what was appended:
 
 ```bash
-curl -s "http://localhost:8080/api/events/product/prod-widget" | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/product/prod-sprocket" | jq .
 ```
 
-As with the customer stream, the product stream id is `product:prod-widget` — `ProductCommand` registers under `ProductState.TYPE` with `c.productId()` as the id.
+As with the customer stream, the product stream id is `product:prod-sprocket` — `ProductCommand` registers under `ProductState.TYPE` with `c.productId()` as the id.
 
-You should see a single `ProductCreated` event, with its `category`. Because `ProductCreatedUpcaster` (Chapter 4) is registered, the event was stored with schema version 2 and loads without an upcast; only rows stamped version 1 — like the hand-inserted `p-legacy` — pass through the upcaster.
+You should see a single `ProductCreated` event, with its `category` — the refused request appended nothing. Because `ProductCreatedUpcaster` (Chapter 4) is registered, the event was stored with schema version 2 and loads without an upcast; only rows stamped version 1 — like the hand-inserted `p-legacy` — pass through the upcaster.
 
 Query the read model built by `ProductProjection`:
 
@@ -267,7 +366,7 @@ curl -s "http://localhost:8080/api/products" | jq .
 
 The response comes from the `QueryBus` (with caching from Chapter 5). The first call executes the query against the projection. A second call within the cache TTL is served entirely from memory — no SQL executed.
 
-Switch to the Products page in the frontend. Both products are listed. The SSE live feed on the Dashboard already shows two `ProductCreated` events.
+Switch to the Products page in the frontend. Both products are listed next to the three seeded ones. The SSE live feed on the Dashboard already shows two `ProductCreated` events.
 
 ### Step 5: Place an Order — Watch the Saga
 
@@ -323,7 +422,7 @@ Every command that passed through `AuditCommandInterceptor` (Chapter 10) is reco
 curl -s "http://localhost:8080/api/audit/commands?limit=20" | jq '.[] | {commandType, aggregateId, userId, occurredAt, outcome}'
 ```
 
-You should see entries for `RegisterCustomer`, `CreateProduct` (twice), and `PlaceOrder` — plus the commands the saga dispatched while fulfilling `ord-1` in Step 5 (`InitiatePayment`, `CapturePayment`, `ReserveStock`, `ConfirmOrder`), since every command goes through the same audited bus. The audit log stores the `user_id` taken from the `X-User-Id` request header (trusted-gateway mode, Chapter 9), so the customer and product commands from Steps 3 and 4 carry `admin-1` and the order command (Step 5 sent `X-User-Id: cust-walkthrough`) carries `cust-walkthrough`; the saga-dispatched commands run with the saga's correlation context rather than a user, so their `userId` is empty. The role itself is used by the authorization interceptor but is not persisted in the audit row. Open the Audit page in the frontend to browse the log; a **Show** selector at the top chooses how many rows to load (25 / 50 / 100).
+You should see entries for `RegisterCustomer`, `CreateProduct` (twice, and a third with outcome `FAILURE` if you sent the duplicate request in Step 4), and `PlaceOrder` — plus the commands the saga dispatched while fulfilling `ord-1` in Step 5 (`InitiatePayment`, `CapturePayment`, `ReserveStock`, `ConfirmOrder`), since every command goes through the same audited bus. The audit log stores the `user_id` taken from the `X-User-Id` request header (trusted-gateway mode, Chapter 9), so the customer and product commands from Steps 3 and 4 carry `admin-1` and the order command (Step 5 sent `X-User-Id: cust-walkthrough`) carries `cust-walkthrough`; the saga-dispatched commands run with the saga's correlation context rather than a user, so their `userId` is empty. The role itself is used by the authorization interceptor but is not persisted in the audit row. Open the Audit page in the frontend to browse the log; a **Show** selector at the top chooses how many rows to load (25 / 50 / 100).
 
 ### Step 7: Trip the Payment-Gateway Circuit Breaker
 
@@ -346,7 +445,7 @@ curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-
 for i in 1 2 3; do
   curl -s -X POST http://localhost:8080/api/orders \
     -H "Content-Type: application/json" -H "X-User-Role: CUSTOMER" -H "X-User-Id: cust-walkthrough" \
-    -d "{\"orderId\":\"cb-$i\",\"customerId\":\"cust-walkthrough\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1,\"unitPrice\":9.99}]}"
+    -d "{\"orderId\":\"walk-cb-$i\",\"customerId\":\"cust-walkthrough\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1,\"unitPrice\":9.99}]}"
 done
 ```
 
@@ -356,7 +455,7 @@ Each order's `PaymentProcessManager` calls the gateway, which now throws, so the
 curl -s http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 
-curl -s http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
+curl -s http://localhost:8080/api/saga/fulfillments/fulfillment-walk-cb-1 | jq .fulfillmentStatus
 # "FAILED"
 ```
 
@@ -383,10 +482,11 @@ curl -s -X POST http://localhost:8080/api/customers/cust-walkthrough/forget \
 Only an `ADMIN` or the customer themself may send this (Chapter 9); anyone else gets `403` and nothing is written. The `CustomerDecider` appends a `CustomerForgotten` event. The endpoint then calls `ForgetSubjectService.forget(...)`, which (1) crypto-shreds the subject's encryption key in the key store and (2) runs the registered `CustomerSubjectDataPurger` to delete the customer's read-model row. The answer is `200` only because `fullyErased` is `true`. Had the key deletion failed, or a purger, it would be `500` with `keyDeleted` or `failedPurgers` saying what is left, and you would send the same request again: the decider records nothing for a customer already forgotten, `deleteKey` is a no-op on a deleted key and each purger is idempotent, so the repeat finishes the erasure from wherever the last attempt stopped (Chapter 7, Step 2). Now read the raw events:
 
 ```bash
-curl -s "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[].payload | .name // .email // empty'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events/customer/cust-walkthrough" | jq '.[].payload | .name // .email // empty'
 ```
 
-The `CustomerRegistered` event still exists in the append-only event store — it cannot be deleted — but its encrypted payload can no longer be decrypted because the key is gone. The read model is handled separately: both the `CustomerProjection` (on the `CustomerForgotten` event) and the `CustomerSubjectDataPurger` **delete the `customers_view` row entirely** rather than leaving a redacted shell. In the frontend, switch to the Customers page; Alice's walkthrough row is gone — `GET /api/customers/cust-walkthrough` now returns `404 Not Found`.
+Where Step 3 showed `Alice Smith`, the same request now prints `"[REDACTED]"`. The `CustomerRegistered` event still exists in the append-only event store — it cannot be deleted — but its encrypted fields can no longer be decrypted because the key is gone, for an admin as for anyone else. The read model is handled separately: both the `CustomerProjection` (on the `CustomerForgotten` event) and the `CustomerSubjectDataPurger` **delete the `customers_view` row entirely** rather than leaving a redacted shell. In the frontend, switch to the Customers page; Alice's walkthrough row is gone — `GET /api/customers/cust-walkthrough` now returns `404 Not Found`.
 
 The event history is intact and auditable, but the personal data is irrecoverably gone — the ciphertext can never be decrypted and the read-model row no longer exists. Both GDPR requirements are satisfied simultaneously.
 
@@ -411,10 +511,11 @@ The `OutboxPoller` drains entries every 5 seconds (the default `streamrune.outbo
 
 ### Step 10: Browse Events in the Event Explorer
 
-The Event Explorer page in the frontend provides a paginated view of the global event stream. You can also query it directly:
+The Event Explorer page in the frontend provides a paginated view of the global event stream when the role switcher is on `ADMIN`; for any other role its history panel says that it requires the ADMIN role. You can also query it directly, with the ADMIN headers:
 
 ```bash
-curl -s "http://localhost:8080/api/events?offset=0&limit=10" | \
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/events?offset=0&limit=10" | \
   jq '.[] | "\(.globalOffset)  \(.eventType)  \(.aggregateType):\(.aggregateId)"'
 ```
 
@@ -426,7 +527,7 @@ Open a persistent SSE connection in a separate terminal to watch new events arri
 curl -N http://localhost:8080/api/events/sse
 ```
 
-Every command you dispatch from this point forward produces SSE frames here within one second.
+Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame names the event — global offset, type, stream, version, timestamp — and carries no payload.
 
 ---
 
