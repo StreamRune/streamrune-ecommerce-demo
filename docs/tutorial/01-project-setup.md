@@ -205,7 +205,7 @@ Create `gradle/libs.versions.toml` (copy from the real demo — only the key ali
 # (declared in the root build.gradle.kts). A ../streamrune checkout replaces it via the composite
 # build in settings.gradle.kts.
 streamrune = "1.0.0-alpha-SNAPSHOT"
-spring-boot = "4.0.3"
+spring-boot = "4.1.1"
 spring-dependency-management = "1.1.6"
 jackson = "2.18.3"
 jakarta-validation = "3.0.2"
