@@ -1,36 +1,63 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# StreamRune e-commerce demo — frontend
 
-## Getting Started
+The browser side of the demo: a Next.js 16 / React 19 application that talks to the demo's Spring
+Boot backend over plain HTTP and keeps itself current through the backend's live event feed.
+Chapter 16 of the tutorial (`../docs/tutorial/16-frontend.md`) walks through how it is built.
 
-First, run the development server:
+## Run it
+
+Start the backend first (see the repository README), then:
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000. The frontend calls the backend at `http://localhost:8080`; set
+`NEXT_PUBLIC_API_URL` when it listens somewhere else.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+`docker compose up` in the repository root builds and starts the frontend together with the
+backend, so you only need the commands above when you work on the frontend itself.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Pages
 
-## Learn More
+| Page | What it shows |
+|------|---------------|
+| Dashboard | Stat cards and the live event feed |
+| Products | Product catalogue with role-guarded actions |
+| Orders | The order lifecycle |
+| Customers | Registration, data export and the right to be forgotten |
+| Fulfillment | The order-fulfillment saga, step by step |
+| Events | The event history and the live feed |
+| Audit | The command audit log (ADMIN only) |
+| Admin | Circuit breaker, dead letters, outbox, payment-failure toggle |
 
-To learn more about Next.js, take a look at the following resources:
+## Roles
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+There is no login. The role switcher picks `GUEST`, `CUSTOMER` or `ADMIN`, and every request
+carries the choice in the `X-User-Role` and `X-User-Id` headers (`src/lib/api.ts`). The backend
+trusts those headers because the demo stands in for a gateway that would authenticate the caller
+and set them; do not copy this into a real deployment (tutorial chapter 9).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Where things are
 
-## Deploy on Vercel
+| Path | Contents |
+|------|----------|
+| `src/app/` | One directory per page |
+| `src/lib/api.ts` | Every HTTP call to the backend |
+| `src/lib/queries.ts`, `src/lib/mutations.ts` | TanStack Query hooks over those calls |
+| `src/providers/sse-provider.tsx` | The live feed connection and the query invalidation it drives |
+| `src/providers/role-provider.tsx`, `src/lib/permissions.ts` | The selected role and what it may do |
+| `src/components/` | Domain components and the UI primitives they are built from |
+| `tests/e2e/` | Playwright tests |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Checks
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm run lint
+npm run build
+npm test        # Playwright; install the browser once with: npx playwright install chromium
+```
+
+The Playwright tests start the dev server themselves. Tests that need the backend skip when none
+answers on `http://localhost:8080` (override with `BACKEND_URL`).

@@ -2,6 +2,7 @@
 .gradle
 **/build
 !spring-app/build/libs
+!notifications-service/build/libs
 **/node_modules
 **/.next
 docs

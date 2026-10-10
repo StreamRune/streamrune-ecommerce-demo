@@ -164,7 +164,7 @@ Build the Spring Boot and notifications-service JARs, then start all services:
 docker compose up
 ```
 
-Docker Compose starts five services: PostgreSQL (schema initialized via `scripts/init-db.sql`), RabbitMQ (ports 5672/15672), the Spring Boot backend (port 8080), the notifications-service outbox consumer (port 8090), and the Next.js frontend (port 3000). Wait for the backend to log `Started SpringEcommerceApplication`.
+Docker Compose starts five services: PostgreSQL (an empty database — the backend creates the schema when it starts), RabbitMQ (ports 5672/15672), the Spring Boot backend (port 8080), the notifications-service outbox consumer (port 8090), and the Next.js frontend (port 3000). Wait for the backend to log `Started SpringEcommerceApplication`.
 
 Verify that the application is healthy:
 
@@ -174,7 +174,7 @@ curl -s http://localhost:8080/actuator/health | jq .status
 
 Expected output: `"UP"`
 
-> **Alternative (without Docker Compose):** Start PostgreSQL with `docker run`, then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
+> **Alternative (backend and frontend outside Docker):** Start only the database and the broker with `docker compose up -d postgres rabbitmq` — the backend needs both, because its outbox publisher opens the AMQP connection at startup — then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
 
 ### Step 2: Open the Frontend
 

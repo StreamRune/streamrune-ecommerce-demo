@@ -1,8 +1,10 @@
 name: DCO
 
-# Every commit of a pull request must carry a Signed-off-by trailer (Developer Certificate of
-# Origin, see CONTRIBUTING.md). Commits authored by bots (Dependabot) are exempt: a bot cannot
-# certify the DCO, and its changes are reviewed by the maintainer who merges them.
+# Every commit of a pull request must carry a Signed-off-by trailer that names the commit's author
+# (Developer Certificate of Origin, see CONTRIBUTING.md). Pull requests opened by Dependabot are
+# exempt: a bot cannot certify the DCO, and its changes are reviewed by the maintainer who merges
+# them. The exemption follows the pull request's author as GitHub reports it, never anything a
+# commit says about itself: the author e-mail of a commit is free text its committer chooses.
 on:
   pull_request:
 
@@ -20,14 +22,18 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "Pull request opened by Dependabot: exempt from the DCO check."
+            exit 0
+          fi
           missing=0
           for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
-            if git log -1 --format=%ae "$sha" | grep -qE '\[bot\]@users\.noreply\.github\.com$'; then
-              echo "skip bot commit $sha"; continue
-            fi
-            if ! git log -1 --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+>$'; then
-              echo "::error::commit $sha has no Signed-off-by trailer (use git commit --signoff)"
+            author="$(git log -1 --format='%an <%ae>' "$sha")"
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" \
+                | grep -qxF -- "$author"; then
+              echo "::error::commit $sha has no Signed-off-by trailer for its author, $author (use git commit --signoff)"
               missing=1
             fi
           done

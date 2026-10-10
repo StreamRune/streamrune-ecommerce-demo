@@ -20,14 +20,12 @@ streamrune:
   event-store:
     type: postgres
     schema:
-      # The demo's schema is created by scripts/init-db.sql (Docker initdb), not Flyway.
-      # The auto-configured event store defaults to running its Flyway series (classpath:db/
-      # streamrune-migration, on its own flyway_schema_history_streamrune table);
-      # disable it so it does not try to re-run V001's plain CREATE TABLE event_stream against the
-      # already-created table (baselineOnMigrate/baselineVersion=0 only tolerates a non-empty
-      # schema that holds the APPLICATION's own unrelated tables, not a hand-pre-created copy of
-      # the framework's own schema).
-      auto-initialize: false
+      # The framework creates its own schema at startup (this is also the default): the event
+      # store's Flyway series (classpath:db/streamrune-migration, history table
+      # flyway_schema_history_streamrune) and, because a PostgresCryptoEngine bean is present, the
+      # crypto series (classpath:db/crypto-migration, flyway_schema_history_crypto). The demo ships
+      # no DDL of its own; an empty database is all the app needs.
+      auto-initialize: true
   projection:
     type: polling
     interval: 100

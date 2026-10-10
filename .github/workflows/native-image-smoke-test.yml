@@ -34,6 +34,9 @@ on:
       - '.github/workflows/native-image-smoke-test.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   native-smoke:
     strategy:
@@ -76,8 +79,6 @@ jobs:
         with:
           repository: StreamRune/streamrune
           path: streamrune
-          # Falls back to the default token once the repository is public.
-          token: ${{ secrets.STREAMRUNE_CHECKOUT_TOKEN || github.token }}
 
       - uses: actions/setup-java@v6
         with:
@@ -110,7 +111,9 @@ jobs:
             -x test -x spotlessCheck --no-daemon
 
       # The same script developers run locally, against the job's service containers and the
-      # binary built above: applies scripts/init-db.sql, then health, a command-to-read-model round
+      # binary built above. The database is empty: the binary creates the schema itself at startup
+      # from the migration scripts the framework registers as native-image resources, and the
+      # script requires the tables to be there. Then health, a command-to-read-model round
       # trip, the replay of a dead-lettered command through its sealed root (DLQ registerCommand
       # of a sealed root needs the root registered for reflection in the image; on Quarkus and
       # Micronaut that is the app's reachability-metadata.json, since @RegisterForReflection and
