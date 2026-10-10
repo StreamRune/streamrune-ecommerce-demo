@@ -152,6 +152,19 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
                       .as("control: the client of order B receives B's frame")
                       .hasSize(1));
 
+      // A frame of B misrouted to A would travel on another connection and could arrive after
+      // B's own. An event of A is stored after B's, so its frame is written to A's client after
+      // anything of B could have been: once it is there, a look at what A received is final.
+      placeOrder(orderA, cid, pid);
+      await()
+          .atMost(Duration.ofSeconds(15))
+          .pollInterval(Duration.ofMillis(200))
+          .untilAsserted(
+              () ->
+                  assertThat(orderPlacedFrames(streamA.frames(), orderA))
+                      .as("the client of order A receives A's frame")
+                      .hasSize(1));
+
       assertThat(streamA.frames())
           .as("the client of order A receives no frame of order B")
           .noneMatch(frame -> frame.data().contains(orderB));

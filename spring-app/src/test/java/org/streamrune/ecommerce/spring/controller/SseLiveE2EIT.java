@@ -134,7 +134,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     Disposable subA = subscribeSse(streamA, receivedA);
     Disposable subB = subscribeSse(streamB, receivedB);
     try {
-      // Emit an event ONLY on stream B (orderId == streamB). The publisher fans out per stream id,
+      // Emit an event on stream B first (orderId == streamB). The publisher fans out per stream id,
       // so the subscriber on stream A must never see it.
       placeOrder(streamB, cid, pid);
 
@@ -148,6 +148,19 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
                   assertThat(receivedB)
                       .as("control: stream B subscriber must receive B's frame")
                       .anySatisfy(f -> assertThat(f.data()).contains(streamB)));
+
+      // A frame of B misrouted to A would travel on another connection and could arrive after
+      // B's own. An event of A is stored after B's, so its frame is written to A's client after
+      // anything of B could have been: once it is there, a look at what A received is final.
+      placeOrder(streamA, cid, pid);
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .pollInterval(Duration.ofMillis(200))
+          .untilAsserted(
+              () ->
+                  assertThat(receivedA)
+                      .as("stream A subscriber must receive A's frame")
+                      .anySatisfy(f -> assertThat(f.data()).contains(streamA)));
 
       // Isolation: the stream A subscriber never received B's frame.
       assertThat(receivedA)
