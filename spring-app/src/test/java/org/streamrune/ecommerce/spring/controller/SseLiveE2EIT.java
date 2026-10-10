@@ -77,6 +77,9 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
             .isOk()
             .returnResult(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
             .getResponseBody();
+    // exchange() has returned with the response head. The endpoint commits the response with its
+    // opening comment, which it writes once the client is subscribed, so the stream is live here:
+    // with the default keepalive interval of 30 seconds nothing else would have committed it.
     return events.subscribe(sink::add);
   }
 

@@ -61,8 +61,8 @@ streamrune:
     # stream from its head and publishes each new event to the clients of that event's stream.
     # SseLiveE2EIT and SseStreamAccessIT exercise it.
     enabled: true
-    # How often the feed reads the global stream: the upper bound on the delay between a commit and
-    # its frame. The framework default is 1s.
+    # How often the feed reads the global stream: the usual delay between a commit and its frame.
+    # The framework default is 1s; the smallest value it accepts is 1ms.
     polling-interval: 100ms
 
 management:

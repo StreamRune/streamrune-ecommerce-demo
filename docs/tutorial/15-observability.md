@@ -337,8 +337,8 @@ streamrune:
   sse:
     # GET /api/sse/{aggregateType}/{aggregateId}. Off by default; needs an SseAuthorizer bean.
     enabled: true
-    # How often the framework's feed reads the global stream: the upper bound on the delay between
-    # a commit and its frame. The framework default is 1s.
+    # How often the framework's feed reads the global stream: the usual delay between a commit and
+    # its frame. The framework default is 1s; the smallest value it accepts is 1ms.
     polling-interval: 100ms
 ```
 
@@ -472,17 +472,17 @@ That is the whole wiring. With `streamrune.sse.enabled=true` the Spring integrat
 
 - **`SseController`** — the endpoint. It builds the `StreamId` from the two path segments (an invalid one is a `400`), asks the `SseAuthorizer` whether the caller may read that stream, and subscribes the client. A refused caller gets `403 Forbidden` — the same answer whether the request named no caller at all or the wrong one; the framework does not answer `401`. The caller is the request identity from Chapter 9: in the demo's trusted-gateway mode, the `X-User-Id` header.
 - **`SseEventPublisher`** — the in-process fan-out the controller subscribes its clients to, one bounded queue per client. A client that cannot keep up is disconnected, not skipped.
-- **`SseEventFeed`** — what publishes. One per application instance: a polling subscription on the global stream that starts at the **head** of the stream when the application starts, reads every `streamrune.sse.polling-interval`, and hands each event to the clients of that event's own stream. It keeps its position in memory — no row in the offset store — and stops with the application.
+- **`SseEventFeed`** — what publishes. One per application instance: a polling subscription on the global stream that starts at the **head** of the stream when the application starts, reads every `streamrune.sse.polling-interval`, and hands each event to the clients of that event's own stream. It keeps its position in memory — no row in the offset store — and stops with the application. It reads, and decrypts, every event of the store whether or not anybody is connected.
 
 **Do not publish to `SseEventPublisher` yourself.** The feed already publishes every stored event; a subscription of your own that also calls `publish` would write every frame twice. `publish` takes the envelope only and routes it by the envelope's own stream id, so an event cannot reach the clients of another stream.
 
-**Delivery is live, best-effort and at-most-once.** A frame reaches a client only while that client is connected. Nothing is redelivered and `Last-Event-ID` is not honoured: events stored before the client connected, while it was reconnecting, or while the instance was down are never sent to it. Within one stream, frames arrive in version order, up to one polling interval after the commit. Treat a frame as a notification — after every (re)connect read the current state from a query — and put anything that must see every event in a projection. This is the difference from the Event Explorer feed of Step 5, which starts at offset `0` for every client and replays the history.
+**Delivery is live, best-effort and at-most-once.** A frame reaches a client only while that client is connected. Nothing is redelivered and `Last-Event-ID` is not honoured: events stored before the client connected, while it was reconnecting, or while the instance was down are never sent to it. Within one stream, frames arrive in version order, normally within one polling interval of the commit (longer while a read of the event store fails and is retried). Treat a frame as a notification — after every (re)connect read the current state from a query — and put anything that must see every event in a projection. This is the difference from the Event Explorer feed of Step 5, which starts at offset `0` for every client and replays the history.
 
 **A frame carries the payload, so the authorizer matters.** The frame's `id` is the event's global offset and its `data` is the event as the event store reads it — with `@Encrypted` fields decrypted. A client of `/api/sse/customer/c-1` therefore receives that customer's name and e-mail in plain text with every `CustomerRegistered` or `ProfileUpdated` stored while it is connected — which is why `OwnerOrAdminStreamAccess` lets in customer `c-1` and an `ADMIN` and nobody else. Without an `SseAuthorizer` bean the framework installs one that denies every stream, so forgetting the bean closes the endpoint rather than opening it.
 
 > **Demo shortcut — protect this in production.** The rule is the one a real deployment keeps; what it is handed is not. The demo runs in the trusted-gateway mode without a gateway (Chapter 9), so the caller's id and role are whatever the client wrote into `X-User-Id` and `X-User-Role`: anyone who sends `X-User-Id: c-1` is customer `c-1`, and anyone who adds `X-User-Role: ADMIN` is an operator. Behind real authentication the same class decides on an identity the client cannot choose.
 
-> **Quarkus and Micronaut.** The same property and an `SseAuthorizer` bean built from the same `OwnerOrAdminStreamAccess` switch the endpoint on in `quarkus-app` (`StreamRuneProducer#sseAuthorizer`) and `micronaut-app` (`StreamRuneFactory#sseAuthorizer`), and the framework feeds it there too; both apps keep the default polling interval of one second. Only the supplier of the request context differs, because each integration keeps the context somewhere else. On Quarkus a JAX-RS filter cannot wrap the resource method in a `ScopedValue`, so the framework's filter stores the context in the request-scoped `StreamRuneRequestContextHolder`, and the supplier reads that holder; the framework's SSE resource is non-blocking there, so the rule — and its one read of the order read model — runs on the event-loop thread. On Micronaut the framework's `StreamRuneContextFilter` binds both `StreamRuneContext.CURRENT` and the `StreamRuneContextHelper` thread-local, and the supplier reads the first and falls back to the second, as that app's controllers do. On Micronaut the frame's `data` is written by Micronaut Serialization, so every domain event (and each record nested in one) needs a serializer: the events live in the framework-agnostic `domain` module, and `MicronautEcommerceApplication` imports them with `@SerdeImport`. Each of the three apps has an `SseLiveE2EIT` that opens a stream over HTTP, sends a command over HTTP and waits for the frame, and an `SseStreamAccessIT` that walks the table above over HTTP; the table itself is unit-tested in `queries` (`OwnerOrAdminStreamAccessTest`).
+> **Quarkus and Micronaut.** The same property and an `SseAuthorizer` bean built from the same `OwnerOrAdminStreamAccess` switch the endpoint on in `quarkus-app` (`StreamRuneProducer#sseAuthorizer`) and `micronaut-app` (`StreamRuneFactory#sseAuthorizer`), and the framework feeds it there too; both apps keep the default polling interval of one second. Only the supplier of the request context differs, because each integration keeps the context somewhere else. On Quarkus a JAX-RS filter cannot wrap the resource method in a `ScopedValue`, so the framework's filter stores the context in the request-scoped `StreamRuneRequestContextHolder`, and the supplier reads that holder; the framework's SSE resource method is a blocking one (`@Blocking`), so Quarkus REST runs the request filter and the rule — with its one read of the order read model — on a worker thread with the request scope active, never on a Vert.x event loop. On Micronaut the framework's `StreamRuneContextFilter` binds both `StreamRuneContext.CURRENT` and the `StreamRuneContextHelper` thread-local, and the supplier reads the first and falls back to the second, as that app's controllers do; that filter runs on the blocking executor and the controller with it, so the rule may read the database there too. On Micronaut the frame's `data` is written by Micronaut Serialization, so every domain event (and each record nested in one) needs a serializer: the events live in the framework-agnostic `domain` module, and `MicronautEcommerceApplication` imports them with `@SerdeImport`. Each of the three apps has an `SseLiveE2EIT` that opens a stream over HTTP, sends a command over HTTP and waits for the frame, and an `SseStreamAccessIT` that walks the table above over HTTP; the table itself is unit-tested in `queries` (`OwnerOrAdminStreamAccessTest`).
 
 ### Step 7: Verify — Health, Metrics, and SSE
 
@@ -525,9 +525,9 @@ Expected response shape:
 }
 ```
 
-The `details` also hold one `relay.<name>` block for each retention sweeper and for the saga compensation-retry sweeper (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` followed by the saga state class), shortened here. `StreamRuneHealthIT` checks this list.
+The `details` also hold one `relay.<name>` block for each retention sweeper and for the saga compensation-retry sweeper (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` followed by the saga state class), shortened here. Once Step 6b has switched the per-stream SSE endpoint on, one more block appears, `relay.sse-event-feed`: the framework reports the feed of that endpoint like its other polling threads, `DOWN` when the thread has died, because the endpoint would go on admitting clients while no event reached them. `StreamRuneHealthIT` checks this list.
 
-The demo's subscriptions (`order-fulfillment-saga`, `payment-process-manager`, and the `MultiProjectionRunner`) are wired as standalone beans and are **not** register(...)-ed with the auto-configured `SubscriptionHealthContributor`, and neither is the framework's `SseEventFeed`, so no `subscription.<name>` detail blocks appear here. If you register a subscription with the contributor, each one adds a `subscription.<name>` detail with `state`, `lag`, `errorCount`, and `status` keys.
+The demo's subscriptions (`order-fulfillment-saga`, `payment-process-manager`, and the `MultiProjectionRunner`) are wired as standalone beans and are **not** register(...)-ed with the auto-configured `SubscriptionHealthContributor`, so no `subscription.<name>` detail blocks appear here (the framework's `SseEventFeed` is not a subscription of that contributor either; it is the `relay.sse-event-feed` block above). If you register a subscription with the contributor, each one adds a `subscription.<name>` detail with `state`, `lag`, `errorCount`, and `status` keys.
 
 **Metrics — command counter:**
 
@@ -642,7 +642,13 @@ Customer `c-1` (registered in Chapter 6) may open their own stream:
 curl -N -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" http://localhost:8080/api/sse/customer/c-1
 ```
 
-Nothing is printed yet. Change the profile in the other terminal:
+`curl` prints one line at once:
+
+```
+: keepalive
+```
+
+That is the stream's opening comment. The endpoint writes it as soon as the client is subscribed, so from this line on every event of `customer:c-1` reaches this terminal. Change the profile in the other terminal:
 
 ```bash
 curl -s -X PUT http://localhost:8080/api/customers/c-1 \
@@ -650,11 +656,14 @@ curl -s -X PUT http://localhost:8080/api/customers/c-1 \
   -d '{"name": "Alice Smith", "email": "alice.smith@example.com", "address": "123 Main St", "phone": "+1234567890"}'
 ```
 
-Within the polling interval the `ProfileUpdated` event arrives as a frame — the whole event as JSON, the encrypted fields in plain text, and its global offset as the `id`:
+Within the polling interval the `ProfileUpdated` event arrives as a frame below the opening comment — the whole event as JSON, the encrypted fields in plain text, and its global offset as the `id`:
 
 ```
+: keepalive
+
 data:{"customerId":"c-1","name":"Alice Smith","email":"alice.smith@example.com","address":"123 Main St","phone":"+1234567890"}
 id:21
+
 ```
 
 That frame is the reason for the two `403`s above. Stop `curl` with Ctrl-C.
@@ -665,7 +674,7 @@ An operator may open any stream of the five aggregate types, including one that 
 curl -N -H "X-User-Id: ops-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/sse/order/o-obs-2
 ```
 
-and place that order in the other terminal:
+It prints `: keepalive` and waits: the stream is open, though no event of that order exists. Place the order in the other terminal:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
@@ -676,15 +685,18 @@ curl -s -X POST http://localhost:8080/api/orders \
 Within the polling interval the `OrderPlaced` event arrives:
 
 ```
+: keepalive
+
 data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":9.99,"currency":"USD"}}],"total":{"amount":9.99,"currency":"USD"}}
 id:22
+
 ```
 
-More frames follow as the saga from Chapter 11 drives the order on (`OrderConfirmed`, or `OrderCancelled` when the stock cannot be reserved). The payment and inventory events of the same order do not appear: they belong to other streams. Stop `curl`, start it again, and nothing is replayed — the stream stays silent until the next event of `order:o-obs-2` is stored.
+More frames follow as the saga from Chapter 11 drives the order on (`OrderConfirmed`, or `OrderCancelled` when the stock cannot be reserved). The payment and inventory events of the same order do not appear: they belong to other streams. Stop `curl`, start it again, and nothing is replayed — after its opening `: keepalive` the stream stays silent until the next event of `order:o-obs-2` is stored.
 
 The order now has a row in the order read model that names `c-1` as its customer, so `c-1` may open `order:o-obs-2` as well (`-H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER"`), while `c-2` gets `403` — and so would `c-1` have, had they asked before the order was placed.
 
-Two details of the wire. The endpoint sends its response, status line included, with the first thing it writes, so an open stream shows nothing — `curl -i` would not even print `200` — until the first frame or the first keepalive. And lines that start with a colon are comments, which an SSE client ignores: the framework's controller writes `:keepalive` every `streamrune.sse.keep-alive-interval` (30 seconds by default). A refusal does not wait for either; the `403` is immediate.
+Two details of the wire. Lines that start with a colon are comments, which an SSE client ignores. Every stream opens with one, `: keepalive`, written as soon as the client is subscribed: it commits the response, so `curl -i` prints `200` and the headers at once, and it tells the client that an event stored from now on will reach it. The same line is the keepalive the controller writes every `streamrune.sse.keep-alive-interval` (30 seconds by default), which is how a client that vanished is noticed. And authorization is decided once, when the stream opens: a refusal is an immediate `403`, and a caller who loses access keeps the stream they have until the server ends it, after `streamrune.sse.timeout` (5 minutes by default) at the latest; the client that reconnects is asked again.
 
 ---
 
@@ -698,7 +710,7 @@ Two details of the wire. The endpoint sends its response, status line included, 
 
 **`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to the ADMIN role; that check is a demo shortcut on a client-supplied header, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open and carries no payload: it starts a virtual thread that polls `EventStore.readGlobalStream` in a tight loop, sleeping one second when no new events are found, and emits each event as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and the event's type, stream and version as its data. The `Sinks.Many` unicast sink bridges the imperative polling thread to the reactive `Flux` returned to WebFlux.
 
-**The framework's SSE endpoint** (`GET /api/sse/{aggregateType}/{aggregateId}`, `streamrune.sse.enabled=true`) streams the events of one aggregate with their payloads. The integration serves it and feeds it: an `SseEventFeed` per application instance reads the global stream from its head every `streamrune.sse.polling-interval` and publishes each event through `SseEventPublisher.publish(EventEnvelope)` to the clients of that event's stream. The application writes no feeder; it supplies the `SseAuthorizer` that decides who may open which stream, and without one every stream answers `403`. The demo's is `OwnerOrAdminStreamAccess`, one framework-agnostic class the three apps share: an authenticated `ADMIN`, or the customer the stream belongs to — the customer themself for a `customer` stream, the customer the order read model names for an `order` stream — and `403` for everyone else, for every other aggregate type, and for a caller without an identity. Delivery is live, best-effort and at-most-once — no replay, no `Last-Event-ID` — so a frame is a notification, and a consumer that must see every event is a projection.
+**The framework's SSE endpoint** (`GET /api/sse/{aggregateType}/{aggregateId}`, `streamrune.sse.enabled=true`) streams the events of one aggregate with their payloads. The integration serves it and feeds it: an `SseEventFeed` per application instance reads the global stream from its head every `streamrune.sse.polling-interval` and publishes each event through `SseEventPublisher.publish(EventEnvelope)` to the clients of that event's stream. The application writes no feeder; it supplies the `SseAuthorizer` that decides who may open which stream, and without one every stream answers `403`. The demo's is `OwnerOrAdminStreamAccess`, one framework-agnostic class the three apps share: an authenticated `ADMIN`, or the customer the stream belongs to — the customer themself for a `customer` stream, the customer the order read model names for an `order` stream — and `403` for everyone else, for every other aggregate type, and for a caller without an identity. The rule is asked once, when a stream opens; the stream then opens with a `: keepalive` comment, written as soon as the client is subscribed. Delivery is live, best-effort and at-most-once — no replay, no `Last-Event-ID` — so a frame is a notification, and a consumer that must see every event is a projection.
 
 ---
 

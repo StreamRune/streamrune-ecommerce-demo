@@ -22,6 +22,12 @@ final class SseTestStream implements AutoCloseable {
   /** One frame of an SSE stream: its {@code id} and {@code data} fields. */
   record Frame(String id, String data) {}
 
+  /**
+   * The line every stream of the endpoint opens with, and the one it repeats as its keepalive: a
+   * comment, which an SSE client ignores.
+   */
+  private static final String OPENING_COMMENT = ": keepalive";
+
   private final HttpClient http = HttpClient.newHttpClient();
   private final List<Frame> frames = new CopyOnWriteArrayList<>();
   private final CompletableFuture<Integer> status = new CompletableFuture<>();
@@ -66,8 +72,9 @@ final class SseTestStream implements AutoCloseable {
       String data = null;
       try (Stream<String> lines = response.body()) {
         for (String line : (Iterable<String>) lines::iterator) {
-          // Any line, the keepalive comment included, is written by a subscribed stream.
-          subscribed.complete(null);
+          if (line.equals(OPENING_COMMENT)) {
+            subscribed.complete(null);
+          }
           if (line.startsWith("id:")) {
             id = line.substring(3).trim();
           } else if (line.startsWith("data:")) {
@@ -99,9 +106,11 @@ final class SseTestStream implements AutoCloseable {
   }
 
   /**
-   * Returns once the server has written to the stream, so its subscription exists: the first
-   * keepalive comment at the latest ({@code streamrune.sse.keep-alive-interval}, shortened for the
-   * tests).
+   * Returns once the client has read the stream's opening comment. The endpoint writes that comment
+   * as the last step of a subscription, whatever {@code streamrune.sse.keep-alive-interval} is, so
+   * an event stored from then on reaches this client. The applications run their tests with the
+   * default interval of 30 seconds, twice this wait: a stream that opened without the comment would
+   * fail here.
    */
   void awaitSubscribed() throws Exception {
     subscribed.get(15, TimeUnit.SECONDS);

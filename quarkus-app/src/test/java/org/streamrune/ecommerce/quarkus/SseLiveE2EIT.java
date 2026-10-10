@@ -26,9 +26,11 @@ import org.junit.jupiter.api.Test;
  * the event it stored arrives.
  *
  * <p>The feed delivers only to clients that are subscribed when it reads an event. The tests
- * therefore wait for the first keepalive comment ({@code streamrune.sse.keep-alive-interval},
- * shortened for the test profile in {@code application.properties}) before they send the command: a
- * stream that has written a keepalive is subscribed.
+ * therefore wait for the stream's opening comment before they send the command: the endpoint writes
+ * {@code : keepalive} as soon as the client is subscribed. On Quarkus the response headers arrive
+ * an instant earlier, so the comment, not the {@code 200}, is the sign. The application runs with
+ * the default {@code streamrune.sse.keep-alive-interval} of 30 seconds, so a stream that opened
+ * without that comment would fail these tests.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)

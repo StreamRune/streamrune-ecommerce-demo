@@ -229,9 +229,10 @@ public class StreamRuneProducer {
    * method, where the request scope is active; {@code StreamRuneContext.CURRENT} is the fallback
    * the controllers of this app use too.
    *
-   * <p>That resource method returns a {@code Multi}, so Quarkus REST runs it, and with it this
-   * rule, on the Vert.x event-loop thread. The rule reads the database only for an order stream
-   * opened by a caller who is not an {@code ADMIN}: one primary-key read of the order read model.
+   * <p>That resource method is a blocking one ({@code @Blocking}), so Quarkus REST runs the request
+   * filter and the method, and with it this rule, on a worker thread, never on a Vert.x event loop.
+   * The rule may therefore read the database, and it does so only for an order stream opened by a
+   * caller who is not an {@code ADMIN}: one primary-key read of the order read model.
    */
   @Produces
   @Singleton

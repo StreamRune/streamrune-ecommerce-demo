@@ -32,11 +32,11 @@ import org.junit.jupiter.api.Test;
  * also proves that the shared domain events, which carry no Micronaut annotation, are imported for
  * it ({@code @SerdeImport} on {@code MicronautEcommerceApplication}).
  *
- * <p>Micronaut writes the response headers with the first frame, and the feed delivers only to
- * clients that are subscribed when it reads an event. The tests therefore wait for the first
- * keepalive comment ({@code streamrune.sse.keep-alive-interval}, shortened in {@code
- * application-test.yml}) before they send the command: a stream that has written a keepalive is
- * subscribed.
+ * <p>The feed delivers only to clients that are subscribed when it reads an event. The tests
+ * therefore wait for the stream's opening comment before they send the command: the endpoint writes
+ * {@code : keepalive} as soon as the client is subscribed, and with it the response headers. The
+ * application runs with the default {@code streamrune.sse.keep-alive-interval} of 30 seconds, so a
+ * stream that opened without that comment would fail these tests.
  */
 @MicronautTest(transactional = false)
 class SseLiveE2EIT extends AbstractIntegrationTest {

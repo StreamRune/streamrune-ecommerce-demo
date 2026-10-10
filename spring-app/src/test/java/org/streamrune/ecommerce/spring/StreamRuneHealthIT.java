@@ -15,7 +15,9 @@ import org.streamrune.spring.StreamRuneHealthIndicator;
  * event store, then one {@code relay.<name>} block per background relay registered for liveness. A
  * started relay whose poll thread died turns the whole component {@code DOWN}, so every relay the
  * app runs must be registered, the demo's own dead-letter retry runner included: the framework
- * registers the relays it builds, and the demo's runner replaces the framework's.
+ * registers the relays it builds, and the demo's runner replaces the framework's. The feed of the
+ * per-stream Server-Sent Events endpoint is one of the framework's: it exists because the app sets
+ * {@code streamrune.sse.enabled=true}.
  */
 class StreamRuneHealthIT extends AbstractIntegrationTest {
 
@@ -38,11 +40,13 @@ class StreamRuneHealthIT extends AbstractIntegrationTest {
             "relay.outbox-retention-sweeper",
             "relay.saga-compensation-retry:"
                 + "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState",
-            "relay.saga-dead-letter-retention-sweeper");
+            "relay.saga-dead-letter-retention-sweeper",
+            "relay.sse-event-feed");
     for (String relay : relays) {
       assertThat(block(health, relay)).as(relay).containsEntry("status", "UP");
     }
-    for (String relay : new String[] {"relay.outbox-relay", "relay.dead-letter-retry"}) {
+    for (String relay :
+        new String[] {"relay.outbox-relay", "relay.dead-letter-retry", "relay.sse-event-feed"}) {
       assertThat(block(health, relay))
           .as(relay)
           .containsEntry("started", true)

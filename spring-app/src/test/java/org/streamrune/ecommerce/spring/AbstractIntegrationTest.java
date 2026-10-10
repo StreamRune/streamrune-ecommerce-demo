@@ -119,10 +119,6 @@ public abstract class AbstractIntegrationTest {
     registry.add("spring.datasource.username", POSTGRES::getUsername);
     registry.add("spring.datasource.password", POSTGRES::getPassword);
     registry.add("streamrune.projections.auto-discovery.enabled", () -> "false");
-    // The SSE endpoint commits its response with the first thing it writes, a frame or a keepalive
-    // comment. The SSE tests wait for that first keepalive as the sign that a stream is open and
-    // subscribed; the default of 30s would make that wait the whole test.
-    registry.add("streamrune.sse.keep-alive-interval", () -> "200ms");
     // RabbitMQ broker for the outbox publisher (opened eagerly at startup by RabbitMqConfig).
     registry.add("spring.rabbitmq.host", RABBIT::getHost);
     registry.add("spring.rabbitmq.port", RABBIT::getAmqpPort);
