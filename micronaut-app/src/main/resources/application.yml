@@ -67,10 +67,11 @@ streamrune:
     trust-user-id-header: true
   sse:
     # GET /api/sse/{aggregateType}/{aggregateId} is off by default and requires an SseAuthorizer
-    # bean (see StreamRuneFactory#sseAuthorizer). Once enabled, the framework feeds the endpoint
-    # itself: one SseEventFeed per application instance reads the global stream from its head, every
-    # streamrune.sse.polling-interval (1s by default), and publishes each new event to the clients
-    # of that event's stream. SseLiveE2EIT exercises it.
+    # bean: StreamRuneFactory#sseAuthorizer lets in an authenticated ADMIN or the customer the
+    # stream belongs to, and refuses everyone else with 403. Once enabled, the framework feeds the
+    # endpoint itself: one SseEventFeed per application instance reads the global stream from its
+    # head, every streamrune.sse.polling-interval (1s by default), and publishes each new event to
+    # the clients of that event's stream. SseLiveE2EIT and SseStreamAccessIT exercise it.
     enabled: true
 
 rabbitmq:

@@ -38,6 +38,7 @@ import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.ecommerce.queries.query.ListProducts;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.postgres.*;
@@ -536,20 +537,25 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Allow-all SSE authorizer for {@code GET /api/sse/{aggregateType}/{aggregateId}}. With {@code
-   * streamrune.sse.enabled=true} the framework registers the publisher the endpoint subscribes its
-   * clients to and the feed that publishes every stored event to it, so the application publishes
-   * nothing itself; it decides who may open a stream. Without an application-provided {@link
-   * SseAuthorizer} bean the framework installs a fail-closed deny-all authorizer, which would 403
-   * every subscription, including {@code SseLiveE2EIT}'s (it never sends {@code X-User-Id} on the
-   * SSE {@code GET}, only on the preceding command, so an ownership-based check would also reject
-   * it). This is a public reference showcase with no real authentication, and the {@code streamId}
-   * itself carries no secret, so every stream is readable — a "look but can't touch" posture
-   * appropriate for a demo, not a production access-control model.
+   * Decides who may open {@code GET /api/sse/{aggregateType}/{aggregateId}}: an authenticated
+   * {@code ADMIN}, or the customer the stream belongs to (see {@link OwnerOrAdminStreamAccess} for
+   * the rule per aggregate type). With {@code streamrune.sse.enabled=true} the framework serves the
+   * endpoint and feeds it; a frame carries the event with {@code @Encrypted} fields decrypted, so
+   * the application's part is this decision. Without an {@link SseAuthorizer} bean the framework
+   * installs one that refuses every stream.
+   *
+   * <p>The rule reads the caller's role from the request context. The framework's {@code
+   * ScopedValueFilter} binds {@code StreamRuneContext.CURRENT} around the whole servlet chain, and
+   * the framework's SSE controller calls the authorizer on that request thread, so the context of
+   * the subscribing request is bound when the rule runs.
    */
   @Bean
-  public SseAuthorizer sseAuthorizer() {
-    return (principal, streamId) -> true;
+  public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
+    OwnerOrAdminStreamAccess access =
+        new OwnerOrAdminStreamAccess(
+            () -> StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null,
+            orderProjection::get);
+    return access::isAuthorized;
   }
 
   /**

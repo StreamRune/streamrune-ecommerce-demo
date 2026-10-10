@@ -13,16 +13,9 @@ import io.micronaut.runtime.server.EmbeddedServer;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
 import jakarta.inject.Inject;
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.URI;
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -54,75 +47,13 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
 
   @Inject EmbeddedServer server;
 
-  /** One frame of an SSE stream: its {@code id} and {@code data} fields. */
-  private record Frame(String id, String data) {}
-
-  /** An open SSE stream of one order, read on a virtual thread. */
-  private static final class OrderStream implements AutoCloseable {
-
-    private final java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
-    private final List<Frame> frames = new CopyOnWriteArrayList<>();
-    private final CompletableFuture<Void> subscribed = new CompletableFuture<>();
-
-    OrderStream(URI server, String orderId) {
-      java.net.http.HttpRequest request =
-          java.net.http.HttpRequest.newBuilder(server.resolve("/api/sse/order/" + orderId))
-              .header("Accept", "text/event-stream")
-              .GET()
-              .build();
-      Thread.ofVirtual().start(() -> read(request));
-    }
-
-    private void read(java.net.http.HttpRequest request) {
-      try {
-        HttpResponse<Stream<String>> response =
-            http.send(request, HttpResponse.BodyHandlers.ofLines());
-        if (response.statusCode() != 200) {
-          subscribed.completeExceptionally(
-              new AssertionError("the stream answered " + response.statusCode()));
-          return;
-        }
-        String id = null;
-        String data = null;
-        try (Stream<String> lines = response.body()) {
-          for (String line : (Iterable<String>) lines::iterator) {
-            // Any line, the keepalive comment included, is written by a subscribed stream.
-            subscribed.complete(null);
-            if (line.startsWith("id:")) {
-              id = line.substring(3).trim();
-            } else if (line.startsWith("data:")) {
-              data = line.substring(5).trim();
-            } else if (line.isEmpty()) {
-              if (data != null) {
-                frames.add(new Frame(id, data));
-              }
-              id = null;
-              data = null;
-            }
-          }
-        }
-      } catch (IOException | UncheckedIOException e) {
-        // The test closed the stream, or it never opened: awaitSubscribed reports the latter.
-        subscribed.completeExceptionally(e);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        subscribed.completeExceptionally(e);
-      }
-    }
-
-    /** Returns once the server has written to the stream, so its subscription exists. */
-    void awaitSubscribed() throws Exception {
-      subscribed.get(15, TimeUnit.SECONDS);
-    }
-
-    List<Frame> frames() {
-      return frames;
-    }
-
-    @Override
-    public void close() {
-      http.shutdownNow();
-    }
+  /**
+   * Opens the stream of one order as an operator. The tests subscribe before the order exists, and
+   * only an {@code ADMIN} may do that: the order's customer is let in once the order read model
+   * names them as its owner ({@code SseStreamAccessIT} covers that side).
+   */
+  private SseTestStream orderStream(String orderId) {
+    return new SseTestStream(server.getURI(), "order", orderId, "sse-operator", "ADMIN");
   }
 
   private void placeOrder(String orderId, String customerId, String productId) {
@@ -148,11 +79,11 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
   }
 
   /** The frames whose event is the {@code OrderPlaced} of the given order. */
-  private static List<JsonNode> orderPlacedFrames(List<Frame> frames, String orderId)
+  private static List<JsonNode> orderPlacedFrames(List<SseTestStream.Frame> frames, String orderId)
       throws IOException {
     ObjectMapper json = new ObjectMapper();
     List<JsonNode> placed = new ArrayList<>();
-    for (Frame frame : frames) {
+    for (SseTestStream.Frame frame : frames) {
       JsonNode event = json.readTree(frame.data());
       if (orderId.equals(event.path("orderId").asText()) && event.has("lines")) {
         assertThat(frame.id()).as("the frame's id is the event's global offset").matches("\\d+");
@@ -168,7 +99,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String cid = "m-sse-cust-" + System.nanoTime();
     String pid = "m-sse-prod-" + System.nanoTime();
 
-    try (OrderStream stream = new OrderStream(server.getURI(), oid)) {
+    try (SseTestStream stream = orderStream(oid)) {
       stream.awaitSubscribed();
       // Placed AFTER the stream is subscribed: the feed delivers only to the clients connected
       // when it reads an event and never replays history.
@@ -203,8 +134,8 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String cid = "m-sse-iso-cust-" + System.nanoTime();
     String pid = "m-sse-iso-prod-" + System.nanoTime();
 
-    try (OrderStream streamA = new OrderStream(server.getURI(), orderA);
-        OrderStream streamB = new OrderStream(server.getURI(), orderB)) {
+    try (SseTestStream streamA = orderStream(orderA);
+        SseTestStream streamB = orderStream(orderB)) {
       // Both streams are subscribed before the event exists, so the control (B receives) is
       // deterministic and the isolation (A does not) is not vacuous.
       streamA.awaitSubscribed();

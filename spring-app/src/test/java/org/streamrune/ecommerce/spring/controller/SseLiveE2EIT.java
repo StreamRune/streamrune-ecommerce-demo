@@ -59,12 +59,18 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
    * Opens a real HTTP SSE subscription to {@code /api/sse/order/{orderId}} and collects received
    * frames into a thread-safe list on a background Reactor subscription. The returned {@link
    * Disposable} cancels the subscription (closing the connection) when the test is done.
+   *
+   * <p>The subscriber is an operator. The tests subscribe before the order exists, and only an
+   * {@code ADMIN} may do that: the order's customer is let in once the order read model names them
+   * as its owner ({@code SseStreamAccessIT} covers that side).
    */
   private Disposable subscribeSse(String orderId, List<ServerSentEvent<String>> sink) {
     Flux<ServerSentEvent<String>> events =
         client
             .get()
             .uri("/api/sse/order/{orderId}", orderId)
+            .header("X-User-Id", "sse-operator")
+            .header("X-User-Role", "ADMIN")
             .accept(MediaType.TEXT_EVENT_STREAM)
             .exchange()
             .expectStatus()

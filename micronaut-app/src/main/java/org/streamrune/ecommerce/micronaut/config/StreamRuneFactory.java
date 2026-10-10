@@ -14,6 +14,7 @@ import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.EventTypeRegistry;
 import org.streamrune.core.SimpleEventTypeRegistry;
+import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
@@ -52,7 +53,9 @@ import org.streamrune.ecommerce.projections.CustomerSubjectDataPurger;
 import org.streamrune.ecommerce.projections.InventoryProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
+import org.streamrune.micronaut.StreamRuneContextHelper;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.postgres.PostgresAuditStore;
@@ -80,16 +83,29 @@ public class StreamRuneFactory {
   }
 
   /**
-   * Allow-all SSE authorizer. Without an application-provided {@link SseAuthorizer} bean, the
-   * framework installs a fail-closed deny-all authorizer once {@code streamrune.sse.enabled=true} —
-   * which would 403 every subscription. This is a public reference showcase with no real
-   * authentication, and the {@code streamId} itself carries no secret, so every stream is readable
-   * — a "look but can't touch" posture appropriate for a demo, not a production access-control
-   * model. Mirrors the Spring app's {@code StreamRuneConfig#sseAuthorizer}.
+   * Decides who may open {@code GET /api/sse/{aggregateType}/{aggregateId}}: an authenticated
+   * {@code ADMIN}, or the customer the stream belongs to (see {@link OwnerOrAdminStreamAccess} for
+   * the rule per aggregate type). A frame carries the event with {@code @Encrypted} fields
+   * decrypted, so the application's part is this decision. Without an {@link SseAuthorizer} bean
+   * the framework installs one that refuses every stream once {@code streamrune.sse.enabled=true}.
+   *
+   * <p>The rule reads the caller's role from the request context. The framework's {@code
+   * StreamRuneContextFilter} binds it around the rest of the request, as the {@code
+   * StreamRuneContext.CURRENT} {@code ScopedValue} on the thread the filter runs on and as the
+   * {@link StreamRuneContextHelper} {@code ThreadLocal} on every thread Micronaut propagates the
+   * request to; the framework's SSE controller calls the authorizer inside that request, so one of
+   * the two is set. The controllers of this app read the context the same way.
    */
   @Singleton
-  public SseAuthorizer sseAuthorizer() {
-    return (principal, streamId) -> true;
+  public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
+    OwnerOrAdminStreamAccess access =
+        new OwnerOrAdminStreamAccess(
+            () ->
+                StreamRuneContext.CURRENT.isBound()
+                    ? StreamRuneContext.CURRENT.get()
+                    : StreamRuneContextHelper.get(),
+            orderProjection::get);
+    return access::isAuthorized;
   }
 
   @Singleton

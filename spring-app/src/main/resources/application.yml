@@ -55,12 +55,11 @@ streamrune:
     trust-user-id-header: true
   sse:
     # GET /api/sse/{aggregateType}/{aggregateId} is off by default and requires an SseAuthorizer
-    # bean (StreamRuneConfig#sseAuthorizer, with the allow-all justification). Once enabled, the
-    # framework feeds the endpoint itself: one SseEventFeed per application instance reads the
-    # global stream from its head and publishes each new event to the clients of that event's
-    # stream. This demo defines its own SseController (see spring-app SseController), which extends
-    # the framework controller and uses the same publisher and authorizer; SseLiveE2EIT exercises
-    # it.
+    # bean: StreamRuneConfig#sseAuthorizer lets in an authenticated ADMIN or the customer the
+    # stream belongs to, and refuses everyone else with 403. Once enabled, the framework serves the
+    # endpoint and feeds it itself: one SseEventFeed per application instance reads the global
+    # stream from its head and publishes each new event to the clients of that event's stream.
+    # SseLiveE2EIT and SseStreamAccessIT exercise it.
     enabled: true
     # How often the feed reads the global stream: the upper bound on the delay between a commit and
     # its frame. The framework default is 1s.
