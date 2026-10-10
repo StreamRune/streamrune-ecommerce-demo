@@ -12,7 +12,7 @@ StreamRune gives you three choices when a projection fails to process a batch of
 
 - **`HALT`** — the default. Stop the projection immediately and surface the error. Good for catching bugs in development, dangerous in production where a single bad event can freeze all projections.
 - **`SKIP`** — log the failure and advance the offset past the failing batch. Guarantees liveness at the cost of potentially missing events silently.
-- **`DLQ`** — write the failed batch to a `ProjectionDeadLetterStore` and continue. The projection stays live; the failed batch is recorded for later inspection and replay — a replay (`ProjectionDeadLetterReplayer`) is at-least-once and runs outside the checkpoint transaction for every delivery mode: it calls the one-argument `process`, a `BaseProjection` writes through its captured repository, possibly while the live runner commits later batches on the same rows, so `process` must tolerate re-application and an older event after a newer one. Check both before you replay into a projection: of the demo's read models, products, customers and orders tolerate re-application but not an older event after a newer one (a dead-lettered `OrderPlaced` replayed after the live runner has processed that order's `OrderConfirmed` — a no-op then, because the row did not exist — leaves the order `CREATED`), and `InventoryProjection`'s counters tolerate neither. This is the right choice for production.
+- **`DLQ`** — write the failed batch to a `ProjectionDeadLetterStore` and continue. The projection stays live; the failed batch is recorded for later inspection and replay. A replay (`ProjectionDeadLetterReplayer`, Step 7) takes the lock a live batch of the projection takes, so the two never run at the same time, and under `TRANSACTIONAL_LOCAL` it applies a range all-or-nothing through the replay transaction's repository. It is still at-least-once, and it applies the range after the events that followed it, so `process` must tolerate re-application and an older event after a newer one. Check both before you replay into a projection: of the demo's read models, products, customers and orders tolerate re-application but not an older event after a newer one (a dead-lettered `OrderPlaced` replayed after the live runner has processed that order's `OrderConfirmed` — a no-op then, because the row did not exist — leaves the order `CREATED`), and `InventoryProjection`'s counters tolerate neither. This is the right choice for production.
 
 In this chapter you will see how to configure `ProjectionErrorStrategy.DLQ` on individual projections inside the `MultiProjectionRunner` with `PostgresProjectionDeadLetterStore` as the persistent store (an optional hardening step: the demo's projections keep the default `HALT`), expose dead letter entries through `AdminController` (together with the outbox's blocked `FAILED` entries and their replay/skip operations, behind an ADMIN role check), look at the command-side `DeadLetterRetryRunner` that automatically retries failed commands, and wire the saga-side dead-letter admin endpoints (list/faulted/replay/discard) built on the `SagaDeadLetterReplayer` introduced in Chapter 11.
 
@@ -668,7 +668,33 @@ LIMIT 5;
  orders          | 42          | 43        | java.lang.RuntimeException | Simulated failure          | 2026-04-25 09:14:22.134
 ```
 
-The projection runner is still alive — it logged the failure, persisted the entry, and continued polling. Its checkpoint has moved past the failed batch, so removing the artificial failure and restarting the application does not re-read it. Applying the range after the fix is a replay through `ProjectionDeadLetterReplayer`, with the requirements on `process` described under `DLQ` at the top of this chapter; the demo does not wire a replayer, so inspect the entry and remove it from `projection_dead_letters` directly in the database.
+The projection runner is still alive — it logged the failure, persisted the entry, and continued polling. Its checkpoint has moved past the failed batch, so removing the artificial failure and restarting the application does not re-read it. Applying the range after the fix is a replay through `ProjectionDeadLetterReplayer`:
+
+```java
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.types.ProjectionName;
+import org.streamrune.runtime.ProjectionDeadLetterReplayer;
+
+var replayer =
+    new ProjectionDeadLetterReplayer(
+        eventStore,
+        projectionDlq,
+        projectionRepository);   // the processor the runner commits through
+
+ProjectionDeadLetterReplayer.ReplayResult result =
+    replayer.replay(
+        ProjectionName.of("orders"),
+        new CacheAwareProjection(orderProjection, cacheInvalidator),  // as registered
+        ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,                   // as registered
+        100);
+// result.replayed(), result.failed(), result.fenced()
+```
+
+- **The constructor takes the processor.** Its third argument is the `AtomicBatchProcessor` the projection's runner commits through — here `projectionRepository`, the `JdbcProjectionRepository` handed to `.atomicProcessor(...)` in Step 4. A replay takes that processor's per-projection lock (the projection's checkpoint row, `FOR UPDATE`), the lock a live batch takes, so a replay and a live batch of one projection never run at the same time, in one process or across replicas, and the replay is safe while the runner is live. A different processor here serializes nothing.
+- **`replay(name, projection, mode, maxEntries)`** names the projection, passes the projection as it is registered (with its `CacheAwareProjection` wrapper, so the replay invalidates the cache too) and the delivery mode it is registered with. The mode decides what the projection is handed, exactly as for a live batch: under `TRANSACTIONAL_LOCAL` it is the replay transaction's repository, so a range is applied all-or-nothing. The call replays up to `maxEntries` entries, oldest range first, discards each entry it applied, and never moves the checkpoint: it fills the hole behind it. `ReplayResult` counts the entries replayed, the entries that failed and were kept, and the entries a self-fencing projection applied nothing of and were kept.
+- **Replay is refused for the non-atomic at-least-once processor.** `AtomicBatchProcessor.nonAtomicAtLeastOnce()` holds no per-projection lock, so `replay` throws an `IllegalStateException` for it before it reads an entry: beside a live batch both sides could read a row before either saves it, and one of the two writes would be lost. For such a registration stop the projection's runner and call `replayWithRunnerStopped(name, projection, maxEntries)`. The demo's runner commits through `JdbcProjectionRepository`, so `replay` is the method to call.
+
+The lock does not lift the requirements on `process` described under `DLQ` at the top of this chapter: a replay is at-least-once (a crash after the replay commits and before the entry is discarded leaves the entry queued, and the next replay applies the range again) and out of order. The demo does not wire a replayer; call it from an admin endpoint or a maintenance task of your own, or inspect the entry and remove it from `projection_dead_letters` directly in the database.
 
 **Scenario 2: Stop, accumulate events, restart and catch up**
 
@@ -702,7 +728,7 @@ Start the application again. On startup `MultiProjectionRunner.start()` is calle
 
 **`ProjectionState`** is the enum returned per projection by `status()`. Its values are `PENDING`, `CATCHING_UP`, `LIVE`, `STANDBY`, `ERROR`, and `STOPPED`.
 
-**Poison message handling** is the scenario where a command or event batch can never succeed, regardless of how many times it is retried. The `DeadLetterRetryRunner` handles this by capping retries at `maxRetries`. A projection registered with `DLQ` strategy writes the batch to the dead letter store and continues — the poison batch is isolated and does not block all subsequent events. Saga poison events follow the same principle via `SagaDeadLetterStore` + `SagaDeadLetterReplayer` (Step 5b), except replay there is always operator-triggered rather than polled.
+**Poison message handling** is the scenario where a command or event batch can never succeed, regardless of how many times it is retried. The `DeadLetterRetryRunner` handles this by capping retries at `maxRetries`. A projection registered with `DLQ` strategy writes the batch to the dead letter store and continues — the poison batch is isolated and does not block all subsequent events; once the cause is fixed, `ProjectionDeadLetterReplayer.replay(name, projection, mode, maxEntries)` applies the range under the lock of the processor the runner commits through. Saga poison events follow the same principle via `SagaDeadLetterStore` + `SagaDeadLetterReplayer` (Step 5b), except replay there is always operator-triggered rather than polled.
 
 ---
 

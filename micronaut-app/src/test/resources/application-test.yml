@@ -12,3 +12,10 @@ app:
 micronaut:
   server:
     port: -1
+
+# SseLiveE2EIT waits for the first keepalive comment of a stream before it sends its command:
+# Micronaut writes the response headers with the first frame, so the keepalive is the earliest
+# sign that the stream is subscribed. The default of 30s would make that wait the whole test.
+streamrune:
+  sse:
+    keep-alive-interval: 200ms

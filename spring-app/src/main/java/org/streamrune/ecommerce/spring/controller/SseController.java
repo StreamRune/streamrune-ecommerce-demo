@@ -22,8 +22,11 @@ import org.streamrune.spring.ScopedValueFilter;
 
 /**
  * Live Server-Sent Events endpoint for the demo: streams every event appended to a given aggregate
- * stream to subscribed browser clients via the {@link SseEventPublisher} fed by the {@code
- * sse-fanout} subscription wired in {@code StreamRuneConfig}.
+ * stream to subscribed browser clients via the framework's {@link SseEventPublisher}. The framework
+ * feeds that publisher itself once {@code streamrune.sse.enabled=true}: its {@code SseEventFeed}
+ * reads the global stream from its head every {@code streamrune.sse.polling-interval} and publishes
+ * each new event to the subscribers of that event's stream. Delivery is live, best-effort and
+ * at-most-once.
  *
  * <p>Endpoint: {@code GET /api/sse/{aggregateType}/{aggregateId}} (media type {@code
  * text/event-stream}). Each frame's {@code data} is the domain event serialized as JSON and its

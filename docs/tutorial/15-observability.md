@@ -1,6 +1,6 @@
 # Chapter 15: Observability
 
-> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how to opt into `OpenTelemetryCommandInterceptor` so each command dispatch creates a trace span, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, and how to serve a live SSE stream of all events using `EventExplorerController`.
+> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how to opt into `OpenTelemetryCommandInterceptor` so each command dispatch creates a trace span, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, how to serve a live SSE stream of all events using `EventExplorerController`, and how to switch on the framework's own SSE endpoint for the events of one aggregate.
 
 ---
 
@@ -17,6 +17,7 @@ In this chapter you will:
 - Opt into `OpenTelemetryCommandInterceptor` as a command interceptor so that every command dispatch creates an OpenTelemetry span with the command type, command ID, and aggregate ID as attributes. The shipped demo does not wire this — it is an addition you make in Step 3.
 - Verify that `StreamRuneHealthIndicator` is registered and returns meaningful detail about the PostgreSQL connection and subscription lag.
 - Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream and a per-stream event list, both for the ADMIN role because they show decrypted payloads, and an open SSE endpoint that announces new events in real time, without their payload.
+- Switch on the framework's own SSE endpoint, `GET /api/sse/{aggregateType}/{aggregateId}`, which streams the events of one aggregate. The framework serves it and feeds it; the application adds a property and an `SseAuthorizer`.
 
 ---
 
@@ -327,6 +328,47 @@ The paginated global-stream endpoint is useful for admin dashboards that need to
 
 Both endpoints are already implemented in `EventExplorerController`. Verify that the controller is picked up by Spring's component scan. Because the ecommerce demo uses a manual `@Configuration` class rather than auto-scan, you may need to verify that Spring detects the `@RestController` annotation. The class lives in `org.streamrune.ecommerce.spring.controller`, which is a sub-package of `org.streamrune.ecommerce.spring`, the application's base package — no additional scan configuration is required.
 
+### Step 6b: Switch On the Framework's Per-Stream SSE Endpoint
+
+`EventExplorerController`'s feed is the demo's own code: one stream of every event, without payloads. The framework ships a second, narrower endpoint — `GET /api/sse/{aggregateType}/{aggregateId}`, the events of **one** aggregate, each with its payload — and it needs no controller and no feeder code from you. It is off by default. Add to `application.yml`:
+
+```yaml
+streamrune:
+  sse:
+    # GET /api/sse/{aggregateType}/{aggregateId}. Off by default; needs an SseAuthorizer bean.
+    enabled: true
+    # How often the framework's feed reads the global stream: the upper bound on the delay between
+    # a commit and its frame. The framework default is 1s.
+    polling-interval: 100ms
+```
+
+and one bean to `StreamRuneConfig` (with `import org.streamrune.integration.SseAuthorizer;`):
+
+```java
+@Bean
+public SseAuthorizer sseAuthorizer() {
+  return (principal, streamId) -> true;
+}
+```
+
+That is the whole wiring. With `streamrune.sse.enabled=true` the Spring integration registers three things:
+
+- **`SseController`** — the endpoint. It builds the `StreamId` from the two path segments (an invalid one is a `400`), asks the `SseAuthorizer` whether the caller may read that stream (`403` if not), and subscribes the client. The caller is the request identity from Chapter 9: in the demo's trusted-gateway mode, the `X-User-Id` header.
+- **`SseEventPublisher`** — the in-process fan-out the controller subscribes its clients to, one bounded queue per client. A client that cannot keep up is disconnected, not skipped.
+- **`SseEventFeed`** — what publishes. One per application instance: a polling subscription on the global stream that starts at the **head** of the stream when the application starts, reads every `streamrune.sse.polling-interval`, and hands each event to the clients of that event's own stream. It keeps its position in memory — no row in the offset store — and stops with the application.
+
+**Do not publish to `SseEventPublisher` yourself.** The feed already publishes every stored event; a subscription of your own that also calls `publish` would write every frame twice. `publish` takes the envelope only and routes it by the envelope's own stream id, so an event cannot reach the clients of another stream.
+
+**Delivery is live, best-effort and at-most-once.** A frame reaches a client only while that client is connected. Nothing is redelivered and `Last-Event-ID` is not honoured: events stored before the client connected, while it was reconnecting, or while the instance was down are never sent to it. Within one stream, frames arrive in version order, up to one polling interval after the commit. Treat a frame as a notification — after every (re)connect read the current state from a query — and put anything that must see every event in a projection. This is the difference from the Event Explorer feed of Step 5, which starts at offset `0` for every client and replays the history.
+
+**A frame carries the payload, so the authorizer matters.** The frame's `id` is the event's global offset and its `data` is the event as the event store reads it — with `@Encrypted` fields decrypted. A client of `/api/sse/customer/c-1` therefore receives that customer's name and e-mail in plain text with every `CustomerRegistered` or `ProfileUpdated` stored while it is connected — if the `SseAuthorizer` lets it in. Without an `SseAuthorizer` bean the framework installs one that denies every stream.
+
+> **Demo shortcut — protect this in production.** The demo's authorizer answers `true` for every caller and every stream, because the demo has no login to check against. A real `SseAuthorizer` compares the authenticated `principal` with the requested `streamId` — a customer may read their own `customer:<id>` stream and the streams of their own orders, an operator more — and the identity it is handed must come from real authentication, not from a header the client sets.
+
+> **The shipped `spring-app` also contains `controller/SseController`**, a subclass of the framework's controller mapped at the same path. It subscribes its clients to the same `SseEventPublisher` and asks the same `SseAuthorizer`, so the frames come from the same `SseEventFeed` with or without it.
+
+> **Quarkus and Micronaut.** The same property and the same `SseAuthorizer` bean switch the endpoint on in `quarkus-app` and `micronaut-app`, and the framework feeds it there too; both apps keep the default polling interval of one second. On Micronaut the frame's `data` is written by Micronaut Serialization, so every domain event (and each record nested in one) needs a serializer: the events live in the framework-agnostic `domain` module, and `MicronautEcommerceApplication` imports them with `@SerdeImport`. Each of the three apps has an `SseLiveE2EIT` that opens a stream over HTTP, sends a command over HTTP and waits for the frame.
+
 ### Step 7: Verify — Health, Metrics, and SSE
 
 Start the application and run the following verification commands.
@@ -370,7 +412,7 @@ Expected response shape:
 
 The `details` also hold one `relay.<name>` block for each retention sweeper and for the saga compensation-retry sweeper (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` followed by the saga state class), shortened here. `StreamRuneHealthIT` checks this list.
 
-The demo's subscriptions (`sse-fanout`, `order-fulfillment-saga`, `payment-process-manager`, and the `MultiProjectionRunner`) are wired as standalone beans and are **not** register(...)-ed with the auto-configured `SubscriptionHealthContributor`, so no `subscription.<name>` detail blocks appear here. If you register a subscription with the contributor, each one adds a `subscription.<name>` detail with `state`, `lag`, `errorCount`, and `status` keys.
+The demo's subscriptions (`order-fulfillment-saga`, `payment-process-manager`, and the `MultiProjectionRunner`) are wired as standalone beans and are **not** register(...)-ed with the auto-configured `SubscriptionHealthContributor`, and neither is the framework's `SseEventFeed`, so no `subscription.<name>` detail blocks appear here. If you register a subscription with the contributor, each one adds a `subscription.<name>` detail with `state`, `lag`, `errorCount`, and `status` keys.
 
 **Metrics — command counter:**
 
@@ -455,6 +497,33 @@ id:17
 data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1","streamId":"order:o-obs-1","globalOffset":17,"version":1,"timestamp":"2026-10-04T08:45:09.326626042Z"}
 ```
 
+**Live SSE stream of one aggregate:**
+
+The framework's endpoint from Step 6b streams one stream, with payloads. Subscribe to an order that does not exist yet:
+
+```bash
+curl -N http://localhost:8080/api/sse/order/o-obs-2
+```
+
+and place that order in the other terminal:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "o-obs-2", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
+```
+
+Within the polling interval the `OrderPlaced` event arrives as a frame — the whole event as JSON, and its global offset as the `id`:
+
+```
+data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":9.99,"currency":"USD"}}],"total":{"amount":9.99,"currency":"USD"}}
+id:14
+```
+
+Lines that start with a colon are comments, which an SSE client ignores: the shipped `spring-app`'s `SseController` writes `:connected` when the stream opens, and the framework's controller writes `:keepalive` every `streamrune.sse.keep-alive-interval` (30 seconds by default).
+
+More frames follow as the saga from Chapter 11 drives the order on (`OrderConfirmed`, or `OrderCancelled` when the stock cannot be reserved). The payment and inventory events of the same order do not appear: they belong to other streams. Stop `curl`, start it again, and nothing is replayed — the stream stays silent until the next event of `order:o-obs-2` is stored.
+
 ---
 
 ## What We Learned
@@ -466,6 +535,8 @@ data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1",
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
 
 **`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to the ADMIN role; that check is a demo shortcut on a client-supplied header, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open and carries no payload: it starts a virtual thread that polls `EventStore.readGlobalStream` in a tight loop, sleeping one second when no new events are found, and emits each event as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and the event's type, stream and version as its data. The `Sinks.Many` unicast sink bridges the imperative polling thread to the reactive `Flux` returned to WebFlux.
+
+**The framework's SSE endpoint** (`GET /api/sse/{aggregateType}/{aggregateId}`, `streamrune.sse.enabled=true`) streams the events of one aggregate with their payloads. The integration serves it and feeds it: an `SseEventFeed` per application instance reads the global stream from its head every `streamrune.sse.polling-interval` and publishes each event through `SseEventPublisher.publish(EventEnvelope)` to the clients of that event's stream. The application writes no feeder; it supplies the `SseAuthorizer` that decides who may open which stream, and without one every stream answers `403`. Delivery is live, best-effort and at-most-once — no replay, no `Last-Event-ID` — so a frame is a notification, and a consumer that must see every event is a projection.
 
 ---
 

@@ -18,16 +18,17 @@ import reactor.core.publisher.Flux;
  * End-to-end proof of the live Server-Sent Events pipeline against a real Spring Boot server
  * (Testcontainers PostgreSQL, random HTTP port).
  *
- * <p>This exercises the full wiring added to {@code StreamRuneConfig}: the framework {@code
- * SseController} ({@code GET /api/sse/{aggregateType}/{aggregateId}}), the {@code
- * SseEventPublisher}, and the {@code sse-fanout} polling subscription that pumps every persisted
- * event into the publisher keyed by its stream id. A client subscribes over real HTTP, a command is
+ * <p>The application adds no feeder code: with {@code streamrune.sse.enabled=true} the framework
+ * registers the {@code SseEventPublisher} behind {@code GET /api/sse/{aggregateType}/{aggregateId}}
+ * and an {@code SseEventFeed} that reads the global stream from its head and publishes every stored
+ * event to the subscribers of that event's stream. A client subscribes over real HTTP, a command is
  * issued that produces an event on that stream, and the test asserts the subscriber receives the
  * live frame.
  *
- * <p>SSE delivery is asynchronous: the publisher enqueues onto a bounded per-subscriber queue and a
- * dedicated virtual-thread worker drains it, and the {@code sse-fanout} subscription only polls the
- * event store periodically. Every assertion therefore awaits rather than checking synchronously.
+ * <p>SSE delivery is asynchronous: the feed polls the event store every {@code
+ * streamrune.sse.polling-interval}, the publisher enqueues onto a bounded per-subscriber queue and
+ * a dedicated virtual-thread worker drains it. Every assertion therefore awaits rather than
+ * checking synchronously.
  */
 class SseLiveE2EIT extends AbstractIntegrationTest {
 
@@ -82,9 +83,9 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     List<ServerSentEvent<String>> received = new CopyOnWriteArrayList<>();
     Disposable sub = subscribeSse(oid, received);
     try {
-      // Place the order AFTER the subscription is open so the OrderPlaced event is delivered live.
-      // (The fanout subscription replays from the start too, but placing after open makes the
-      // "live delivery" claim non-vacuous: the frame arrives without the client reconnecting.)
+      // Place the order AFTER the subscription is open: the feed delivers only to the clients
+      // connected when it reads an event and never replays history, so an order placed earlier
+      // would produce no frame.
       placeOrder(oid, cid, pid);
 
       await()
@@ -115,9 +116,9 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String cid = "sse-iso-cust-" + System.nanoTime();
     String pid = "sse-iso-prod-" + System.nanoTime();
 
-    // Open BOTH subscriptions before emitting, so both are live when the fanout polls the event.
-    // The fanout has a single advancing offset shared by the whole server; only subscribers that
-    // are already registered when an event is polled receive it. Subscribing first makes the
+    // Open BOTH subscriptions before emitting, so both are live when the feed reads the event.
+    // The feed has a single advancing offset shared by the whole server; only subscribers that
+    // are already registered when an event is read receive it. Subscribing first makes the
     // control (B receives) deterministic and the isolation (A does not) non-vacuous.
     List<ServerSentEvent<String>> receivedA = new CopyOnWriteArrayList<>();
     List<ServerSentEvent<String>> receivedB = new CopyOnWriteArrayList<>();
@@ -128,7 +129,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
       // so the subscriber on stream A must never see it.
       placeOrder(streamB, cid, pid);
 
-      // Control: stream B's subscriber must receive B's frame (proves the fanout actually ran —
+      // Control: stream B's subscriber must receive B's frame (proves the feed actually ran —
       // otherwise the negative assertion below would be vacuously true).
       await()
           .atMost(Duration.ofSeconds(10))

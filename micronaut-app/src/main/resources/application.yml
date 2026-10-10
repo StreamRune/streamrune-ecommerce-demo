@@ -66,9 +66,11 @@ streamrune:
     # ("Request identity: TRUSTED_GATEWAY ...").
     trust-user-id-header: true
   sse:
-    # The framework's auto-registered GET /api/sse/{aggregateType}/{aggregateId} SSE endpoint is now
-    # default-off and requires an SseAuthorizer bean (see StreamRuneFactory#sseAuthorizer). Enabled
-    # here for parity with the Spring app's SseController + SseLiveE2EIT showcase feature.
+    # GET /api/sse/{aggregateType}/{aggregateId} is off by default and requires an SseAuthorizer
+    # bean (see StreamRuneFactory#sseAuthorizer). Once enabled, the framework feeds the endpoint
+    # itself: one SseEventFeed per application instance reads the global stream from its head, every
+    # streamrune.sse.polling-interval (1s by default), and publishes each new event to the clients
+    # of that event's stream. SseLiveE2EIT exercises it.
     enabled: true
 
 rabbitmq:

@@ -536,57 +536,20 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Server-Sent Events publisher. The demo's {@code SseController} ({@code
-   * /api/sse/{aggregateType}/{aggregateId}}) subscribes browser clients to it, and {@link
-   * #sseFanoutSubscription} feeds it every persisted event keyed by stream id. Without both halves
-   * the demo would expose the SSE feature but never deliver a frame.
-   */
-  @Bean(destroyMethod = "close")
-  public org.streamrune.runtime.SseEventPublisher sseEventPublisher() {
-    return new org.streamrune.runtime.SseEventPublisher();
-  }
-
-  /**
-   * Allow-all SSE authorizer. Without an application-provided {@link SseAuthorizer} bean, the
-   * framework installs a fail-closed deny-all authorizer once {@code streamrune.sse.enabled=true} —
-   * which would 403 every subscription, including {@code SseLiveE2EIT}'s (it never sends {@code
-   * X-User-Id} on the SSE {@code GET}, only on the preceding command, so an ownership-based check
-   * would also reject it). This is a public reference showcase with no real authentication, and the
-   * {@code streamId} itself carries no secret, so every stream is readable — a "look but can't
-   * touch" posture appropriate for a demo, not a production access-control model.
+   * Allow-all SSE authorizer for {@code GET /api/sse/{aggregateType}/{aggregateId}}. With {@code
+   * streamrune.sse.enabled=true} the framework registers the publisher the endpoint subscribes its
+   * clients to and the feed that publishes every stored event to it, so the application publishes
+   * nothing itself; it decides who may open a stream. Without an application-provided {@link
+   * SseAuthorizer} bean the framework installs a fail-closed deny-all authorizer, which would 403
+   * every subscription, including {@code SseLiveE2EIT}'s (it never sends {@code X-User-Id} on the
+   * SSE {@code GET}, only on the preceding command, so an ownership-based check would also reject
+   * it). This is a public reference showcase with no real authentication, and the {@code streamId}
+   * itself carries no secret, so every stream is readable — a "look but can't touch" posture
+   * appropriate for a demo, not a production access-control model.
    */
   @Bean
   public SseAuthorizer sseAuthorizer() {
     return (principal, streamId) -> true;
-  }
-
-  /**
-   * Fans the global event stream out to the {@link org.streamrune.runtime.SseEventPublisher}. The
-   * framework publisher is a sink — something has to feed it. This polling subscription publishes
-   * each persisted event under its own stream id, so a client subscribed to {@code
-   * /api/sse/{aggregateType}/{aggregateId}} receives the live frame for that aggregate. Mirrors the
-   * saga subscription wiring below.
-   */
-  @Bean(destroyMethod = "close")
-  public PollingEventSubscription sseFanoutSubscription(
-      EventStore eventStore,
-      OffsetStore offsetStore,
-      org.streamrune.runtime.SseEventPublisher sseEventPublisher) {
-    var subscription =
-        PollingEventSubscription.builder()
-            .subscriptionName("sse-fanout")
-            .eventStore(eventStore)
-            .offsetStore(offsetStore)
-            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(100)))
-            .listener(
-                events -> {
-                  for (var envelope : events) {
-                    sseEventPublisher.publish(envelope.streamId(), envelope);
-                  }
-                })
-            .build();
-    subscription.start();
-    return subscription;
   }
 
   /**
