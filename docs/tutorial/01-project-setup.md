@@ -211,7 +211,7 @@ jackson = "2.18.3"
 jakarta-validation = "3.0.2"
 hibernate-validator = "8.0.1.Final"
 jakarta-el = "4.0.2"
-assertj = "3.27.3"
+assertj = "3.27.7"
 spotless = "7.1.0"
 # ... (see the full catalog in the real demo for all aliases)
 
