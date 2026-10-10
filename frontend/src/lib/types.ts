@@ -91,6 +91,24 @@ export interface OrderFulfillmentState {
   fulfillmentStatus: OrderFulfillmentStatus;
 }
 
+/**
+ * One frame of the live feed (GET /api/events/sse): which event, of which
+ * stream, and when. The feed is open to every role, so it carries no payload.
+ */
+export interface LiveEvent {
+  globalOffset: number;
+  streamId: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  version: number;
+  timestamp: string;
+}
+
+/**
+ * One event of the history (GET /api/events, GET /api/events/{type}/{id}),
+ * with its payload as the event store reads it: decrypted. ADMIN only.
+ */
 export interface EventEntry {
   globalOffset: number;
   streamId: string;

@@ -16,7 +16,7 @@ In this chapter you will:
 - Verify `MicrometerStreamRuneMetrics` records counters and timers for commands, events, and projections. Because the auto-configuration registers this bean automatically when a `MeterRegistry` is present — and actuator provides a `SimpleMeterRegistry` — the wiring reduces to verifying that the dependency is on the classpath.
 - Opt into `OpenTelemetryCommandInterceptor` as a command interceptor so that every command dispatch creates an OpenTelemetry span with the command type, command ID, and aggregate ID as attributes. The shipped demo does not wire this — it is an addition you make in Step 3.
 - Verify that `StreamRuneHealthIndicator` is registered and returns meaningful detail about the PostgreSQL connection and subscription lag.
-- Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream, a per-stream event list, and an SSE endpoint that pushes new events in real time as they are appended.
+- Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream and a per-stream event list, both for the ADMIN role because they show decrypted payloads, and an open SSE endpoint that announces new events in real time, without their payload.
 
 ---
 
@@ -184,6 +184,31 @@ import org.streamrune.core.types.StreamId;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
+/**
+ * The demo's window on the event store: the global event list, one stream's history, and a live
+ * feed of new events.
+ *
+ * <p><b>The list and the stream history are ADMIN only.</b> They return each event's payload as the
+ * event store reads it, and the store decrypts {@code @Encrypted} fields on the way out. Until a
+ * customer's key is erased, these two endpoints therefore show that customer's name, e-mail and
+ * address in plain text. They are gated with the same {@code requireRole("ADMIN")} check as the
+ * mutating admin endpoints.
+ *
+ * <p><b>DEMO SHORTCUT, protect this in production.</b> The role is whatever the client sent in
+ * {@code X-User-Role} (the gateway stand-in chapter 9 describes), so the check keeps the tutorial
+ * honest but protects nothing against a caller who sets the header. A real deployment authenticates
+ * the caller, derives the role from that identity, and does not expose raw event payloads outside
+ * an operator's tooling.
+ *
+ * <p><b>The live feed is open and carries no payload.</b> The browser's {@code EventSource} cannot
+ * send the role header, and the dashboard only needs to know that something happened to a stream. A
+ * frame holds the event's global offset, its type, the stream it belongs to, its version in that
+ * stream and its timestamp, never the event itself.
+ *
+ * <p>The feed reads the global stream from its first event and then polls once a second. Its frames
+ * are unnamed (no {@code event:} field), so {@code EventSource.onmessage} receives every one of
+ * them.
+ */
 @RestController
 @RequestMapping("/api/events")
 public class EventExplorerController {
@@ -199,6 +224,7 @@ public class EventExplorerController {
   @GetMapping
   public List<Map<String, Object>> listEvents(
       @RequestParam(defaultValue = "0") long offset, @RequestParam(defaultValue = "50") int limit) {
+    AdminController.requireRole("ADMIN");
     return eventStore.readGlobalStream(new GlobalOffset(offset), limit).stream()
         .map(this::toMap)
         .toList();
@@ -207,6 +233,7 @@ public class EventExplorerController {
   @GetMapping("/{aggregateType}/{aggregateId}")
   public List<Map<String, Object>> streamEvents(
       @PathVariable String aggregateType, @PathVariable String aggregateId) {
+    AdminController.requireRole("ADMIN");
     // Both path values are client input: build them through the ingress doors.
     var stream = StreamId.of(AggregateType.of(aggregateType), AggregateId.of(aggregateId));
     return eventStore.load(stream).events().stream().map(this::toMap).toList();
@@ -225,10 +252,9 @@ public class EventExplorerController {
                 try {
                   var events = eventStore.readGlobalStream(offset, 100);
                   for (var env : events) {
-                    var data = objectMapper.writeValueAsString(toMap(env));
+                    var data = objectMapper.writeValueAsString(toFrame(env));
                     sink.tryEmitNext(
                         ServerSentEvent.<String>builder()
-                            .event(env.eventType().name())
                             .id(String.valueOf(env.globalOffset().value()))
                             .data(data)
                             .build());
@@ -251,6 +277,21 @@ public class EventExplorerController {
     return sink.asFlux();
   }
 
+  /**
+   * What the live feed says about an event: which one, of which stream, and when. No payload — the
+   * feed is open to every caller.
+   */
+  private static Map<String, Object> toFrame(EventEnvelope env) {
+    return Map.of(
+        "globalOffset", env.globalOffset().value(),
+        "streamId", env.streamId().value(),
+        "aggregateType", env.aggregateType().value(),
+        "aggregateId", env.aggregateId().value(),
+        "eventType", env.eventType().name(),
+        "version", env.version().value(),
+        "timestamp", env.metadata().timestamp().toString());
+  }
+
   private Map<String, Object> toMap(EventEnvelope env) {
     return Map.of(
         "globalOffset", env.globalOffset().value(),
@@ -266,9 +307,15 @@ public class EventExplorerController {
 
 The three endpoints serve different use cases:
 
-- `GET /api/events?offset=0&limit=50` — paginated read of the global stream. The `offset` is **exclusive** — `readGlobalStream` returns events whose global offset is strictly greater than it. Because offsets start at 1, `offset=0` returns the full history; use the last `globalOffset` you received as the next request's `offset` to page forward. Each response item includes `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `timestamp`, and the deserialized `payload`.
-- `GET /api/events/{aggregateType}/{aggregateId}` — all events for a single stream, returned in append order. A stream is the pair of the aggregate type its decider is registered under and the id the command bus's id extractor returned when the events were appended, written `<aggregateType>:<aggregateId>`. An order placed as `o-1` lives in `order:o-1`, and reserving stock for `p-1` writes to `inventory:p-1` while the product `p-1` stays in `product:p-1`. Both path values are client input and go through the ingress doors (`AggregateType.of`, `AggregateId.of`); a type outside `[a-z][a-z0-9_]{0,31}` is a `400`.
-- `GET /api/events/sse` — a persistent SSE connection. The server starts a virtual thread that polls `readGlobalStream` from `GlobalOffset.initial()` (which is the exclusive offset `0`, so the first poll replays the full history) and emits each event as an SSE frame. The SSE `event` field is the event type name; the `id` field is the global offset; the `data` field is a JSON object with the same shape as the paginated endpoint. When no new events are present, the thread sleeps one second before polling again.
+- `GET /api/events?offset=0&limit=50` — paginated read of the global stream, **ADMIN only**. The `offset` is **exclusive** — `readGlobalStream` returns events whose global offset is strictly greater than it. Because offsets start at 1, `offset=0` returns the full history; use the last `globalOffset` you received as the next request's `offset` to page forward. Each response item includes `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `timestamp`, and the deserialized `payload`.
+- `GET /api/events/{aggregateType}/{aggregateId}` — all events for a single stream, returned in append order, **ADMIN only**. A stream is the pair of the aggregate type its decider is registered under and the id the command bus's id extractor returned when the events were appended, written `<aggregateType>:<aggregateId>`. An order placed as `o-1` lives in `order:o-1`, and reserving stock for `p-1` writes to `inventory:p-1` while the product `p-1` stays in `product:p-1`. Both path values are client input and go through the ingress doors (`AggregateType.of`, `AggregateId.of`); a type outside `[a-z][a-z0-9_]{0,31}` is a `400`.
+- `GET /api/events/sse` — a persistent SSE connection, **open to every caller and without payloads**. The server starts a virtual thread that polls `readGlobalStream` from `GlobalOffset.initial()` (which is the exclusive offset `0`, so the first poll replays the full history) and emits one SSE frame per event. The `id` field is the global offset; the `data` field is a JSON object with `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `version` and `timestamp`. There is no `event` field: an unnamed frame is what the browser's `EventSource` hands to `onmessage`, and the frontend in Chapter 16 relies on that. When no new events are present, the thread sleeps one second before polling again.
+
+**Why two of them need ADMIN.** `payload` is `env.event()`: the event as the event store reads it. The store is the crypto-aware one from Chapter 6, and it decrypts `@Encrypted` fields on the way out. So the list and the stream history show a customer's name, e-mail, address and phone **in plain text** for as long as that customer's key exists; only after the key is erased (Chapter 7) do the same fields come back as `[REDACTED]`. Encryption at rest protects the database, not this endpoint. Both methods therefore start with `AdminController.requireRole("ADMIN")`, the check the mutating admin endpoints use (Chapter 14): without the role the answer is `403`, and no event is read.
+
+**Why the feed does not.** The browser opens the feed with `EventSource`, which cannot send request headers, so the feed cannot ask for a role. It stays open instead and says less: `toFrame` builds a frame from the envelope's coordinates and never touches `env.event()`. A dashboard that only needs to know *that* something happened to a stream loses nothing.
+
+> **Demo shortcut — protect this in production.** `requireRole` trusts the `X-User-Role` header, which any client can set to `ADMIN` (the gateway stand-in from Chapter 9). The check keeps the demo honest about *who should* see decrypted events, but it does not stop anyone who adds the header. In a real system an endpoint that returns raw event payloads belongs behind real authentication, with the role derived from the authenticated identity, on an operator-only network path — or it does not exist at all, and operators read events with tooling that has its own access control. The same goes for the open feed: stream ids and event types are metadata, and metadata can be sensitive too (a `customer:<id>` stream with a `CustomerForgotten` event tells a story). Decide per deployment whether an unauthenticated caller may see it.
 
 The SSE endpoint uses `spring-boot-starter-webflux` for the `Flux` return type. The `webflux` dependency is already present in `build.gradle.kts` from an earlier chapter. The virtual thread approach means no Reactor scheduler is consumed while the thread is sleeping — the thread is parked at `Thread.sleep` at zero cost.
 
@@ -366,18 +413,26 @@ After adding `.metrics(metrics)`, place an order and re-run the curl — `measur
 **Paginated event list:**
 
 ```bash
-curl -s "http://localhost:8080/api/events?offset=0&limit=5" | jq .
+curl -s -H "X-User-Role: ADMIN" "http://localhost:8080/api/events?offset=0&limit=5" | jq .
 ```
 
-Each item in the response array includes `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `timestamp`, and `payload`.
+Each item in the response array includes `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `timestamp`, and `payload`. Leave the header out and the answer is `403 Forbidden`.
 
 **Per-stream events:**
 
 ```bash
-curl -s http://localhost:8080/api/events/order/o-1 | jq .
+curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/events/order/o-1 | jq .
 ```
 
 Replace `o-1` with an order ID you have placed (the stream is `order:<orderId>`, so the path carries the type `order` and the id as two segments). The response contains all events for that stream in append order.
+
+Now read a customer's stream the same way, for example the customer from Chapter 6:
+
+```bash
+curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/events/customer/c-1 | jq '.[0].payload'
+```
+
+The name, e-mail and address are there in plain text, although the `payload` column of `event_stream` holds ciphertext for them: the event store decrypted the fields for the caller. This is the reason the endpoint asks for the role.
 
 **Live SSE stream:**
 
@@ -393,12 +448,11 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"orderId": "o-obs-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
 ```
 
-Within one second you should see SSE frames appear in the first terminal, one per event appended. Each frame looks like:
+Within one second you should see SSE frames appear in the first terminal, one per event appended. The feed needs no header, and a frame carries no payload:
 
 ```
 id:17
-event:OrderPlaced
-data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1","streamId":"order:o-obs-1","globalOffset":17,"timestamp":"2026-10-04T08:45:09.326626042Z","payload":{...}}
+data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1","streamId":"order:o-obs-1","globalOffset":17,"version":1,"timestamp":"2026-10-04T08:45:09.326626042Z"}
 ```
 
 ---
@@ -411,7 +465,7 @@ data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1",
 
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
 
-**`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The SSE endpoint starts a virtual thread that polls `EventStore.readGlobalStream` in a tight loop, sleeping one second when no new events are found. It emits each event as a `ServerSentEvent<String>` with the event type as the SSE `event` field and the global offset as the SSE `id` field. The `Sinks.Many` unicast sink bridges the imperative polling thread to the reactive `Flux` returned to WebFlux.
+**`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to the ADMIN role; that check is a demo shortcut on a client-supplied header, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open and carries no payload: it starts a virtual thread that polls `EventStore.readGlobalStream` in a tight loop, sleeping one second when no new events are found, and emits each event as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and the event's type, stream and version as its data. The `Sinks.Many` unicast sink bridges the imperative polling thread to the reactive `Flux` returned to WebFlux.
 
 ---
 

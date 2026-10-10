@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Zap, Search } from "lucide-react";
+import { Zap, Search, ShieldOff } from "lucide-react";
 import { useEvents, useStreamEvents } from "@/lib/queries";
 import { parseStreamFilter } from "@/lib/api";
 import { useSSE } from "@/providers/sse-provider";
-import type { EventEntry } from "@/lib/types";
+import { useRole } from "@/providers/role-provider";
+import type { EventEntry, LiveEvent } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,11 +44,33 @@ function EventRow({ event }: { event: EventEntry }) {
   );
 }
 
+/** A live feed row: the event's type, stream and version. The feed carries no payload. */
+function LiveEventRow({ event }: { event: LiveEvent }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border last:border-0">
+      <span className="text-xs text-muted-foreground tabular-nums w-12 shrink-0">
+        #{event.globalOffset}
+      </span>
+      <Badge className={cn("text-xs shrink-0", getAggregateBadgeClass(event.eventType))}>
+        {event.eventType}
+      </Badge>
+      <span className="text-xs text-muted-foreground truncate flex-1">{event.streamId}</span>
+      <span className="text-xs text-muted-foreground shrink-0 tabular-nums">v{event.version}</span>
+      <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+        {new Date(event.timestamp).toLocaleTimeString()}
+      </span>
+    </div>
+  );
+}
+
 // ─── Historical Browser ───────────────────────────────────────────────────────
 
 const PAGE_SIZE = 25;
 
 function HistoricalBrowser() {
+  const { hasPermission } = useRole();
+  // The history returns each event's payload decrypted, so the backend serves it to ADMIN only.
+  const allowed = hasPermission("EVENT_HISTORY_VIEW");
   const [streamInput, setStreamInput] = useState("");
   const [streamFilter, setStreamFilter] = useState<{
     aggregateType: string;
@@ -56,11 +79,31 @@ function HistoricalBrowser() {
   const [filterHint, setFilterHint] = useState(false);
   const [offset, setOffset] = useState(0);
 
-  const { data: globalEvents = [], isLoading: globalLoading } = useEvents(offset, PAGE_SIZE);
+  const { data: globalEvents = [], isLoading: globalLoading } = useEvents(
+    offset,
+    PAGE_SIZE,
+    allowed,
+  );
   const { data: streamEvents = [], isLoading: streamLoading } = useStreamEvents(
     streamFilter?.aggregateType ?? null,
     streamFilter?.aggregateId ?? null,
+    allowed,
   );
+
+  if (!allowed) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 gap-3 text-center rounded-xl border border-border">
+        <ShieldOff className="size-10 text-muted-foreground opacity-40" />
+        <div>
+          <p className="text-sm font-medium">Requires ADMIN role to browse the event history.</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            The history shows each event with its payload, decrypted. The live feed above lists
+            events without their payload.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const events = streamFilter ? streamEvents : globalEvents;
   const isLoading = streamFilter ? streamLoading : globalLoading;
@@ -188,7 +231,7 @@ export default function EventsPage() {
             </div>
           ) : (
             recentEvents.map((event) => (
-              <EventRow key={`live-${event.globalOffset}-${event.streamId}`} event={event} />
+              <LiveEventRow key={`live-${event.globalOffset}-${event.streamId}`} event={event} />
             ))
           )}
         </div>

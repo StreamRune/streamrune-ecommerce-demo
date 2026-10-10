@@ -366,7 +366,7 @@ curl -i -X POST http://localhost:8080/api/customers/c-bob/export-data
 The response is `200 OK` with **no body** — the endpoint only dispatches `RequestDataExport`. The portability request is recorded durably as a `DataExportRequested` event in Bob's stream:
 
 ```bash
-curl http://localhost:8080/api/events/customer/c-bob
+curl -H "X-User-Role: ADMIN" http://localhost:8080/api/events/customer/c-bob
 ```
 
 ```json
