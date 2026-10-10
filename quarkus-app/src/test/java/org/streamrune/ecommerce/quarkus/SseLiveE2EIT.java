@@ -4,6 +4,8 @@ import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -171,7 +173,13 @@ class SseLiveE2EIT {
 
       Frame placed = orderPlacedFrames(stream.frames(), oid, pid).getFirst();
       assertThat(placed.id()).as("the frame's id is the event's global offset").matches("\\d+");
-      assertThat(placed.data()).contains(cid);
+      // The data field is the whole event as JSON, nested records included, as the application's
+      // Jackson writer wrote it.
+      JsonNode event = new ObjectMapper().readTree(placed.data());
+      assertThat(event.path("orderId").asText()).isEqualTo(oid);
+      assertThat(event.path("customerId").asText()).isEqualTo(cid);
+      assertThat(event.path("lines")).hasSize(1);
+      assertThat(event.path("lines").path(0).path("productId").asText()).isEqualTo(pid);
     }
   }
 
