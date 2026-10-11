@@ -13,16 +13,34 @@
  *   npm run test:live
  *
  * The tests run in order and share what they create: the customer the first
- * one registers places the orders of the later ones. They touch no seed data
- * except the stock of the seeded Widget, of which each order takes one, and
- * they leave the payment-failure switch off.
+ * one registers places the orders of the later ones. The suite brings what it
+ * consumes: before the first test it creates a product of its own through the
+ * API and receives ten units of it into the inventory, and every order that
+ * needs stock takes it from there. It changes no seed data, so it passes run
+ * after run on the same database.
+ *
+ * What a run leaves behind: a forgotten customer, two products (the one it
+ * ordered from, with the units no order took, and a discontinued one), four
+ * orders with their payments and sagas (one delivered, one confirmed, one
+ * cancelled after its confirmation, one cancelled by a failed payment), and
+ * the events of all of them. The payment-failure switch is left off.
  */
 
 import { test, expect, request, type Browser, type Page } from "@playwright/test";
 import { actAs, isBackendReachable, BACKEND_URL } from "./helpers";
 
-/** A read model follows the event store, and the saga takes a few steps: the pages catch up. */
-const SETTLED = { timeout: 30_000 };
+/**
+ * How long a page may take to show the outcome of a write.
+ *
+ * With the backend's defaults an order is confirmed by its saga within two
+ * seconds, and the order read model, which polls every five seconds plus up to
+ * one of jitter, has the row within eight. The page reads its lists again at
+ * once and 2, 7, 15 and 30 seconds after the last frame of a change
+ * (`read-model-sync.ts`). 45 seconds is above the backend's worst case several
+ * times over and above the page's last re-read, so a run fails here only when
+ * the outcome does not come, not when a poll falls badly.
+ */
+const SETTLED = { timeout: 45_000 };
 
 const ADMIN_HEADERS = { "X-User-Id": "admin-1", "X-User-Role": "ADMIN" };
 
@@ -33,7 +51,12 @@ const created = {
   orderId: "",
   productId: "",
   productName: "",
+  /** The product the suite's orders take their stock from. */
+  stockedProductId: "",
+  stockedProductName: "",
 };
+
+const STOCKED_PRICE = 19.99;
 
 /** The JSON body of the command the page sends to `path` while `action` runs. */
 async function commandSentBy(
@@ -97,7 +120,39 @@ test.describe("Writes against a running backend", () => {
       console.log(
         "[writes.live.spec] Backend not reachable at localhost:8080 — skipping the write tests"
       );
+      return;
     }
+    // A product of the run's own, with stock in the inventory the fulfillment saga reserves
+    // from: the orders below consume it, not the seed data's.
+    const suffix = Date.now().toString(36);
+    created.stockedProductId = `prod-live-${suffix}`;
+    created.stockedProductName = `Live Gadget ${suffix}`;
+    const api = await request.newContext({ extraHTTPHeaders: ADMIN_HEADERS });
+    const product = await api.post(`${BACKEND_URL}/api/products`, {
+      data: {
+        productId: created.stockedProductId,
+        name: created.stockedProductName,
+        description: "Ordered by the write tests",
+        category: "Tests",
+        price: STOCKED_PRICE,
+        initialStock: 0,
+      },
+    });
+    expect(product.status(), await product.text()).toBe(200);
+    const shipment = await api.post(
+      `${BACKEND_URL}/api/inventory/${created.stockedProductId}/receive`,
+      { data: { quantity: 10 } }
+    );
+    expect(shipment.status(), await shipment.text()).toBe(200);
+    // No page is open yet to hear the feed announce the product: wait until the catalogue, a
+    // read model, lists it, so that the first Place Order dialog offers it.
+    await expect
+      .poll(
+        async () => (await api.get(`${BACKEND_URL}/api/products/${created.stockedProductId}`)).status(),
+        SETTLED
+      )
+      .toBe(200);
+    await api.dispose();
   });
 
   test.beforeEach(() => {
@@ -146,7 +201,7 @@ test.describe("Writes against a running backend", () => {
   }) => {
     await actAs(page, "CUSTOMER", created.customerId);
 
-    created.orderId = await placeOrder(page, "Widget");
+    created.orderId = await placeOrder(page, created.stockedProductName);
 
     // The order is the customer's own, and the fulfillment saga confirms it.
     const placed = row(page, created.orderId);
@@ -166,20 +221,53 @@ test.describe("Writes against a running backend", () => {
     await expect(page.getByText("fulfillment-order-seed-1")).toHaveCount(0);
   });
 
-  test("the customer cancels an order of their own", async ({ page }) => {
+  test("the customer cancels a confirmed order: it is CANCELLED, its payment stays captured and its stock reserved", async ({
+    page,
+  }) => {
     await actAs(page, "CUSTOMER", created.customerId);
-    const orderId = await placeOrder(page, "Widget");
+    const orderId = await placeOrder(page, created.stockedProductName);
     const placed = row(page, orderId);
     await expect(placed).toContainText("CONFIRMED", SETTLED);
 
+    // The dialog says what a cancel of a confirmed order does and what it does not.
     await placed.getByRole("button", { name: "Cancel" }).click();
     const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("note")).toContainText(
+      "The demo does not refund the payment and does not release the reservation."
+    );
     await dialog.getByLabel("Reason (optional)").fill("changed my mind");
     await dialog.getByRole("button", { name: "Cancel Order" }).click();
 
     await expect(page.getByText("Order cancelled")).toBeVisible();
     await expect(placed).toContainText("CANCELLED", SETTLED);
     await expect(placed.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+
+    // That is all the cancel did. The order's saga was complete before it and stays so, the
+    // payment is still captured and the unit is still reserved: nothing refunds or releases.
+    await page.goto("/fulfillment");
+    const saga = page.locator('[data-slot="card"]').filter({ hasText: `fulfillment-${orderId}` });
+    await expect(saga).toContainText("COMPLETED", SETTLED);
+    const api = await request.newContext({ extraHTTPHeaders: ADMIN_HEADERS });
+    const eventTypesOf = async (stream: string) => {
+      const events = await api.get(`${BACKEND_URL}/api/events/${stream}`);
+      expect(events.status()).toBe(200);
+      return ((await events.json()) as { eventType: string; payload: { orderId?: string } }[])
+        .filter((event) => event.payload.orderId === undefined || event.payload.orderId === orderId)
+        .map((event) => event.eventType);
+    };
+    expect(await eventTypesOf(`order/${orderId}`)).toEqual([
+      "OrderPlaced",
+      "OrderConfirmed",
+      "OrderCancelled",
+    ]);
+    expect(await eventTypesOf(`payment/pay-${orderId}`)).toEqual([
+      "PaymentInitiated",
+      "PaymentCaptured",
+    ]);
+    const inventory = await eventTypesOf(`inventory/${created.stockedProductId}`);
+    expect(inventory).toContain("StockReserved");
+    expect(inventory).not.toContain("StockReleased");
+    await api.dispose();
   });
 
   test("an ADMIN ships and delivers the customer's order", async ({ page }) => {
@@ -290,12 +378,18 @@ test.describe("Writes against a running backend", () => {
     await expect(toggle).toBeChecked();
 
     const customer = await pageAs(browser, "CUSTOMER", created.customerId);
-    const orderId = await placeOrder(customer, "Widget");
+    const orderId = await placeOrder(customer, created.stockedProductName);
     await expect(row(customer, orderId)).toContainText("CANCELLED", SETTLED);
-    await customer.context().close();
 
-    const saga = page.locator('[data-slot="card"]').filter({ hasText: `fulfillment-${orderId}` });
+    // The saga is read on the customer's own Fulfillment page, which lists the sagas of their
+    // orders. An ADMIN's page lists fifty sagas of everyone, the highest saga ids first, and on
+    // a database that has seen many runs a new order's saga need not be among them.
+    await customer.goto("/fulfillment");
+    const saga = customer
+      .locator('[data-slot="card"]')
+      .filter({ hasText: `fulfillment-${orderId}` });
     await expect(saga).toContainText("FAILED", SETTLED);
+    await customer.context().close();
 
     await toggle.click();
     await expect(page.getByText("Payment failure disabled")).toBeVisible();

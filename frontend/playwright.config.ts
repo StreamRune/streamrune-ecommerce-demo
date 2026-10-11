@@ -17,8 +17,9 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:3000",
     viewport: { width: 1280, height: 720 },
-    /* Collect trace on first retry to help diagnose CI failures */
-    trace: "on-first-retry",
+    /* A failed test keeps its trace (test-results/). The suite runs without retries, so a trace
+       collected on a first retry would never exist. */
+    trace: "retain-on-failure",
   },
 
   projects: [

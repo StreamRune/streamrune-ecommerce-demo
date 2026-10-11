@@ -172,7 +172,9 @@ jobs:
         env:
           E2E_REQUIRE_BACKEND: '1'
           E2E_REUSE_SERVER: '1'
-        run: npx playwright test --reporter=line
+        # line for the job log, html for the artifact: with the traces the config keeps for
+        # failed tests, the upload below shows what the page looked like when a test failed.
+        run: npx playwright test --reporter=line,html
 
       - name: Quick Start - upload Playwright report on failure
         if: failure()
@@ -245,7 +247,8 @@ jobs:
         # This job exercises the no-backend path: the page-render contract
         # and, in write-contracts.spec.ts, the request each write action
         # sends. The run-paths job runs the suite against the started stack.
-        run: npx playwright test --reporter=line
+        # line for the job log, html and the failed tests' traces for the upload below.
+        run: npx playwright test --reporter=line,html
 
       - name: Upload Playwright report on failure
         if: failure()
