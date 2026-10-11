@@ -4,7 +4,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
@@ -13,14 +12,18 @@ import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.projections.access.FulfillmentSagaRows;
+import org.streamrune.ecommerce.projections.access.FulfillmentScope;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewaySimulator;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 
 /**
- * The order-fulfillment sagas, for the {@code ADMIN} role ({@code 403} otherwise): a saga's state
- * names the order, the customer, the payment and the total of one purchase, and the list holds
- * every customer's.
+ * The order-fulfillment sagas, for an authenticated {@code ADMIN} or the customer of the order a
+ * saga fulfils ({@link OwnerOrAdminQueries}); {@code 403} for everyone else. A saga's state names
+ * the order, its customer, the payment and the total of one purchase: an {@code ADMIN} reads every
+ * saga, a customer the sagas of their own orders. The payment-failure switch is an {@code ADMIN}'s.
  */
 @Path("/api/saga/fulfillments")
 @Produces(MediaType.APPLICATION_JSON)
@@ -29,39 +32,30 @@ public class SagaController {
   @Inject SagaStore sagaStore;
   @Inject PaymentGatewaySimulator paymentGateway;
   @Inject DataSource dataSource;
+  @Inject OwnerOrAdminQueries queries;
 
   /** The request context the StreamRune filter parsed from the headers (see RequestCaller). */
   @Inject StreamRuneRequestContextHolder requestContext;
 
+  /**
+   * Every saga for an {@code ADMIN}; for anyone else the sagas of the caller's own orders, selected
+   * by their ids where the rows are read. A request without an identity is refused.
+   */
   @GET
   public List<Map<String, Object>> listSagas(@QueryParam("limit") @DefaultValue("50") int limit) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
-    var results = new ArrayList<Map<String, Object>>();
-    try (var conn = dataSource.getConnection();
-        var ps =
-            conn.prepareStatement(
-                "SELECT saga_id, saga_type, status, state_json FROM saga_state ORDER BY saga_id DESC LIMIT ?")) {
-      ps.setInt(1, limit);
-      try (var rs = ps.executeQuery()) {
-        while (rs.next()) {
-          results.add(
-              Map.of(
-                  "sagaId", rs.getString("saga_id"),
-                  "sagaType", rs.getString("saga_type"),
-                  "status", rs.getString("status"),
-                  "state", rs.getString("state_json") != null ? rs.getString("state_json") : ""));
-        }
-      }
-    } catch (Exception e) {
-      throw new RuntimeException("Failed to query saga state", e);
-    }
-    return results;
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.of(requestContext));
+    return FulfillmentSagaRows.read(dataSource, scope, limit);
   }
 
+  /**
+   * One saga. {@code 404} is the answer for a saga that does not exist to a caller who may read it:
+   * an {@code ADMIN}, or the customer of the order the id names. A customer gets {@code 403} for
+   * the saga of an order that is not theirs or has no read-model row, as for the order itself.
+   */
   @GET
   @Path("/{id}")
   public Response getSaga(@PathParam("id") String id) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
+    queries.requireFulfillmentAccess(RequestCaller.of(requestContext), id);
     return sagaStore
         .load(
             new SagaId(id),

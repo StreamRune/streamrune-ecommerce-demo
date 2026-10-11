@@ -15,7 +15,10 @@ import type { Role } from "./types";
  * - PRODUCT_MANAGE: creating a product, its stock and price, discontinuing it
  *   and receiving a shipment are an ADMIN's; everyone reads the catalogue.
  * - PROFILE_MANAGE: a CUSTOMER may edit, export and forget their own record.
- * - FULFILLMENT_VIEW: the saga list names every customer's orders, ADMIN only.
+ * - FULFILLMENT_VIEW: read the fulfillment sagas. A saga belongs to its order,
+ *   so the backend serves them as it serves orders: every saga to an ADMIN, the
+ *   sagas of their own orders to a CUSTOMER. A GUEST is refused. The
+ *   payment-failure switch on the same page is ADMIN_PANEL.
  */
 const ROLE_PERMISSIONS: Record<Role, string[]> = {
   ADMIN: [
@@ -31,7 +34,13 @@ const ROLE_PERMISSIONS: Record<Role, string[]> = {
     "OWN_DATA_VIEW",
     "ADMIN_PANEL",
   ],
-  CUSTOMER: ["ORDER_PLACE", "ORDER_CONFIRM_CANCEL", "PROFILE_MANAGE", "OWN_DATA_VIEW"],
+  CUSTOMER: [
+    "ORDER_PLACE",
+    "ORDER_CONFIRM_CANCEL",
+    "PROFILE_MANAGE",
+    "OWN_DATA_VIEW",
+    "FULFILLMENT_VIEW",
+  ],
   GUEST: [],
 };
 
