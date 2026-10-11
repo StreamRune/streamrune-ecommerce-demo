@@ -37,8 +37,9 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * request metadata: an HTTP request's is whatever the client put in {@code X-Correlation-Id}, and a
  * client that could address a saga with it would have its own order's {@code OrderConfirmed}
  * evolved by another order's saga. {@link #evolve} and {@link #handle} check the same thing from
- * the other side: an event that is not about this saga's order changes nothing and dispatches
- * nothing, whoever hands it over.
+ * the other side, against the order id and the payment id the saga stores in its own state: an
+ * event that is not about this saga's order changes nothing and dispatches nothing, whoever hands
+ * it over and whatever routed it.
  *
  * <p>A {@code SagaId} holds 255 characters at most, so {@code OrderCommand.PlaceOrder} refuses an
  * order id longer than 255 minus the prefix ({@code SAGA_ID_PREFIX}, which this class uses to build
@@ -146,15 +147,33 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
   }
 
   /**
-   * Whether the event is about this saga's order: the {@code OrderPlaced} that starts this saga, or
-   * an event {@link #correlate} routes to it.
+   * Whether the event is about this saga's order, answered from what the saga itself stores and
+   * without asking {@link #correlate}: the {@code OrderPlaced} that starts this saga names the
+   * order the saga id is built from, and every later event names the order id or the payment id the
+   * saga recorded from that {@code OrderPlaced}. The answer holds whoever routed the event here.
    */
-  private boolean isAboutThisSaga(OrderFulfillmentState state, EventEnvelope event) {
-    Optional<SagaId> saga =
-        event.event() instanceof OrderEvent.OrderPlaced placed
-            ? sagaOfOrder(placed.orderId())
-            : correlate(event);
-    return saga.isPresent() && saga.get().equals(state.sagaId());
+  private static boolean isAboutThisSaga(OrderFulfillmentState state, EventEnvelope event) {
+    return switch (event.event()) {
+      case OrderEvent.OrderPlaced e ->
+          sagaOfOrder(e.orderId()).filter(state.sagaId()::equals).isPresent();
+      case OrderEvent.OrderConfirmed e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case OrderEvent.OrderCancelled e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentInitiated e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentCaptured e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentFailed e -> isTheSagasOwn(state.paymentId(), e.paymentId());
+      case PaymentEvent.PaymentRefunded e -> isTheSagasOwn(state.paymentId(), e.paymentId());
+      case InventoryEvent.StockReserved e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case InventoryEvent.StockReleased e -> isTheSagasOwn(state.orderId(), e.orderId());
+      default -> false;
+    };
+  }
+
+  /**
+   * Whether an id an event carries is the id this saga recorded; a saga that recorded none has
+   * none.
+   */
+  private static boolean isTheSagasOwn(String recorded, String inTheEvent) {
+    return recorded != null && recorded.equals(inTheEvent);
   }
 
   @Override

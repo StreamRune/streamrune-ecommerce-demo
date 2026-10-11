@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.DomainEvent;
@@ -289,12 +290,41 @@ class OrderFulfillmentSagaTest {
 
   @Test
   void evolve_anotherOrdersConfirmation_leavesTheSagaWhereItIs() {
-    var state = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    // AWAITING_CONFIRMATION is the one state in which a confirmation completes the saga.
+    var state = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
     var foreign =
         envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
 
     assertThat(saga.evolve(state, foreign)).isEqualTo(state);
     assertThat(saga.handle(state, foreign)).isEmpty();
+  }
+
+  @Test
+  void evolve_anotherOrdersEvent_isIgnoredWhateverRoutedItHere() {
+    // A router that sends every event to the saga of order o-2: evolve and handle compare the
+    // event with the ids the saga stores, so they do not depend on correlate being right.
+    var misrouting =
+        new OrderFulfillmentSaga() {
+          @Override
+          public Optional<SagaId> correlate(EventEnvelope event) {
+            return Optional.of(new SagaId("fulfillment-o-2"));
+          }
+        };
+    var awaitingConfirmation = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    var foreignConfirmation =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingConfirmation, foreignConfirmation))
+        .isEqualTo(awaitingConfirmation);
+
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    var foreignFailure =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
+    assertThat(misrouting.handle(awaitingPayment, foreignFailure)).isEmpty();
   }
 
   @Test
@@ -432,11 +462,11 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
-  // ---- PaymentFailed must actually cancel the order. A direct evolve-to-FAILED made the
-  // handle() FAILED branch unreachable, because SagaRunner.persistStatusFor returns before
-  // calling handle() once evolve() lands on a terminal SagaStatus. Fixed via a non-terminal
-  // CANCELLING intermediate: evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches
-  // CancelOrder, then evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
+  // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
+  // the CancelOrder dispatch unreachable, because SagaRunner skips handle() once evolve() lands
+  // on a terminal SagaStatus. Hence the non-terminal CANCELLING intermediate:
+  // evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches CancelOrder, then
+  // evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
 
   @Test
   void paymentFailed_evolvesToCancelling_andHandleEmitsCancelOrder() {

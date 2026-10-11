@@ -17,6 +17,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
+import org.streamrune.core.saga.LoadedSaga;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.saga.SagaStore;
@@ -41,7 +42,9 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *
  * <p>Two customers place an order each, and the saga of each order waits for its payment. The first
  * customer then confirms their own order with the second customer's saga id as the correlation id.
- * The second saga must still be waiting for its payment afterwards.
+ * The second saga must still be waiting for its payment afterwards, and its row must be the row
+ * that was stored: a row records every event the runner hands its saga, so an untouched row is what
+ * shows that the event was never routed there, whatever the saga would have made of it.
  *
  * <p><b>How the two sagas are kept waiting.</b> A fulfillment passes {@code AWAITING_PAYMENT} in
  * well under a second, so the test stores each saga's row in that state before the order is placed
@@ -117,6 +120,18 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
       // confirmation yet: it stays where it is too.
       assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("AWAITING_PAYMENT");
       assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
+
+      // A saga's row records every event the runner hands it, whatever the saga makes of it:
+      // each one raises the row's version and becomes its last applied offset. Bob's row is
+      // the row that was stored, and the event Alice's row applied last is her OrderConfirmed.
+      LoadedSaga<OrderFulfillmentState> bobRow = sagaRow(bobSaga);
+      assertThat(bobRow.version()).as("the version of Bob's saga row").isEqualTo(1);
+      assertThat(bobRow.lastAppliedOffset())
+          .as("the offset of the last event applied to Bob's saga row")
+          .isNull();
+      assertThat(sagaRow(aliceSaga).lastAppliedOffset())
+          .as("the offset of the last event applied to Alice's saga row")
+          .isEqualTo(offsetOf(OrderState.TYPE, aliceOrder, "OrderConfirmed"));
     } finally {
       sagaStore.delete(aliceSaga, FULFILLMENT);
       sagaStore.delete(bobSaga, FULFILLMENT);
@@ -174,6 +189,20 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
                         send("GET", "/api/orders/" + order, customer, "CUSTOMER", null, null)
                             .statusCode())
                     .isEqualTo(200));
+  }
+
+  /** The stored row of one fulfillment saga. */
+  private LoadedSaga<OrderFulfillmentState> sagaRow(SagaId sagaId) {
+    return sagaStore.load(sagaId, FULFILLMENT, OrderFulfillmentState.class).orElseThrow();
+  }
+
+  private long offsetOf(AggregateType type, String id, String eventType) {
+    return events(type, id).stream()
+        .filter(e -> e.eventType().name().equals(eventType))
+        .findFirst()
+        .orElseThrow()
+        .globalOffset()
+        .value();
   }
 
   private List<String> eventTypes(AggregateType type, String id) {
