@@ -29,7 +29,7 @@ import org.streamrune.ecommerce.queries.access.LiveFeed;
  *
  * <p><b>The feed is live.</b> A connection starts at the head of the global stream: it is sent
  * nothing that was stored before it connected and a frame for every event stored after it. The
- * reader the app runs for a client ends when that client leaves.
+ * place of a client that left is free again, and the feed's one reader ends with its last client.
  */
 @MicronautTest(transactional = false)
 class LiveFeedAccessIT extends AbstractIntegrationTest {
@@ -107,8 +107,9 @@ class LiveFeedAccessIT extends AbstractIntegrationTest {
   }
 
   @Test
-  void theReaderOfAClientThatLeftEnds() throws Exception {
-    // The reader of an earlier test's client ends with that client; wait for the last of them.
+  void thePlaceOfAClientThatLeftIsFreeAgain() throws Exception {
+    // The place of an earlier test's client is freed when that client has left; wait for the
+    // last of them.
     awaitOpenConnections(0);
 
     LiveFeedTestClient feed = new LiveFeedTestClient(server(), null, null);
@@ -117,14 +118,14 @@ class LiveFeedAccessIT extends AbstractIntegrationTest {
 
     feed.close();
 
-    // Nothing is stored in the meantime: the reader ends although the store stays quiet.
+    // Nothing is stored in the meantime: the place is freed although the store stays quiet.
     awaitOpenConnections(0);
   }
 
   /**
-   * Waits until the app runs the given number of feed readers. The server cancels the stream of a
-   * closed connection at once and the reader ends within its polling interval; the bound is the one
-   * the Spring app's test needs, two keep-alive intervals and a margin.
+   * Waits until the feed serves the given number of clients. The server cancels the stream of a
+   * closed connection at once and the reader forgets the client in its next round; the bound is the
+   * one the Spring app's test needs, two keep-alive intervals and a margin.
    */
   private void awaitOpenConnections(int expected) {
     await()

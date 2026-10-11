@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.subscription.BackPressureStrategy;
 import io.smallrye.mutiny.subscription.MultiEmitter;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -19,6 +20,7 @@ import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 
@@ -51,9 +53,15 @@ import org.streamrune.quarkus.StreamRuneRequestContextHolder;
  *
  * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
  * the client is connected and nothing of what the store held before, so no caller makes the app
- * read its history: {@link LiveFeed} reads, one reader per connection, and the reader ends when its
- * client leaves. The frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
- * receives every one of them.
+ * read its history. The frames are unnamed (no {@code event:} field), so {@code
+ * EventSource.onmessage} receives every one of them.
+ *
+ * <p><b>One reader, a bounded number of connections.</b> {@link LiveFeed} reads: one reader for the
+ * application asks the event store once per polling interval and hands every frame to every
+ * connected client, so what the feed costs the store does not grow with the number of connections.
+ * The reader runs while a client is connected. The feed has {@link LiveFeed#MAX_CONNECTIONS}
+ * places; the connection that would be one more is answered {@code 503 Service Unavailable} with
+ * {@code Retry-After} ({@link LiveFeedFullException}).
  */
 @Path("/api/events")
 @Produces(MediaType.APPLICATION_JSON)
@@ -66,8 +74,9 @@ public class EventExplorerController {
   @Inject ObjectMapper objectMapper;
   @Inject StreamRuneRequestContextHolder requestContext;
 
-  // One feed for the application: Quarkus REST keeps a single instance of a resource class.
-  private final LiveFeed liveFeed = new LiveFeed();
+  // One feed, and so one reader, for the application: Quarkus REST keeps a single instance of a
+  // resource class. Built once the event store is injected.
+  private LiveFeed liveFeed;
 
   @GET
   public List<Map<String, Object>> listEvents(
@@ -102,17 +111,25 @@ public class EventExplorerController {
    * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
    * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
-   * <p>Uses a bounded Mutiny emitter with back-pressure buffering: a client that reads too slowly
-   * has up to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that the stream fails and the
-   * client reconnects.
+   * <p>The place is taken before the answer starts: when the feed has none left, {@link
+   * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code LiveFeedFullExceptionMapper}
+   * answers {@code 503} with {@code Retry-After}. Taking a place and registering the client read
+   * nothing and wait for nothing, so this method is safe on the event loop it is called on; the
+   * store is read by the feed's own thread.
+   *
+   * <p>Uses a bounded Mutiny emitter with back-pressure buffering. The feed's reader hands a frame
+   * to the emitter and goes on to the next client; it never waits for this one. A client that reads
+   * too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that its stream fails,
+   * its place is free again and the client reconnects.
    */
   @GET
   @Path("/sse")
   @Produces(MediaType.SERVER_SENT_EVENTS)
   public Multi<OutboundSseEvent> sseStream() {
+    LiveFeed.Place place = liveFeed.admit();
     return Multi.createFrom()
         .<OutboundSseEvent>emitter(
-            emitter -> liveFeed.follow(eventStore, clientOf(emitter)), BackPressureStrategy.ERROR)
+            emitter -> place.follow(clientOf(emitter)), BackPressureStrategy.ERROR)
         .onOverflow()
         .buffer(SLOW_CLIENT_BUFFER);
   }
@@ -154,9 +171,25 @@ public class EventExplorerController {
     return liveFeed.openConnections();
   }
 
-  /** Ends the open feeds when the application stops. */
+  /** Whether the feed's reader runs: it does while a client is connected. */
+  public boolean feedReaderRuns() {
+    return liveFeed.isReading();
+  }
+
+  /** How many times the feed's reader has asked the event store. */
+  public long feedStoreReads() {
+    return liveFeed.storeReads();
+  }
+
+  /** Builds the feed when the application starts; its reader starts with the first client. */
+  @PostConstruct
+  public void openFeed() {
+    liveFeed = new LiveFeed(eventStore);
+  }
+
+  /** Completes the open feeds and ends the reader when the application stops. */
   @PreDestroy
-  void closeFeed() {
+  public void closeFeed() {
     liveFeed.close();
   }
 
