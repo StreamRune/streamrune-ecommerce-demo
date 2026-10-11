@@ -35,6 +35,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/circuit-breaker")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -54,6 +55,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/dead-letters")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -70,6 +72,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/admin/dead-letters?limit=10")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -83,6 +86,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/outbox")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -101,6 +105,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -121,6 +126,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -138,6 +144,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .post()
             .uri("/api/admin/payment-failure/toggle")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -153,6 +160,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/admin/payment-failure/toggle")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -167,6 +175,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/admin/dead-letters/" + unknownUuid + "/retry")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -199,7 +208,14 @@ class AdminControllerIT extends AbstractIntegrationTest {
           .exchange()
           .expectStatus()
           .isForbidden();
-      client.get().uri(path).header("X-User-Role", "ADMIN").exchange().expectStatus().isOk();
+      client
+          .get()
+          .uri(path)
+          .header("X-User-Id", "admin-1")
+          .header("X-User-Role", "ADMIN")
+          .exchange()
+          .expectStatus()
+          .isOk();
     }
     client.get().uri("/api/admin/health").exchange().expectStatus().isOk();
   }

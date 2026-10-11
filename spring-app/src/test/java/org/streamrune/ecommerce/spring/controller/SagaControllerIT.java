@@ -89,6 +89,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/saga/fulfillments")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -105,6 +106,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/saga/fulfillments?limit=5")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -116,6 +118,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/saga/fulfillments/nonexistent-saga-" + System.nanoTime())
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -159,6 +162,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/saga/fulfillments?limit=100")
+                      .header("X-User-Id", "admin-1")
                       .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
@@ -192,6 +196,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -214,6 +219,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
         client
             .post()
             .uri("/api/saga/fulfillments/any-saga-id/inject-failure")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -230,6 +236,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/saga/fulfillments/any-saga-id/inject-failure")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -280,6 +287,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/saga/fulfillments")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -287,6 +295,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/saga/fulfillments/fulfillment-any")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()

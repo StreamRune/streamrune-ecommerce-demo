@@ -66,7 +66,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/circuit-breaker").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/circuit-breaker")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
 
     assertThat(body).containsKey("state");
@@ -79,7 +81,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/dead-letters").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/dead-letters")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -91,7 +95,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/outbox").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/outbox")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -104,7 +110,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/payment-failure").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/payment-failure")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
     boolean initialFlag = (Boolean) initial.get("failureInjected");
 
@@ -115,6 +123,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
             .retrieve(
                 HttpRequest.POST("/api/admin/payment-failure/toggle", "")
                     .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
     boolean toggledFlag = (Boolean) afterToggle.get("failureInjected");
@@ -127,6 +136,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         .retrieve(
             HttpRequest.POST("/api/admin/payment-failure/toggle", "")
                 .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Id", "admin-1")
                 .header("X-User-Role", "ADMIN"),
             Argument.mapOf(String.class, Object.class));
   }
@@ -151,11 +161,13 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
     assertThat(
             statusOf(
                 HttpRequest.POST("/api/admin/payment-failure/toggle", "")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN")))
         .isEqualTo(200);
     assertThat(
             statusOf(
                 HttpRequest.POST("/api/admin/payment-failure/toggle", "")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN")))
         .isEqualTo(200);
 
@@ -165,6 +177,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
     assertThat(
             statusOf(
                 HttpRequest.POST("/api/admin/dead-letters/no-such-command/retry", "")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN")))
         .isEqualTo(404);
 
@@ -173,7 +186,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/outbox/failed").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/outbox/failed")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
     assertThat(failed).isEmpty();
 
@@ -203,7 +218,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
           client
               .toBlocking()
               .retrieve(
-                  HttpRequest.GET("/api/admin/outbox?limit=1000").header("X-User-Role", "ADMIN"),
+                  HttpRequest.GET("/api/admin/outbox?limit=1000")
+                      .header("X-User-Id", "admin-1")
+                      .header("X-User-Role", "ADMIN"),
                   Argument.listOf(Argument.mapOf(String.class, Object.class)));
       assertThat(pending).anySatisfy(e -> assertThat(e.get("id")).isEqualTo(pendingId));
       assertThat(pending).allSatisfy(e -> assertThat(e.get("status")).isEqualTo("PENDING"));
@@ -213,7 +230,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
           client
               .toBlocking()
               .retrieve(
-                  HttpRequest.GET("/api/admin/outbox/failed").header("X-User-Role", "ADMIN"),
+                  HttpRequest.GET("/api/admin/outbox/failed")
+                      .header("X-User-Id", "admin-1")
+                      .header("X-User-Role", "ADMIN"),
                   Argument.listOf(Argument.mapOf(String.class, Object.class)));
       assertThat(failed)
           .singleElement()
@@ -249,8 +268,8 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                 HttpRequest.POST(uri, reason)
                     .contentType(MediaType.APPLICATION_JSON)
                     .header("X-User-Role", "ADMIN")))
-        .as("no request identity (X-User-Id)")
-        .isEqualTo(400);
+        .as("the ADMIN role without an identity (X-User-Id) is nobody")
+        .isEqualTo(403);
     for (String body : new String[] {"", "null", "{}", "{\"reason\": \"   \"}"}) {
       assertThat(
               statusOf(
@@ -354,7 +373,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/saga/fulfillments").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/saga/fulfillments")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -371,6 +392,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                     .retrieve(
                         HttpRequest.GET(
                                 "/api/saga/fulfillments/does-not-exist-" + System.nanoTime())
+                            .header("X-User-Id", "admin-1")
                             .header("X-User-Role", "ADMIN")));
 
     assertThat(ex.getStatus().getCode()).isEqualTo(404);
@@ -382,7 +404,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/payment-failure").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/admin/payment-failure")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
     return (Boolean) state.get("failureInjected");
   }
@@ -399,6 +423,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
             .retrieve(
                 HttpRequest.POST("/api/saga/fulfillments/any-saga-id/inject-failure", "")
                     .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
 
@@ -409,6 +434,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
     assertThat(
             statusOf(
                 HttpRequest.POST("/api/saga/fulfillments/any-saga-id/inject-failure", "")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN")))
         .isEqualTo(200);
     assertThat(failureInjected()).isEqualTo(initial);
@@ -458,7 +484,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/audit/commands").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/audit/commands")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(rows).isNotNull();
@@ -478,7 +506,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/events")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -490,7 +520,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events?offset=0&limit=10").header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/events?offset=0&limit=10")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -523,7 +555,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/events/product/" + pid).header("X-User-Role", "ADMIN"),
+                HttpRequest.GET("/api/events/product/" + pid)
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(events).isNotEmpty();

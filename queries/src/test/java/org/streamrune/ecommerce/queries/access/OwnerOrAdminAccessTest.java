@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -125,8 +124,8 @@ class OwnerOrAdminAccessTest {
   @Test
   void aMissingRequestContextIsNobody() {
     assertNull(OwnerOrAdminAccess.identityOf(null));
-    assertFalse(OwnerOrAdminAccess.hasAdminRole(null));
     assertFalse(OwnerOrAdminAccess.isAdmin(null));
+    assertThrows(AccessRefusedException.class, () -> OwnerOrAdminAccess.requireAdmin(null));
     assertFalse(OwnerOrAdminAccess.mayAccessCustomer(null, "c-1"));
     assertFalse(OwnerOrAdminAccess.mayAccessOrder(null, ORDER_OF_C1));
     assertThrows(AccessRefusedException.class, () -> OwnerOrAdminAccess.requireIdentity(null));
@@ -143,23 +142,40 @@ class OwnerOrAdminAccessTest {
   }
 
   /**
-   * The role is one thing and an authenticated ADMIN another: the role entry alone answers {@link
-   * OwnerOrAdminAccess#hasAdminRole}, and a customer's data needs the identity with it.
+   * One definition of an ADMIN, for a customer's data and for the ADMIN-only endpoints alike: the
+   * role together with an identity. The role entry without an identity is nobody, and so is an
+   * identity without the role.
    */
-  @Test
-  void theAdminRoleWithoutAnIdentityIsNotAnAuthenticatedAdmin() {
-    StreamRuneContext.RequestContext roleOnly = requestContext(null, "ADMIN");
+  @ParameterizedTest(name = "caller={0} role={1} -> admin={2}")
+  @MethodSource("adminDecisions")
+  void anAdminIsTheRoleTogetherWithAnIdentity(String caller, String role, boolean admin) {
+    StreamRuneContext.RequestContext context = requestContext(caller, role);
 
-    assertTrue(OwnerOrAdminAccess.hasAdminRole(roleOnly));
-    assertFalse(OwnerOrAdminAccess.isAdmin(roleOnly));
+    assertEquals(admin, OwnerOrAdminAccess.isAdmin(context));
+    if (admin) {
+      assertDoesNotThrow(() -> OwnerOrAdminAccess.requireAdmin(context));
+    } else {
+      AccessRefusedException refused =
+          assertThrows(
+              AccessRefusedException.class, () -> OwnerOrAdminAccess.requireAdmin(context));
+      assertEquals("Required role: ADMIN", refused.getMessage());
+    }
+  }
 
-    StreamRuneContext.RequestContext operator = requestContext("ops-1", "ADMIN");
-    assertTrue(OwnerOrAdminAccess.hasAdminRole(operator));
-    assertTrue(OwnerOrAdminAccess.isAdmin(operator));
-
-    StreamRuneContext.RequestContext customer = requestContext("c-1", "CUSTOMER");
-    assertFalse(OwnerOrAdminAccess.hasAdminRole(customer));
-    assertFalse(OwnerOrAdminAccess.isAdmin(customer));
+  static Stream<Arguments> adminDecisions() {
+    return Stream.of(
+        // caller, role, admin
+        Arguments.of("ops-1", "ADMIN", true),
+        // The role without an identity: refused, on every endpoint.
+        Arguments.of(null, "ADMIN", false),
+        // An identity without the role.
+        Arguments.of("c-1", "CUSTOMER", false),
+        Arguments.of("c-1", NO_ROLE, false),
+        Arguments.of("c-1", "admin", false),
+        Arguments.of("c-1", "ADMIN,CUSTOMER", false),
+        // Neither.
+        Arguments.of(null, NO_ROLE, false),
+        Arguments.of(null, "CUSTOMER", false));
   }
 
   /**
@@ -172,7 +188,10 @@ class OwnerOrAdminAccessTest {
     StreamRuneContext.RequestContext customerWithAdminAuthority =
         requestContext("c-2", "CUSTOMER").withAuthority(adminAuthority);
 
-    assertFalse(OwnerOrAdminAccess.hasAdminRole(customerWithAdminAuthority));
+    assertFalse(OwnerOrAdminAccess.isAdmin(customerWithAdminAuthority));
+    assertThrows(
+        AccessRefusedException.class,
+        () -> OwnerOrAdminAccess.requireAdmin(customerWithAdminAuthority));
     assertFalse(OwnerOrAdminAccess.mayAccessCustomer(customerWithAdminAuthority, "c-1"));
     assertFalse(OwnerOrAdminAccess.mayAccessOrder(customerWithAdminAuthority, ORDER_OF_C1));
   }

@@ -145,6 +145,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/saga-dead-letters?limit=200")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -172,6 +173,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/admin/saga-dead-letters?limit=10")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -188,6 +190,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/sagas/faulted?limit=200")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -218,6 +221,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                 "/api/admin/saga-dead-letters/replay?sagaId={sagaId}&eventOffset={offset}",
                 sagaId.value(),
                 offset.value())
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -245,6 +249,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                 "/api/admin/saga-dead-letters/replay?sagaId={sagaId}&eventOffset={offset}",
                 "fulfillment-nonexistent-" + System.nanoTime(),
                 999999999L)
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -274,6 +279,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                 "/api/admin/saga-dead-letters?sagaId={sagaId}&eventOffset={offset}",
                 sagaId.value(),
                 offset.value())
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -317,6 +323,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                 "/api/admin/saga-dead-letters?sagaId={sagaId}&eventOffset={offset}",
                 sagaId.value(),
                 offset.value())
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -343,6 +350,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                 "/api/admin/saga-dead-letters?sagaId={sagaId}&eventOffset={offset}",
                 "fulfillment-nonexistent-" + System.nanoTime(),
                 888888888L)
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -408,6 +416,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .post()
             .uri("/api/admin/saga-dead-letters/replay-all?sagaId={sagaId}", sagaId.value())
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -538,6 +547,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .post()
             .uri(uri)
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()

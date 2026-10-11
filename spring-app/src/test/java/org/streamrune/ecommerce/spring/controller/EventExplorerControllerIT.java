@@ -44,6 +44,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/events")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -60,6 +61,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/events?offset=0&limit=5")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -81,6 +83,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/events?offset=0&limit=200")
+                      .header("X-User-Id", "admin-1")
                       .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
@@ -126,6 +129,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/events/product/" + pid)
+                      .header("X-User-Id", "admin-1")
                       .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
@@ -149,6 +153,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/events/product/nonexistent-stream-" + System.nanoTime())
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -166,6 +171,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/events/Order/x")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -173,6 +179,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/events/order-line/x")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -184,6 +191,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/events/o-1")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()

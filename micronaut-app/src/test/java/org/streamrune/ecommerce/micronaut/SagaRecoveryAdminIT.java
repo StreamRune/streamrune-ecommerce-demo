@@ -140,6 +140,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
     Map<String, Object> drained =
         exchange(
             HttpRequest.POST("/api/admin/saga-dead-letters/replay-all?sagaId=" + sagaId.value(), "")
+                .header("X-User-Id", "admin-1")
                 .header("X-User-Role", "ADMIN"));
     @SuppressWarnings("unchecked")
     List<String> outcomes = (List<String>) drained.get("outcomes");
@@ -191,6 +192,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
             .toBlocking()
             .retrieve(
                 HttpRequest.GET("/api/admin/sagas/faulted?limit=500")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN"),
                 Argument.listOf(String.class));
     assertThat(faulted).contains(sagaId.value());
@@ -200,6 +202,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
             .toBlocking()
             .retrieve(
                 HttpRequest.GET("/api/admin/saga-dead-letters?limit=500")
+                    .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
     assertThat(entries)
@@ -217,6 +220,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
                         + sagaId.value()
                         + "&eventOffset="
                         + offset.value())
+                .header("X-User-Id", "admin-1")
                 .header("X-User-Role", "ADMIN"));
     assertThat(discarded.get("discarded")).isEqualTo(true);
   }
@@ -355,7 +359,11 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
 
   private String postForOutcome(String path) {
     return (String)
-        exchange(HttpRequest.POST(path, "").header("X-User-Role", "ADMIN")).get("outcome");
+        exchange(
+                HttpRequest.POST(path, "")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN"))
+            .get("outcome");
   }
 
   private Map<String, Object> exchange(MutableHttpRequest<?> request) {

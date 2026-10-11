@@ -12,13 +12,14 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  * writes of customers and orders ({@code OwnerOrAdminQueries} for the reads, the command
  * controllers for the writes) and the per-stream SSE endpoint ({@link OwnerOrAdminStreamAccess}).
  * The {@code ADMIN}-only endpoints (the admin panel, the audit log, the event history, the saga
- * list) ask {@link #hasAdminRole}, so the demo has one definition of the role too.
+ * list, the product and inventory writes) ask {@link #requireAdmin}. Both go through {@link
+ * #isAdmin}, the demo's one definition of an {@code ADMIN}: the role together with an identity.
  *
  * <p><b>Who the caller is.</b> The request context the framework's request filter built for the
  * request. Its {@code userId()} is the caller's identity, {@code null} for a request without one.
- * {@code ADMIN} is the {@code role} entry of its baggage: the entry the request filter writes from
- * {@code X-User-Role}, and the one each app's {@code HeaderUserRoleResolver} resolves the caller's
- * authority from.
+ * The {@code ADMIN} role is the {@code role} entry of its baggage: the entry the request filter
+ * writes from {@code X-User-Role}, and the one each app's {@code HeaderUserRoleResolver} resolves
+ * the caller's authority from. A role without an identity is nobody, on every endpoint.
  *
  * <p><b>Who owns what.</b>
  *
@@ -54,36 +55,26 @@ public final class OwnerOrAdminAccess {
   }
 
   /**
-   * Whether the request carries the {@code ADMIN} role: the {@code role} entry of the request
-   * context's baggage equals {@code ADMIN}, exactly. This is the demo's only definition of the
-   * role. It says nothing about an identity; {@link #isAdmin} adds that.
-   *
-   * @param caller the request context of the request, or {@code null} when none is bound
-   */
-  public static boolean hasAdminRole(StreamRuneContext.RequestContext caller) {
-    return caller != null && ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
-  }
-
-  /**
-   * Refuses a request that does not carry the {@code ADMIN} role: the guard of the {@code
-   * ADMIN}-only endpoints.
-   *
-   * @throws AccessRefusedException unless {@link #hasAdminRole} holds
-   */
-  public static void requireAdminRole(StreamRuneContext.RequestContext caller) {
-    if (!hasAdminRole(caller)) {
-      throw new AccessRefusedException(ADMIN_REQUIRED);
-    }
-  }
-
-  /**
-   * Whether the caller is an authenticated {@code ADMIN}: a caller with an identity whose request
-   * carries the role. {@code X-User-Role: ADMIN} without an identity is nobody.
+   * Whether the caller is an {@code ADMIN}: a caller with an identity whose request carries the
+   * role, that is, whose {@code role} baggage entry equals {@code ADMIN} exactly. This is the
+   * demo's only definition of an {@code ADMIN}, asked for a customer's data and for the {@code
+   * ADMIN}-only endpoints alike. {@code X-User-Role: ADMIN} without an identity is nobody.
    *
    * @param caller the request context of the request, or {@code null} when none is bound
    */
   public static boolean isAdmin(StreamRuneContext.RequestContext caller) {
-    return identityOf(caller) != null && hasAdminRole(caller);
+    return identityOf(caller) != null && ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
+  }
+
+  /**
+   * Refuses a caller who is not an {@code ADMIN}: the guard of the {@code ADMIN}-only endpoints.
+   *
+   * @throws AccessRefusedException unless {@link #isAdmin} holds
+   */
+  public static void requireAdmin(StreamRuneContext.RequestContext caller) {
+    if (!isAdmin(caller)) {
+      throw new AccessRefusedException(ADMIN_REQUIRED);
+    }
   }
 
   /**
@@ -97,7 +88,7 @@ public final class OwnerOrAdminAccess {
   public static boolean mayAccessCustomer(
       StreamRuneContext.RequestContext caller, String customerId) {
     String identity = identityOf(caller);
-    return identity != null && (hasAdminRole(caller) || identity.equals(customerId));
+    return identity != null && (isAdmin(caller) || identity.equals(customerId));
   }
 
   /**
@@ -113,7 +104,7 @@ public final class OwnerOrAdminAccess {
     if (identity == null) {
       return false;
     }
-    return hasAdminRole(caller) || (order != null && identity.equals(order.customerId()));
+    return isAdmin(caller) || (order != null && identity.equals(order.customerId()));
   }
 
   /**

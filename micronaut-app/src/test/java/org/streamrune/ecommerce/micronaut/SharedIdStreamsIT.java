@@ -27,7 +27,9 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
   private List<Map> events(String path) {
     return client
         .toBlocking()
-        .retrieve(HttpRequest.GET(path).header("X-User-Role", "ADMIN"), Argument.listOf(Map.class));
+        .retrieve(
+            HttpRequest.GET(path).header("X-User-Id", "admin-1").header("X-User-Role", "ADMIN"),
+            Argument.listOf(Map.class));
   }
 
   private List<String> eventTypes(List<Map> events) {
@@ -82,7 +84,9 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
                 client
                     .toBlocking()
                     .exchange(
-                        HttpRequest.GET("/api/events/Order/x").header("X-User-Role", "ADMIN")));
+                        HttpRequest.GET("/api/events/Order/x")
+                            .header("X-User-Id", "admin-1")
+                            .header("X-User-Role", "ADMIN")));
     assertThat(badType.getStatus().getCode()).isEqualTo(HttpStatus.BAD_REQUEST.getCode());
 
     var singleSegment =
@@ -91,7 +95,10 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
             () ->
                 client
                     .toBlocking()
-                    .exchange(HttpRequest.GET("/api/events/o-1").header("X-User-Role", "ADMIN")));
+                    .exchange(
+                        HttpRequest.GET("/api/events/o-1")
+                            .header("X-User-Id", "admin-1")
+                            .header("X-User-Role", "ADMIN")));
     assertThat(singleSegment.getStatus().getCode()).isEqualTo(HttpStatus.NOT_FOUND.getCode());
 
     assertThat(events("/api/events/order/no-such-order")).isEmpty();

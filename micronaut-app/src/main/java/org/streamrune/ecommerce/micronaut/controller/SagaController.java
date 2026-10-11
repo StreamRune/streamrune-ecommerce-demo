@@ -33,7 +33,7 @@ public class SagaController {
   @Get
   public List<Map<String, Object>> listSagas(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =
@@ -58,7 +58,7 @@ public class SagaController {
 
   @Get("/{id}")
   public HttpResponse<Map<String, Object>> getSaga(@PathVariable String id) {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     TypeReference<Map<String, Object>> typeRef = new TypeReference<>() {};
     return sagaStore
         .load(
@@ -79,7 +79,7 @@ public class SagaController {
    */
   @Post("/{id}/inject-failure")
   public Map<String, Boolean> injectFailure(@PathVariable String id) {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);

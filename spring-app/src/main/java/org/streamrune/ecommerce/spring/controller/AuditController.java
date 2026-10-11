@@ -24,7 +24,7 @@ public class AuditController {
 
   @GetMapping("/commands")
   public List<Map<String, Object>> commandAuditLog(@RequestParam(defaultValue = "100") int limit) {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =

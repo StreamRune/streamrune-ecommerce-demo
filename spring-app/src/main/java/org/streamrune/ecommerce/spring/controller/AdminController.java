@@ -125,16 +125,14 @@ public class AdminController {
    * Skips one FAILED entry: it will never be delivered; the row records who, when and why, and the
    * aggregate's later entries are claimable on the next poll. {@code skippedBy} is the request
    * identity the framework filter resolved ({@code X-User-Id} in this demo's trusted-gateway mode)
-   * — never a header this controller reads itself; 400 when no identity is bound.
+   * — never a header this controller reads itself. An ADMIN always has one: {@code requireAdmin()}
+   * refuses a caller without an identity.
    */
   @PostMapping("/outbox/failed/{id}/skip")
   public Map<String, String> skipFailedOutboxEntry(
       @PathVariable String id, @RequestBody SkipRequest request) {
     requireAdmin();
     String by = currentUserId();
-    if (by == null) {
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "no request identity (X-User-Id)");
-    }
     if (request.reason() == null || request.reason().isBlank()) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason is required");
     }
@@ -151,23 +149,24 @@ public class AdminController {
     return r;
   }
 
-  /** Request identity; null when none is bound. */
+  /** The request identity: the ADMIN who is calling, once {@code requireAdmin()} has passed. */
   private static String currentUserId() {
     return OwnerOrAdminAccess.identityOf(RequestCaller.current());
   }
 
   /**
-   * Answers {@code 403} unless the request carries the ADMIN role ({@code
-   * OwnerOrAdminAccess#hasAdminRole}, the demo's one definition of it). Every route of this
-   * controller but {@code /health} asks: the reads show operational state and, in the dead-letter
-   * and outbox lists, payloads of other people's commands and events.
+   * Answers {@code 403} unless the caller is an ADMIN: a caller with an identity whose request
+   * carries the ADMIN role ({@code OwnerOrAdminAccess#isAdmin}, the demo's one definition of it).
+   * Every route of this controller but {@code /health} asks: the reads show operational state and,
+   * in the dead-letter and outbox lists, payloads of other people's commands and events.
    *
-   * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
-   * X-User-Role (copied into the context baggage by the framework filter). It is checked here so
-   * the tutorial does not model an admin surface anyone can call; a real deployment authenticates.
+   * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the identity and the role are whatever
+   * the client sent in X-User-Id and X-User-Role (the framework filter puts them into the request
+   * context). They are checked here so the tutorial does not model an admin surface anyone can
+   * call; a real deployment authenticates.
    */
   private static void requireAdmin() {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
   }
 
   /**
