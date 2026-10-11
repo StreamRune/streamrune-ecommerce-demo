@@ -1883,7 +1883,7 @@ Example response:
     "sagaId": "fulfillment-o-100",
     "sagaType": "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState",
     "status": "COMPLETED",
-    "state": "{\"sagaId\":{\"value\":\"fulfillment-o-100\"},\"orderId\":\"o-100\",...}"
+    "state": "{\"sagaId\": \"fulfillment-o-100\", \"orderId\": \"o-100\", ...}"
   }
 ]
 ```

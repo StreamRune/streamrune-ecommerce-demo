@@ -276,7 +276,7 @@ If you are running the demo manually (not via Docker Compose), seed data is crea
 
 ### Step 3: Register a Customer — Observe Encrypted PII
 
-In the Admin role, open the Customers page and register a new customer (use `cust-walkthrough` to avoid colliding with the `cust-alice` seed account from `SeedDataRunner`):
+Register a new customer as an `ADMIN`. The walkthrough sends the request with `curl` and an id of its own, `cust-walkthrough`, so that the later steps can name the customer and it does not collide with the `cust-alice` seed account from `SeedDataRunner`. The **Register Customer** dialog of the Customers page sends the same request with an id it generates (`cust-` and eight hex digits, shown in the toast and in the table's ID column):
 
 ```bash
 curl -s -X POST http://localhost:8080/api/customers \
@@ -366,7 +366,7 @@ curl -s "http://localhost:8080/api/products" | jq .
 
 The response comes from the `QueryBus` (with caching from Chapter 5). The first call executes the query against the projection. A second call within the cache TTL is served entirely from memory — no SQL executed.
 
-Switch to the Products page in the frontend. Both products are listed next to the three seeded ones. The SSE live feed on the Dashboard already shows two `ProductCreated` events.
+Switch to the Products page in the frontend. Both products are listed next to the three seeded ones. The SSE live feed on the Dashboard already shows two `ProductCreated` events. The page's **Add Product** dialog sends the same request with a generated id (`prod-` and eight hex digits); a product created either way has no inventory until a shipment is received for it (**Receive Shipment** in the row's menu, `POST /api/inventory/{id}/receive`), and the saga cancels an order for it until then.
 
 ### Step 5: Place an Order — Watch the Saga
 
@@ -385,6 +385,8 @@ curl -s -X POST http://localhost:8080/api/orders \
     ]
   }' | jq .
 ```
+
+The Orders page's **Place Order** dialog sends the same request for the persona it acts as: it generates the `orderId` (`order-` and eight hex digits) and takes each line's `unitPrice` from the product picked.
 
 The `OrderDecider` appends `OrderPlaced`. From there the order-fulfillment saga (Chapter 11) runs all the way to completion, driven by three polling subscriptions cooperating through correlation ids:
 
