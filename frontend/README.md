@@ -78,12 +78,16 @@ A write action sends the request the backend's controller reads, field for field
   `order-`, `cust-` or `prod-` and eight hex digits (`src/lib/ids.ts`). The toast of a successful
   action shows it.
 - **An order line carries its unit price**: the price of the product picked, as the catalogue
-  lists it.
+  lists it. The backend accepts the price it is sent (a demo shortcut, see the repository README).
+- **Cancel is offered for a confirmed order too**, and says what it does there: the order becomes
+  `CANCELLED`, the payment stays captured and the stock stays reserved. The demo has no refund
+  flow for an order whose fulfillment is complete.
 - **A command is answered before the lists show it.** The backend answers `200` with an empty
   body once the events are stored; the read models follow by up to the projections' polling
   interval (five seconds and up to one of jitter by default). The page therefore reads a list
-  again at once and once more seven seconds after the last change (`src/lib/read-model-sync.ts`),
-  so a placed order appears in the table by itself, a few seconds after its toast.
+  again at once and 2, 7, 15 and 30 seconds after the last change (`src/lib/read-model-sync.ts`),
+  so a placed order appears in the table by itself, a few seconds after its toast, and a read
+  model that is late still shows up. A burst of feed frames is answered by one read per list.
 
 An action is offered to the roles the backend accepts it from (`src/lib/permissions.ts`). A
 request the backend refuses is shown in a toast with the backend's reason: "Not allowed for the
@@ -115,8 +119,10 @@ The Playwright tests start the dev server themselves, or use the one already run
   `writes.live.spec.ts` then performs each write through the pages against the backend — register
   a customer, place and cancel an order, ship and deliver, create a product and change its price
   and stock, receive a shipment, the payment-failure switch, edit, export and forget — and asserts
-  the result through the pages. It registers a customer of its own and leaves the seed data as it
-  is, apart from the units of the seeded Widget its orders take.
+  the result through the pages. It brings what it consumes: a customer it registers and a product
+  it creates and stocks through the API before the first test, so it changes no seed data and
+  passes run after run on the same database. Each run leaves a forgotten customer, two products
+  and four orders with their events behind.
 
 CI runs both: the suite without a backend in its own job, and the suite against the Docker
 Compose stack of the Quick Start (`E2E_REUSE_SERVER=1` points Playwright at the frontend

@@ -92,7 +92,7 @@ docker compose up -d postgres rabbitmq
 
 All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing).
 
-> **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md).
+> **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md). The price of an order line is a shortcut of the same kind: `POST /api/orders` takes `unitPrice` from the request and checks only that it is positive, where a real shop reads the price from its own catalogue.
 
 ### Who may call what
 
@@ -129,7 +129,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 |--------|------|-------------|-----|
 | `POST` | `/api/orders` | Place order | `ADMIN`, or the customer the order names in `customerId` |
 | `POST` | `/api/orders/{id}/confirm` | Confirm order (the fulfillment saga does this itself) | `ADMIN` or the order's customer |
-| `POST` | `/api/orders/{id}/cancel` | Cancel order | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not delivered; a confirmed order becomes `CANCELLED` and keeps its captured payment and its reserved stock (the demo has no refund flow after the saga completed) | `ADMIN` or the order's customer |
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
 | `GET` | `/api/orders/{id}` | Get order | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
