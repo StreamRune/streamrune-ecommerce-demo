@@ -31,7 +31,10 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     url: "http://localhost:3000",
-    reuseExistingServer: !process.env.CI,
+    // Locally a dev server that is already running is used as it is. In CI the suite starts its
+    // own, unless E2E_REUSE_SERVER=1 says that the frontend under test is already up at the URL
+    // (the Docker Compose stack of the README's Quick Start).
+    reuseExistingServer: !process.env.CI || process.env.E2E_REUSE_SERVER === "1",
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
