@@ -138,6 +138,53 @@ test.describe("Orders — the commands the page sends", () => {
     expect(sent[0].body?.reason).toBeTruthy();
   });
 
+  test("Cancel says what it leaves behind for a confirmed order, and only for one", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/orders", [
+      order("order-a0", "CREATED"),
+      order("order-a1", "CONFIRMED"),
+    ]);
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    const row = (orderId: string) => page.getByRole("row").filter({ hasText: orderId });
+    const dialog = page.getByRole("dialog");
+    const note = dialog.getByRole("note");
+
+    await row("order-a1").getByRole("button", { name: "Cancel" }).click();
+    await expect(note).toContainText("its payment is captured and its stock is reserved");
+    await expect(note).toContainText(
+      "The demo does not refund the payment and does not release the reservation."
+    );
+    await dialog.getByRole("button", { name: "Close" }).first().click();
+    await expect(dialog).toHaveCount(0);
+
+    // An order the saga has not confirmed holds no payment and no stock yet: nothing to say.
+    await row("order-a0").getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog.getByText("Are you sure you want to cancel order")).toBeVisible();
+    await expect(note).toHaveCount(0);
+  });
+
+  test("an id is sent as one path segment, whatever characters it holds", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/orders", [order("order a/1?x", "CONFIRMED")]);
+    const paths: string[] = [];
+    await page.route(`${BACKEND_URL}/api/orders/**`, (route) => {
+      paths.push(new URL(route.request().url()).pathname);
+      return route.fulfill({ status: 200, body: "" });
+    });
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel Order" }).click();
+
+    await expect(page.getByText("Order cancelled")).toBeVisible();
+    expect(paths).toEqual(["/api/orders/order%20a%2F1%3Fx/cancel"]);
+  });
+
   test("Confirm, Ship and Deliver send no body; Ship and Deliver are an ADMIN's", async ({
     page,
   }) => {
@@ -539,6 +586,59 @@ test.describe("A refused command is shown", () => {
       )
     ).toBeVisible();
     await expect(page.getByText("Order cancelled")).toHaveCount(0);
+  });
+
+  test("a forget that stopped part-way says what is left and what to do", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/customers", [ALICE]);
+    // The backend's answer when a purger failed after the key was deleted: 500 with the result.
+    await answerCommands(page, "/api/customers/cust-alice/forget", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          keyDeleted: true,
+          fullyErased: false,
+          failedPurgers: ["customers_view"],
+        }),
+      })
+    );
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/customers");
+    await pickRowAction(page, "Forget (GDPR)");
+    await page.getByRole("dialog").getByRole("button", { name: "Forget Customer" }).click();
+
+    await expect(
+      page.getByText(
+        "API error 500: The erasure is not complete: the key is deleted, a copy is left in: customers_view. Send Forget again."
+      )
+    ).toBeVisible();
+    await expect(page.getByText("Customer forgotten (GDPR)")).toHaveCount(0);
+  });
+
+  test("an id that cannot be generated is reported, and no request is sent", async ({ page }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/customers");
+    await actAs(page, "ADMIN");
+    // A page opened over plain http under another host name has no crypto.randomUUID.
+    await page.addInitScript(() => {
+      Object.defineProperty(window.crypto, "randomUUID", {
+        value: () => {
+          throw new Error("crypto.randomUUID is not available here");
+        },
+      });
+    });
+
+    await page.goto("/customers");
+    await page.getByRole("button", { name: "Register Customer" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Carol White");
+    await dialog.getByLabel("Email").fill("carol@example.com");
+    await dialog.getByRole("button", { name: "Register" }).click();
+
+    await expect(page.getByText("crypto.randomUUID is not available here")).toBeVisible();
+    expect(sent).toHaveLength(0);
   });
 
   test("a 400 shows the backend's reason", async ({ page }) => {

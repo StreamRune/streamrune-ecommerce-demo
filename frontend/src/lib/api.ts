@@ -71,6 +71,7 @@ async function refusalDetail(res: Response): Promise<string> {
   if ((res.headers.get("content-type") ?? "").includes("json")) {
     try {
       const body = JSON.parse(text) as Record<string, unknown>;
+      if (body.fullyErased === false) return describeUnfinishedErasure(body);
       const detail = body.message ?? body.detail ?? body.error;
       if (typeof detail === "string" && detail) return detail;
     } catch {
@@ -78,6 +79,23 @@ async function refusalDetail(res: Response): Promise<string> {
     }
   }
   return text || res.statusText;
+}
+
+/**
+ * What the answer of a forget that stopped part-way says (`500` with the
+ * `ForgetResult`): whether the customer's key is gone, and which read models
+ * still hold a copy. Sending the request again finishes the erasure.
+ */
+function describeUnfinishedErasure(result: Record<string, unknown>): string {
+  const key = result.keyDeleted === true ? "the key is deleted" : "the key is not deleted";
+  const left = Array.isArray(result.failedPurgers) ? result.failedPurgers.join(", ") : "";
+  const copies = left ? `, a copy is left in: ${left}` : "";
+  return `The erasure is not complete: ${key}${copies}. Send Forget again.`;
+}
+
+/** One segment of a request path: an id as the backend's path variable reads it. */
+function segment(id: string): string {
+  return encodeURIComponent(id);
 }
 
 async function apiFetch<T>(
@@ -119,7 +137,7 @@ export function fetchProducts(): Promise<ProductView[]> {
 }
 
 export function fetchProduct(productId: string): Promise<ProductView> {
-  return apiFetch(`/api/products/${productId}`);
+  return apiFetch(`/api/products/${segment(productId)}`);
 }
 
 /** `POST /api/products`: the id is the client's to pick, the price a plain USD amount. */
@@ -139,16 +157,16 @@ export function adjustStock(
   productId: string,
   body: { quantity: number; reason?: string }
 ): Promise<void> {
-  return apiCommand(`/api/products/${productId}/stock`, "PUT", body);
+  return apiCommand(`/api/products/${segment(productId)}/stock`, "PUT", body);
 }
 
 /** `PUT /api/products/{id}/price`: the new price as a plain USD amount. */
 export function updatePrice(productId: string, body: { price: number }): Promise<void> {
-  return apiCommand(`/api/products/${productId}/price`, "PUT", body);
+  return apiCommand(`/api/products/${segment(productId)}/price`, "PUT", body);
 }
 
 export function discontinueProduct(productId: string): Promise<void> {
-  return apiCommand(`/api/products/${productId}/discontinue`, "POST");
+  return apiCommand(`/api/products/${segment(productId)}/discontinue`, "POST");
 }
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
@@ -162,7 +180,7 @@ export function receiveShipment(
   productId: string,
   body: { quantity: number }
 ): Promise<void> {
-  return apiCommand(`/api/inventory/${productId}/receive`, "POST", body);
+  return apiCommand(`/api/inventory/${segment(productId)}/receive`, "POST", body);
 }
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
@@ -173,7 +191,7 @@ export function fetchOrders(customerId?: string): Promise<OrderView[]> {
 }
 
 export function fetchOrder(orderId: string): Promise<OrderView> {
-  return apiFetch(`/api/orders/${orderId}`);
+  return apiFetch(`/api/orders/${segment(orderId)}`);
 }
 
 /**
@@ -189,20 +207,20 @@ export function placeOrder(body: {
 }
 
 export function confirmOrder(orderId: string): Promise<void> {
-  return apiCommand(`/api/orders/${orderId}/confirm`, "POST");
+  return apiCommand(`/api/orders/${segment(orderId)}/confirm`, "POST");
 }
 
 export function shipOrder(orderId: string): Promise<void> {
-  return apiCommand(`/api/orders/${orderId}/ship`, "POST");
+  return apiCommand(`/api/orders/${segment(orderId)}/ship`, "POST");
 }
 
 export function deliverOrder(orderId: string): Promise<void> {
-  return apiCommand(`/api/orders/${orderId}/deliver`, "POST");
+  return apiCommand(`/api/orders/${segment(orderId)}/deliver`, "POST");
 }
 
 /** `POST /api/orders/{id}/cancel`: the body is required and holds the reason. */
 export function cancelOrder(orderId: string, reason: string): Promise<void> {
-  return apiCommand(`/api/orders/${orderId}/cancel`, "POST", { reason });
+  return apiCommand(`/api/orders/${segment(orderId)}/cancel`, "POST", { reason });
 }
 
 // ─── Customers ───────────────────────────────────────────────────────────────
@@ -212,7 +230,7 @@ export function fetchCustomers(): Promise<CustomerView[]> {
 }
 
 export function fetchCustomer(customerId: string): Promise<CustomerView> {
-  return apiFetch(`/api/customers/${customerId}`);
+  return apiFetch(`/api/customers/${segment(customerId)}`);
 }
 
 /**
@@ -234,11 +252,11 @@ export function updateProfile(
   customerId: string,
   body: { name?: string; email?: string; address?: string; phone?: string }
 ): Promise<void> {
-  return apiCommand(`/api/customers/${customerId}`, "PUT", body);
+  return apiCommand(`/api/customers/${segment(customerId)}`, "PUT", body);
 }
 
 export function exportData(customerId: string): Promise<void> {
-  return apiCommand(`/api/customers/${customerId}/export-data`, "POST");
+  return apiCommand(`/api/customers/${segment(customerId)}/export-data`, "POST");
 }
 
 /**
@@ -247,7 +265,7 @@ export function exportData(customerId: string): Promise<void> {
  * which arrives here as an ApiError and is repeated by sending it again.
  */
 export function forgetCustomer(customerId: string): Promise<ForgetResult> {
-  return apiFetch(`/api/customers/${customerId}/forget`, { method: "POST" });
+  return apiFetch(`/api/customers/${segment(customerId)}/forget`, { method: "POST" });
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
@@ -264,7 +282,7 @@ export function fetchStreamEvents(
   aggregateId: string,
 ): Promise<EventEntry[]> {
   return apiFetch(
-    `/api/events/${encodeURIComponent(aggregateType)}/${encodeURIComponent(aggregateId)}`,
+    `/api/events/${segment(aggregateType)}/${segment(aggregateId)}`,
   );
 }
 
@@ -286,7 +304,7 @@ export function fetchDeadLetters(): Promise<DeadLetterEntry[]> {
 
 /** `POST /api/admin/dead-letters/{commandId}/retry`: `404` when the entry is gone. */
 export function retryDeadLetter(commandId: string): Promise<void> {
-  return apiCommand(`/api/admin/dead-letters/${encodeURIComponent(commandId)}/retry`, "POST");
+  return apiCommand(`/api/admin/dead-letters/${segment(commandId)}/retry`, "POST");
 }
 
 export function fetchOutbox(): Promise<OutboxEntry[]> {
@@ -316,12 +334,12 @@ export function fetchSagaList(limit = 50): Promise<SagaListEntry[]> {
 }
 
 export function fetchSaga(id: string): Promise<OrderFulfillmentState> {
-  return apiFetch(`/api/saga/fulfillments/${id}`);
+  return apiFetch(`/api/saga/fulfillments/${segment(id)}`);
 }
 
 /** Flips the same switch as `togglePaymentFailure`; the saga id is not used by the backend. */
 export function injectSagaFailure(id: string): Promise<PaymentFailureState> {
-  return apiFetch(`/api/saga/fulfillments/${id}/inject-failure`, {
+  return apiFetch(`/api/saga/fulfillments/${segment(id)}/inject-failure`, {
     method: "POST",
   });
 }

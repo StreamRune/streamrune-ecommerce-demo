@@ -101,8 +101,8 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
       toast.error("Add at least one product line");
       return;
     }
-    const orderId = newId("order");
     try {
+      const orderId = newId("order");
       await mutateAsync({ orderId, customerId, lines: orderLines });
       toast.success(`Order placed: ${orderId}`);
       setOpen(false);
@@ -201,7 +201,16 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
 
 // ─── Cancel Dialog ────────────────────────────────────────────────────────────
 
-function CancelOrderDialog({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+function CancelOrderDialog({
+  orderId,
+  confirmed,
+  onClose,
+}: {
+  orderId: string;
+  /** The order is CONFIRMED: the fulfillment saga has captured its payment and reserved its stock. */
+  confirmed: boolean;
+  onClose: () => void;
+}) {
   const [reason, setReason] = useState("");
   const { mutateAsync, isPending } = useCancelOrder();
 
@@ -225,6 +234,13 @@ function CancelOrderDialog({ orderId, onClose }: { orderId: string; onClose: () 
         Are you sure you want to cancel order <span className="font-mono">{orderId}</span>? This
         action cannot be undone.
       </p>
+      {confirmed && (
+        <p className="text-sm text-amber-700 dark:text-amber-400" role="note">
+          This order is confirmed: its payment is captured and its stock is reserved. Cancelling
+          sets its status to CANCELLED and does nothing else. The demo does not refund the
+          payment and does not release the reservation.
+        </p>
+      )}
       <div className="space-y-1">
         <Label htmlFor="co-reason">Reason (optional)</Label>
         <Input id="co-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
@@ -295,9 +311,12 @@ function OrderRow({ order }: { order: OrderView }) {
                 </Button>
               </PermissionGate>
             )}
-            {/* The backend accepts a cancel for any order that is not delivered, and the
-                fulfillment saga confirms a placed order within seconds: the page offers Cancel
-                for an order that is not shipped yet, confirmed or not. */}
+            {/* The backend accepts a cancel for any order that is not delivered, from the order's
+                customer or an ADMIN, and the fulfillment saga confirms a placed order within
+                seconds: the page offers Cancel for an order that is not shipped yet, confirmed
+                or not. A cancel of a confirmed order changes the order's status and nothing
+                else: the saga is complete by then, so no refund and no release of the stock
+                follow. The dialog says so before the customer decides. */}
             {(order.status === "CREATED" || order.status === "CONFIRMED") && (
               <PermissionGate permission="ORDER_CONFIRM_CANCEL">
                 <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
@@ -333,7 +352,11 @@ function OrderRow({ order }: { order: OrderView }) {
       )}
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
         <DialogContent>
-          <CancelOrderDialog orderId={order.orderId} onClose={() => setCancelOpen(false)} />
+          <CancelOrderDialog
+            orderId={order.orderId}
+            confirmed={order.status === "CONFIRMED"}
+            onClose={() => setCancelOpen(false)}
+          />
         </DialogContent>
       </Dialog>
     </>

@@ -65,8 +65,8 @@ function CreateProductDialog() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     // The backend takes the product id from the request and the price as a plain USD amount.
-    const productId = newId("prod");
     try {
+      const productId = newId("prod");
       await mutateAsync({
         productId,
         name,

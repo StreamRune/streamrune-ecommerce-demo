@@ -58,8 +58,8 @@ function RegisterCustomerDialog() {
     e.preventDefault();
     // The backend takes the customer id from the request. An ADMIN may register any id; the
     // page offers this dialog to the ADMIN role only.
-    const customerId = newId("cust");
     try {
+      const customerId = newId("cust");
       await mutateAsync({ customerId, name, email, address, phone });
       toast.success(`Customer registered: ${customerId}`);
       setOpen(false);
