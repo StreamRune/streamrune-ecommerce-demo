@@ -15,6 +15,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 
@@ -34,12 +35,13 @@ import org.streamrune.quarkus.StreamRuneRequestContextHolder;
  * the two headers. A real deployment authenticates the caller, derives the role from that identity,
  * and does not expose raw event payloads outside an operator's tooling.
  *
- * <p><b>The live feed is open and carries no payload.</b> The browser's {@code EventSource} cannot
- * send the role header, and the dashboard only needs to know that something happened to a stream. A
- * frame holds the event's global offset, its type, the stream it belongs to, its version in that
- * stream and its timestamp, never the event itself. Every caller therefore sees which streams
- * exist, customer ids and order ids among them, and which events happen on them when: the ids are
- * public here, the data behind them is not.
+ * <p><b>The live feed is open and names no stream.</b> The browser's {@code EventSource} cannot
+ * send the two headers, so the feed cannot ask who is calling and every connection is anonymous. A
+ * frame is a {@link LiveFeedFrame}: the event's global offset, the type of its aggregate, the event
+ * type and the timestamp. It holds no stream id, no aggregate id and no payload, for an {@code
+ * ADMIN} as for everyone else, so no caller learns a customer id or an order id from it: the feed
+ * says that a customer registered or an order was placed, and when, not which one. A view that
+ * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
  * <p>Same paths, response shape and frame format as the Spring app's {@code
  * EventExplorerController}. The feed reads the global stream from its first event and then polls
@@ -82,9 +84,8 @@ public class EventExplorerController {
    * The live feed: every event of the global stream as a Server-Sent Event, open to every caller.
    *
    * <p>Frame wire format (matching Spring): {@code id} = globalOffset, no {@code event} name,
-   * {@code data} = JSON map
-   * (globalOffset/streamId/aggregateType/aggregateId/eventType/version/timestamp), without the
-   * event's payload.
+   * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
+   * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
    * <p>Uses a bounded Mutiny emitter with back-pressure buffering: slow clients will have up to 256
    * events buffered; beyond that the stream fails and the client must reconnect.
@@ -106,7 +107,7 @@ public class EventExplorerController {
                             var events = eventStore.readGlobalStream(offset, 100);
                             for (var env : events) {
                               if (emitter.isCancelled()) break;
-                              var data = objectMapper.writeValueAsString(toFrame(env));
+                              var data = objectMapper.writeValueAsString(LiveFeedFrame.of(env));
                               emitter.emit(
                                   new SseEventFrame(
                                       String.valueOf(env.globalOffset().value()), data));
@@ -131,21 +132,6 @@ public class EventExplorerController {
             BackPressureStrategy.ERROR)
         .onOverflow()
         .buffer(256);
-  }
-
-  /**
-   * What the live feed says about an event: which one, of which stream, and when. No payload — the
-   * feed is open to every caller.
-   */
-  private static Map<String, Object> toFrame(EventEnvelope env) {
-    return Map.of(
-        "globalOffset", env.globalOffset().value(),
-        "streamId", env.streamId().value(),
-        "aggregateType", env.aggregateType().value(),
-        "aggregateId", env.aggregateId().value(),
-        "eventType", env.eventType().name(),
-        "version", env.version().value(),
-        "timestamp", env.metadata().timestamp().toString());
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {

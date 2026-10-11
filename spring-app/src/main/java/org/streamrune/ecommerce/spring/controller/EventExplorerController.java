@@ -13,6 +13,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
@@ -33,12 +34,13 @@ import reactor.core.publisher.Sinks;
  * the two headers. A real deployment authenticates the caller, derives the role from that identity,
  * and does not expose raw event payloads outside an operator's tooling.
  *
- * <p><b>The live feed is open and carries no payload.</b> The browser's {@code EventSource} cannot
- * send the role header, and the dashboard only needs to know that something happened to a stream. A
- * frame holds the event's global offset, its type, the stream it belongs to, its version in that
- * stream and its timestamp, never the event itself. Every caller therefore sees which streams
- * exist, customer ids and order ids among them, and which events happen on them when: the ids are
- * public here, the data behind them is not.
+ * <p><b>The live feed is open and names no stream.</b> The browser's {@code EventSource} cannot
+ * send the two headers, so the feed cannot ask who is calling and every connection is anonymous. A
+ * frame is a {@link LiveFeedFrame}: the event's global offset, the type of its aggregate, the event
+ * type and the timestamp. It holds no stream id, no aggregate id and no payload, for an {@code
+ * ADMIN} as for everyone else, so no caller learns a customer id or an order id from it: the feed
+ * says that a customer registered or an order was placed, and when, not which one. A view that
+ * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
  * <p>The feed reads the global stream from its first event and then polls once a second. Its frames
  * are unnamed (no {@code event:} field), so {@code EventSource.onmessage} receives every one of
@@ -90,7 +92,7 @@ public class EventExplorerController {
                 try {
                   var events = eventStore.readGlobalStream(offset, 100);
                   for (var env : events) {
-                    var data = objectMapper.writeValueAsString(toFrame(env));
+                    var data = objectMapper.writeValueAsString(LiveFeedFrame.of(env));
                     sink.tryEmitNext(
                         ServerSentEvent.<String>builder()
                             .id(String.valueOf(env.globalOffset().value()))
@@ -113,21 +115,6 @@ public class EventExplorerController {
             });
 
     return sink.asFlux();
-  }
-
-  /**
-   * What the live feed says about an event: which one, of which stream, and when. No payload — the
-   * feed is open to every caller.
-   */
-  private static Map<String, Object> toFrame(EventEnvelope env) {
-    return Map.of(
-        "globalOffset", env.globalOffset().value(),
-        "streamId", env.streamId().value(),
-        "aggregateType", env.aggregateType().value(),
-        "aggregateId", env.aggregateId().value(),
-        "eventType", env.eventType().name(),
-        "version", env.version().value(),
-        "timestamp", env.metadata().timestamp().toString());
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {

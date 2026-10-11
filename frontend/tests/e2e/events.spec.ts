@@ -2,9 +2,10 @@
  * Event Explorer page tests.
  *
  * Uses mocked backend so the tests always run. The backend serves the event
- * history (payloads included, decrypted) to the ADMIN role only, and an open
- * live feed whose frames carry no payload. The page follows: the history is
- * browsed as ADMIN, the live feed is shown to everyone.
+ * history (stream ids and payloads included, decrypted) to the ADMIN role only,
+ * and an open live feed whose frames name no stream and carry no payload. The
+ * page follows: the history is browsed as ADMIN, the live feed is shown to
+ * everyone.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -92,17 +93,17 @@ test.describe("Event Explorer page", () => {
     expect(sent[0]["x-user-id"]).toBe("admin-1");
   });
 
-  test("the live feed lists a payload-free frame for every role", async ({ page }) => {
+  test("the live feed lists a frame that names no stream for every role", async ({ page }) => {
     await mockBackendRoutes(page);
-    // An unnamed frame, as the backend sends it: an id and a data line without a payload.
+    // An unnamed frame, as the backend sends it: an id and a data line with the offset, the two
+    // types and the timestamp, and no stream id, aggregate id or payload.
     await page.route(`${BACKEND_URL}/api/events/sse`, (route) =>
       route.fulfill({
         status: 200,
         contentType: "text/event-stream",
         body:
           "id:7\n" +
-          'data:{"globalOffset":7,"streamId":"customer:cust-alice","aggregateType":"customer",' +
-          '"aggregateId":"cust-alice","eventType":"CustomerRegistered","version":1,' +
+          'data:{"globalOffset":7,"aggregateType":"customer","eventType":"CustomerRegistered",' +
           '"timestamp":"2026-10-04T00:00:00Z"}\n\n',
       })
     );
@@ -113,8 +114,8 @@ test.describe("Event Explorer page", () => {
       has: page.getByRole("heading", { name: "Live Feed" }),
     });
     await expect(liveFeed.getByText("CustomerRegistered")).toBeVisible();
-    await expect(liveFeed.getByText("customer:cust-alice")).toBeVisible();
-    await expect(liveFeed.getByText("v1", { exact: true })).toBeVisible();
+    await expect(liveFeed.getByText("customer", { exact: true })).toBeVisible();
+    await expect(liveFeed.getByText("#7")).toBeVisible();
     // The mocked feed ends after its one frame and the page reconnects to the same frame; an
     // event already listed is not listed again.
     await page.waitForTimeout(2_500);

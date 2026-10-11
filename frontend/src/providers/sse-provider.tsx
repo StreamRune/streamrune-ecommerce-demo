@@ -26,6 +26,12 @@ const SSEContext = createContext<SSEContextValue>({
   recentEvents: [],
 });
 
+/**
+ * The queries an event of the given type makes stale. A frame names no stream,
+ * so the decision is by event type alone and every query of a kind is read
+ * again, each with the session's identity headers: the backend answers with
+ * what that identity may see.
+ */
 function invalidationKeysFor(eventType: string): string[][] {
   const keys: string[][] = [["dashboard"], ["events"]];
 
@@ -46,6 +52,8 @@ function invalidationKeysFor(eventType: string): string[][] {
     ].includes(eventType)
   ) {
     keys.push(["orders"]);
+    // The saga starts with OrderPlaced and ends with OrderConfirmed or OrderCancelled.
+    keys.push(["fulfillment"]);
   }
   if (
     [
@@ -108,9 +116,9 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       }
 
       // An EventSource cannot send request headers, so the feed is the one endpoint the browser
-      // calls without X-User-Role. The backend keeps it open to everyone and sends frames
-      // without the event's payload (see LiveEvent); the frames are unnamed, so onmessage
-      // receives them all.
+      // calls without X-User-Id and X-User-Role. The backend keeps it open to everyone and
+      // sends frames that name no stream and carry no payload (see LiveEvent); the frames are
+      // unnamed, so onmessage receives them all.
       const es = new EventSource(`${API_URL}/api/events/sse`);
       esRef.current = es;
 

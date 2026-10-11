@@ -44,7 +44,7 @@ export function EventFeed({ maxItems = 20, className }: EventFeedProps) {
         <div className="space-y-1.5">
           {events.map((event) => (
             <div
-              key={`${event.globalOffset}-${event.streamId}-${event.eventType}`}
+              key={event.globalOffset}
               className="flex items-center gap-2 text-xs"
             >
               <Badge
@@ -55,7 +55,7 @@ export function EventFeed({ maxItems = 20, className }: EventFeedProps) {
               >
                 {event.eventType}
               </Badge>
-              <span className="text-muted-foreground truncate flex-1">{event.streamId}</span>
+              <span className="text-muted-foreground truncate flex-1">{event.aggregateType}</span>
               <span className="text-muted-foreground shrink-0 tabular-nums">
                 {relativeTime(event.timestamp)}
               </span>
