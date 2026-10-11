@@ -89,6 +89,8 @@ class SagaControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/saga/fulfillments")
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -101,7 +103,14 @@ class SagaControllerIT extends AbstractIntegrationTest {
 
   @Test
   void listSagasWithLimitQueryParamReturnsOk() {
-    client.get().uri("/api/saga/fulfillments?limit=5").exchange().expectStatus().isOk();
+    client
+        .get()
+        .uri("/api/saga/fulfillments?limit=5")
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
   }
 
   @Test
@@ -109,6 +118,8 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/saga/fulfillments/nonexistent-saga-" + System.nanoTime())
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
         .isNotFound();
@@ -151,6 +162,8 @@ class SagaControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/saga/fulfillments?limit=100")
+                      .header("X-User-Id", "admin-1")
+                      .header("X-User-Role", "ADMIN")
                       .exchange()
                       .expectStatus()
                       .isOk()
@@ -176,13 +189,15 @@ class SagaControllerIT extends AbstractIntegrationTest {
             });
   }
 
-  /** The flag both payment-failure routes flip, read through the open admin listing. */
+  /** The flag both payment-failure routes flip, read through the admin listing. */
   private boolean failureInjected() {
     @SuppressWarnings("unchecked")
     Map<String, Object> state =
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -204,6 +219,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
         client
             .post()
             .uri("/api/saga/fulfillments/any-saga-id/inject-failure")
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
@@ -220,6 +236,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/saga/fulfillments/any-saga-id/inject-failure")
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
@@ -247,5 +264,41 @@ class SagaControllerIT extends AbstractIntegrationTest {
         .expectStatus()
         .isForbidden();
     assertThat(failureInjected()).isEqualTo(initial);
+  }
+
+  /**
+   * A saga's state names the order, the customer, the payment and the total of one purchase, and
+   * the list holds every customer's: both reads are for the ADMIN role.
+   */
+  @Test
+  void theSagaReadsRequireTheAdminRole() {
+    for (String path :
+        new String[] {"/api/saga/fulfillments", "/api/saga/fulfillments/fulfillment-any"}) {
+      client.get().uri(path).exchange().expectStatus().isForbidden();
+      client
+          .get()
+          .uri(path)
+          .header("X-User-Role", "CUSTOMER")
+          .header("X-User-Id", "cust-alice")
+          .exchange()
+          .expectStatus()
+          .isForbidden();
+    }
+    client
+        .get()
+        .uri("/api/saga/fulfillments")
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
+    client
+        .get()
+        .uri("/api/saga/fulfillments/fulfillment-any")
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isNotFound();
   }
 }

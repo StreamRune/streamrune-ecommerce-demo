@@ -228,7 +228,7 @@ public class SeedDataRunner implements ApplicationRunner {
 }
 ```
 
-`SeedDataRunner` implements `ApplicationRunner` and is annotated `@Component` so Spring picks it up automatically. On the first boot it dispatches nine commands through the full interceptor chain (audit, authorization with `ADMIN` role not required for `CreateProduct`, validation), so all seed data appears in the audit log and produces events visible in the Event Explorer.
+`SeedDataRunner` implements `ApplicationRunner` and is annotated `@Component` so Spring picks it up automatically. On the first boot it dispatches nine commands through the full interceptor chain (audit, authorization, validation; `CreateProduct` carries no `@RequireRole`, and the `ADMIN` guard of the product routes sits in the controller, which the seed does not pass through), so all seed data appears in the audit log and produces events visible in the Event Explorer.
 
 The runner must not seed twice: the database outlives the application (the `pgdata` volume in `docker-compose.yml`), and every later start runs it again. It relies on two things, one command at a time:
 
@@ -311,7 +311,7 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
 
 There the `name`, `email`, and `address` fields are AES-GCM ciphertext blobs, not plaintext — the field encryption from Chapter 6. The database never holds the personal data in the clear; anyone who can call the explorer as an admin sees it decrypted, until the customer's key is erased in Step 8.
 
-> **Demo shortcut — protect this in production.** The explorer's ADMIN check trusts the `X-User-Role` header, like every role check in this demo (see the note on the two headers above). Without the header the same request answers `403`; with it, anyone gets decrypted personal data. An endpoint that returns raw event payloads needs real authentication and a role derived from the authenticated identity, or it should not be deployed. Chapter 15 has the details.
+> **Demo shortcut — protect this in production.** The explorer's ADMIN check trusts the `X-User-Id` and `X-User-Role` headers, like every access check in this demo (see the note on the two headers above). Without them the same request answers `403`; with them, anyone gets decrypted personal data. An endpoint that returns raw event payloads needs real authentication and a role derived from the authenticated identity, or it should not be deployed. Chapter 15 has the details.
 
 ### Step 4: Create Products — Events, Projection, Query
 
@@ -397,20 +397,24 @@ The saga's full design (see the Javadoc on `OrderFulfillmentSaga`) is `OrderPlac
 Because each leg hops through a separate polling subscription, give it a second or two, then inspect the saga state:
 
 ```bash
-curl -s http://localhost:8080/api/saga/fulfillments/fulfillment-ord-1 | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/saga/fulfillments/fulfillment-ord-1 | jq .fulfillmentStatus
 ```
 
 Expected output: `"COMPLETED"`
 
-In the browser, open the Fulfillment page. The order row for `ord-1` walks through Payment → Inventory → Confirmation → Completed; the step visualizer updates in real time via SSE — no page refresh needed.
+The saga endpoints are for the ADMIN role (Chapter 11): a saga names the order, the customer and the payment. In the browser, switch to `ADMIN` and open the Fulfillment page. The order row for `ord-1` walks through Payment → Inventory → Confirmation → Completed; the step visualizer updates in real time via SSE — no page refresh needed.
 
 Confirm the order state — the saga's final `ConfirmOrder` emitted `OrderConfirmed`, so the projection reports:
 
 ```bash
-curl -s http://localhost:8080/api/orders/ord-1 | jq .status
+curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
+  http://localhost:8080/api/orders/ord-1 | jq .status
 ```
 
 Expected output: `"CONFIRMED"`
+
+The order is read by the customer it belongs to. Leave the two headers out, or send another customer's id, and the answer is `403`: an order is for its customer or an `ADMIN` (Chapter 9), and so is the list — `GET /api/orders` with these headers returns the walkthrough customer's orders and nobody else's.
 
 The order snapshot is stored after every 5 events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). If you have placed enough orders, you can verify that the next load of the aggregate reads from the snapshot store rather than replaying from offset 0.
 
@@ -419,7 +423,8 @@ The order snapshot is stored after every 5 events (`SnapshotPolicy.everyNEvents(
 Every command that passed through `AuditCommandInterceptor` (Chapter 10) is recorded:
 
 ```bash
-curl -s "http://localhost:8080/api/audit/commands?limit=20" | jq '.[] | {commandType, aggregateId, userId, occurredAt, outcome}'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/audit/commands?limit=20" | jq '.[] | {commandType, aggregateId, userId, occurredAt, outcome}'
 ```
 
 You should see entries for `RegisterCustomer`, `CreateProduct` (twice, and a third with outcome `FAILURE` if you sent the duplicate request in Step 4), and `PlaceOrder` — plus the commands the saga dispatched while fulfilling `ord-1` in Step 5 (`InitiatePayment`, `CapturePayment`, `ReserveStock`, `ConfirmOrder`), since every command goes through the same audited bus. The audit log stores the `user_id` taken from the `X-User-Id` request header (trusted-gateway mode, Chapter 9), so the customer and product commands from Steps 3 and 4 carry `admin-1` and the order command (Step 5 sent `X-User-Id: cust-walkthrough`) carries `cust-walkthrough`; the saga-dispatched commands run with the saga's correlation context rather than a user, so their `userId` is empty. The role itself is used by the authorization interceptor but is not persisted in the audit row. Open the Audit page in the frontend to browse the log; a **Show** selector at the top chooses how many rows to load (25 / 50 / 100).
@@ -429,17 +434,17 @@ You should see entries for `RegisterCustomer`, `CreateProduct` (twice, and a thi
 The demo runs **two** breakers (Chapter 12), and `/api/admin/circuit-breaker` reports both:
 
 ```bash
-curl -s http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"CLOSED"}
 ```
 
 - `state` is the command-bus `CircuitBreakerCommandInterceptor` (`new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30))`). It counts genuine infrastructure failures on the command bus and opens after 3 in a row.
 - `paymentGateway` is the `PaymentGatewayCircuitBreaker` (also `3` / `30s`) wrapped around the gateway call the `PaymentProcessManager` makes.
 
-Now exercise the gateway breaker. Toggle payment failure on (a mutating admin endpoint, so the call carries the ADMIN role header — Chapter 14) and place a few orders:
+Now exercise the gateway breaker. Toggle payment failure on (an admin endpoint, so the call carries an `ADMIN`'s two headers, as the reads of this step do — Chapter 12) and place a few orders:
 
 ```bash
-curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
 # {"failureInjected":true}
 
 for i in 1 2 3; do
@@ -452,10 +457,10 @@ done
 Each order's `PaymentProcessManager` calls the gateway, which now throws, so the manager dispatches `FailPayment` and the saga cancels the order. After three consecutive gateway failures the gateway breaker opens:
 
 ```bash
-curl -s http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 
-curl -s http://localhost:8080/api/saga/fulfillments/fulfillment-walk-cb-1 | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-walk-cb-1 | jq .fulfillmentStatus
 # "FAILED"
 ```
 
@@ -495,7 +500,7 @@ The event history is intact and auditable, but the personal data is irrecoverabl
 The DLQ (Chapter 14) collects commands that exhausted their retries. Check it:
 
 ```bash
-curl -s "http://localhost:8080/api/admin/dead-letters" | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/dead-letters" | jq .
 ```
 
 In this walkthrough nothing lands in the DLQ: the gateway failures from Step 7 are handled cleanly by the saga (the `FailPayment`/`CancelOrder` commands succeed), so no command exhausts its retries. The endpoint returns an empty array `[]`. When a command *does* land in the DLQ, each entry exposes the failed `commandType`, the `errorType`/`errorMessage`, and the attempt counts (`attempts` / `dlqAttempts`). The `commandPayload` of a dead-lettered `RegisterCustomer` or `UpdateProfile` shows the customer's personal data as ciphertext: those commands carry `@Encrypted` (Chapter 6), so the queued copy is erased with the customer (Chapter 7). From the Admin page in the frontend you can re-run individual entries with the **Retry** button. `POST /api/admin/dead-letters/{id}/retry` calls `deadLetterRetryRunner.retry(new CommandId(id))`, which **re-dispatches the dead-lettered command through the bus** under a `DLQ_REPLAY` marker and the entry's original request context — discarding the entry on success, bumping its DLQ attempt count on failure, and returning `404` if no entry exists for that id. Like every mutating admin endpoint it requires the ADMIN role header and answers `403` without it; the Admin page sends it for the ADMIN persona. This is the same operation the `DeadLetterRetryRunner` bean performs automatically on its own schedule; the endpoint just lets an operator trigger one entry on demand.
@@ -503,8 +508,8 @@ In this walkthrough nothing lands in the DLQ: the gateway failures from Step 7 a
 Verify the outbox as well — the listing is read-only (`findByStatus(PENDING)`), so it never stalls delivery:
 
 ```bash
-curl -s "http://localhost:8080/api/admin/outbox" | jq .
-curl -s "http://localhost:8080/api/admin/outbox/failed" | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/outbox" | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/outbox/failed" | jq .
 ```
 
 The `OutboxPoller` drains entries every 5 seconds (the default `streamrune.outbox.flush-interval-ms`, not overridden in the demo's `application.yml`), so the first list is usually empty or shows the last few seconds of entries. The second list is empty in a healthy run: on the demo's `STRICT_PER_AGGREGATE` channel a `FAILED` entry would block its order, payment or product until replayed or skipped from the admin API (Chapter 14).

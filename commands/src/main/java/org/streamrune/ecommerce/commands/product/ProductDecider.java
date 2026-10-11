@@ -30,10 +30,13 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
                 c.initialStock()));
       }
 
-      case ProductCommand.UpdatePrice c ->
-          List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
+      case ProductCommand.UpdatePrice c -> {
+        requireCreated(state, c.productId());
+        yield List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
+      }
 
       case ProductCommand.AdjustStock c -> {
+        requireCreated(state, c.productId());
         int newStock = state.stock() + c.quantityChange();
         if (newStock < 0)
           throw new DomainException("Insufficient stock for product: " + c.productId());
@@ -42,11 +45,20 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
       }
 
       case ProductCommand.DiscontinueProduct c -> {
+        requireCreated(state, c.productId());
         if (state.status() == ProductStatus.DISCONTINUED)
           throw new DomainException("Product already discontinued: " + c.productId());
         yield List.of(new ProductEvent.ProductDiscontinued(c.productId()));
       }
     };
+  }
+
+  /**
+   * A product that was never created takes no command but {@code CreateProduct}: without this check
+   * a price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+   */
+  private static void requireCreated(ProductState state, String productId) {
+    if (state.productId() == null) throw new DomainException("Product not found: " + productId);
   }
 
   @Override

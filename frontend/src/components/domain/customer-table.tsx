@@ -13,6 +13,8 @@ import {
 } from "@/lib/mutations";
 import type { CustomerView } from "@/lib/types";
 import { PermissionGate } from "@/components/domain/permission-gate";
+import { AccessRestricted } from "@/components/domain/access-restricted";
+import { useRole } from "@/providers/role-provider";
 import {
   Table,
   TableBody,
@@ -183,6 +185,9 @@ function ForgetCustomerForm({ customer, onClose }: { customer: CustomerView; onC
 type ActionMode = "edit" | "forget" | null;
 
 function CustomerRowActions({ customer }: { customer: CustomerView }) {
+  const { userId } = useRole();
+  // The backend lets an ADMIN manage every customer and a customer their own record.
+  const permission = customer.customerId === userId ? "PROFILE_MANAGE" : "CUSTOMER_MANAGE";
   const [dialogMode, setDialogMode] = useState<ActionMode>(null);
   const { mutateAsync: exportData, isPending: isExporting } = useExportData();
 
@@ -199,7 +204,7 @@ function CustomerRowActions({ customer }: { customer: CustomerView }) {
 
   return (
     <Dialog open={dialogMode !== null} onOpenChange={(open) => { if (!open) setDialogMode(null); }}>
-      <PermissionGate permission="CUSTOMER_MANAGE">
+      <PermissionGate permission={permission}>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" />}>
             <MoreHorizontal className="size-4" />
@@ -242,8 +247,17 @@ function CustomerRowActions({ customer }: { customer: CustomerView }) {
 // ─── Main Table ───────────────────────────────────────────────────────────────
 
 export function CustomerTable() {
-  const { data: customers = [], isLoading } = useCustomers();
+  const { role, userId, hasPermission } = useRole();
+  // The backend serves customers to an authenticated caller only: every customer to an ADMIN,
+  // their own record to a CUSTOMER.
+  const allowed = hasPermission("OWN_DATA_VIEW");
+  const ownOnly = allowed && role !== "ADMIN";
+  const { data: customers = [], isLoading } = useCustomers(allowed);
   const router = useRouter();
+
+  if (!allowed) {
+    return <AccessRestricted message="Requires CUSTOMER or ADMIN role to view customers." />;
+  }
 
   if (isLoading) {
     return (
@@ -259,7 +273,9 @@ export function CustomerTable() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Customers</h1>
-          <p className="text-sm text-muted-foreground">{customers.length} total</p>
+          <p className="text-sm text-muted-foreground">
+            {ownOnly ? `Your own record (${userId})` : `${customers.length} total`}
+          </p>
         </div>
         <RegisterCustomerDialog />
       </div>
@@ -279,7 +295,7 @@ export function CustomerTable() {
             {customers.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                  No customers yet.
+                  {ownOnly ? `No customer record for ${userId}.` : "No customers yet."}
                 </TableCell>
               </TableRow>
             ) : (

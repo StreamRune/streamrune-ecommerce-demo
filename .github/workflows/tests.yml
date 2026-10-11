@@ -51,6 +51,64 @@ jobs:
             streamrune-ecommerce-demo/spring-app/build/reports/tests/
             streamrune-ecommerce-demo/spring-app/build/test-results/
 
+  # The tests of every other module gate a pull request too: the access rule and the deciders are
+  # unit-tested in the shared modules, and each of the three apps has its own integration suite
+  # over the same REST API. One job per suite, so a failure names the app it belongs to.
+  backend-modules:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Quarkus backend integration tests
+            id: quarkus-app
+            tasks: ':quarkus-app:test'
+          - name: Micronaut backend integration tests
+            id: micronaut-app
+            tasks: ':micronaut-app:test'
+          # Every module that is not one of the three apps: domain, commands, queries,
+          # projections, notifications-service, and any module added later.
+          - name: Shared module tests
+            id: shared-modules
+            tasks: 'test -x :spring-app:test -x :quarkus-app:test -x :micronaut-app:test'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: streamrune-ecommerce-demo
+
+      - uses: actions/checkout@v7
+        with:
+          repository: StreamRune/streamrune
+          path: streamrune
+
+      - uses: actions/setup-java@v6
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The app suites use Testcontainers (PostgreSQL, RabbitMQ), as the Spring one does.
+      - name: Verify Docker available
+        run: docker info
+
+      - name: Run ${{ matrix.tasks }}
+        working-directory: streamrune-ecommerce-demo
+        run: ./gradlew ${{ matrix.tasks }} --console=plain --no-daemon
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.id }}-test-reports
+          path: |
+            streamrune-ecommerce-demo/*/build/reports/tests/
+            streamrune-ecommerce-demo/*/build/test-results/
+
   run-paths:
     name: README run paths (Docker Compose, bootRun)
     runs-on: ubuntu-latest

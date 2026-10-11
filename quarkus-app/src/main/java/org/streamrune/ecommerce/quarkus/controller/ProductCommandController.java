@@ -7,10 +7,18 @@ import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 import org.streamrune.quarkus.StreamRuneRequestFilter;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/**
+ * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
+ * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
+ * ask {@link OwnerOrAdminAccess#requireAdmin} once the request is read; discontinuing is guarded in
+ * the command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
+ * ({@code ProductQueryController}).
+ */
 @Path("/api/products")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
@@ -22,9 +30,10 @@ public class ProductCommandController {
   /**
    * Executes a command with the request's {@link org.streamrune.core.StreamRuneContext} bound to
    * the {@code ScopedValue}. See {@code OrderCommandController#executeInContext} for why this
-   * explicit bind is required in Quarkus (JAX-RS filters cannot wrap the resource method). Product
-   * writes only gate {@code DiscontinueProduct} on {@code ADMIN} (not exposed here), but binding
-   * still records the real {@code X-User-Id} on the audit trail instead of {@code GUEST}.
+   * explicit bind is required in Quarkus (JAX-RS filters cannot wrap the resource method). The bind
+   * is what lets the command bus authorize {@code DiscontinueProduct} ({@code @RequireRole})
+   * against the caller, and it records the real {@code X-User-Id} on the audit trail instead of
+   * {@code GUEST}.
    */
   private void executeInContext(ProductCommand command) {
     StreamRuneRequestFilter.withContext(
@@ -34,6 +43,11 @@ public class ProductCommandController {
 
   @POST
   public Response createProduct(CreateProductRequest req) {
+    RequestChecks.present(req);
+    RequestChecks.notBlank(req.productId(), "productId");
+    RequestChecks.notBlank(req.name(), "name");
+    RequestChecks.positive(req.price(), "price");
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
     executeInContext(
         new ProductCommand.CreateProduct(
             req.productId(),
@@ -48,6 +62,8 @@ public class ProductCommandController {
   @PUT
   @Path("/{id}/stock")
   public Response adjustStock(@PathParam("id") String id, AdjustStockRequest req) {
+    RequestChecks.present(req);
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
     executeInContext(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
     return Response.ok().build();
   }
@@ -55,6 +71,9 @@ public class ProductCommandController {
   @PUT
   @Path("/{id}/price")
   public Response updatePrice(@PathParam("id") String id, UpdatePriceRequest req) {
+    RequestChecks.present(req);
+    RequestChecks.positive(req.price(), "price");
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
     executeInContext(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
     return Response.ok().build();
   }

@@ -173,6 +173,7 @@ package org.streamrune.ecommerce.spring.controller;
 
 import java.util.Map;
 import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
@@ -196,6 +197,7 @@ public class AdminController {
 
   @GetMapping("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
+    requireAdmin();
     // "state" = the command-bus breaker; "paymentGateway" = the breaker around the payment gateway
     // call, which is the one the payment-failure toggle exercises.
     return Map.of(
@@ -205,6 +207,7 @@ public class AdminController {
 
   @PostMapping("/payment-failure/toggle")
   public Map<String, Boolean> togglePaymentFailure() {
+    requireAdmin();
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);
@@ -212,15 +215,24 @@ public class AdminController {
 
   @GetMapping("/payment-failure")
   public Map<String, Boolean> paymentFailureState() {
+    requireAdmin();
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 
+  /** Open to every caller: the answer says that the application runs and nothing else. */
   @GetMapping("/health")
   public Map<String, String> health() {
     return Map.of("status", "UP");
   }
+
+  /** Answers 403 unless the caller is an ADMIN: an identity with the ADMIN role (Chapter 9). */
+  private static void requireAdmin() {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+  }
 }
 ```
+
+Every route but `/health` starts with `requireAdmin()`: the controller is the operators' panel, and what it shows and switches is internal state of the running system. The check is `OwnerOrAdminAccess.requireAdmin` from Chapter 9 — the `X-User-Id` and `X-User-Role` headers in this demo, a stand-in for the gateway that would authenticate an operator in a real deployment — so a call from anyone but an `ADMIN` is answered `403`, the role without an identity included. `/health` stays open: its answer says that the application runs and nothing else.
 
 The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circuitState()` delegates to `state.get().name()` inside the command-bus interceptor; `paymentGatewayCircuitBreaker.state().name()` is the gateway breaker. Both return one of `"CLOSED"`, `"OPEN"`, or `"HALF_OPEN"` as a plain string — no dedicated DTO needed. The toggle in Step 5 exercises the **`paymentGateway`** value, not `state`.
 
@@ -229,14 +241,14 @@ The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circu
 Start the application and confirm both circuits start closed:
 
 ```bash
-curl -s http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"CLOSED"}
 ```
 
-Now turn on payment failure and place a few orders (the toggle carries `X-User-Role: ADMIN`: the finished demo guards every mutating admin endpoint with a role check, which Chapter 14 adds — the chapter-12 controller above simply ignores the header). Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which throws; the manager records the failure on the gateway breaker. After three consecutive gateway failures the gateway breaker opens:
+Now turn on payment failure and place a few orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which throws; the manager records the failure on the gateway breaker. After three consecutive gateway failures the gateway breaker opens:
 
 ```bash
-curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
 # {"failureInjected":true}
 
 # place three orders (different ids), e.g.:
@@ -246,14 +258,14 @@ for i in 1 2 3; do
     -d "{\"orderId\":\"cb-$i\",\"customerId\":\"c-1\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1,\"unitPrice\":9.99}]}"
 done
 
-curl -s http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 ```
 
 Each of those orders fails at the payment step, so their sagas land in `FAILED`:
 
 ```bash
-curl -s http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
 # "FAILED"
 ```
 

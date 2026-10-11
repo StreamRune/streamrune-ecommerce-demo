@@ -114,8 +114,8 @@ class OrderCommandQueryE2EIT {
 
   private OrderView fetchOrder(String orderId) {
     return given()
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .when()
         .get("/api/orders/" + orderId)
         .then()
@@ -186,6 +186,8 @@ class OrderCommandQueryE2EIT {
             () -> {
               List<String> ids =
                   given()
+                      .header("X-User-Role", "CUSTOMER")
+                      .header("X-User-Id", cid)
                       .when()
                       .get("/api/orders")
                       .then()
@@ -193,13 +195,19 @@ class OrderCommandQueryE2EIT {
                       .extract()
                       .jsonPath()
                       .getList("orderId", String.class);
-              assertThat(ids).contains(oid1, oid2);
+              assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
   }
 
   @Test
   void getMissingOrderReturns404() {
-    given().when().get("/api/orders/does-not-exist-" + System.nanoTime()).then().statusCode(404);
+    given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .when()
+        .get("/api/orders/does-not-exist-" + System.nanoTime())
+        .then()
+        .statusCode(404);
   }
 
   @Test
@@ -207,8 +215,8 @@ class OrderCommandQueryE2EIT {
     // Blank orderId: the command bus rejects the blank aggregate id with an
     // IllegalArgumentException, mapped to 400 by IllegalArgumentExceptionMapper.
     given()
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .contentType(ContentType.JSON)
         .body(
             """
@@ -227,8 +235,8 @@ class OrderCommandQueryE2EIT {
     // names the rule without echoing the id.
     String body =
         given()
-            .header("X-User-Role", "CUSTOMER")
-            .header("X-User-Id", "test-user")
+            .header("X-User-Role", "ADMIN")
+            .header("X-User-Id", "test-admin")
             .contentType(ContentType.JSON)
             .body(
                 """
@@ -253,8 +261,8 @@ class OrderCommandQueryE2EIT {
     String orderId = "q-o-long-SECRET-" + "x".repeat(256 - 16);
     String body =
         given()
-            .header("X-User-Role", "CUSTOMER")
-            .header("X-User-Id", "test-user")
+            .header("X-User-Role", "ADMIN")
+            .header("X-User-Id", "test-admin")
             .contentType(ContentType.JSON)
             .when()
             .post("/api/orders/" + orderId + "/confirm")
@@ -278,8 +286,8 @@ class OrderCommandQueryE2EIT {
       String orderId = "q-o-saga-SECRET-" + "x".repeat(length - 16);
       String body =
           given()
-              .header("X-User-Role", "CUSTOMER")
-              .header("X-User-Id", "test-user")
+              .header("X-User-Role", "ADMIN")
+              .header("X-User-Id", "test-admin")
               .contentType(ContentType.JSON)
               .body(
                   """
@@ -330,8 +338,8 @@ class OrderCommandQueryE2EIT {
     String orderId = "q-o-pctl-" + System.nanoTime();
     String body =
         given()
-            .header("X-User-Role", "CUSTOMER")
-            .header("X-User-Id", "test-user")
+            .header("X-User-Role", "ADMIN")
+            .header("X-User-Id", "test-admin")
             .contentType(ContentType.JSON)
             .body(
                 """
@@ -411,7 +419,7 @@ class OrderCommandQueryE2EIT {
    * FAILURE} row that names the caller and the missing role, as on the Spring and Micronaut apps.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns400AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
     String oid = "q-o-ship-noadmin-" + System.nanoTime();
     String cid = "q-o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "q-prod-ship-noadmin-" + System.nanoTime();
@@ -419,9 +427,9 @@ class OrderCommandQueryE2EIT {
     placeOrder(oid, cid, pid);
 
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
-    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 400 (a
-    // DomainException subclass mapped by DomainExceptionMapper). The order is CONFIRMED, so a 400
-    // here proves the authz gate (not the state machine) rejected the command.
+    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 403
+    // (AuthorizationExceptionMapper). The order is CONFIRMED, so the state machine would accept the
+    // command: the 403 is the authorization interceptor's.
     given()
         .header("X-User-Role", "CUSTOMER")
         .header("X-User-Id", cid)
@@ -429,7 +437,7 @@ class OrderCommandQueryE2EIT {
         .when()
         .post("/api/orders/" + oid + "/ship")
         .then()
-        .statusCode(400);
+        .statusCode(403);
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);

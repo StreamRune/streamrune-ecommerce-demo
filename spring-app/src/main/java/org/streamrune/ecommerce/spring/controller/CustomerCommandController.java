@@ -6,14 +6,12 @@ import jakarta.validation.constraints.NotBlank;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.SubjectId;
 import org.streamrune.core.types.UserId;
 import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 import org.streamrune.runtime.gdpr.ForgetResult;
 import org.streamrune.runtime.gdpr.ForgetSubjectService;
@@ -33,17 +31,21 @@ public class CustomerCommandController {
     this.forgetSubjectService = forgetSubjectService;
   }
 
+  /** A customer registers themself; an {@code ADMIN} registers anyone ({@code 403} otherwise). */
   @PostMapping
   public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     commandBus.execute(
         new CustomerCommand.RegisterCustomer(
             req.customerId(), req.name(), req.email(), req.address(), req.phone()));
     return ResponseEntity.ok().build();
   }
 
+  /** For an ADMIN or the customer themself (403 otherwise). */
   @PutMapping("/{id}")
   public ResponseEntity<Void> updateProfile(
       @PathVariable String id, @RequestBody UpdateProfileRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(
         new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
     return ResponseEntity.ok().build();
@@ -52,7 +54,7 @@ public class CustomerCommandController {
   /** GDPR Article 20 request, for an ADMIN or the customer themself (403 otherwise). */
   @PostMapping("/{id}/export-data")
   public ResponseEntity<Void> exportData(@PathVariable String id) {
-    requireAdminOrSelf(id);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.RequestDataExport(id));
     return ResponseEntity.ok().build();
   }
@@ -62,8 +64,8 @@ public class CustomerCommandController {
    * in this order:
    *
    * <ol>
-   *   <li>{@link #requireAdminOrSelf} answers {@code 403} to anyone else, before anything is
-   *       written.
+   *   <li>{@link OwnerOrAdminAccess#requireCustomerAccess} answers {@code 403} to anyone else,
+   *       before anything is written.
    *   <li>{@code ForgetCustomer} records the {@code CustomerForgotten} domain event (audited,
    *       replayable). The decider refuses an id no customer registered ({@code 400}), so nobody
    *       can erase, and so block for good, an id before its customer exists. For a customer
@@ -87,7 +89,7 @@ public class CustomerCommandController {
    */
   @PostMapping("/{id}/forget")
   public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
-    requireAdminOrSelf(id);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.ForgetCustomer(id));
     SubjectId subjectId = SubjectId.of(id);
     String requesterId = currentRequesterId();
@@ -129,36 +131,11 @@ public class CustomerCommandController {
   }
 
   /**
-   * Answers {@code 403} unless the caller holds the ADMIN role or is the customer themself (the
-   * request identity equals the customer id). DEMO SHORTCUT, as in {@code AdminController}: the
-   * role and the identity are what the trusted-gateway headers say (ch. 9); a real deployment
-   * authenticates the caller.
-   */
-  private static void requireAdminOrSelf(String customerId) {
-    var ctx = StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
-    if (ctx != null) {
-      if ("ADMIN".equals(ctx.baggage().get("role"))) {
-        return;
-      }
-      if (ctx.userId() != null && ctx.userId().value().equals(customerId)) {
-        return;
-      }
-    }
-    throw new ResponseStatusException(
-        HttpStatus.FORBIDDEN, "Only an ADMIN or the customer themself may do this");
-  }
-
-  /**
-   * Requester id for the GDPR audit trail, read from the request-scoped context; null if unbound.
+   * Requester id for the GDPR audit trail: the request identity, or {@code null} when none is
+   * bound.
    */
   private static String currentRequesterId() {
-    if (StreamRuneContext.CURRENT.isBound()) {
-      var ctx = StreamRuneContext.CURRENT.get();
-      if (ctx != null && ctx.userId() != null) {
-        return ctx.userId().value();
-      }
-    }
-    return null;
+    return OwnerOrAdminAccess.identityOf(RequestCaller.current());
   }
 
   public record RegisterRequest(

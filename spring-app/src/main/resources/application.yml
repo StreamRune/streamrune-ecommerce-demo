@@ -59,7 +59,8 @@ streamrune:
     # stream belongs to, and refuses everyone else with 403. Once enabled, the framework serves the
     # endpoint and feeds it itself: one SseEventFeed per application instance reads the global
     # stream from its head and publishes each new event to the clients of that event's stream.
-    # SseLiveE2EIT and SseStreamAccessIT exercise it.
+    # It reads and decrypts events only while a client is connected; with none, a poll reads the
+    # head of the stream and no event. SseLiveE2EIT and SseStreamAccessIT exercise it.
     enabled: true
     # How often the feed reads the global stream: the usual delay between a commit and its frame.
     # The framework default is 1s; the smallest value it accepts is 1ms.

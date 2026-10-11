@@ -133,6 +133,7 @@ class SagaRecoveryAdminIT {
 
     List<String> outcomes =
         given()
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .queryParam("sagaId", sagaId.value())
             .when()
@@ -187,6 +188,8 @@ class SagaRecoveryAdminIT {
 
     List<String> faulted =
         given()
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .queryParam("limit", 500)
             .when()
             .get("/api/admin/sagas/faulted")
@@ -199,6 +202,8 @@ class SagaRecoveryAdminIT {
 
     List<Map<String, Object>> entries =
         given()
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .queryParam("limit", 500)
             .when()
             .get("/api/admin/saga-dead-letters")
@@ -217,6 +222,7 @@ class SagaRecoveryAdminIT {
 
     assertThat(
             given()
+                .header("X-User-Id", "admin-1")
                 .header("X-User-Role", "ADMIN")
                 .queryParam("sagaId", sagaId.value())
                 .queryParam("eventOffset", offset.value())
@@ -377,6 +383,7 @@ class SagaRecoveryAdminIT {
 
   private static String postForOutcome(String path) {
     return given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .when()
         .post(path)

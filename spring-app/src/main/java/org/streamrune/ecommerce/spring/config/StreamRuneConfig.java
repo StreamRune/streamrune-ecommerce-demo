@@ -38,6 +38,7 @@ import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.ecommerce.queries.query.ListProducts;
 import org.streamrune.integration.SseAuthorizer;
@@ -429,11 +430,26 @@ public class StreamRuneConfig {
     return new PostgresOffsetStore(ds);
   }
 
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
       OffsetStore offsetStore,
       JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
       CustomerProjection customerProjection,
@@ -443,6 +459,7 @@ public class StreamRuneConfig {
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
             .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
@@ -551,6 +568,17 @@ public class StreamRuneConfig {
   @Bean
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
     return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess} that the SSE endpoint above applies too.
+   * The customer and order controllers answer every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
   }
 
   /**

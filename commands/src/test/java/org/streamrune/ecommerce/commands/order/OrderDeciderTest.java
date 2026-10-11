@@ -109,4 +109,42 @@ class OrderDeciderTest {
         .when(new OrderCommand.CancelOrder("o-1", "Too late"))
         .expectException(DomainException.class);
   }
+
+  // An order that was never placed is not confirmed, shipped or delivered: its empty state reads
+  // CREATED, so without the check ConfirmOrder would open a stream for an id nobody placed.
+
+  @Test
+  void confirmOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.ConfirmOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void shipOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.ShipOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void deliverOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.DeliverOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void cancelOrder_neverPlaced_isAccepted() {
+    // CancelOrder is the last step of the fulfillment saga's compensation, and a refused
+    // compensation command ends the saga FAILED: the decider accepts it for any order that is not
+    // delivered, an id nobody placed included.
+    fixture
+        .given()
+        .when(new OrderCommand.CancelOrder("o-none", "Compensation"))
+        .expectEvents(new OrderEvent.OrderCancelled("o-none", "Compensation"));
+  }
 }

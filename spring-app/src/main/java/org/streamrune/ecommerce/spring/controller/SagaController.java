@@ -11,8 +11,14 @@ import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
 
+/**
+ * The order-fulfillment sagas, for the {@code ADMIN} role ({@code 403} otherwise): a saga's state
+ * names the order, the customer, the payment and the total of one purchase, and the list holds
+ * every customer's.
+ */
 @RestController
 @RequestMapping("/api/saga/fulfillments")
 public class SagaController {
@@ -30,6 +36,7 @@ public class SagaController {
 
   @GetMapping
   public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =
@@ -54,6 +61,7 @@ public class SagaController {
 
   @GetMapping("/{id}")
   public ResponseEntity<OrderFulfillmentState> getSaga(@PathVariable String id) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     return sagaStore
         .load(
             new SagaId(id),
@@ -71,7 +79,7 @@ public class SagaController {
    */
   @PostMapping("/{id}/inject-failure")
   public Map<String, Boolean> injectFailure(@PathVariable String id) {
-    AdminController.requireRole("ADMIN");
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);

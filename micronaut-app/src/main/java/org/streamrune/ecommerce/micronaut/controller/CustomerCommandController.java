@@ -2,22 +2,19 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.micronaut.http.HttpResponse;
-import io.micronaut.http.HttpStatus;
 import io.micronaut.http.annotation.Body;
 import io.micronaut.http.annotation.Controller;
 import io.micronaut.http.annotation.PathVariable;
 import io.micronaut.http.annotation.Post;
 import io.micronaut.http.annotation.Put;
-import io.micronaut.http.exceptions.HttpStatusException;
 import io.micronaut.serde.annotation.Serdeable;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.SubjectId;
 import org.streamrune.core.types.UserId;
 import org.streamrune.ecommerce.domain.customer.CustomerCommand;
-import org.streamrune.micronaut.StreamRuneContextHelper;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 import org.streamrune.runtime.gdpr.ForgetResult;
 import org.streamrune.runtime.gdpr.ForgetSubjectService;
@@ -36,16 +33,21 @@ public class CustomerCommandController {
     this.forgetSubjectService = forgetSubjectService;
   }
 
+  /** A customer registers themself; an {@code ADMIN} registers anyone ({@code 403} otherwise). */
   @Post
   public HttpResponse<Void> registerCustomer(@Body RegisterRequest req) {
+    requireWellFormed(req);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     commandBus.execute(
         new CustomerCommand.RegisterCustomer(
             req.customerId(), req.name(), req.email(), req.address(), req.phone()));
     return HttpResponse.ok();
   }
 
+  /** For an ADMIN or the customer themself (403 otherwise). */
   @Put("/{id}")
   public HttpResponse<Void> updateProfile(@PathVariable String id, @Body UpdateProfileRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(
         new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
     return HttpResponse.ok();
@@ -54,7 +56,7 @@ public class CustomerCommandController {
   /** GDPR Article 20 request, for an ADMIN or the customer themself (403 otherwise). */
   @Post("/{id}/export-data")
   public HttpResponse<Void> exportData(@PathVariable String id) {
-    requireAdminOrSelf(id);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.RequestDataExport(id));
     return HttpResponse.ok();
   }
@@ -64,8 +66,8 @@ public class CustomerCommandController {
    * in this order:
    *
    * <ol>
-   *   <li>{@link #requireAdminOrSelf} answers {@code 403} to anyone else, before anything is
-   *       written.
+   *   <li>{@link OwnerOrAdminAccess#requireCustomerAccess} answers {@code 403} to anyone else,
+   *       before anything is written.
    *   <li>{@code ForgetCustomer} records the {@code CustomerForgotten} domain event (audited,
    *       replayable). The decider refuses an id no customer registered ({@code 400}), so nobody
    *       can erase, and so block for good, an id before its customer exists. For a customer
@@ -89,7 +91,7 @@ public class CustomerCommandController {
    */
   @Post("/{id}/forget")
   public HttpResponse<ForgetResponse> forgetCustomer(@PathVariable String id) {
-    requireAdminOrSelf(id);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.ForgetCustomer(id));
     SubjectId subjectId = SubjectId.of(id);
     String requesterId = currentRequesterId();
@@ -134,46 +136,18 @@ public class CustomerCommandController {
   }
 
   /**
-   * Answers {@code 403} unless the caller holds the ADMIN role or is the customer themself (the
-   * request identity equals the customer id). DEMO SHORTCUT, as in {@code AdminController}: the
-   * role and the identity are what the trusted-gateway headers say (ch. 9); a real deployment
-   * authenticates the caller.
-   */
-  private static void requireAdminOrSelf(String customerId) {
-    var ctx = context();
-    if (ctx != null) {
-      if ("ADMIN".equals(ctx.baggage().get("role"))) {
-        return;
-      }
-      if (ctx.userId() != null && ctx.userId().value().equals(customerId)) {
-        return;
-      }
-    }
-    throw new HttpStatusException(
-        HttpStatus.FORBIDDEN, "Only an ADMIN or the customer themself may do this");
-  }
-
-  /**
-   * The request context the framework filter bound (see {@link #currentRequesterId()}); {@code
-   * null} when neither the ScopedValue nor the ThreadLocal is set.
-   */
-  private static StreamRuneContext.RequestContext context() {
-    StreamRuneContext.RequestContext ctx =
-        StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
-    return ctx != null ? ctx : StreamRuneContextHelper.get();
-  }
-
-  /**
-   * Requester id for the GDPR audit trail. The Micronaut context filter binds the request context
-   * both as a {@link StreamRuneContext#CURRENT} {@code ScopedValue} (visible on the request thread)
-   * and into the {@link StreamRuneContextHelper} {@code ThreadLocal} (visible on {@code @ExecuteOn}
-   * executor threads where the {@code ScopedValue} does not propagate). Prefer the ScopedValue,
-   * fall back to the ThreadLocal, then to {@code null} (a system/unbound requester) if neither is
-   * set.
+   * Requester id for the GDPR audit trail: the request identity, or {@code null} when none is
+   * bound.
    */
   private static String currentRequesterId() {
-    var ctx = context();
-    return ctx != null && ctx.userId() != null ? ctx.userId().value() : null;
+    return OwnerOrAdminAccess.identityOf(RequestCaller.current());
+  }
+
+  /** The constraints of the Spring app's {@code RegisterRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(RegisterRequest req) {
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notBlank(req.name(), "name");
+    RequestChecks.email(req.email(), "email");
   }
 
   @Serdeable

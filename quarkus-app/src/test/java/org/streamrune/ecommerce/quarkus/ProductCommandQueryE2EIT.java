@@ -18,9 +18,8 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * GET query) over real HTTP against a running Quarkus app backed by a real PostgreSQL
  * (Testcontainers).
  *
- * <p>The Quarkus {@code ProductCommandController} exposes create / adjust-stock / update-price (no
- * discontinue endpoint, unlike Spring), so the discontinue case is intentionally absent — the suite
- * covers exactly what the Quarkus surface exposes.
+ * <p>The suite covers create, adjust-stock and update-price. Discontinuing a product, and who may
+ * call each of the four writes, is {@code OwnerOrAdminRestAccessIT}'s.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)

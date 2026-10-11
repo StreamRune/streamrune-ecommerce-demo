@@ -24,8 +24,8 @@ All domain logic is framework-agnostic. The three application modules (Spring Bo
 |--------|-------------|
 | `domain/` | Events, commands, aggregate state, value types |
 | `commands/` | Decider implementations -- pure domain logic, no I/O |
-| `queries/` | Read-model DTOs (`ProductView`, `OrderView`, `CustomerView`, `InventoryView`) |
-| `projections/` | Event-to-view projectors (`ProductProjection`, `OrderProjection`, `CustomerProjection`, `InventoryProjection`) |
+| `queries/` | Read-model DTOs (`ProductView`, `OrderView`, `CustomerView`, `InventoryView`) and the access rule for a customer's data (`OwnerOrAdminAccess`, `OwnerOrAdminStreamAccess`) |
+| `projections/` | Event-to-view projectors (`ProductProjection`, `OrderProjection`, `CustomerProjection`, `InventoryProjection`) and the customer and order reads as one caller may see them (`OwnerOrAdminQueries`) |
 | `spring-app/` | Spring Boot 4 REST application (port 8080) |
 | `micronaut-app/` | Micronaut REST application (port 8081) |
 | `quarkus-app/` | Quarkus REST application (port 8082) |
@@ -90,50 +90,83 @@ docker compose up -d postgres rabbitmq
 
 ## API
 
-All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization. `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing).
+All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing).
 
 > **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md).
 
+### Who may call what
+
+One rule guards a customer's data, in all three apps: **an authenticated caller who holds the `ADMIN` role, or the customer the data belongs to** (`OwnerOrAdminAccess` in the `queries` module). A customer record belongs to the caller whose `X-User-Id` equals the customer id; an order belongs to the customer it names. Everyone else gets `403` — a caller without `X-User-Id` first of all, whatever `X-User-Role` says. The per-stream SSE endpoint applies the same rule.
+
+- **An `ADMIN` is the role together with an identity**, on every endpoint: `X-User-Role: ADMIN` on a request without `X-User-Id` is nobody (`OwnerOrAdminAccess.isAdmin`, the demo's one definition).
+- **A refusal is always `403`, and the refusal says nothing about existence.** Another customer's record and a record that does not exist are refused alike, and so are another customer's order and an order id without a row. `404` is an answer for the two callers who may know: the customer for their own record, and an `ADMIN`. The read model follows the event store by up to the projection's polling interval (five seconds by default), so for that moment after `POST /api/orders` the order has no row and its own customer gets `403` for it as well. A command refused by `@RequireRole` in the command bus (ship, deliver, discontinue) is a `403` too.
+- **Ids are not secrets.** The refusal is silent about existence; the demo as a whole is not. The live event feed (`GET /api/events/sse`) is open to every caller and shows the stream id (customer ids and order ids among them), the event type and the timestamp of every event, without a payload. And `POST /api/orders` answers `400 Order already exists` to a caller who places an order of their own under an id that is taken. What the rule keeps from a refused caller is the data behind an id: the record, the order, the payloads.
+- **A list holds what the caller may see.** An `ADMIN` gets every row; any other authenticated caller gets their own record from `GET /api/customers` and their own orders from `GET /api/orders`. The rows are chosen inside `OwnerOrAdminQueries` and the read models, before a controller sees one. No query parameter widens that: `?customerId=` may repeat the caller's own id, and naming another customer is a `403`.
+- **Operations are for an `ADMIN`**: the audit log, the saga list, the event history and everything under `/api/admin` except `/api/admin/health`, reads and writes alike.
+- **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price or stock, discontinuing it and receiving a shipment into the inventory are for an `ADMIN`.
+- **A request is read before the caller is decided.** A request without a body, with malformed JSON or without a required field is `400` for every caller, in all three apps; a well-formed request from a caller the rule refuses is `403`.
+- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a confirm, ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not delivered.
+
 ### Products
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/products` | Create product |
-| `PUT` | `/api/products/{id}/stock` | Adjust stock |
-| `PUT` | `/api/products/{id}/price` | Update price |
-| `GET` | `/api/products/{id}` | Get product |
-| `GET` | `/api/products` | List products |
+| Method | Path | Description | Who |
+|--------|------|-------------|-----|
+| `POST` | `/api/products` | Create product | `ADMIN` |
+| `PUT` | `/api/products/{id}/stock` | Adjust stock | `ADMIN` |
+| `PUT` | `/api/products/{id}/price` | Update price | `ADMIN` |
+| `POST` | `/api/products/{id}/discontinue` | Discontinue product | `ADMIN` (`@RequireRole`) |
+| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment into the inventory the fulfillment saga reserves from | `ADMIN` |
+| `GET` | `/api/products/{id}` | Get product | anyone: the public catalogue |
+| `GET` | `/api/products` | List products | anyone: the public catalogue |
 
 ### Orders
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/orders` | Place order |
-| `PUT` | `/api/orders/{id}/confirm` | Confirm order |
-| `PUT` | `/api/orders/{id}/ship` | Ship order |
-| `PUT` | `/api/orders/{id}/cancel` | Cancel order |
-| `GET` | `/api/orders/{id}` | Get order |
-| `GET` | `/api/orders` | List orders |
+| Method | Path | Description | Who |
+|--------|------|-------------|-----|
+| `POST` | `/api/orders` | Place order | `ADMIN`, or the customer the order names in `customerId` |
+| `POST` | `/api/orders/{id}/confirm` | Confirm order (the fulfillment saga does this itself) | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/cancel` | Cancel order | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
+| `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
+| `GET` | `/api/orders/{id}` | Get order | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
+| `GET` | `/api/orders` | List orders; `?customerId=` narrows the list | `ADMIN`: every order. Any other authenticated caller: their own orders. `403` without an identity |
 
 ### Customers
 
+| Method | Path | Description | Who |
+|--------|------|-------------|-----|
+| `POST` | `/api/customers` | Register customer | `ADMIN`, or the customer registering themself (`customerId` equal to `X-User-Id`) |
+| `PUT` | `/api/customers/{id}` | Update profile | `ADMIN` or the customer themself |
+| `GET` | `/api/customers/{id}` | Get customer; `404` once the customer is forgotten | `ADMIN` or the customer themself |
+| `GET` | `/api/customers` | List customers | `ADMIN`: every customer. Any other authenticated caller: their own record. `403` without an identity |
+| `POST` | `/api/customers/{id}/export-data` | GDPR data export request | `ADMIN` or the customer themself |
+| `POST` | `/api/customers/{id}/forget` | GDPR forget (`200` only when fully erased, else `500` — send it again) | `ADMIN` or the customer themself |
+
+### Operations
+
+All of these answer `403` to everyone but an `ADMIN` (the role together with `X-User-Id`), except the health answer.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/customers` | Register customer |
-| `GET` | `/api/customers/{id}` | Get customer |
-| `GET` | `/api/customers` | List customers |
-| `POST` | `/api/customers/{id}/forget` | GDPR forget (ADMIN or the customer themself; `200` only when fully erased, else `500` — send it again) |
+| `GET` | `/api/audit/commands?limit=100` | The command audit log: who sent which command to which aggregate |
+| `GET` | `/api/saga/fulfillments`, `/api/saga/fulfillments/{id}` | The order-fulfillment sagas: order, customer, payment and total of each purchase |
+| `GET` | `/api/admin/circuit-breaker`, `/api/admin/payment-failure` | Breaker states and the payment-failure flag |
+| `GET` | `/api/admin/dead-letters`, `/api/admin/outbox`, `/api/admin/outbox/failed`, `/api/admin/saga-dead-letters`, `/api/admin/sagas/faulted` | Dead-lettered commands, outbox entries, quarantined saga events, faulted sagas |
+| `POST`, `DELETE` | `/api/admin/…`, `/api/saga/fulfillments/{id}/inject-failure` | The recovery operations and the payment-failure toggle (tutorial chapters 11 to 14) |
+| `GET` | `/api/admin/health` | `{"status":"UP"}`, open to every caller |
 
 ### SSE & Events
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload |
-| `GET` | `/api/sse/{aggregateType}/{aggregateId}` | Live events of one stream (SSE). The framework's endpoint (`streamrune.sse.enabled`), fed by the framework from the head of the global stream: live, at-most-once, no replay. A frame carries the event **with its payload**, so the demo's `SseAuthorizer` lets in only an authenticated `ADMIN` or the customer the stream belongs to (their own `customer` stream, the streams of their own orders); `403` for everyone else. An order belongs to the customer it names: `POST /api/orders` takes `customerId` from the request body and does not tie it to the caller, one more demo shortcut |
+| `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload: every caller sees which customer ids and order ids exist and what happens to them when |
+| `GET` | `/api/sse/{aggregateType}/{aggregateId}` | Live events of one stream (SSE). The framework's endpoint (`streamrune.sse.enabled`), fed by the framework from the head of the global stream: live, at-most-once, no replay. A frame carries the event **with its payload**, so the demo's `SseAuthorizer` lets in only an authenticated `ADMIN` or the customer the stream belongs to (their own `customer` stream, the streams of their own orders); `403` for everyone else. An order belongs to the customer it names, and only that customer or an `ADMIN` may place it |
 | `GET` | `/api/events?offset=0&limit=10` | Paginated event history with payloads. ADMIN only, `403` otherwise |
 | `GET` | `/api/events/{aggregateType}/{aggregateId}` | One stream's events with payloads. ADMIN only, `403` otherwise |
 
 > **Demo shortcut, protect this in production.** The two history endpoints return each event as the event store reads it, which means `@Encrypted` fields come back **decrypted** until the subject's key is erased. They check the ADMIN role, but that role is the client-supplied `X-User-Role` header (see above), so the check documents the intent and protects nothing. Put an endpoint like this behind real authentication, or do not ship it. The per-stream SSE endpoint carries decrypted payloads too. Its `SseAuthorizer` applies the rule a real deployment keeps — an `ADMIN`, or the stream's owner — but to the same client-supplied `X-User-Id` and `X-User-Role` headers, so it is only as strong as whatever sets them. See [Chapter 15 of the tutorial](docs/tutorial/15-observability.md).
+
+When an app stops, the open streams of the per-stream endpoint end with it. The Spring app completes them before its web server stops, and so does the Quarkus app, because it is built with `quarkus.shutdown.delay-enabled=true` (a build-time property in `quarkus-app/src/main/resources/application.properties`; without it Quarkus stops its HTTP server first and a client sees its connection cut). On the Micronaut app the server closes the connections as it stops. An `EventSource` reconnects in every case.
 
 ### Example
 
@@ -145,12 +178,19 @@ curl -X POST http://localhost:8080/api/products \
   -H "X-User-Role: ADMIN" \
   -d '{"productId":"p1","name":"Widget","description":"A widget","category":"General","price":9.99,"initialStock":100}'
 
-# Place an order
+# Place an order as the customer it names
 curl -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: cust-1" \
   -H "X-User-Role: CUSTOMER" \
   -d '{"orderId":"o1","customerId":"cust-1","lines":[{"productId":"p1","quantity":2,"unitPrice":9.99}]}'
+
+# Read it as that customer; without the two headers, or as another customer, the answer is 403
+curl http://localhost:8080/api/orders/o1 -H "X-User-Id: cust-1" -H "X-User-Role: CUSTOMER"
+
+# The customer's list holds their own orders; an ADMIN's holds everyone's
+curl http://localhost:8080/api/orders -H "X-User-Id: cust-1" -H "X-User-Role: CUSTOMER"
+curl http://localhost:8080/api/orders -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN"
 ```
 
 ## Projection Naming

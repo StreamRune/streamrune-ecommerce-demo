@@ -44,6 +44,66 @@ export function collectConsoleErrors(page: Page): () => string[] {
 }
 
 /**
+ * Opens the pages of a test as the given role, as the role switcher would have
+ * saved it: ADMIN acts as admin-1, CUSTOMER as cust-alice unless `userId`
+ * names another seeded customer, GUEST (also the default of an empty
+ * localStorage) as nobody.
+ */
+export async function actAs(
+  page: Page,
+  role: "ADMIN" | "CUSTOMER" | "GUEST",
+  userId?: string
+): Promise<void> {
+  await page.addInitScript(
+    ([r, id]) => {
+      window.localStorage.setItem("sr_role", r as string);
+      if (id) {
+        window.localStorage.setItem("sr_userId", id as string);
+      } else {
+        window.localStorage.removeItem("sr_userId");
+      }
+    },
+    [role, userId ?? null]
+  );
+}
+
+/** One request the page sent to the backend API. */
+export interface ApiRequest {
+  /** Path and query, e.g. "/api/orders?customerId=cust-bob". */
+  target: string;
+  role: string | undefined;
+  userId: string | undefined;
+}
+
+/**
+ * Records every request the page sends to the backend API from now on, with
+ * the identity headers it carried.
+ */
+export function recordApiRequests(page: Page): ApiRequest[] {
+  const seen: ApiRequest[] = [];
+  page.on("request", (r) => {
+    const url = new URL(r.url());
+    if (url.origin === new URL(BACKEND_URL).origin && url.pathname.startsWith("/api/")) {
+      const headers = r.headers();
+      seen.push({
+        target: url.pathname + url.search,
+        role: headers["x-user-role"],
+        userId: headers["x-user-id"],
+      });
+    }
+  });
+  return seen;
+}
+
+/** The requests among `seen` whose path is `path` or lies below it. */
+export function requestsTo(seen: ApiRequest[], path: string): ApiRequest[] {
+  return seen.filter((r) => {
+    const pathname = r.target.split("?")[0];
+    return pathname === path || pathname.startsWith(`${path}/`);
+  });
+}
+
+/**
  * Mock all backend API calls so the page renders without port 8080.
  * Intercepts /api/** and /actuator/** with minimal empty-body responses.
  */
@@ -64,7 +124,7 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
   await page.route(`${BACKEND_URL}/api/audit**`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
-  await page.route(`${BACKEND_URL}/api/sagas**`, (route) =>
+  await page.route(`${BACKEND_URL}/api/saga/**`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
   await page.route(`${BACKEND_URL}/api/admin/**`, (route) =>

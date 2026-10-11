@@ -221,7 +221,12 @@ import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
 import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 
+/**
+ * The command audit log, for the ADMIN role (403 otherwise): a row names the user who sent a
+ * command and the aggregate it was sent to, for every customer.
+ */
 @RestController
 @RequestMapping("/api/audit")
 public class AuditController {
@@ -234,6 +239,7 @@ public class AuditController {
 
   @GetMapping("/commands")
   public List<Map<String, Object>> commandAuditLog(@RequestParam(defaultValue = "100") int limit) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =
@@ -263,7 +269,9 @@ public class AuditController {
 }
 ```
 
-This controller queries `audit_log` directly via JDBC rather than through a query handler. The endpoint is intentionally read-only and paginated — the `limit` parameter prevents runaway result sets. In a production system you would add filtering by date range, user ID, or outcome. You would also protect the endpoint with `@RequireRole("ADMIN")` using the authorization interceptor from Chapter 9.
+This controller queries `audit_log` directly via JDBC rather than through a query handler. The endpoint is intentionally read-only and paginated — the `limit` parameter prevents runaway result sets. In a production system you would add filtering by date range, user ID, or outcome.
+
+Its first line is the guard: the log says who sent which command to which aggregate, for every customer, so it is for operators. `@RequireRole` guards commands, and this is a read, so the controller calls `OwnerOrAdminAccess.requireAdmin` from Chapter 9 with the caller `RequestCaller` hands it, and a request from anyone but an `ADMIN` is answered `403`. The identity and the role are the `X-User-Id` and `X-User-Role` headers — the demo shortcut from Chapter 9, which a real deployment replaces with authentication.
 
 ### Step 6 — Create ComplianceReportQuery
 
@@ -329,7 +337,8 @@ curl -X POST http://localhost:8080/api/orders/order-audit-1/ship \
 **Query the audit log:**
 
 ```bash
-curl http://localhost:8080/api/audit/commands | jq .
+curl -s http://localhost:8080/api/audit/commands \
+  -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' | jq .
 ```
 
 You should see four entries, newest first. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:
@@ -383,6 +392,8 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
 ```
 
 The refused attempt reads `ShipOrder | customer-1 | FAILURE | Required role: ADMIN`. The `error_message` is the exception's message in stored form: each run of line breaks or other control characters becomes one space, and anything past 2048 characters is cut off. This matters because an exception message can echo client input, such as a reused idempotency key. Stored as thrown, a line break in that input could forge a row for anyone reading the table, and a NUL would make the insert fail. The exception your controller receives is not changed.
+
+**What the log does not hold.** The audit interceptor sits in the command bus, so it records what reaches the bus. A `@RequireRole` refusal does, as the `FAILURE` row above shows. A refusal by the access rule of Chapter 9 does not: `OwnerOrAdminAccess` is asked in the controller, as the first line of the handler, and a caller it refuses never dispatches a command. A refused `POST /api/customers/{id}/forget` or `PUT /api/products/{id}/price` answers `403` and leaves no row here. A deployment that must record refused attempts on those routes logs them where they are refused, at the HTTP edge.
 
 The `userId` in each entry is simply what `X-User-Id` said, because the demo runs in the trusted-gateway mode (Chapter 9) with your `curl` standing in for the gateway. An audit trail is only as trustworthy as its identity source: in production that is an authenticated principal, or a gateway that authenticates the caller and sets the header itself. The role you sent in `X-User-Role` is not part of the audit entry; it does travel into each produced event's metadata as the `role` baggage entry, exactly as unverified as the header it came from. (The framework copies that header into the baggage only in the trusted-gateway mode, where a real gateway would set it; in any other mode the entry is absent.)
 

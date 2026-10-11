@@ -7,7 +7,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 
+/**
+ * The command audit log, for the {@code ADMIN} role ({@code 403} otherwise): a row names the user
+ * who sent a command and the aggregate it was sent to, for every customer.
+ */
 @Controller("/api/audit")
 public class AuditController {
 
@@ -16,6 +21,7 @@ public class AuditController {
   @Get("/commands")
   public List<Map<String, Object>> commandAuditLog(
       @QueryValue(value = "limit", defaultValue = "100") int limit) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =

@@ -355,6 +355,7 @@ public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
     OffsetStore offsetStore,
     JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
     ProductProjection productProjection,
     OrderProjection orderProjection,
     CustomerProjection customerProjection,
@@ -365,6 +366,7 @@ public MultiProjectionRunner projectionRunner(
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
           .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
           // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
           // checkpoint in ONE transaction — the inventory counter can never double-reserve.
           .atomicProcessor(projectionRepository)
@@ -603,8 +605,10 @@ import jakarta.validation.constraints.Positive;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/** Receiving a shipment changes the stock every order reserves from: for an {@code ADMIN} only. */
 @RestController
 @RequestMapping("/api/inventory")
 public class InventoryCommandController {
@@ -617,6 +621,7 @@ public class InventoryCommandController {
   @PostMapping("/{productId}/receive")
   public ResponseEntity<Void> receiveShipment(
       @PathVariable String productId, @Valid @RequestBody ReceiveShipmentRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(new InventoryCommand.ReceiveShipment(productId, req.quantity()));
     return ResponseEntity.ok().build();
   }
@@ -624,6 +629,17 @@ public class InventoryCommandController {
   public record ReceiveShipmentRequest(@Positive int quantity) {}
 }
 ```
+
+The handler's first line is the guard Chapter 9 gave the product writes: `OwnerOrAdminAccess.requireAdmin` answers `403` to everyone but an `ADMIN`, the role together with an identity. The stock a shipment adds is the stock every customer's order reserves from, so the route is an operator's:
+
+```bash
+curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \
+  -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
+  -d '{"quantity": 50}'
+# → 200 OK; 403 without the two headers
+```
+
+`ReceiveShipment` itself carries no `@RequireRole`: the seed data of Chapter 17 and a dead-letter replay (Chapter 14) dispatch it through the command bus without a request.
 
 ### Step 7: Create the `notifications-service` Module and Wire docker-compose
 
@@ -905,6 +921,7 @@ Wait for all services to be healthy. `SeedDataRunner` issues `ReceiveShipment` a
 # Place an order (adapt IDs to your seed data)
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"prod-widget","quantity":1,"unitPrice":29.99}]}'
 
 # The saga automatically progresses through payment and inventory;
@@ -924,6 +941,7 @@ You should see a JSON array containing an entry whose `type` is `"OrderConfirmed
 ```bash
 curl -s -X POST http://localhost:8080/api/customers \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-pii-test" -H "X-User-Role: CUSTOMER" \
   -d '{"customerId":"c-pii-test","name":"Eve","email":"eve@example.com"}'
 
 # Wait a moment, then check — the count should not increase

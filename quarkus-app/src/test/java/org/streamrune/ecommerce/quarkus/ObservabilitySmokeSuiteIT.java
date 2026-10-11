@@ -46,6 +46,8 @@ class ObservabilitySmokeSuiteIT {
   void circuitBreakerEndpointHasExpectedKeys() {
     io.restassured.path.json.JsonPath body =
         given()
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .when()
             .get("/api/admin/circuit-breaker")
             .then()
@@ -59,12 +61,24 @@ class ObservabilitySmokeSuiteIT {
 
   @Test
   void deadLettersEndpointReturnsArray() {
-    given().when().get("/api/admin/dead-letters").then().statusCode(200);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .get("/api/admin/dead-letters")
+        .then()
+        .statusCode(200);
   }
 
   @Test
   void outboxEndpointReturnsArray() {
-    given().when().get("/api/admin/outbox").then().statusCode(200);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .get("/api/admin/outbox")
+        .then()
+        .statusCode(200);
   }
 
   @Test
@@ -72,6 +86,8 @@ class ObservabilitySmokeSuiteIT {
     // Read initial state
     boolean initial =
         given()
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
             .when()
             .get("/api/admin/payment-failure")
             .then()
@@ -83,6 +99,7 @@ class ObservabilitySmokeSuiteIT {
     // Toggle — should be opposite of initial
     boolean afterToggle =
         given()
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .contentType(ContentType.JSON)
             .when()
@@ -97,6 +114,7 @@ class ObservabilitySmokeSuiteIT {
 
     // Restore to original state
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .contentType(ContentType.JSON)
         .when()
@@ -116,12 +134,14 @@ class ObservabilitySmokeSuiteIT {
         .then()
         .statusCode(403);
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .when()
         .post("/api/admin/payment-failure/toggle")
         .then()
         .statusCode(200);
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .when()
         .post("/api/admin/payment-failure/toggle")
@@ -131,6 +151,7 @@ class ObservabilitySmokeSuiteIT {
     // Dead-letter retry: 403 without the role; with it, an unknown entry is 404.
     given().when().post("/api/admin/dead-letters/no-such-command/retry").then().statusCode(403);
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .when()
         .post("/api/admin/dead-letters/no-such-command/retry")
@@ -138,7 +159,13 @@ class ObservabilitySmokeSuiteIT {
         .statusCode(404);
 
     // The FAILED listing is a read: no role needed.
-    given().when().get("/api/admin/outbox/failed").then().statusCode(200);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .get("/api/admin/outbox/failed")
+        .then()
+        .statusCode(200);
 
     // Outbox replay: 403 without the role; with it, 503 — the outbox is disabled under %test, so
     // the replayer is absent and the endpoint says so instead of failing with a 500.
@@ -167,7 +194,7 @@ class ObservabilitySmokeSuiteIT {
         .when()
         .post(uri)
         .then()
-        .statusCode(400); // no request identity (X-User-Id)
+        .statusCode(403); // the ADMIN role without an identity (X-User-Id) is nobody
     for (String body : new String[] {"", "null", "{}", "{\"reason\": \"   \"}"}) {
       given()
           .header("X-User-Role", "ADMIN")
@@ -194,21 +221,31 @@ class ObservabilitySmokeSuiteIT {
 
   @Test
   void sagaFulfillmentsEndpointReturnsArray() {
-    given().when().get("/api/saga/fulfillments").then().statusCode(200);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .get("/api/saga/fulfillments")
+        .then()
+        .statusCode(200);
   }
 
   @Test
   void sagaFulfillmentByUnknownIdReturns404() {
     given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
         .when()
         .get("/api/saga/fulfillments/does-not-exist-" + System.nanoTime())
         .then()
         .statusCode(404);
   }
 
-  /** The flag both payment-failure routes flip, read through the open admin listing. */
+  /** The flag both payment-failure routes flip, read through the admin listing. */
   private static boolean failureInjected() {
     return given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
         .when()
         .get("/api/admin/payment-failure")
         .then()
@@ -226,6 +263,7 @@ class ObservabilitySmokeSuiteIT {
 
     boolean afterInject =
         given()
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .when()
             .post("/api/saga/fulfillments/any-saga-id/inject-failure")
@@ -240,6 +278,7 @@ class ObservabilitySmokeSuiteIT {
 
     // Restore to original state
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .when()
         .post("/api/saga/fulfillments/any-saga-id/inject-failure")
@@ -287,7 +326,15 @@ class ObservabilitySmokeSuiteIT {
         .post("/api/products");
 
     io.restassured.path.json.JsonPath body =
-        given().when().get("/api/audit/commands").then().statusCode(200).extract().jsonPath();
+        given()
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
+            .when()
+            .get("/api/audit/commands")
+            .then()
+            .statusCode(200)
+            .extract()
+            .jsonPath();
 
     List<Map<String, Object>> rows = body.getList("");
     assertThat(rows).isNotNull();
@@ -303,12 +350,19 @@ class ObservabilitySmokeSuiteIT {
 
   @Test
   void eventsGlobalListReturnsArray() {
-    given().header("X-User-Role", "ADMIN").when().get("/api/events").then().statusCode(200);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .get("/api/events")
+        .then()
+        .statusCode(200);
   }
 
   @Test
   void eventsGlobalListWithOffsetAndLimitReturnsArray() {
     given()
+        .header("X-User-Id", "admin-1")
         .header("X-User-Role", "ADMIN")
         .queryParam("offset", 0)
         .queryParam("limit", 10)
@@ -343,6 +397,7 @@ class ObservabilitySmokeSuiteIT {
 
     io.restassured.path.json.JsonPath body =
         given()
+            .header("X-User-Id", "admin-1")
             .header("X-User-Role", "ADMIN")
             .when()
             .get("/api/events/product/" + pid)

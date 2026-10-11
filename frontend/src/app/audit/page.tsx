@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { ShieldOff } from "lucide-react";
 import { useAuditLog } from "@/lib/queries";
 import { useRole } from "@/providers/role-provider";
+import { AccessRestricted } from "@/components/domain/access-restricted";
 import {
   Table,
   TableBody,
@@ -27,19 +27,13 @@ const LIMIT_OPTIONS = [25, 50, 100];
 
 export default function AuditPage() {
   const { hasPermission } = useRole();
+  // The backend serves the audit log to ADMIN only.
+  const allowed = hasPermission("AUDIT_VIEW");
   const [limit, setLimit] = useState(25);
-  const { data: entries = [], isLoading } = useAuditLog(limit);
+  const { data: entries = [], isLoading } = useAuditLog(limit, allowed);
 
-  if (!hasPermission("AUDIT_VIEW")) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
-        <ShieldOff className="size-12 text-muted-foreground opacity-40" />
-        <div>
-          <h2 className="text-lg font-semibold">Access Restricted</h2>
-          <p className="text-sm text-muted-foreground mt-1">Requires ADMIN role to view audit log.</p>
-        </div>
-      </div>
-    );
+  if (!allowed) {
+    return <AccessRestricted message="Requires ADMIN role to view audit log." />;
   }
 
   return (

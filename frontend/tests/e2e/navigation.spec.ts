@@ -8,8 +8,10 @@
  *
  * Uses mocked backend throughout — runs without the Spring Boot backend.
  *
- * Note: Audit Log requires ADMIN role; GUEST sees "Access Restricted".
- * Both are valid rendered states that prove the page loaded without crashing.
+ * The flow runs as GUEST (an empty localStorage). Orders and Customers require
+ * the CUSTOMER or ADMIN role and Fulfillment and Audit Log the ADMIN role, so a
+ * GUEST sees "Access Restricted" there: the rendered state that proves the
+ * page loaded without crashing.
  */
 
 import { test, expect } from "@playwright/test";
@@ -17,10 +19,10 @@ import { mockBackendRoutes } from "./helpers";
 
 /** Nav items: [href, expected heading text OR fallback gate text] */
 const NAV_ITEMS: Array<{ href: string; heading: string; fallback?: string }> = [
-  { href: "/orders", heading: "Orders" },
+  { href: "/orders", heading: "Orders", fallback: "Access Restricted" },
   { href: "/products", heading: "Products" },
-  { href: "/customers", heading: "Customers" },
-  { href: "/fulfillment", heading: "Fulfillment" },
+  { href: "/customers", heading: "Customers", fallback: "Access Restricted" },
+  { href: "/fulfillment", heading: "Fulfillment", fallback: "Access Restricted" },
   { href: "/events", heading: "Event Explorer" },
   { href: "/audit", heading: "Audit Log", fallback: "Access Restricted" },
   { href: "/admin", heading: "Admin" },

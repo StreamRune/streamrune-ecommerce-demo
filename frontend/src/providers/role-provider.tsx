@@ -15,8 +15,8 @@ import { userIdForRole } from "@/lib/identity";
 import { getPermissions, hasPermission as checkPermission } from "@/lib/permissions";
 
 export const DEFAULT_USERS = {
-  "cust-alice": { name: "Alice Smith", email: "alice@example.com" },
-  "cust-bob": { name: "Bob Jones", email: "bob@example.com" },
+  "cust-alice": { name: "Alice Johnson", email: "alice@example.com" },
+  "cust-bob": { name: "Bob Smith", email: "bob@example.com" },
 } as const;
 
 interface RoleContextValue {
@@ -68,8 +68,10 @@ export function RoleProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(STORAGE_KEY_USER);
     }
     setApiAuth(role, userId);
-    // Invalidate all cached data when role changes — previous data may differ by role
-    void queryClient.invalidateQueries();
+    // What the backend returns depends on the identity (a CUSTOMER gets their own orders, an
+    // ADMIN everyone's), so the cache of the identity that was active is dropped, not just
+    // marked stale: nothing it loaded is shown under the next one.
+    void queryClient.resetQueries();
   }, [role, userId, queryClient]);
 
   const setRole = useCallback((newRole: Role) => {

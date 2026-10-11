@@ -9,11 +9,14 @@ import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import javax.sql.DataSource;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
@@ -35,6 +38,7 @@ import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.runtime.CacheAwareProjection;
 import org.streamrune.runtime.CacheInvalidator;
 import org.streamrune.runtime.MultiProjectionRunner;
+import org.streamrune.spring.StreamRuneProperties;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.InMemoryOffsetStore;
 import org.streamrune.test.InMemoryProjectionRepository;
@@ -76,6 +80,12 @@ class ProjectionDeliveryModeWiringTest {
   }
 
   /** A DataSource for a repository that the test never lets reach the database. */
+  /** The framework's properties with nothing configured: the runner polls at the defaults. */
+  private static StreamRuneProperties defaultProperties() {
+    return new Binder(new MapConfigurationPropertySource(Map.of()))
+        .bindOrCreate("streamrune", StreamRuneProperties.class);
+  }
+
   private static DataSource unusedDataSource() {
     return (DataSource)
         Proxy.newProxyInstance(
@@ -163,6 +173,7 @@ class ProjectionDeliveryModeWiringTest {
                         new InMemoryEventStore(),
                         new InMemoryOffsetStore(),
                         processor,
+                        defaultProperties(),
                         new ProductProjection(name.equals("products") ? other : processor),
                         new OrderProjection(name.equals("orders") ? other : processor),
                         new CustomerProjection(name.equals("customers") ? other : processor),

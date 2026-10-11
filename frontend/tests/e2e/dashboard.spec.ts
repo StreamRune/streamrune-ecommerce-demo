@@ -7,7 +7,14 @@
  */
 
 import { test, expect } from "@playwright/test";
-import { mockBackendRoutes, collectConsoleErrors, BACKEND_URL } from "./helpers";
+import {
+  actAs,
+  mockBackendRoutes,
+  collectConsoleErrors,
+  recordApiRequests,
+  requestsTo,
+  BACKEND_URL,
+} from "./helpers";
 
 test.describe("Dashboard page", () => {
   test("the live event feed lists a payload-free frame", async ({ page }) => {
@@ -70,5 +77,43 @@ test.describe("Dashboard page", () => {
         !e.includes("Failed to fetch")
     );
     expect(unexpectedErrors, `Unexpected console errors: ${unexpectedErrors.join("\n")}`).toHaveLength(0);
+  });
+
+  test("a GUEST sends no order or customer request and sees what the cards require", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const requests = recordApiRequests(page);
+
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(page.getByText("Requires CUSTOMER or ADMIN role", { exact: true })).toHaveCount(2);
+    await expect(page.getByText("Requires CUSTOMER or ADMIN role to view orders.")).toBeVisible();
+    // The product catalogue is open to everyone.
+    await expect.poll(() => requestsTo(requests, "/api/products").length).toBeGreaterThan(0);
+    expect(requestsTo(requests, "/api/orders")).toHaveLength(0);
+    expect(requestsTo(requests, "/api/customers")).toHaveLength(0);
+  });
+
+  test("a CUSTOMER loads their own orders and record, as cust-alice", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await actAs(page, "CUSTOMER");
+    const requests = recordApiRequests(page);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Your own record")).toBeVisible();
+    await expect(page.getByText("0 pending, your own")).toBeVisible();
+    const sent = [
+      ...requestsTo(requests, "/api/orders"),
+      ...requestsTo(requests, "/api/customers"),
+    ];
+    expect(sent.length).toBeGreaterThanOrEqual(2);
+    for (const request of sent) {
+      expect(request.target).not.toContain("customerId");
+      expect(request.role).toBe("CUSTOMER");
+      expect(request.userId).toBe("cust-alice");
+    }
   });
 });

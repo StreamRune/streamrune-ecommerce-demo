@@ -6,7 +6,7 @@
 > - How `UserRoleResolver` bridges the gap between request context and authorization decisions
 > - How `ScopedValueFilter` uses Java's `ScopedValue` (a preview API in Java 21–24, finalized in Java 25) to propagate request identity through a virtual-thread call stack
 > - How to test authorization in practice: a `CUSTOMER` cannot ship an order; an `ADMIN` can
-> - How to guard the GDPR routes from Chapter 7 so only an `ADMIN` or the customer themself can erase a customer
+> - How to guard a customer's data — the customer and order routes, the GDPR routes from Chapter 7 — with one rule: an authenticated `ADMIN`, or the customer the data belongs to
 > - Why the demo's identity and role headers are a stand-in for a gateway, and why its header-based role resolver must not be copied into a real deployment
 
 ---
@@ -243,7 +243,7 @@ You do **not** need to create a custom filter. The `streamrune-spring` auto-conf
 
 Your `HeaderUserRoleResolver` (Step 2) reads exactly this `"role"` baggage entry via `StreamRuneContext.CURRENT.get().baggage().getOrDefault("role", "GUEST")`. The whole chain works without any filter code in your project.
 
-> **`X-User-Id` is required for any annotated command.** Before checking roles, `AnnotationAuthorizationInterceptor` calls `Authorization.currentUserId()` (which returns `ctx.userId()`, populated from the `X-User-Id` header once you enable the trusted-gateway mode below). If it is null — because the request omitted `X-User-Id` — the interceptor throws `AuthorizationException("Authentication required")` rather than the role message. Like every other `AuthorizationException`, this surfaces as `400 Bad Request`. So a request to a guarded command always needs `X-User-Id` set; `X-User-Role` then decides whether the caller is authorized.
+> **`X-User-Id` is required for any annotated command.** Before checking roles, `AnnotationAuthorizationInterceptor` calls `Authorization.currentUserId()` (which returns `ctx.userId()`, populated from the `X-User-Id` header once you enable the trusted-gateway mode below). If it is null — because the request omitted `X-User-Id` — the interceptor throws `AuthorizationException("Authentication required")` rather than the role message. Like every other `AuthorizationException`, this surfaces as `403 Forbidden` once Step 6 has given the exception its handler. So a request to a guarded command always needs `X-User-Id` set; `X-User-Role` then decides whether the caller is authorized.
 
 **Trust `X-User-Id` explicitly.** Out of the box the framework never believes a client-supplied `X-User-Id`: the user is the authenticated Spring Security principal when a resolver is available, and otherwise every request is anonymous. The header becomes the identity — and `X-User-Role` the `"role"` baggage entry — only in the *trusted-gateway* mode, which you switch on in `spring-app/src/main/resources/application.yml`:
 
@@ -344,6 +344,15 @@ curl -X POST http://localhost:8080/api/orders/order-auth-test/confirm \
 
 Both succeed: `PlaceOrder` and `ConfirmOrder` have no `@RequireRole` annotation, so the interceptor is a no-op for those commands.
 
+**First decide what a refusal looks like over HTTP.** `AuthorizationException` extends `DomainException`, and the `GlobalExceptionHandler` from Chapter 1 maps every `DomainException` to `400 Bad Request`: the status of a broken business rule, which a refusal is not. Give the exception a handler of its own in `GlobalExceptionHandler` (import `org.streamrune.core.AuthorizationException`); Spring picks the most specific handler, so the one for `DomainException` keeps every other case:
+
+```java
+@ExceptionHandler(AuthorizationException.class)
+public ResponseEntity<String> handleAuthorization(AuthorizationException e) {
+  return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+}
+```
+
 **Try to ship as a CUSTOMER — expect rejection:**
 
 ```bash
@@ -352,7 +361,7 @@ curl -v -X POST http://localhost:8080/api/orders/order-auth-test/ship \
   -H 'X-User-Role: CUSTOMER'
 ```
 
-The response is `400 Bad Request` with a body like:
+The response is `403 Forbidden` with the body:
 
 ```
 Required role: ADMIN
@@ -360,7 +369,7 @@ Required role: ADMIN
 
 The filter bound `role=CUSTOMER` in the `ScopedValue` (and `userId=customer-1` from `X-User-Id`), resolved the caller's authority via `HeaderUserRoleResolver` and stored it in the request context. The interceptor read `@RequireRole("ADMIN")` from `ShipOrder`, found no `ADMIN` role in that authority, and threw `AuthorizationException`. The command never reached `OrderDecider`. Nothing was written to the event store.
 
-> **Why 400, not 403?** `AuthorizationException` extends `DomainException`, and the demo's `GlobalExceptionHandler` maps every `DomainException` to `400 Bad Request`. The demo does not register a dedicated handler for `AuthorizationException`, and it depends only on `spring-security-core` (not the full Spring Security filter chain), so nothing produces a `403`. If you want a `403` for authorization failures, add an `@ExceptionHandler(AuthorizationException.class)` to `GlobalExceptionHandler` that returns `HttpStatus.FORBIDDEN` — the body (`Required role: ADMIN`) stays the same.
+> **`403` without an identity too.** A request with no `X-User-Id` is refused with the body `Authentication required`, and the same handler answers it with `403`: the demo has no login to send a `401` to. Without the handler both refusals would be a `400`, indistinguishable from an order that cannot be shipped in its current state.
 
 **Ship as an ADMIN — expect success:**
 
@@ -383,7 +392,7 @@ Discontinuing a product is a `POST` to `/api/products/{id}/discontinue` (see `Pr
 curl -v -X POST http://localhost:8080/api/products/p-1/discontinue \
   -H 'X-User-Id: customer-1' \
   -H 'X-User-Role: CUSTOMER'
-# → 400 Bad Request — "Required role: ADMIN"
+# → 403 Forbidden — "Required role: ADMIN"
 
 # Attempt as ADMIN
 curl -X POST http://localhost:8080/api/products/p-1/discontinue \
@@ -392,47 +401,499 @@ curl -X POST http://localhost:8080/api/products/p-1/discontinue \
 # → 200 OK
 ```
 
-### Step 7 — Guard the GDPR routes: an ADMIN or the customer themself
+### Step 7 — A customer's data: an ADMIN or the customer themself
 
-Chapter 7 left `POST /api/customers/{id}/forget` and `POST /api/customers/{id}/export-data` open, because until now no request carried an identity. Now one does, and the forget route needs it most: it destroys the customer's encryption key, which cannot be undone. Who may call it depends on *which* customer the request names — an `ADMIN` may erase anyone, a customer only themself — and `@RequireRole` cannot express that: it looks at the command's type, never at the id inside it. So the check is a few lines in `CustomerCommandController`, run as the first line of both handlers, before anything is written:
+Chapters 6 to 8 left every customer and order route open, because until now no request carried an identity. Now one does, and the routes need it: `GET /api/customers` returns every customer's name, e-mail, address and phone, `GET /api/orders` every customer's purchases, and `POST /api/customers/{id}/forget` destroys a customer's encryption key, which cannot be undone.
+
+Who may call them depends on *which* customer the request names — an `ADMIN` may read or erase anyone, a customer only themself — and `@RequireRole` cannot express that: it looks at the command's type, never at the id inside it, and it guards commands, not reads. So the demo has one rule of its own, written once and asked everywhere a customer's data is handed out or changed:
+
+> **An authenticated caller who holds the `ADMIN` role, or the customer the data belongs to. Everyone else is refused — a caller without an identity first of all.**
+
+The rule is plain Java with no Spring in it, so it goes into the shared `queries` module, where `quarkus-app` and `micronaut-app` use the same class. A refusal is an exception of its own. Create `queries/src/main/java/org/streamrune/ecommerce/queries/access/AccessRefusedException.java`:
 
 ```java
-@PostMapping("/{id}/forget")
-public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
-    requireAdminOrSelf(id);
-    commandBus.execute(new CustomerCommand.ForgetCustomer(id));
-    // ... the rest as in Chapter 7
+package org.streamrune.ecommerce.queries.access;
+
+/**
+ * The caller may not read or change what the request names. Each application answers it with 403
+ * Forbidden. The message never names the resource.
+ */
+public final class AccessRefusedException extends RuntimeException {
+
+  private static final long serialVersionUID = 1L;
+
+  public AccessRefusedException(String message) {
+    super(message);
+  }
+}
+```
+
+and next to it `OwnerOrAdminAccess.java`:
+
+```java
+package org.streamrune.ecommerce.queries.access;
+
+import org.streamrune.core.StreamRuneContext;
+import org.streamrune.ecommerce.queries.dto.OrderView;
+
+/**
+ * The demo's one rule for a customer's data: an authenticated caller who holds the ADMIN role, or
+ * the customer the data belongs to. Everyone else is refused.
+ */
+public final class OwnerOrAdminAccess {
+
+  private static final String ROLE_BAGGAGE_KEY = "role";
+  private static final String ADMIN = "ADMIN";
+  private static final String REFUSED = "Only an ADMIN or the customer themself may do this";
+  private static final String ADMIN_REQUIRED = "Required role: ADMIN";
+
+  private OwnerOrAdminAccess() {}
+
+  /** The caller's id, or null when the request has no request context or no identity. */
+  public static String identityOf(StreamRuneContext.RequestContext caller) {
+    return caller == null || caller.userId() == null ? null : caller.userId().value();
+  }
+
+  /**
+   * An ADMIN: a caller with an identity whose request carries the ADMIN role. The demo's only
+   * definition of an ADMIN; the role alone, without an identity, is nobody.
+   */
+  public static boolean isAdmin(StreamRuneContext.RequestContext caller) {
+    return identityOf(caller) != null && ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
+  }
+
+  /** Refuses a caller who is not an ADMIN: the guard of the ADMIN-only endpoints. */
+  public static void requireAdmin(StreamRuneContext.RequestContext caller) {
+    if (!isAdmin(caller)) {
+      throw new AccessRefusedException(ADMIN_REQUIRED);
+    }
+  }
+
+  /** An ADMIN, or the customer themself. Needs no read model. */
+  public static boolean mayAccessCustomer(
+      StreamRuneContext.RequestContext caller, String customerId) {
+    String identity = identityOf(caller);
+    return identity != null && (isAdmin(caller) || identity.equals(customerId));
+  }
+
+  /**
+   * An ADMIN, or the customer the order's read-model row names. An order without a row (null) has
+   * no known owner: only an ADMIN may go on.
+   */
+  public static boolean mayAccessOrder(StreamRuneContext.RequestContext caller, OrderView order) {
+    String identity = identityOf(caller);
+    if (identity == null) {
+      return false;
+    }
+    return isAdmin(caller) || (order != null && identity.equals(order.customerId()));
+  }
+
+  public static void requireCustomerAccess(
+      StreamRuneContext.RequestContext caller, String customerId) {
+    if (!mayAccessCustomer(caller, customerId)) {
+      throw new AccessRefusedException(REFUSED);
+    }
+  }
+
+  public static void requireOrderAccess(StreamRuneContext.RequestContext caller, OrderView order) {
+    if (!mayAccessOrder(caller, order)) {
+      throw new AccessRefusedException(REFUSED);
+    }
+  }
+
+  /** The caller's id; refuses a request without an identity. */
+  public static String requireIdentity(StreamRuneContext.RequestContext caller) {
+    String identity = identityOf(caller);
+    if (identity == null) {
+      throw new AccessRefusedException(REFUSED);
+    }
+    return identity;
+  }
+}
+```
+
+The class reads the same two things the interceptor does, from the one object the request filter built: the user id (the trusted-gateway mode from Step 3) and the `role` baggage entry (the demo shortcut from Step 2). The customer id is the user id in this demo — the frontend's customer persona sends its own customer id as `X-User-Id` — so "themself" is a plain comparison. `isAdmin` is the demo's only definition of an `ADMIN`: the role together with an identity, so `X-User-Role: ADMIN` on a request without `X-User-Id` is nobody. Every endpoint that is for operators alone calls `requireAdmin`, which is `isAdmin` as a guard: the product writes below, and in later chapters the audit log, the saga list, the admin panel, the event history and the inventory.
+
+**The reads go through one more class.** A single customer or order is a yes-or-no question, but a list is not: an `ADMIN` gets every row, a customer their own, and the rows must be chosen before anything is returned, not filtered out of a full list in the controller. That needs the read models, so the class lives in the `projections` module. Create `projections/src/main/java/org/streamrune/ecommerce/projections/access/OwnerOrAdminQueries.java`:
+
+```java
+package org.streamrune.ecommerce.projections.access;
+
+import java.util.List;
+import org.streamrune.core.StreamRuneContext;
+import org.streamrune.ecommerce.projections.CustomerProjection;
+import org.streamrune.ecommerce.projections.OrderProjection;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderView;
+
+/**
+ * The customer and order read models as one caller may see them: OwnerOrAdminAccess applied to
+ * every read. A refusal is an AccessRefusedException.
+ */
+public final class OwnerOrAdminQueries {
+
+  private final CustomerProjection customers;
+  private final OrderProjection orders;
+
+  public OwnerOrAdminQueries(CustomerProjection customers, OrderProjection orders) {
+    if (customers == null) {
+      throw new IllegalArgumentException("customers is required");
+    }
+    if (orders == null) {
+      throw new IllegalArgumentException("orders is required");
+    }
+    this.customers = customers;
+    this.orders = orders;
+  }
+
+  /** One customer, or null when the read model has no row. Decided before the read. */
+  public CustomerView customer(StreamRuneContext.RequestContext caller, String customerId) {
+    OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
+    return customers.get(customerId);
+  }
+
+  /** Every customer for an ADMIN; the caller's own record, read by its id, for anyone else. */
+  public List<CustomerView> customers(StreamRuneContext.RequestContext caller) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return customers.listAll();
+    }
+    CustomerView own = customers.get(identity);
+    return own == null ? List.of() : List.of(own);
+  }
+
+  /** One order; null only for an ADMIN, when the read model has no row for the id. */
+  public OrderView order(StreamRuneContext.RequestContext caller, String orderId) {
+    OwnerOrAdminAccess.requireIdentity(caller);
+    OrderView order = orders.get(orderId);
+    OwnerOrAdminAccess.requireOrderAccess(caller, order);
+    return order;
+  }
+
+  /**
+   * Every order for an ADMIN, narrowed to one customer when the request names one. The caller's own
+   * orders for anyone else: the filter can repeat the caller's id and cannot name another customer.
+   */
+  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    boolean filtered = customerId != null && !customerId.isEmpty();
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+    }
+    if (filtered) {
+      OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
+    }
+    return orders.listByCustomer(identity);
+  }
+
+  /** The guard of the order commands that act on an existing order. */
+  public void requireOrderAccess(StreamRuneContext.RequestContext caller, String orderId) {
+    order(caller, orderId);
+  }
+}
+```
+
+**The Spring side is three small pieces.** First, where the caller comes from: the framework's `ScopedValueFilter` (Step 3) binds the request context around the whole servlet chain. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/RequestCaller.java`:
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import org.streamrune.core.StreamRuneContext;
+
+/** The caller of the request being served: the request context the framework's filter bound. */
+final class RequestCaller {
+
+  private RequestCaller() {}
+
+  /** The request context of the current request, or null when none is bound. */
+  static StreamRuneContext.RequestContext current() {
+    return StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
+  }
+}
+```
+
+Second, the status of a refusal. Add the import `org.streamrune.ecommerce.queries.access.AccessRefusedException` to `GlobalExceptionHandler` and one handler:
+
+```java
+@ExceptionHandler(AccessRefusedException.class)
+public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
+  return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+}
+```
+
+Third, the bean. Add the import `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` to `StreamRuneConfig` and:
+
+```java
+@Bean
+public OwnerOrAdminQueries ownerOrAdminQueries(
+    CustomerProjection customerProjection, OrderProjection orderProjection) {
+  return new OwnerOrAdminQueries(customerProjection, orderProjection);
+}
+```
+
+**Now the controllers ask.** The two query controllers hand every read to `OwnerOrAdminQueries`. Replace `CustomerQueryController` from Chapter 6:
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import java.util.List;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.dto.CustomerView;
+
+/** The customer read model, for an authenticated ADMIN or the customer themself; 403 otherwise. */
+@RestController
+@RequestMapping("/api/customers")
+public class CustomerQueryController {
+
+  private final OwnerOrAdminQueries queries;
+
+  public CustomerQueryController(OwnerOrAdminQueries queries) {
+    this.queries = queries;
+  }
+
+  /** One customer: 404 when the caller may read it and the read model has no row. */
+  @GetMapping("/{id}")
+  public ResponseEntity<CustomerView> getCustomer(@PathVariable String id) {
+    CustomerView customer = queries.customer(RequestCaller.current(), id);
+    return customer != null ? ResponseEntity.ok(customer) : ResponseEntity.notFound().build();
+  }
+
+  /** Every customer for an ADMIN; the caller's own record for anyone else. */
+  @GetMapping
+  public List<CustomerView> listCustomers() {
+    return queries.customers(RequestCaller.current());
+  }
+}
+```
+
+and `OrderQueryController` from Chapter 8:
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import java.util.List;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.dto.OrderView;
+
+/** The order read model, for an authenticated ADMIN or the customer an order names; 403 otherwise. */
+@RestController
+@RequestMapping("/api/orders")
+public class OrderQueryController {
+
+  private final OwnerOrAdminQueries queries;
+
+  public OrderQueryController(OwnerOrAdminQueries queries) {
+    this.queries = queries;
+  }
+
+  /** One order. 404 is an ADMIN's answer for an id without a row; a customer gets 403 for it. */
+  @GetMapping("/{id}")
+  public ResponseEntity<OrderView> getOrder(@PathVariable String id) {
+    OrderView order = queries.order(RequestCaller.current(), id);
+    return order != null ? ResponseEntity.ok(order) : ResponseEntity.notFound().build();
+  }
+
+  /** Every order for an ADMIN, narrowed by customerId; the caller's own orders for anyone else. */
+  @GetMapping
+  public List<OrderView> listOrders(@RequestParam(required = false) String customerId) {
+    return queries.orders(RequestCaller.current(), customerId);
+  }
+}
+```
+
+The command controllers ask as their first line, before anything is written. In `CustomerCommandController` (import `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`) every handler names a customer, by the body for a registration and by the path for the rest:
+
+```java
+@PostMapping
+public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
+    // ... the rest as in Chapter 6
+}
+
+@PutMapping("/{id}")
+public ResponseEntity<Void> updateProfile(
+    @PathVariable String id, @RequestBody UpdateProfileRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
+    // ... the rest as in Chapter 6
 }
 
 @PostMapping("/{id}/export-data")
 public ResponseEntity<Void> exportData(@PathVariable String id) {
-    requireAdminOrSelf(id);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.RequestDataExport(id));
     return ResponseEntity.ok().build();
 }
 
-/**
- * Answers 403 unless the caller holds the ADMIN role or is the customer themself (the request
- * identity equals the customer id).
- */
-private static void requireAdminOrSelf(String customerId) {
-    var ctx = StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
-    if (ctx != null) {
-        if ("ADMIN".equals(ctx.baggage().get("role"))) {
-            return;
-        }
-        if (ctx.userId() != null && ctx.userId().value().equals(customerId)) {
-            return;
-        }
-    }
-    throw new ResponseStatusException(
-        HttpStatus.FORBIDDEN, "Only an ADMIN or the customer themself may do this");
+@PostMapping("/{id}/forget")
+public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
+    commandBus.execute(new CustomerCommand.ForgetCustomer(id));
+    // ... the rest as in Chapter 7
 }
 ```
 
-It reads the same two things the interceptor does: the `role` baggage entry (the demo shortcut from Step 2) and the user id (the trusted-gateway mode from Step 3). The customer id is the user id in this demo — the frontend's customer persona sends its own customer id as `X-User-Id` — so "themself" is a plain comparison. Add the imports `org.springframework.http.HttpStatus` and `org.springframework.web.server.ResponseStatusException`.
+`OrderCommandController` takes the `OwnerOrAdminQueries` bean as a second constructor argument (field `queries`; imports `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` and `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`). Placing an order names its customer in the body; confirming and cancelling name an order, whose owner the read model knows:
 
-Try it with Bob from Chapter 7 (register him again if your database was reset):
+```java
+@PostMapping
+public ResponseEntity<Void> placeOrder(@Valid @RequestBody PlaceOrderRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
+    // ... the rest as in Chapter 8
+}
+
+@PostMapping("/{id}/confirm")
+public ResponseEntity<Void> confirmOrder(@PathVariable String id) {
+    queries.requireOrderAccess(RequestCaller.current(), id);
+    commandBus.execute(new OrderCommand.ConfirmOrder(id));
+    return ResponseEntity.ok().build();
+}
+
+@PostMapping("/{id}/cancel")
+public ResponseEntity<Void> cancelOrder(
+    @PathVariable String id, @Valid @RequestBody CancelOrderRequest req) {
+    queries.requireOrderAccess(RequestCaller.current(), id);
+    commandBus.execute(new OrderCommand.CancelOrder(id, req.reason()));
+    return ResponseEntity.ok().build();
+}
+```
+
+`ShipOrder` and `DeliverOrder` keep their `@RequireRole("ADMIN")` from Step 1: they are an operator's commands whoever the order belongs to.
+
+**The catalogue's writes are an operator's.** Chapter 2 left `POST /api/products`, `PUT /api/products/{id}/stock` and `PUT /api/products/{id}/price` open, and anyone who can reach the API could set a price of one cent. These routes name no customer, so there is no owner to compare: they are for an `ADMIN`. Each handler of `ProductCommandController` asks as its first line (import `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`):
+
+```java
+@PostMapping
+public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    // ... the rest as in Chapter 2
+}
+
+@PutMapping("/{id}/stock")
+public ResponseEntity<Void> adjustStock(
+    @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
+    return ResponseEntity.ok().build();
+}
+
+@PutMapping("/{id}/price")
+public ResponseEntity<Void> updatePrice(
+    @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
+    return ResponseEntity.ok().build();
+}
+```
+
+`DiscontinueProduct` keeps its `@RequireRole("ADMIN")` from Step 1, and both refusals are a `403`. The two mechanisms guard different doors. `@RequireRole` is declared on the command and enforced in the command bus, for every caller of the bus. The controller line guards the HTTP route and leaves the bus to the callers that have no request: the seed data of Chapter 17 creates its products through the command bus at startup, with no caller at all. Reading the catalogue stays open: `ProductQueryController` asks nobody. Chapter 13 gives the inventory's one write, receiving a shipment, the same first line.
+
+**Who gets what.** Four callers — one without an identity, an authenticated customer who is not the owner, the owner, and an `ADMIN`:
+
+| Endpoint | No identity | Another customer | The owner | `ADMIN` |
+|----------|-------------|------------------|-----------|---------|
+| `GET /api/customers/{id}` | `403` | `403` | `200`, or `404` without a row | `200`, or `404` without a row |
+| `GET /api/customers` | `403` | `200`: their own record only | `200`: their own record only | `200`: every customer |
+| `POST /api/customers` | `403` | `403` | `200` | `200` |
+| `PUT /api/customers/{id}`, `POST …/export-data`, `POST …/forget` | `403` | `403` | `200` | `200` |
+| `GET /api/orders/{id}` | `403` | `403` | `200` | `200`, or `404` without a row |
+| `GET /api/orders` | `403` | `200`: their own orders only | `200`: their own orders only | `200`: every order |
+| `GET /api/orders?customerId=X` | `403` | `403` when `X` is not the caller | `200`: their own orders | `200`: the orders of `X` |
+| `POST /api/orders` | `403` | `403` | `200` | `200` |
+| `POST /api/orders/{id}/confirm`, `…/cancel` | `403` | `403` | `200` | `200` |
+
+The endpoints that are for an `ADMIN` alone have no owner. Their four callers are a request without any header, the role without an identity, an authenticated customer, and an `ADMIN`:
+
+| Endpoint | No header | `X-User-Role: ADMIN`, no `X-User-Id` | A customer | `ADMIN` |
+|----------|-----------|--------------------------------------|------------|---------|
+| `POST /api/products`, `PUT /api/products/{id}/stock`, `PUT …/price` | `403` | `403` | `403` | `200` |
+| `POST /api/products/{id}/discontinue`, `POST /api/orders/{id}/ship`, `…/deliver` (`@RequireRole`) | `403` | `403` | `403` | `200` |
+| `GET /api/products`, `GET /api/products/{id}` | `200` | `200` | `200` | `200` |
+
+Five decisions are worth a second look:
+
+- **A request is read before the caller is asked.** `@Valid @RequestBody` runs before the handler, so a request without a body, or without a field its request record requires, is a `400` for anyone, also for a caller the rule would refuse. The handler's first line then decides on a request it can read: a well-formed request from a refused caller is a `403`. Inside the command bus the order is the other one (Step 5): authorization runs before Bean Validation of the command, so the command's own constraints and the decider's business rules stay out of a refused caller's reach.
+- **A refusal is `403`, never `404`, and the refusal says nothing about existence.** For a customer the rule compares two ids and never asks the read model, so another customer's record and a record that does not exist are refused alike. For an order a caller who is not an `ADMIN` gets the same `403` for another customer's order and for an id without a row: an order without a row has no known owner. `404` is kept for the two callers who may know — the customer for their own record (a forgotten customer has no row, Chapter 7), and an `ADMIN`. A request without an identity is refused with `403` as well; the demo has no login to send a `401` to. One consequence to know: the read model follows the event store by up to the projection's polling interval (five seconds by default), so right after `POST /api/orders` the order has no row yet and its own customer is answered `403` too, until the row is there. The customer's list never refuses them: it simply does not hold the new order for that moment.
+- **A list is scoped where it is read.** A customer's `GET /api/customers` is one read by their own id, and their `GET /api/orders` is `OrderProjection.listByCustomer` with their own id (Chapter 8), never `listAll()`: the rows are chosen inside the read model's class, before the controller sees one, not picked out of everybody's in the controller. (`listByCustomer` itself reads the order table and keeps that customer's rows in memory, which a demo's table allows; a read model with real volumes gives its repository a query by `customerId`.) No query parameter widens the result: `customerId` may repeat the caller's id, and naming anybody else is a `403`.
+- **An order belongs to the customer it names, and only that customer or an `ADMIN` may place it.** `POST /api/orders` takes `customerId` from the request body, so the check ties it to the caller.
+- **Ids are not secrets here; the data behind them is what the rule guards.** The refusal is silent about existence, the demo as a whole is not. The live event feed of Chapter 15 (`GET /api/events/sse`) is open to everyone and names every stream with its event types and times, `customer:c-carol` and `order:order-acl-1` among them, without any payload. And `POST /api/orders` answers `400 Order already exists` to a customer who places an order of their own under an id that is taken. A caller can therefore learn that an id exists; what `403` keeps from them is the record, the order and the events' payloads.
+
+Try it. Register Carol and Dave as themselves, then read as each caller (`p-1` is the product from Chapter 2). Give the projection its five seconds after each write before you read: until the row is there, Carol's own record answers `404` and her own order `403`.
+
+```bash
+for c in carol dave; do
+  curl -s -X POST http://localhost:8080/api/customers \
+    -H 'Content-Type: application/json' -H "X-User-Id: c-$c" -H 'X-User-Role: CUSTOMER' \
+    -d "{\"customerId\":\"c-$c\",\"name\":\"$c\",\"email\":\"$c@example.com\",\"address\":\"1 Main St\",\"phone\":\"555-0100\"}"
+done
+
+# No identity, or someone else's: 403
+curl -i http://localhost:8080/api/customers/c-carol
+curl -i http://localhost:8080/api/customers/c-carol -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
+# → 403 Forbidden
+
+# Carol reads her own record, and her list holds nobody else
+curl -s http://localhost:8080/api/customers/c-carol -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER'
+curl -s http://localhost:8080/api/customers -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER'
+# → [{"customerId":"c-carol", ...}]
+
+# An ADMIN reads everyone
+curl -s http://localhost:8080/api/customers -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'
+# → [..., {"customerId":"c-carol", ...}, {"customerId":"c-dave", ...}]
+
+# The role header alone is nobody
+curl -i http://localhost:8080/api/customers -H 'X-User-Role: ADMIN'
+# → 403 Forbidden
+```
+
+The catalogue: anyone reads it, an `ADMIN` changes it.
+
+```bash
+curl -s http://localhost:8080/api/products/p-1
+
+# A customer, and the role without an identity: 403
+curl -i -X PUT http://localhost:8080/api/products/p-1/price \
+  -H 'Content-Type: application/json' -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER' \
+  -d '{"price": 0.01}'
+curl -i -X PUT http://localhost:8080/api/products/p-1/price \
+  -H 'Content-Type: application/json' -H 'X-User-Role: ADMIN' \
+  -d '{"price": 0.01}'
+# → 403 Forbidden
+
+# An ADMIN
+curl -i -X PUT http://localhost:8080/api/products/p-1/price \
+  -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
+  -d '{"price": 21.99}'
+# → 200 OK
+```
+
+Orders follow the same lines:
+
+```bash
+# Dave may not place an order in Carol's name
+curl -i -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER' \
+  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1,"unitPrice":19.99}]}'
+# → 403 Forbidden
+
+# Carol places it herself and reads it; Dave gets 403 for it, and his own list is empty
+curl -s -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER' \
+  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1,"unitPrice":19.99}]}'
+curl -s http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER'
+curl -i http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
+# → 403 Forbidden
+curl -s http://localhost:8080/api/orders -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
+# → []
+curl -i "http://localhost:8080/api/orders?customerId=c-carol" -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
+# → 403 Forbidden
+```
+
+And the GDPR routes from Chapter 7, with Bob (register him again, as himself, if your database was reset):
 
 ```bash
 # No identity, or someone else's: 403, and nothing is written
@@ -450,9 +911,17 @@ curl -i -X POST http://localhost:8080/api/customers/c-bob/export-data \
 curl -s -X POST http://localhost:8080/api/customers/c-bob/forget \
   -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'
 # → {"keyDeleted":true,"fullyErased":true,"failedPurgers":[]}
+
+# Bob's record is gone for the two callers who may ask
+curl -i http://localhost:8080/api/customers/c-bob -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'
+# → 404 Not Found
 ```
 
-A refused request writes no event and leaves the key alone: the check runs before `ForgetCustomer` is dispatched. The Quarkus and Micronaut apps apply the same check in their `CustomerCommandController`s.
+A refused request writes no event and leaves the key alone: the check runs before any command is dispatched.
+
+> **Demo shortcut — protect this in production.** The rule is the one a real deployment keeps; what it is handed is not. The demo runs in the trusted-gateway mode without a gateway, so anyone who sends `X-User-Id: c-alice` is Alice, and anyone who adds `X-User-Role: ADMIN` is an operator. Behind real authentication the same classes decide on an identity the client cannot choose.
+
+> **Quarkus and Micronaut.** Both apps use the same `OwnerOrAdminAccess` and `OwnerOrAdminQueries` and answer the two tables above status for status. Each has its own small pieces: a `RequestCaller` that says where its integration keeps the request context (the request-scoped `StreamRuneRequestContextHolder` on Quarkus, the `ScopedValue` or the `StreamRuneContextHelper` thread-local on Micronaut), a mapper from `AccessRefusedException` and one from `AuthorizationException` to `403` (`AccessRefusedExceptionMapper` and `AuthorizationExceptionMapper`, `AccessRefusedExceptionHandler` and `AuthorizationExceptionHandler`), and the `OwnerOrAdminQueries` bean. Neither app uses Bean Validation on its request records, so each has a `RequestChecks` class with the same constraints written out, and a handler runs them before it asks the rule: a malformed request is a `400` in all three apps before the caller is decided. Each of the three apps has an `OwnerOrAdminRestAccessIT` that walks the tables over HTTP with their callers and asserts exactly which rows a list returns; the rule itself is unit-tested as a table in `queries` (`OwnerOrAdminAccessTest`), and the rows of the lists in `projections` (`OwnerOrAdminQueriesTest`).
 
 ---
 
@@ -470,7 +939,7 @@ A refused request writes no event and leaves the key alone: the check runs befor
 
 - **Identity and role in the demo are stand-ins.** The apps run in the trusted-gateway mode (`streamrune.security.trust-user-id-header: true`), so `X-User-Id` is the identity — acceptable only because the demo stands in for a gateway that would authenticate callers and set the header itself. `HeaderUserRoleResolver` goes further and authorizes on `X-User-Role`. The framework reads that header only in the trusted-gateway mode, where a real gateway would set it; in the demo nothing authenticates it: a demo shortcut a real deployment must replace with a resolver that derives the authority from the authenticated identity.
 
-- **Ownership is checked where the id is known.** `@RequireRole` decides by the command's type; "an `ADMIN`, or the customer themself" depends on the id the request names, so the GDPR routes check it in the controller (`requireAdminOrSelf`) and answer `403` before anything is written.
+- **Ownership is checked where the id is known.** `@RequireRole` decides by the command's type; "an `ADMIN`, or the customer themself" depends on the id the request names. The demo writes that rule once (`OwnerOrAdminAccess`), asks it in every customer and order route — reads through `OwnerOrAdminQueries`, which also scopes a list to the caller's own rows — and answers `403` before anything is read or written. A refusal never tells a caller whether the thing exists. What has no owner is for an `ADMIN` alone, the role together with an identity: the product writes ask `OwnerOrAdminAccess.requireAdmin`.
 
 - **Interceptor ordering** matters: authorization runs before validation, so an unauthorized caller cannot probe the validation rules. In the next chapter audit goes in front of authorization, so a refused command is still recorded.
 

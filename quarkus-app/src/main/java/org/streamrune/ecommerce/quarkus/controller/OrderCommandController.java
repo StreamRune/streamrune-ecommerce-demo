@@ -8,16 +8,25 @@ import java.math.BigDecimal;
 import java.util.List;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 import org.streamrune.quarkus.StreamRuneRequestFilter;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/**
+ * The order commands. An order is placed, confirmed and cancelled by an authenticated {@code ADMIN}
+ * or by the customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else.
+ * Shipping and delivering are for the {@code ADMIN} role, which {@code @RequireRole} on the two
+ * commands enforces in the command bus.
+ */
 @Path("/api/orders")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class OrderCommandController {
 
   @Inject VirtualThreadCommandBus commandBus;
+  @Inject OwnerOrAdminQueries queries;
   @Inject StreamRuneRequestContextHolder requestContext;
 
   /**
@@ -36,8 +45,11 @@ public class OrderCommandController {
         () -> commandBus.execute(command));
   }
 
+  /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
   @POST
   public Response createOrder(CreateOrderRequest req) {
+    requireWellFormed(req);
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.of(requestContext), req.customerId());
     List<OrderCommand.OrderLine> lines =
         req.lines().stream()
             .map(
@@ -52,6 +64,7 @@ public class OrderCommandController {
   @POST
   @Path("/{id}/confirm")
   public Response confirmOrder(@PathParam("id") String id) {
+    queries.requireOrderAccess(RequestCaller.of(requestContext), id);
     executeInContext(new OrderCommand.ConfirmOrder(id));
     return Response.ok().build();
   }
@@ -73,8 +86,26 @@ public class OrderCommandController {
   @POST
   @Path("/{id}/cancel")
   public Response cancelOrder(@PathParam("id") String id, CancelOrderRequest req) {
+    RequestChecks.present(req);
+    queries.requireOrderAccess(RequestCaller.of(requestContext), id);
     executeInContext(new OrderCommand.CancelOrder(id, req.reason()));
     return Response.ok().build();
+  }
+
+  /** The constraints of the Spring app's {@code PlaceOrderRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(CreateOrderRequest req) {
+    RequestChecks.present(req);
+    RequestChecks.notBlank(req.orderId(), "orderId");
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notEmpty(req.lines(), "lines");
+    for (OrderLineRequest line : req.lines()) {
+      if (line == null) {
+        throw new IllegalArgumentException("lines must not hold null");
+      }
+      RequestChecks.notBlank(line.productId(), "lines.productId");
+      RequestChecks.positive(line.quantity(), "lines.quantity");
+      RequestChecks.positive(line.unitPrice(), "lines.unitPrice");
+    }
   }
 
   public record CreateOrderRequest(

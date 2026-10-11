@@ -40,8 +40,12 @@ Open `commands/src/main/java/org/streamrune/ecommerce/commands/customer/Customer
 The two GDPR-relevant cases are already implemented from chapter 6:
 
 ```java
-case CustomerCommand.RequestDataExport c ->
-    List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+case CustomerCommand.RequestDataExport c -> {
+    if (state.customerId() == null) throw new DomainException("Customer not found");
+    if (state.status() == CustomerStatus.FORGOTTEN)
+        throw new DomainException("Cannot export the data of a forgotten customer");
+    yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+}
 
 case CustomerCommand.ForgetCustomer c -> {
     if (state.customerId() == null) throw new DomainException("Customer not found");
@@ -50,9 +54,9 @@ case CustomerCommand.ForgetCustomer c -> {
 }
 ```
 
-`CustomerDecider` emits domain events — it does not touch keys or purge read models. That is infrastructure territory, handled outside the decider: the controller dispatches `ForgetCustomer` (which records `CustomerForgotten`) and then calls `ForgetSubjectService` to shred the key and purge the read model (Step 2). The decider stays pure. Its two rules exist because of the step that follows it:
+`CustomerDecider` emits domain events — it does not touch keys or purge read models. That is infrastructure territory, handled outside the decider: the controller dispatches `ForgetCustomer` (which records `CustomerForgotten`) and then calls `ForgetSubjectService` to shred the key and purge the read model (Step 2). The decider stays pure. Its rules for a forget exist because of the step that follows it:
 
-- **An id no customer registered is refused.** Deleting a key also records a permanent tombstone for the subject id: the key store never mints a key for that id again. Forgetting an id nobody registered would block it for good, before its customer exists. The decider throws `DomainException` (HTTP 400), and the controller never reaches the key.
+- **An id no customer registered is refused.** Deleting a key also records a permanent tombstone for the subject id: the key store never mints a key for that id again. Forgetting an id nobody registered would block it for good, before its customer exists. The decider throws `DomainException` (HTTP 400), and the controller never reaches the key. `UpdateProfile` and `RequestDataExport` refuse such an id the same way (`Customer not found`), and that is the other half of the rule: a profile stored under an id nobody registered would be personal data no forget could ever reach.
 - **A repeat records nothing.** For a customer who is already `FORGOTTEN`, `decide` returns no events and the command succeeds. A forget request that failed after the event was recorded is finished by sending it again (Step 2), and the repeat has to get past this command to reach the key deletion. Refusing it as a "double erasure" would leave the key in place for good.
 
 ### Step 2 — Wire the forget flow in the controller
@@ -168,7 +172,7 @@ Nothing in the demo sends the request again for you: the caller does, or an oper
 
 The `/export-data` handler only dispatches `RequestDataExport` and returns `200 OK` with an empty body. The command records a `DataExportRequested` event — see Step 5 — but the demo does not assemble or return a data package.
 
-> **Heads up for chapter 9: this route is not guarded yet.** As written here, anyone who can reach the API can erase any customer, and erasure cannot be undone. Chapter 9 makes `requireAdminOrSelf(id)` the first line of `forgetCustomer` and `exportData`: only an ADMIN, or the customer themself (`X-User-Id` equal to the customer id), gets past it; anyone else gets `403` and nothing is written. It is not added here because no request carries an identity until Chapter 9 switches on the trusted-gateway mode, so the check would refuse every call, including the `curl` in Step 5. Never expose the endpoint without it.
+> **Heads up for chapter 9: this route is not guarded yet.** As written here, anyone who can reach the API can erase any customer, and erasure cannot be undone. Chapter 9 makes `OwnerOrAdminAccess.requireCustomerAccess(…)` the first line of `forgetCustomer` and `exportData`, as of every other customer route: only an authenticated `ADMIN`, or the customer themself (`X-User-Id` equal to the customer id), gets past it; anyone else gets `403` and nothing is written. It is not added here because no request carries an identity until Chapter 9 switches on the trusted-gateway mode, so the check would refuse every call, including the `curl` in Step 5. Never expose the endpoint without it. From Chapter 9 on, the calls of Step 5 need the caller's headers — `-H 'X-User-Id: c-alice' -H 'X-User-Role: CUSTOMER'` for Alice's, and likewise for Bob's.
 
 > **Why call `forget(...)` explicitly?** Keeping it in the controller makes the two-step erasure visible and ordered: the domain event first (audited, replayable, the existence check), then the irreversible crypto-shred. No annotation magic, no hidden event listener — the StreamRune philosophy of explicit, readable code.
 >
@@ -366,7 +370,7 @@ curl -i -X POST http://localhost:8080/api/customers/c-bob/export-data
 The response is `200 OK` with **no body** — the endpoint only dispatches `RequestDataExport`. The portability request is recorded durably as a `DataExportRequested` event in Bob's stream:
 
 ```bash
-curl -H "X-User-Role: ADMIN" http://localhost:8080/api/events/customer/c-bob
+curl -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/events/customer/c-bob
 ```
 
 ```json

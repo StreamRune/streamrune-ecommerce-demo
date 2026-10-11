@@ -228,10 +228,11 @@ dlq_sealed_root_replay_smoke() {
     return 1
   fi
 
-  # The retry endpoint is a mutating admin endpoint: it answers 403 without the ADMIN role, which
-  # the demo reads from X-User-Role (its trusted-gateway stand-in, see AdminController).
+  # The retry endpoint is a mutating admin endpoint: it answers 403 unless the caller is an ADMIN,
+  # an identity (X-User-Id) together with the ADMIN role (X-User-Role), both of which the demo
+  # reads from the request headers (its trusted-gateway stand-in, see AdminController).
   local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-User-Role: ADMIN' \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' \
     "$base/api/admin/dead-letters/$cid/retry")
   if [ "$code" != "200" ]; then
     echo "  ✗ POST /api/admin/dead-letters/$cid/retry returned $code"
@@ -251,9 +252,9 @@ dlq_sealed_root_replay_smoke() {
   fi
 
   # The event explorer reads the same stream by its two key parts. It returns event payloads, so
-  # it answers only to the ADMIN role.
+  # it answers only to an ADMIN.
   local body
-  body=$(curl -s -H 'X-User-Role: ADMIN' "$base/api/events/inventory/$pid")
+  body=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/events/inventory/$pid")
   if ! printf '%s' "$body" | grep -q '"aggregateType":"inventory"'; then
     echo "  ✗ GET /api/events/inventory/$pid did not return the typed stream: $body"
     return 1

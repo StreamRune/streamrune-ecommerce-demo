@@ -7,13 +7,19 @@ import { usePaymentFailure } from "@/lib/queries";
 import { useTogglePaymentFailure } from "@/lib/mutations";
 import { SagaCard } from "@/components/domain/saga-card";
 import { PermissionGate } from "@/components/domain/permission-gate";
+import { AccessRestricted } from "@/components/domain/access-restricted";
+import { useRole } from "@/providers/role-provider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 export default function FulfillmentPage() {
-  const { data: sagas = [], isLoading } = useSagaList();
-  const { data: paymentFailure } = usePaymentFailure();
+  const { hasPermission } = useRole();
+  // A saga names the order, the customer and the payment of one purchase, and the list holds
+  // every customer's: the backend serves it, and the payment-failure flag, to ADMIN only.
+  const allowed = hasPermission("FULFILLMENT_VIEW");
+  const { data: sagas = [], isLoading } = useSagaList(50, allowed);
+  const { data: paymentFailure } = usePaymentFailure(allowed);
   const { mutateAsync: toggleFailure, isPending: isToggling } = useTogglePaymentFailure();
 
   async function handleToggle() {
@@ -23,6 +29,10 @@ export default function FulfillmentPage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to toggle payment failure");
     }
+  }
+
+  if (!allowed) {
+    return <AccessRestricted message="Requires ADMIN role to view fulfillment sagas." />;
   }
 
   return (

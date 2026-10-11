@@ -134,4 +134,33 @@ class ProductDeciderTest {
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectException(DomainException.class);
   }
+
+  // A product that was never created takes no command but CreateProduct: without the check a
+  // price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+
+  @Test
+  void updatePrice_neverCreated_throws() {
+    fixture
+        .given()
+        .when(
+            new ProductCommand.UpdatePrice(
+                "p-none", new Money(java.math.BigDecimal.valueOf(25), "USD")))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
+
+  @Test
+  void adjustStock_neverCreated_throws() {
+    fixture
+        .given()
+        .when(new ProductCommand.AdjustStock("p-none", 5, "Restock"))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
+
+  @Test
+  void discontinueProduct_neverCreated_throws() {
+    fixture
+        .given()
+        .when(new ProductCommand.DiscontinueProduct("p-none"))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
 }

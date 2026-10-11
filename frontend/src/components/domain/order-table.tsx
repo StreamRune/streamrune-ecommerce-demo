@@ -13,6 +13,8 @@ import {
 } from "@/lib/mutations";
 import type { OrderView, OrderStatus } from "@/lib/types";
 import { PermissionGate } from "@/components/domain/permission-gate";
+import { AccessRestricted } from "@/components/domain/access-restricted";
+import { useRole } from "@/providers/role-provider";
 import {
   Table,
   TableBody,
@@ -63,7 +65,10 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
   const [lines, setLines] = useState<OrderLine[]>([{ productId: "", quantity: 1 }]);
   const { mutateAsync, isPending } = usePlaceOrder();
   const { data: products = [] } = useProducts();
-  const { data: customers = [] } = useCustomers();
+  // An ADMIN gets every customer to choose from; a CUSTOMER gets their own record, the only
+  // customer the backend accepts an order from them for.
+  const { hasPermission } = useRole();
+  const { data: customers = [] } = useCustomers(hasPermission("OWN_DATA_VIEW"));
 
   function addLine() {
     setLines((l) => [...l, { productId: "", quantity: 1 }]);
@@ -256,12 +261,12 @@ function OrderRow({ order }: { order: OrderView }) {
           <div className="flex gap-1">
             {order.status === "CREATED" && (
               <>
-                <PermissionGate permission="ORDER_CANCEL_CONFIRMED">
+                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
                   <Button variant="outline" size="xs" onClick={() => handleAction("confirm")} disabled={isConfirming}>
                     Confirm
                   </Button>
                 </PermissionGate>
-                <PermissionGate permission="ORDER_CANCEL_OWN">
+                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
                   <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
                     Cancel
                   </Button>
@@ -316,8 +321,19 @@ interface OrderTableProps {
   customerId?: string;
 }
 
-export function OrderTable({ customerId }: OrderTableProps) {
-  const { data: orders = [], isLoading } = useOrders(customerId);
+export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps) {
+  const { role, userId, hasPermission } = useRole();
+  // The backend serves orders to an authenticated caller only: every order to an ADMIN, their own
+  // orders to a CUSTOMER. Only an ADMIN may narrow the list to another customer, so the filter is
+  // sent for an ADMIN alone; a CUSTOMER's list is their own whatever the address bar says.
+  const allowed = hasPermission("OWN_DATA_VIEW");
+  const ownOnly = allowed && role !== "ADMIN";
+  const customerId = ownOnly ? (userId ?? undefined) : requestedCustomerId;
+  const { data: orders = [], isLoading } = useOrders(ownOnly ? undefined : customerId, allowed);
+
+  if (!allowed) {
+    return <AccessRestricted message="Requires CUSTOMER or ADMIN role to view orders." />;
+  }
 
   if (isLoading) {
     return (
@@ -335,9 +351,10 @@ export function OrderTable({ customerId }: OrderTableProps) {
           <h1 className="text-2xl font-bold">Orders</h1>
           <p className="text-sm text-muted-foreground">
             {orders.length} total{customerId ? ` for ${customerId}` : ""}
+            {ownOnly ? " (your own orders)" : ""}
           </p>
         </div>
-        <PlaceOrderDialog initialCustomerId={customerId} />
+        <PlaceOrderDialog key={customerId ?? "any"} initialCustomerId={customerId} />
       </div>
 
       <div className="rounded-xl border border-border overflow-hidden">

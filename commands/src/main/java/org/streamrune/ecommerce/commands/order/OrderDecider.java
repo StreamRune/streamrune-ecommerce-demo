@@ -34,6 +34,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.ConfirmOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.CREATED)
           throw new DomainException(
               "Can only confirm CREATED orders, current status: " + state.status());
@@ -41,6 +42,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.ShipOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.CONFIRMED)
           throw new DomainException(
               "Can only ship CONFIRMED orders, current status: " + state.status());
@@ -48,6 +50,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.DeliverOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.SHIPPED)
           throw new DomainException(
               "Can only deliver SHIPPED orders, current status: " + state.status());
@@ -55,11 +58,24 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.CancelOrder c -> {
+        // No requirePlaced here. CancelOrder is the last step of the fulfillment saga's
+        // compensation, and a compensation command the decider refuses ends the saga FAILED
+        // instead of COMPENSATED: it is accepted whatever the order's stream holds, short of a
+        // delivered order.
         if (state.status() == OrderStatus.DELIVERED)
           throw new DomainException("Cannot cancel DELIVERED orders");
         yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason()));
       }
     };
+  }
+
+  /**
+   * An order that was never placed is not confirmed, shipped or delivered. Its empty state reads
+   * {@code CREATED}, so without this check {@code ConfirmOrder} would open a stream for an id
+   * nobody placed.
+   */
+  private static void requirePlaced(OrderState state, String orderId) {
+    if (state.orderId() == null) throw new DomainException("Order not found: " + orderId);
   }
 
   @Override

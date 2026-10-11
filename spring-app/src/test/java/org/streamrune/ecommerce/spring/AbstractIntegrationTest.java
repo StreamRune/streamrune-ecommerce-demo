@@ -119,6 +119,12 @@ public abstract class AbstractIntegrationTest {
     registry.add("spring.datasource.username", POSTGRES::getUsername);
     registry.add("spring.datasource.password", POSTGRES::getPassword);
     registry.add("streamrune.projections.auto-discovery.enabled", () -> "false");
+    // The read models follow the event store every 500 ms (plus up to 100 ms of jitter) instead of
+    // the default 5 s (plus up to 1 s), as in the Quarkus and Micronaut test configurations: a test
+    // that awaits a row waits for one short poll, far below its limit, and a saga-driven status
+    // that needs two polls is there in about a second.
+    registry.add("streamrune.polling-interval-ms", () -> "500");
+    registry.add("streamrune.polling-jitter-ms", () -> "100");
     // On Spring the periodic SSE keepalive is one tick shared by every stream, running since the
     // application started: its first occurrence on a stream can come at any moment after the
     // stream opens, and it commits the response exactly as the opening comment does. With the

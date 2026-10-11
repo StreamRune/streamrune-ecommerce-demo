@@ -305,10 +305,14 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
                     c.price(), c.initialStock()));
             }
 
-            case ProductCommand.UpdatePrice c ->
-                List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
+            case ProductCommand.UpdatePrice c -> {
+                requireCreated(state, c.productId());
+                yield List.of(
+                    new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
+            }
 
             case ProductCommand.AdjustStock c -> {
+                requireCreated(state, c.productId());
                 int newStock = state.stock() + c.quantityChange();
                 if (newStock < 0)
                     throw new DomainException("Insufficient stock for product: " + c.productId());
@@ -317,11 +321,22 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
             }
 
             case ProductCommand.DiscontinueProduct c -> {
+                requireCreated(state, c.productId());
                 if (state.status() == ProductStatus.DISCONTINUED)
                     throw new DomainException("Product already discontinued: " + c.productId());
                 yield List.of(new ProductEvent.ProductDiscontinued(c.productId()));
             }
         };
+    }
+
+    /**
+     * A product that was never created takes no command but {@code CreateProduct}: without this
+     * check a price, a stock adjustment or a discontinuation would open a stream for an id nobody
+     * created.
+     */
+    private static void requireCreated(ProductState state, String productId) {
+        if (state.productId() == null)
+            throw new DomainException("Product not found: " + productId);
     }
 
     @Override
@@ -350,6 +365,8 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
     }
 }
 ```
+
+Two guards in `decide` are about existence. `CreateProduct` refuses an id that already has a product: a second `ProductCreated` would replace its name, price and stock. `requireCreated` is the mirror of it for the three other commands: the empty state of an id nobody created has no price and no stock, and without the check `UpdatePrice`, `AdjustStock` or `DiscontinueProduct` would open a stream for a product that does not exist. They are refused with `Product not found`.
 
 Run the test again:
 
@@ -703,6 +720,8 @@ Query the product list (returns an empty array until chapter 5):
 ```bash
 curl http://localhost:8080/api/products
 ```
+
+> **Heads up for chapter 9: the product writes are open here.** As written in this chapter, anyone who can reach the API can create a product and change its stock and its price: no request carries an identity yet. Chapter 9 switches the identity on and makes the three writes ask for an `ADMIN` as their first line (`OwnerOrAdminAccess.requireAdmin(…)`); reading the catalogue stays open. From then on the `POST` and `PUT` calls of chapters 2 to 5 need an operator's headers, `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'`, and answer `403` without them.
 
 ---
 

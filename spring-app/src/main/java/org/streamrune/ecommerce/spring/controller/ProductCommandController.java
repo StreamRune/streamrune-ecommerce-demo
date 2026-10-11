@@ -9,8 +9,16 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/**
+ * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
+ * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
+ * ask {@link OwnerOrAdminAccess#requireAdmin} as their first line; discontinuing is guarded in the
+ * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
+ * ({@code ProductQueryController}).
+ */
 @RestController
 @RequestMapping("/api/products")
 public class ProductCommandController {
@@ -23,6 +31,7 @@ public class ProductCommandController {
 
   @PostMapping
   public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(
         new ProductCommand.CreateProduct(
             req.productId(),
@@ -37,6 +46,7 @@ public class ProductCommandController {
   @PutMapping("/{id}/stock")
   public ResponseEntity<Void> adjustStock(
       @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
     return ResponseEntity.ok().build();
   }
@@ -44,6 +54,7 @@ public class ProductCommandController {
   @PutMapping("/{id}/price")
   public ResponseEntity<Void> updatePrice(
       @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
     return ResponseEntity.ok().build();
   }

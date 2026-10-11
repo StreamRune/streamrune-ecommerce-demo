@@ -13,7 +13,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.streamrune.core.DeadLetterQueue;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -28,7 +27,7 @@ import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.micronaut.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.micronaut.config.PaymentGatewaySimulator;
-import org.streamrune.micronaut.StreamRuneContextHelper;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.OutboxFailedReplayer;
@@ -55,6 +54,7 @@ public class AdminController {
    */
   @Inject @Nullable OutboxFailedReplayer outboxFailedReplayer;
 
+  /** Open to every caller: the answer says that the application runs and nothing else. */
   @Get("/health")
   public Map<String, String> health() {
     return Map.of("status", "UP");
@@ -62,6 +62,7 @@ public class AdminController {
 
   @Get("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
+    requireAdmin();
     return Map.of(
         "state", circuitBreaker.circuitState(),
         "paymentGateway", paymentGatewayCircuitBreaker.state().name());
@@ -70,6 +71,7 @@ public class AdminController {
   @Get("/dead-letters")
   public List<Map<String, Object>> listDeadLetters(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
+    requireAdmin();
     TypeReference<Map<String, Object>> typeRef = new TypeReference<>() {};
     return deadLetterQueue.read(limit).stream()
         .map(entry -> objectMapper.convertValue(entry, typeRef))
@@ -78,7 +80,7 @@ public class AdminController {
 
   @Post("/dead-letters/{id}/retry")
   public HttpResponse<Void> retryDeadLetter(@PathVariable String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
     return retried ? HttpResponse.ok() : HttpResponse.notFound();
   }
@@ -87,6 +89,7 @@ public class AdminController {
   @Get("/outbox")
   public List<Map<String, Object>> listOutboxEntries(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
+    requireAdmin();
     return toJson(outboxStore.findByStatus(OutboxStatus.PENDING, limit));
   }
 
@@ -96,6 +99,7 @@ public class AdminController {
   @Get("/outbox/failed")
   public List<Map<String, Object>> listFailedOutboxEntries(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
+    requireAdmin();
     return toJson(outboxStore.findByStatus(OutboxStatus.FAILED, limit));
   }
 
@@ -104,7 +108,7 @@ public class AdminController {
    */
   @Post("/outbox/failed/{id}/replay")
   public Map<String, String> replayFailedOutboxEntry(@PathVariable String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = replayer().replay(OutboxEntryId.of(id));
     return Map.of("outcome", outcome.name());
   }
@@ -120,17 +124,15 @@ public class AdminController {
    * Skips one FAILED entry: it will never be delivered; the row records who, when and why, and the
    * aggregate's later entries are claimable on the next poll. {@code skippedBy} is the request
    * identity the framework filter resolved ({@code X-User-Id} in this demo's trusted-gateway mode)
-   * — never a header this controller reads itself; 400 when no identity is bound. The {@code @Body}
-   * is required, so Micronaut answers 400 for a missing or JSON-null body before this method runs.
+   * — never a header this controller reads itself. An ADMIN always has one: {@code requireAdmin()}
+   * refuses a caller without an identity. The {@code @Body} is required, so Micronaut answers 400
+   * for a missing or JSON-null body before this method runs.
    */
   @Post("/outbox/failed/{id}/skip")
   public Map<String, String> skipFailedOutboxEntry(
       @PathVariable String id, @Body SkipRequest request) {
-    requireRole("ADMIN");
+    requireAdmin();
     String by = currentUserId();
-    if (by == null) {
-      throw new HttpStatusException(HttpStatus.BAD_REQUEST, "no request identity (X-User-Id)");
-    }
     if (request.reason() == null || request.reason().isBlank()) {
       throw new HttpStatusException(HttpStatus.BAD_REQUEST, "reason is required");
     }
@@ -151,37 +153,24 @@ public class AdminController {
     return outboxFailedReplayer;
   }
 
-  /**
-   * The request context the framework filter bound: the {@code StreamRuneContext.CURRENT} {@code
-   * ScopedValue} on the request thread, else the {@link StreamRuneContextHelper} ThreadLocal on an
-   * executor thread the ScopedValue does not reach; {@code null} when neither is set (same as
-   * CustomerCommandController).
-   */
-  private static StreamRuneContext.RequestContext context() {
-    StreamRuneContext.RequestContext ctx =
-        StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
-    return ctx != null ? ctx : StreamRuneContextHelper.get();
-  }
-
-  /** Request identity; null when none is bound. */
+  /** The request identity: the ADMIN who is calling, once {@code requireAdmin()} has passed. */
   private static String currentUserId() {
-    var ctx = context();
-    return ctx != null && ctx.userId() != null ? ctx.userId().value() : null;
+    return OwnerOrAdminAccess.identityOf(RequestCaller.current());
   }
 
   /**
-   * DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
-   * X-User-Role (copied into the context baggage by the framework filter). It is checked here so
-   * the tutorial does not model an admin surface anyone can call; a real deployment authenticates.
-   * Package-private because {@code SagaController}'s inject-failure route flips the same
-   * payment-failure flag as {@link #togglePaymentFailure()} and must apply the same check.
+   * Answers {@code 403} unless the caller is an ADMIN: a caller with an identity whose request
+   * carries the ADMIN role ({@code OwnerOrAdminAccess#isAdmin}, the demo's one definition of it).
+   * Every route of this controller but {@code /health} asks: the reads show operational state and,
+   * in the dead-letter and outbox lists, payloads of other people's commands and events.
+   *
+   * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the identity and the role are whatever
+   * the client sent in X-User-Id and X-User-Role (the framework filter puts them into the request
+   * context). They are checked here so the tutorial does not model an admin surface anyone can
+   * call; a real deployment authenticates.
    */
-  static void requireRole(String role) {
-    var ctx = context();
-    String current = ctx == null ? "GUEST" : ctx.baggage().getOrDefault("role", "GUEST");
-    if (!role.equals(current)) {
-      throw new HttpStatusException(HttpStatus.FORBIDDEN, "Required role: " + role);
-    }
+  private static void requireAdmin() {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
   }
 
   /**
@@ -191,6 +180,7 @@ public class AdminController {
   @Get("/saga-dead-letters")
   public List<Map<String, Object>> listSagaDeadLetters(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
+    requireAdmin();
     return sagaDeadLetterStore.findAll(limit).stream().map(AdminController::sagaEntryJson).toList();
   }
 
@@ -214,6 +204,7 @@ public class AdminController {
   @Get("/sagas/faulted")
   public List<String> listFaultedSagas(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
+    requireAdmin();
     return sagaStore
         .findByStatus(SagaType.fromClass(OrderFulfillmentState.class), SagaStatus.FAULTED, limit)
         .stream()
@@ -235,7 +226,7 @@ public class AdminController {
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue("eventOffset") @Nullable Long eventOffset,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome =
         sagaDeadLetterReplayer.replay(
             sagaId == null ? null : SagaId.of(sagaId), requiredOffset(eventOffset), force);
@@ -250,7 +241,7 @@ public class AdminController {
   public Map<String, List<String>> replayAllSagaDeadLetters(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcomes = sagaDeadLetterReplayer.replayAll(requiredSagaId(sagaId), force);
     return Map.of("outcomes", outcomes.stream().map(Enum::name).toList());
   }
@@ -264,7 +255,7 @@ public class AdminController {
   public Map<String, String> resumeFaultedSaga(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = sagaDeadLetterReplayer.resumeFaulted(requiredSagaId(sagaId), force);
     return Map.of("outcome", outcome.name());
   }
@@ -278,7 +269,7 @@ public class AdminController {
   public Map<String, Boolean> discardSagaDeadLetter(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue("eventOffset") @Nullable Long eventOffset) {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean discarded =
         sagaDeadLetterReplayer.discard(
             sagaId == null ? null : SagaId.of(sagaId), requiredOffset(eventOffset));
@@ -301,7 +292,7 @@ public class AdminController {
 
   @Post("/payment-failure/toggle")
   public Map<String, Boolean> togglePaymentFailure() {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);
@@ -309,6 +300,7 @@ public class AdminController {
 
   @Get("/payment-failure")
   public Map<String, Boolean> paymentFailureState() {
+    requireAdmin();
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 }

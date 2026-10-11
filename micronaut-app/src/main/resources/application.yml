@@ -71,7 +71,9 @@ streamrune:
     # stream belongs to, and refuses everyone else with 403. Once enabled, the framework feeds the
     # endpoint itself: one SseEventFeed per application instance reads the global stream from its
     # head, every streamrune.sse.polling-interval (1s by default), and publishes each new event to
-    # the clients of that event's stream. SseLiveE2EIT and SseStreamAccessIT exercise it.
+    # the clients of that event's stream. It reads and decrypts events only while a client is
+    # connected; with none, a poll reads the head of the stream and no event. SseLiveE2EIT and
+    # SseStreamAccessIT exercise it.
     enabled: true
 
 rabbitmq:

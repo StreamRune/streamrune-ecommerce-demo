@@ -4,7 +4,6 @@ import java.util.function.Function;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
-import org.streamrune.core.types.UserId;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
@@ -32,8 +31,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       OrderProjection} writes that read model after the event is stored, so for a moment after
  *       {@code POST /api/orders} the order has no row. An order without a row has no known owner
  *       and is refused, exactly like an order that was never placed; the customer subscribes once
- *       {@code GET /api/orders/{id}} answers. The order's customer is the customer the order names:
- *       see the second demo shortcut below.
+ *       {@code GET /api/orders/{id}} answers. The order's customer is the customer the order names,
+ *       and {@code POST /api/orders} accepts an order only from that customer or an {@code ADMIN}.
  *   <li>{@code payment}: {@code ADMIN} only. The events carry the amount and the refund or failure
  *       reason of one customer's purchase, and no read model of the demo links a payment to its
  *       customer, so ownership cannot be shown.
@@ -46,34 +45,23 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       added here.
  * </ul>
  *
- * <p><b>Who the caller is.</b> The framework's SSE endpoint hands the rule the request context of
- * the request that asks for the stream, and that one object answers both questions. {@code
- * caller.userId()} is the caller's id, {@code null} for a request without an identity. {@code
- * ADMIN} is the {@code role} entry of {@code caller.baggage()}: the entry the framework's request
- * filter writes from {@code X-User-Role}, the one {@code AdminController#requireRole} and {@code
- * CustomerCommandController#requireAdminOrSelf} check and each app's {@code HeaderUserRoleResolver}
- * resolves the caller's authority from. The demo has this one definition of {@code ADMIN}. The role
- * counts only for a caller with an identity, so {@code X-User-Role: ADMIN} alone opens nothing.
+ * <p><b>Who the caller is, and who owns what.</b> {@link OwnerOrAdminAccess} answers both, for this
+ * endpoint as for the REST reads and writes of customers and orders: the framework's SSE endpoint
+ * hands the rule the request context of the request that asks for the stream, {@code
+ * caller.userId()} is the caller's id and {@code ADMIN} is the {@code role} entry of {@code
+ * caller.baggage()}. The role counts only for a caller with an identity, so {@code X-User-Role:
+ * ADMIN} alone opens nothing.
  *
  * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 of the tutorial describes: the demo runs in the
  * trusted-gateway mode without a gateway, so the id and the role are whatever the client put in
  * {@code X-User-Id} and {@code X-User-Role}. The rule is the one a real deployment keeps; the
  * identity it is handed must then come from real authentication.
  *
- * <p>DEMO SHORTCUT, the owner of an order: an order belongs to the customer it names, and {@code
- * POST /api/orders} takes that {@code customerId} from the request body without tying it to the
- * caller. Whoever places an order therefore chooses whose order it is. Nobody but the customer so
- * named gains access to its stream, but a real deployment places an order for the authenticated
- * caller.
- *
  * <p><b>Shape.</b> {@link #isAuthorized} has the signature of the framework's {@code
  * SseAuthorizer}, so each application registers {@code access::isAuthorized} as its {@code
  * SseAuthorizer} bean and this module needs nothing beyond {@code streamrune-core}.
  */
 public final class OwnerOrAdminStreamAccess {
-
-  private static final String ROLE_BAGGAGE_KEY = "role";
-  private static final String ADMIN = "ADMIN";
 
   private final Function<String, OrderView> orderById;
 
@@ -98,30 +86,24 @@ public final class OwnerOrAdminStreamAccess {
    *     stream belongs to; {@code false} for everyone else
    */
   public boolean isAuthorized(StreamRuneContext.RequestContext caller, StreamId streamId) {
-    if (caller == null || caller.userId() == null) {
+    if (OwnerOrAdminAccess.identityOf(caller) == null) {
       return false;
     }
-    UserId user = caller.userId();
-    boolean admin = ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return admin || user.value().equals(aggregateId);
+      return OwnerOrAdminAccess.mayAccessCustomer(caller, aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return admin || ownsOrder(user, aggregateId);
+      // An ADMIN needs no owner, so the read model is asked only for everyone else.
+      return OwnerOrAdminAccess.isAdmin(caller)
+          || OwnerOrAdminAccess.mayAccessOrder(caller, orderById.apply(aggregateId));
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return admin;
+      return OwnerOrAdminAccess.isAdmin(caller);
     }
     return false;
-  }
-
-  /** The order read model has a row for the order and names the caller as its customer. */
-  private boolean ownsOrder(UserId user, String orderId) {
-    OrderView order = orderById.apply(orderId);
-    return order != null && user.value().equals(order.customerId());
   }
 }
