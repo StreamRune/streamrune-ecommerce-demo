@@ -7,6 +7,7 @@ import { useProducts } from "@/lib/queries";
 import { useOrders } from "@/lib/queries";
 import { useCustomers } from "@/lib/queries";
 import { useSSE } from "@/providers/sse-provider";
+import { useRole } from "@/providers/role-provider";
 import {
   Card,
   CardContent,
@@ -33,10 +34,19 @@ const ORDER_STATUS_STYLES: Record<OrderStatus, string> = {
   CANCELLED: "bg-red-500/10 text-red-400 border-red-500/20",
 };
 
+const REQUIRES_IDENTITY = "Requires CUSTOMER or ADMIN role";
+
 export default function DashboardPage() {
+  const { role, hasPermission } = useRole();
+  // Orders and customers are served to an authenticated caller only: every row to an ADMIN, their
+  // own to a CUSTOMER. A GUEST sends neither request and sees what the two cards require.
+  const allowed = hasPermission("OWN_DATA_VIEW");
+  const ownOnly = allowed && role !== "ADMIN";
   const { data: products = [] } = useProducts();
-  const { data: orders = [] } = useOrders();
-  const { data: customers = [] } = useCustomers();
+  const { data: allowedOrders = [] } = useOrders(undefined, allowed);
+  const { data: allowedCustomers = [] } = useCustomers(allowed);
+  const orders = allowed ? allowedOrders : [];
+  const customers = allowed ? allowedCustomers : [];
   const { recentEvents } = useSSE();
 
   const recentOrders = orders.slice(0, 5);
@@ -59,15 +69,25 @@ export default function DashboardPage() {
         />
         <StatCard
           title="Orders"
-          value={orders.length}
-          subtitle={`${orders.filter((o) => o.status === "CREATED").length} pending`}
+          value={allowed ? orders.length : "—"}
+          subtitle={
+            allowed
+              ? `${orders.filter((o) => o.status === "CREATED").length} pending${ownOnly ? ", your own" : ""}`
+              : REQUIRES_IDENTITY
+          }
           icon={ShoppingCart}
           href="/orders"
         />
         <StatCard
           title="Customers"
-          value={customers.length}
-          subtitle={`${customers.filter((c) => c.status === "ACTIVE").length} active`}
+          value={allowed ? customers.length : "—"}
+          subtitle={
+            allowed
+              ? ownOnly
+                ? "Your own record"
+                : `${customers.filter((c) => c.status === "ACTIVE").length} active`
+              : REQUIRES_IDENTITY
+          }
           icon={Users}
           href="/customers"
         />
@@ -87,7 +107,11 @@ export default function DashboardPage() {
             <CardTitle>Recent Orders</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {recentOrders.length === 0 ? (
+            {!allowed ? (
+              <p className="text-sm text-muted-foreground px-4 pb-4">
+                Requires CUSTOMER or ADMIN role to view orders.
+              </p>
+            ) : recentOrders.length === 0 ? (
               <p className="text-sm text-muted-foreground px-4 pb-4">No orders yet.</p>
             ) : (
               <Table>

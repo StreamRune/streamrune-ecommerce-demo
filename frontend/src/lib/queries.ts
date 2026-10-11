@@ -33,10 +33,17 @@ export function useProduct(id: string) {
   });
 }
 
-export function useOrders(customerId?: string) {
+/**
+ * Orders are served to an authenticated caller only: every order to an ADMIN,
+ * a CUSTOMER's own orders to that customer (who may not name another customer
+ * in `customerId`). The caller passes `enabled: false` for a GUEST and no
+ * request is sent.
+ */
+export function useOrders(customerId?: string, enabled = true) {
   return useQuery({
     queryKey: customerId ? ["orders", customerId] : ["orders"],
     queryFn: () => fetchOrders(customerId),
+    enabled,
   });
 }
 
@@ -48,10 +55,16 @@ export function useOrder(id: string) {
   });
 }
 
-export function useCustomers() {
+/**
+ * Customers are served to an authenticated caller only: every customer to an
+ * ADMIN, a CUSTOMER's own record to that customer. The caller passes
+ * `enabled: false` for a GUEST and no request is sent.
+ */
+export function useCustomers(enabled = true) {
   return useQuery({
     queryKey: ["customers"],
     queryFn: fetchCustomers,
+    enabled,
   });
 }
 
@@ -88,10 +101,12 @@ export function useStreamEvents(
   });
 }
 
-export function useAuditLog(limit = 100) {
+/** The audit log is ADMIN only on the backend; `enabled: false` sends no request. */
+export function useAuditLog(limit = 100, enabled = true) {
   return useQuery({
     queryKey: ["audit", limit],
     queryFn: () => fetchAuditLog(limit),
+    enabled,
   });
 }
 
@@ -135,10 +150,12 @@ export function useHealth(enabled = true) {
   });
 }
 
-export function useSagaList(limit = 50) {
+/** The saga list is ADMIN only on the backend; `enabled: false` sends no request. */
+export function useSagaList(limit = 50, enabled = true) {
   return useQuery({
     queryKey: ["fulfillment", "sagas", limit],
     queryFn: () => fetchSagaList(limit),
+    enabled,
   });
 }
 
