@@ -650,6 +650,40 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     }
   }
 
+  @Test
+  void aQueryParameterThatCannotBeReadIsAnswered400WhoeverSendsIt() throws Exception {
+    String customer = uniqueId("alice");
+    String[][] unreadable = {
+      // A number that is not one, on every endpoint that takes a page size or an offset.
+      {"GET", "/api/saga/fulfillments?limit=abc"},
+      {"GET", "/api/saga/fulfillments?limit=1.5"},
+      {"GET", "/api/saga/fulfillments?limit=99999999999"},
+      {"GET", "/api/events?limit=abc"},
+      {"GET", "/api/events?offset=abc"},
+      {"GET", "/api/audit/commands?limit=abc"},
+      {"GET", "/api/admin/dead-letters?limit=abc"},
+      {"GET", "/api/admin/outbox?limit=abc"},
+      {"GET", "/api/admin/outbox/failed?limit=abc"},
+      {"GET", "/api/admin/saga-dead-letters?limit=abc"},
+      {"GET", "/api/admin/sagas/faulted?limit=abc"},
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1&eventOffset=abc"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1&eventOffset=abc"},
+      // A required parameter that is missing.
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1"},
+      {"POST", "/api/admin/saga-dead-letters/replay-all"},
+      {"POST", "/api/admin/sagas/faulted/resume"}
+    };
+    String[][] callers = {{null, null}, {null, ADMIN}, {customer, CUSTOMER}, {OPERATOR, ADMIN}};
+    for (String[] request : unreadable) {
+      for (String[] caller : callers) {
+        assertThat(send(request[0], request[1], caller[0], caller[1], null).statusCode())
+            .as("%s %s as id=%s role=%s", request[0], request[1], caller[0], caller[1])
+            .isEqualTo(400);
+      }
+    }
+  }
+
   // --- helpers ---
 
   private URI server() {

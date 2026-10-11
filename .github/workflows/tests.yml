@@ -145,7 +145,7 @@ jobs:
 
       - name: Quick Start - backend, notifications service and frontend answer
         working-directory: streamrune-ecommerce-demo
-        run: bash scripts/wait-for-http.sh http://localhost:8080/actuator/health '"status":"UP"' http://localhost:8090/received '' http://localhost:3000 ''
+        run: bash scripts/wait-for-http.sh http://localhost:8080/actuator/health '"status":"UP"' http://localhost:8090/health '' http://localhost:3000 ''
 
       # The frontend against the backend, with the stack of the Quick Start up: the Playwright
       # suite drives the frontend container at :3000. Its backend-dependent specs run here and

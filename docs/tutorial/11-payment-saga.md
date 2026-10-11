@@ -1689,7 +1689,7 @@ The toggle is an admin endpoint, so the call carries an `ADMIN`'s two headers, t
 
 ### Step 8 — SagaController: inspect sagas and inject failures via REST
 
-The demo includes a `SagaController` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/SagaController.java`) that exposes three endpoints for interacting with running sagas. The two reads follow the rule of Chapter 9, because a saga's state names the order, the customer, the payment and the total of one purchase: **an `ADMIN` reads every saga, a customer the sagas of their own orders, and everyone else is refused with `403`**. The third endpoint, the payment-failure switch, is an `ADMIN`'s.
+The demo includes a `SagaController` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/SagaController.java`) that exposes three endpoints for interacting with running sagas. The two reads follow the rule of Chapter 9, because a saga's state names the order, the customer, the payment and the total of one purchase: **an `ADMIN` reads every fulfillment saga, a customer the sagas of their own orders, and everyone else is refused with `403`**. The third endpoint, the payment-failure switch, is an `ADMIN`'s.
 
 **Whose saga is it?** A fulfillment saga belongs to its order. `OrderFulfillmentSaga.extractSagaId` (Step 3) derives the saga id from `OrderPlaced` as `"fulfillment-" + orderId`, so the order is known from the saga id, and Chapter 9 already says who owns an order: the customer its read-model row names. The saga reads therefore ask the question the order reads ask, with the same answer in every case:
 
@@ -1744,7 +1744,8 @@ import java.util.List;
  * Which fulfillment sagas one caller may list: {@link OwnerOrAdminQueries#fulfillments} decides it
  * and {@link FulfillmentSagaRows} reads exactly that.
  *
- * @param everySaga {@code true} for an {@code ADMIN}: the list is not narrowed
+ * @param everySaga {@code true} for an {@code ADMIN}: every fulfillment saga, the list is not
+ *     narrowed by id
  * @param sagaIds for any other caller, the ids of the fulfillment sagas of the caller's own orders,
  *     and the only rows the list may hold; empty when {@code everySaga} is {@code true}
  */
@@ -1760,7 +1761,7 @@ public record FulfillmentScope(boolean everySaga, List<String> sagaIds) {
     sagaIds = List.copyOf(sagaIds);
   }
 
-  /** An {@code ADMIN}'s scope: every saga. */
+  /** An {@code ADMIN}'s scope: every fulfillment saga. */
   public static FulfillmentScope all() {
     return new FulfillmentScope(true, List.of());
   }
@@ -1783,14 +1784,17 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
+import org.streamrune.core.types.SagaType;
 
 /**
  * The saga list of {@code GET /api/saga/fulfillments}, read from the framework's {@code saga_state}
- * table for one {@link FulfillmentScope}. The three applications answer the list from here, so a
- * caller gets the same rows from each of them.
+ * table for one saga type and one {@link FulfillmentScope}. The three applications answer the list
+ * from here, so a caller gets the same rows from each of them.
  *
- * <p>The scope is applied in the statement: a caller who is not an {@code ADMIN} gets the rows
- * whose id is one of the scope's saga ids, selected by the database, and no other row is read.
+ * <p>The type and the scope are applied in the statement. Every caller gets rows of the one saga
+ * type the endpoint is named for, whatever other sagas the table holds; a caller who is not an
+ * {@code ADMIN} gets, of those, the rows whose id is one of the scope's saga ids. The database
+ * selects them, and no other row is read.
  *
  * <p>A row is the saga's id, its type, the framework's {@code SagaStatus} and the saga's state as
  * the JSON the store holds. For a fulfillment saga that state names the order, its customer, the
@@ -1801,22 +1805,23 @@ public final class FulfillmentSagaRows {
 
   private static final String EVERY_SAGA =
       "SELECT saga_id, saga_type, status, state_json FROM saga_state"
-          + " ORDER BY saga_id DESC LIMIT ?";
+          + " WHERE saga_type = ? ORDER BY saga_id DESC LIMIT ?";
 
   private static final String SAGAS_WITH_IDS =
       "SELECT saga_id, saga_type, status, state_json FROM saga_state"
-          + " WHERE saga_id = ANY (?) ORDER BY saga_id DESC LIMIT ?";
+          + " WHERE saga_type = ? AND saga_id = ANY (?) ORDER BY saga_id DESC LIMIT ?";
 
   private FulfillmentSagaRows() {}
 
   /**
    * The rows of the scope, the highest saga id first.
    *
+   * @param sagaType the type of the fulfillment saga, as the saga store records it
    * @param limit the most rows to return
    * @throws IllegalArgumentException for a negative {@code limit}
    */
   public static List<Map<String, Object>> read(
-      DataSource dataSource, FulfillmentScope scope, int limit) {
+      DataSource dataSource, SagaType sagaType, FulfillmentScope scope, int limit) {
     if (limit < 0) {
       throw new IllegalArgumentException("limit must not be negative");
     }
@@ -1824,11 +1829,12 @@ public final class FulfillmentSagaRows {
     try (var connection = dataSource.getConnection();
         var statement =
             connection.prepareStatement(scope.everySaga() ? EVERY_SAGA : SAGAS_WITH_IDS)) {
+      statement.setString(1, sagaType.value());
       if (scope.everySaga()) {
-        statement.setInt(1, limit);
-      } else {
-        statement.setArray(1, connection.createArrayOf("varchar", scope.sagaIds().toArray()));
         statement.setInt(2, limit);
+      } else {
+        statement.setArray(2, connection.createArrayOf("varchar", scope.sagaIds().toArray()));
+        statement.setInt(3, limit);
       }
       try (var result = statement.executeQuery()) {
         while (result.next()) {
@@ -1849,7 +1855,7 @@ public final class FulfillmentSagaRows {
 }
 ```
 
-The framework has no "list sagas" query — `SagaStore` loads one saga by id — so the list reads the `saga_state` table directly. For a caller who is not an `ADMIN` the statement itself selects by `saga_id = ANY (?)`: no row of another customer leaves the database. A scope that is neither "every saga" nor holds an id selects nothing, which is what a customer without orders gets.
+The framework has no "list sagas" query — `SagaStore` loads one saga by id — so the list reads the `saga_state` table directly. The table holds the sagas of every type an application runs, so both statements select by `saga_type` first: the endpoint is the fulfillment saga's, and a row of another saga type is not its to show, to an `ADMIN` or to a customer. For a caller who is not an `ADMIN` the statement then selects by `saga_id = ANY (?)`: no row of another customer leaves the database. A scope that is neither "every saga" nor holds an id selects nothing, which is what a customer without orders gets.
 
 The controller takes `OwnerOrAdminQueries` and the `DataSource` in its constructor, and its two reads are the rule followed by the read:
 
@@ -1857,13 +1863,15 @@ The controller takes `OwnerOrAdminQueries` and the `DataSource` in its construct
 @GetMapping
 public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
   FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
-  return FulfillmentSagaRows.read(dataSource, scope, limit);
+  return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
 }
 ```
 
+`FULFILLMENT` is a constant of the controller, `SagaType.fromClass(OrderFulfillmentState.class)`: the type the saga store records the saga under, and the one the single read passes to `sagaStore.load`.
+
 **What a customer reads.** The same row and the same state an `ADMIN` reads, for their own orders: the order id, their own customer id, the payment id (`"pay-" + orderId`, derived, not a card or account number), the lines and the total they ordered, and the fulfillment status. Nothing in a fulfillment saga's state belongs to anybody else, so nothing is cut from it. What stays with the `ADMIN` is everything that is not one order's saga: the dead letters, the faulted sagas and the recovery operations of Chapter 14, and the failure switch below.
 
-**List the fulfillment sagas** (reads directly from the `saga_state` table). As an `ADMIN`, every saga:
+**List the fulfillment sagas** (reads directly from the `saga_state` table). As an `ADMIN`, every fulfillment saga:
 
 ```bash
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments | jq .
@@ -1901,17 +1909,14 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 public ResponseEntity<OrderFulfillmentState> getSaga(@PathVariable String id) {
   queries.requireFulfillmentAccess(RequestCaller.current(), id);
   return sagaStore
-      .load(
-          new SagaId(id),
-          SagaType.fromClass(OrderFulfillmentState.class),
-          OrderFulfillmentState.class)
+      .load(new SagaId(id), FULFILLMENT, OrderFulfillmentState.class)
       .map(LoadedSaga::state)
       .map(ResponseEntity::ok)
       .orElse(ResponseEntity.notFound().build());
 }
 ```
 
-The load is type-scoped: it names the saga type the row must belong to (`SagaType.fromClass(OrderFulfillmentState.class)`, the same value `SagaRunner` stamps on every row it creates) and returns empty both when no row exists and when the id belongs to a different saga type, so the endpoint answers `404` instead of deserializing another saga's state. `sagaStore.load(...)` returns `Optional<LoadedSaga<OrderFulfillmentState>>` — a `LoadedSaga` bundles the deserialized `state`, the framework-owned `status`, and the `version` CAS token together (see [What We Learned](#what-we-learned) below). This endpoint only cares about `state`, so it maps `LoadedSaga::state` straight through: the JSON response is the bare `OrderFulfillmentState` record — `fulfillmentStatus`, `orderId`, `paymentId`, `orderTotal`, and the order `lines` — with no wrapper. If you need the framework's `status` or `version` (for example to spot a `FAULTED` saga that the domain state's own `fulfillmentStatus` doesn't reflect), use the list endpoint above instead, which surfaces the `saga_state.status` column directly.
+The load is type-scoped: it names the saga type the row must belong to (`FULFILLMENT`, that is `SagaType.fromClass(OrderFulfillmentState.class)`, the same value `SagaRunner` stamps on every row it creates) and returns empty both when no row exists and when the id belongs to a different saga type, so the endpoint answers `404` instead of deserializing another saga's state. `sagaStore.load(...)` returns `Optional<LoadedSaga<OrderFulfillmentState>>` — a `LoadedSaga` bundles the deserialized `state`, the framework-owned `status`, and the `version` CAS token together (see [What We Learned](#what-we-learned) below). This endpoint only cares about `state`, so it maps `LoadedSaga::state` straight through: the JSON response is the bare `OrderFulfillmentState` record — `fulfillmentStatus`, `orderId`, `paymentId`, `orderTotal`, and the order `lines` — with no wrapper. If you need the framework's `status` or `version` (for example to spot a `FAULTED` saga that the domain state's own `fulfillmentStatus` doesn't reflect), use the list endpoint above instead, which surfaces the `saga_state.status` column directly.
 
 **Inject a payment failure** (toggles `PaymentGatewaySimulator.failureInjected`):
 

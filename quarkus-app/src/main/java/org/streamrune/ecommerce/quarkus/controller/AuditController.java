@@ -24,8 +24,8 @@ public class AuditController {
 
   @GET
   @Path("/commands")
-  public List<Map<String, Object>> commandAuditLog(
-      @QueryParam("limit") @DefaultValue("100") int limit) {
+  public List<Map<String, Object>> commandAuditLog(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 100);
     OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
@@ -33,7 +33,7 @@ public class AuditController {
             conn.prepareStatement(
                 "SELECT command_id, command_type, aggregate_id, user_id, occurred_at, outcome, "
                     + "error_message, event_count FROM audit_log ORDER BY occurred_at DESC LIMIT ?")) {
-      ps.setInt(1, limit);
+      ps.setInt(1, rows);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           results.add(

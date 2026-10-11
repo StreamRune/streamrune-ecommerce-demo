@@ -102,10 +102,11 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [connected, setConnected] = useState(false);
   const [recentEvents, setRecentEvents] = useState<LiveEvent[]>([]);
-  // The feed starts at the first event of the store on every connection, so after a reconnect
-  // it repeats what was already received. Events up to this offset are known and skipped.
+  // The feed is live: a connection starts at the head of the event store and is sent what is
+  // stored from then on. A frame at or below this offset has been counted and is skipped.
   const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
+  const hasConnectedRef = useRef(false);
   const esRef = useRef<EventSource | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -126,6 +127,13 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       es.onopen = () => {
         setConnected(true);
         retryRef.current = 0;
+        // What was stored while the page was disconnected is not sent after the reconnect: a
+        // connection starts at the head. Every list is read again instead, each with the
+        // session's identity headers.
+        if (hasConnectedRef.current) {
+          void queryClient.invalidateQueries();
+        }
+        hasConnectedRef.current = true;
       };
 
       es.onmessage = (event) => {

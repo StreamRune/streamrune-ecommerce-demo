@@ -6,7 +6,8 @@ import java.util.List;
  * Which fulfillment sagas one caller may list: {@link OwnerOrAdminQueries#fulfillments} decides it
  * and {@link FulfillmentSagaRows} reads exactly that.
  *
- * @param everySaga {@code true} for an {@code ADMIN}: the list is not narrowed
+ * @param everySaga {@code true} for an {@code ADMIN}: every fulfillment saga, the list is not
+ *     narrowed by id
  * @param sagaIds for any other caller, the ids of the fulfillment sagas of the caller's own orders,
  *     and the only rows the list may hold; empty when {@code everySaga} is {@code true}
  */
@@ -22,7 +23,7 @@ public record FulfillmentScope(boolean everySaga, List<String> sagaIds) {
     sagaIds = List.copyOf(sagaIds);
   }
 
-  /** An {@code ADMIN}'s scope: every saga. */
+  /** An {@code ADMIN}'s scope: every fulfillment saga. */
   public static FulfillmentScope all() {
     return new FulfillmentScope(true, List.of());
   }

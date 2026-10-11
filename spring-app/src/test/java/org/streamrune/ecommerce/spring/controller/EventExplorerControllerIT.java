@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.test.web.reactive.server.FluxExchangeResult;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 
 class EventExplorerControllerIT extends AbstractIntegrationTest {
@@ -200,16 +201,19 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
 
   @Test
   void sseEndpointReturnsTextEventStreamContentType() {
-    // Only check that the SSE endpoint is reachable and returns the correct content type.
-    // We do not consume the full stream to avoid blocking the test indefinitely.
-    client
-        .get()
-        .uri("/api/events/sse")
-        .accept(MediaType.TEXT_EVENT_STREAM)
-        .exchange()
-        .expectStatus()
-        .isOk()
-        .expectHeader()
-        .contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM);
+    // The feed never ends on its own: the status and the content type come with the head of the
+    // response, and the body is then cancelled, which closes the connection.
+    FluxExchangeResult<String> feed =
+        client
+            .get()
+            .uri("/api/events/sse")
+            .accept(MediaType.TEXT_EVENT_STREAM)
+            .exchange()
+            .expectStatus()
+            .isOk()
+            .expectHeader()
+            .contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM)
+            .returnResult(String.class);
+    feed.getResponseBody().subscribe().dispose();
   }
 }

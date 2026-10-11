@@ -26,6 +26,9 @@ import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
 @RequestMapping("/api/saga/fulfillments")
 public class SagaController {
 
+  /** The type the saga store records a fulfillment saga under: the list and the single read. */
+  private static final SagaType FULFILLMENT = SagaType.fromClass(OrderFulfillmentState.class);
+
   private final SagaStore sagaStore;
   private final PaymentGatewaySimulator paymentGateway;
   private final DataSource dataSource;
@@ -43,13 +46,14 @@ public class SagaController {
   }
 
   /**
-   * Every saga for an {@code ADMIN}; for anyone else the sagas of the caller's own orders, selected
-   * by their ids where the rows are read. A request without an identity is refused.
+   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
+   * orders, selected by their ids where the rows are read. A request without an identity is
+   * refused.
    */
   @GetMapping
   public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
     FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
-    return FulfillmentSagaRows.read(dataSource, scope, limit);
+    return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
   }
 
   /**
@@ -61,10 +65,7 @@ public class SagaController {
   public ResponseEntity<OrderFulfillmentState> getSaga(@PathVariable String id) {
     queries.requireFulfillmentAccess(RequestCaller.current(), id);
     return sagaStore
-        .load(
-            new SagaId(id),
-            SagaType.fromClass(OrderFulfillmentState.class),
-            OrderFulfillmentState.class)
+        .load(new SagaId(id), FULFILLMENT, OrderFulfillmentState.class)
         .map(LoadedSaga::state)
         .map(ResponseEntity::ok)
         .orElse(ResponseEntity.notFound().build());
