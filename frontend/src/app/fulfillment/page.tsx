@@ -25,8 +25,8 @@ export default function FulfillmentPage() {
 
   async function handleToggle() {
     try {
-      await toggleFailure(undefined);
-      toast.success(paymentFailure?.enabled ? "Payment failure disabled" : "Payment failure injection enabled");
+      const next = await toggleFailure(undefined);
+      toast.success(next.failureInjected ? "Payment failure injection enabled" : "Payment failure disabled");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to toggle payment failure");
     }
@@ -52,7 +52,7 @@ export default function FulfillmentPage() {
             <Label htmlFor="pf-toggle" className="text-sm">Inject Payment Failure</Label>
             <Switch
               id="pf-toggle"
-              checked={paymentFailure?.enabled ?? false}
+              checked={paymentFailure?.failureInjected ?? false}
               onCheckedChange={handleToggle}
               disabled={isToggling}
             />
@@ -60,7 +60,7 @@ export default function FulfillmentPage() {
         )}
       </div>
 
-      {paymentFailure?.enabled && (
+      {paymentFailure?.failureInjected && (
         <div className="flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-400">
           <AlertTriangle className="size-4 shrink-0" />
           <span>Payment failure injection is active. New orders will fail at the payment step.</span>

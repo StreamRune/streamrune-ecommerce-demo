@@ -11,6 +11,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import type { LiveEvent } from "@/lib/types";
 import { API_URL } from "@/lib/api";
+import { refreshAndAgainOnceSettled } from "@/lib/read-model-sync";
 
 const MAX_RECENT = 50;
 const BASE_BACKOFF_MS = 1_000;
@@ -134,10 +135,9 @@ export function SSEProvider({ children }: { children: ReactNode }) {
           lastOffsetRef.current = entry.globalOffset;
           setRecentEvents((prev) => [entry, ...prev].slice(0, MAX_RECENT));
 
-          const keys = invalidationKeysFor(entry.eventType);
-          for (const k of keys) {
-            void queryClient.invalidateQueries({ queryKey: k });
-          }
+          // The frame arrives within a second of the event; the read models the queries show
+          // follow the event store by seconds. Read at once, and once more when they have settled.
+          refreshAndAgainOnceSettled(queryClient, invalidationKeysFor(entry.eventType));
         } catch {
           // ignore parse errors
         }

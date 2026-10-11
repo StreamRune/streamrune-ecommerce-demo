@@ -1,24 +1,38 @@
 /**
- * Shared helpers for StreamRune E2E smoke tests.
+ * Shared helpers for StreamRune E2E tests.
  *
- * Backend-dependent tests skip themselves when the Spring Boot backend at
+ * Backend-dependent tests skip themselves when the backend at
  * http://localhost:8080 is not reachable.  Set BACKEND_URL env var to
  * override the health-check target (defaults to "http://localhost:8080").
  */
 
-import { type Page, type TestInfo, request } from "@playwright/test";
+import { type Page, type Route, request } from "@playwright/test";
 
 export const BACKEND_URL =
   process.env.BACKEND_URL ?? "http://localhost:8080";
 
 /**
- * Returns true when the backend actuator health endpoint responds 200.
+ * Returns true when the backend's health endpoint responds 200: GET
+ * /api/admin/health, the one the three apps share and answer to every caller.
  * Used in beforeAll hooks to decide whether to skip backend-dependent suites.
+ * With E2E_REQUIRE_BACKEND=1 an unreachable backend throws instead.
  */
 export async function isBackendReachable(): Promise<boolean> {
+  const reachable = await healthAnswers();
+  if (!reachable && process.env.E2E_REQUIRE_BACKEND === "1") {
+    // `npm run test:live` and the CI job that starts the stack: a backend that does not answer
+    // is a failure there, not a reason to skip.
+    throw new Error(
+      `E2E_REQUIRE_BACKEND=1, but ${BACKEND_URL}/api/admin/health does not answer 200`
+    );
+  }
+  return reachable;
+}
+
+async function healthAnswers(): Promise<boolean> {
   try {
     const ctx = await request.newContext();
-    const res = await ctx.get(`${BACKEND_URL}/actuator/health`, {
+    const res = await ctx.get(`${BACKEND_URL}/api/admin/health`, {
       timeout: 3_000,
       // Don't throw on non-2xx — we just check status manually
     }).catch(() => null);
@@ -105,7 +119,7 @@ export function requestsTo(seen: ApiRequest[], path: string): ApiRequest[] {
 
 /**
  * Mock all backend API calls so the page renders without port 8080.
- * Intercepts /api/** and /actuator/** with minimal empty-body responses.
+ * Intercepts /api/** with minimal responses in the shapes the backend sends.
  */
 export async function mockBackendRoutes(page: Page): Promise<void> {
   // Empty arrays for list endpoints
@@ -130,7 +144,27 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
   await page.route(`${BACKEND_URL}/api/admin/**`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "{}" })
   );
-  await page.route(`${BACKEND_URL}/actuator/**`, (route) =>
+  // The admin reads, each in its own shape: two lists, the switch, the breakers, the health.
+  for (const list of ["dead-letters", "outbox"]) {
+    await page.route(`${BACKEND_URL}/api/admin/${list}`, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+    );
+  }
+  await page.route(`${BACKEND_URL}/api/admin/payment-failure`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ failureInjected: false }),
+    })
+  );
+  await page.route(`${BACKEND_URL}/api/admin/circuit-breaker`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "CLOSED", paymentGateway: "CLOSED" }),
+    })
+  );
+  await page.route(`${BACKEND_URL}/api/admin/health`, (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -145,4 +179,48 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
       body: "",
     })
   );
+}
+
+/** One command the page sent: a POST or PUT, with its identity headers and its JSON body. */
+export interface SentCommand {
+  method: string;
+  /** Path without the query, e.g. "/api/orders/order-a1/cancel". */
+  path: string;
+  role: string | undefined;
+  userId: string | undefined;
+  contentType: string | undefined;
+  /** The parsed JSON body, or null for a request without one. */
+  body: Record<string, unknown> | null;
+}
+
+/**
+ * Answers the commands the page sends to `path` (a path below /api, or a glob
+ * such as "/api/orders/*\/cancel") and records each one. The answer is the
+ * backend's for a command it accepted: `200` with an empty body, unless
+ * `answer` says otherwise.
+ */
+export async function answerCommands(
+  page: Page,
+  path: string,
+  answer: (route: Route) => Promise<void> = (route) => route.fulfill({ status: 200, body: "" })
+): Promise<SentCommand[]> {
+  const sent: SentCommand[] = [];
+  await page.route(`${BACKEND_URL}${path}`, (route) => {
+    const req = route.request();
+    if (req.method() !== "POST" && req.method() !== "PUT") {
+      return route.fallback();
+    }
+    const headers = req.headers();
+    const data = req.postData();
+    sent.push({
+      method: req.method(),
+      path: new URL(req.url()).pathname,
+      role: headers["x-user-role"],
+      userId: headers["x-user-id"],
+      contentType: headers["content-type"],
+      body: data ? (JSON.parse(data) as Record<string, unknown>) : null,
+    });
+    return answer(route);
+  });
+  return sent;
 }

@@ -24,7 +24,7 @@ function sagaRow(orderId: string, customerId: string, status: string) {
     sagaType: "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState",
     status,
     state: JSON.stringify({
-      sagaId: { value: `fulfillment-${orderId}` },
+      sagaId: `fulfillment-${orderId}`,
       orderId,
       customerId,
       paymentId: `pay-${orderId}`,

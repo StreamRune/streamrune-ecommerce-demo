@@ -19,7 +19,13 @@ import {
   togglePaymentFailure,
   injectSagaFailure,
 } from "./api";
+import { refreshAndAgainOnceSettled } from "./read-model-sync";
 
+/**
+ * A command and the queries its result shows in. The backend answers a command
+ * once its events are stored; the read models follow, so the queries are read
+ * again at once and once more when the read models have settled.
+ */
 function useInvalidatingMutation<TData, TVariables>(
   mutationFn: (vars: TVariables) => Promise<TData>,
   invalidateKeys: QueryKey[]
@@ -27,11 +33,7 @@ function useInvalidatingMutation<TData, TVariables>(
   const queryClient = useQueryClient();
   return useMutation<TData, Error, TVariables>({
     mutationFn,
-    onSuccess: () => {
-      for (const key of invalidateKeys) {
-        void queryClient.invalidateQueries({ queryKey: key as string[] });
-      }
-    },
+    onSuccess: () => refreshAndAgainOnceSettled(queryClient, invalidateKeys),
   });
 }
 
@@ -43,7 +45,7 @@ export function useCreateProduct() {
 
 export function useAdjustStock() {
   return useInvalidatingMutation(
-    ({ productId, body }: { productId: string; body: { delta: number; reason?: string } }) =>
+    ({ productId, body }: { productId: string; body: { quantity: number; reason?: string } }) =>
       adjustStock(productId, body),
     [["products"]]
   );
@@ -51,13 +53,8 @@ export function useAdjustStock() {
 
 export function useUpdatePrice() {
   return useInvalidatingMutation(
-    ({
-      productId,
-      body,
-    }: {
-      productId: string;
-      body: { amount: number; currency: string };
-    }) => updatePrice(productId, body),
+    ({ productId, body }: { productId: string; body: { price: number } }) =>
+      updatePrice(productId, body),
     [["products"]]
   );
 }
@@ -108,7 +105,7 @@ export function useDeliverOrder() {
 
 export function useCancelOrder() {
   return useInvalidatingMutation(
-    (orderId: string) => cancelOrder(orderId),
+    ({ orderId, reason }: { orderId: string; reason: string }) => cancelOrder(orderId, reason),
     [["orders"], ["fulfillment"]]
   );
 }

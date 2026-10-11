@@ -83,11 +83,12 @@ export interface SagaListEntry {
 }
 
 export interface OrderFulfillmentState {
-  sagaId: { value: string };
+  sagaId: string;
   orderId: string;
   customerId: string;
   paymentId: string;
   orderTotal: Money;
+  lines: OrderLineView[];
   fulfillmentStatus: OrderFulfillmentStatus;
 }
 
@@ -129,17 +130,56 @@ export interface AuditEntry {
   eventCount: number;
 }
 
+/**
+ * One entry of GET /api/admin/dead-letters: a command that failed on
+ * infrastructure and waits for a retry. `commandId` is the id the retry route
+ * takes. The entry has more fields (the stored command, trace ids); these are
+ * the ones the admin page shows.
+ */
 export interface DeadLetterEntry {
-  id: string;
+  commandId: string;
   commandType: string;
-  error: string;
-  timestamp: string;
+  errorType: string;
+  errorMessage: string;
+  attempts: number;
+  dlqAttempts: number;
+  firstAttemptAt: string;
+  lastAttemptAt: string | null;
 }
 
+/**
+ * One entry of GET /api/admin/outbox: an integration event waiting for the
+ * broker. `payloadType` names the event, e.g. "OrderConfirmed".
+ */
 export interface OutboxEntry {
   id: string;
-  eventType: string;
+  payloadType: string;
+  status: string;
+  attempts: number;
   createdAt: string;
+}
+
+/** GET /api/admin/payment-failure and the answer of both routes that flip the switch. */
+export interface PaymentFailureState {
+  failureInjected: boolean;
+}
+
+/** GET /api/admin/circuit-breaker: the command bus's breaker and the payment gateway's. */
+export interface CircuitBreakerState {
+  state: string;
+  paymentGateway: string;
+}
+
+/** GET /api/admin/health. */
+export interface HealthState {
+  status: string;
+}
+
+/** The answer of POST /api/customers/{id}/forget. */
+export interface ForgetResult {
+  keyDeleted: boolean;
+  fullyErased: boolean;
+  failedPurgers: string[];
 }
 
 export type Role = "ADMIN" | "CUSTOMER" | "GUEST";

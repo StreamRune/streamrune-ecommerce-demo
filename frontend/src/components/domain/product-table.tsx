@@ -14,6 +14,7 @@ import {
   useReceiveShipment,
 } from "@/lib/mutations";
 import type { ProductView, ProductStatus } from "@/lib/types";
+import { newId } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import {
   Table,
@@ -63,15 +64,18 @@ function CreateProductDialog() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // The backend takes the product id from the request and the price as a plain USD amount.
+    const productId = newId("prod");
     try {
       await mutateAsync({
+        productId,
         name,
         description,
         category,
-        price: { amount: parseFloat(price), currency: "USD" },
+        price: parseFloat(price),
         initialStock: parseInt(stock, 10),
       });
-      toast.success("Product created");
+      toast.success(`Product created: ${productId}`);
       setOpen(false);
       setName(""); setDescription(""); setCategory(""); setPrice(""); setStock("0");
     } catch (err) {
@@ -107,7 +111,7 @@ function CreateProductDialog() {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="cp-price">Price (USD)</Label>
-              <Input id="cp-price" type="number" step="0.01" min="0" value={price} onChange={(e) => setPrice(e.target.value)} required />
+              <Input id="cp-price" type="number" step="0.01" min="0.01" value={price} onChange={(e) => setPrice(e.target.value)} required />
             </div>
             <div className="space-y-1">
               <Label htmlFor="cp-stock">Initial Stock</Label>
@@ -135,7 +139,8 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      await mutateAsync({ productId: product.productId, body: { delta: parseInt(delta, 10), reason: reason || undefined } });
+      // The backend's field is `quantity`: the change to apply, negative to remove.
+      await mutateAsync({ productId: product.productId, body: { quantity: parseInt(delta, 10), reason: reason || undefined } });
       toast.success("Stock adjusted");
       onClose();
     } catch (err) {
@@ -171,7 +176,8 @@ function UpdatePriceForm({ product, onClose }: { product: ProductView; onClose: 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      await mutateAsync({ productId: product.productId, body: { amount: parseFloat(amount), currency: product.price.currency } });
+      // The backend's field is `price`, a plain amount; the currency is USD on the backend.
+      await mutateAsync({ productId: product.productId, body: { price: parseFloat(amount) } });
       toast.success("Price updated");
       onClose();
     } catch (err) {
@@ -186,7 +192,7 @@ function UpdatePriceForm({ product, onClose }: { product: ProductView; onClose: 
       </DialogHeader>
       <div className="space-y-1">
         <Label htmlFor="up-amount">New Price ({product.price.currency})</Label>
-        <Input id="up-amount" type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+        <Input id="up-amount" type="number" step="0.01" min="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required />
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Update"}</Button>
@@ -203,7 +209,7 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
     e.preventDefault();
     try {
       await mutateAsync({ productId: product.productId, body: { quantity: parseInt(quantity, 10) } });
-      toast.success("Shipment received");
+      toast.success("Shipment received into the inventory");
       onClose();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to receive shipment");
@@ -215,6 +221,10 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
       <DialogHeader>
         <DialogTitle>Receive Shipment — {product.name}</DialogTitle>
       </DialogHeader>
+      <p className="text-sm text-muted-foreground">
+        Adds to the inventory the fulfillment saga reserves from when an order is placed. The Stock
+        column of this table is the catalogue&apos;s own figure and stays as it is.
+      </p>
       <div className="space-y-1">
         <Label htmlFor="rs-qty">Quantity</Label>
         <Input id="rs-qty" type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
