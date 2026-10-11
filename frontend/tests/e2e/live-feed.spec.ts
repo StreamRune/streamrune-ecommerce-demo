@@ -9,6 +9,17 @@
 import { test, expect } from "@playwright/test";
 import { mockBackendRoutes, BACKEND_URL } from "./helpers";
 
+/** The body of a feed connection that sends one frame and ends. */
+function oneFrame(globalOffset: number, aggregateType: string, eventType: string): string {
+  const data = JSON.stringify({
+    globalOffset,
+    aggregateType,
+    eventType,
+    timestamp: new Date().toISOString(),
+  });
+  return `id:${globalOffset}\ndata:${data}\n\n`;
+}
+
 test.describe("Live feed connection", () => {
   test("a page that just connected shows no event and reads no list again", async ({ page }) => {
     await mockBackendRoutes(page);
@@ -59,5 +70,40 @@ test.describe("Live feed connection", () => {
       return back < 0 ? [] : asked.slice(back + 1);
     };
     await expect.poll(askedSinceTheFeedWasBack, { timeout: 10_000 }).toContain("products");
+  });
+
+  test("a page whose feed is back at lower offsets shows the events of the new connection", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    // The first connection sends a frame at a high offset and ends. The second one is a backend
+    // whose event store was created again: its offsets start from the beginning. The third stays
+    // open.
+    let connections = 0;
+    await page.route(`${BACKEND_URL}/api/events/sse`, (route) => {
+      connections += 1;
+      if (connections === 1) {
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: oneFrame(500, "product", "ProductCreated"),
+        });
+      }
+      if (connections === 2) {
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: oneFrame(3, "order", "OrderPlaced"),
+        });
+      }
+      // Left unanswered: the connection stays as it is.
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByText("ProductCreated", { exact: true })).toBeVisible();
+    // The frame of the second connection counts although its offset is below the first one's.
+    await expect(page.getByText("OrderPlaced", { exact: true })).toBeVisible();
+    await expect(page.getByText("ProductCreated", { exact: true })).toBeVisible();
   });
 });

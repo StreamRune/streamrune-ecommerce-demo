@@ -114,7 +114,8 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [recentEvents, setRecentEvents] = useState<LiveEvent[]>([]);
   // The feed is live: a connection starts at the head of the event store and is sent what is
-  // stored from then on. A frame at or below this offset has been counted and is skipped.
+  // stored from then on. Within one connection a frame at or below this offset has been counted
+  // and is skipped; every connection starts counting again (see onopen).
   const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
   const hasConnectedRef = useRef(false);
@@ -138,6 +139,10 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       es.onopen = () => {
         setConnected(true);
         retryRef.current = 0;
+        // A connection is sent nothing that was stored before it, so there is nothing to skip
+        // across connections, and the offsets of the new one need not be above the old ones: an
+        // event store that was created again counts from the start.
+        lastOffsetRef.current = 0;
         // What was stored while the page was disconnected is not sent after the reconnect: a
         // connection starts at the head. Every list is read again instead, each with the
         // session's identity headers, and re-read while the read models settle.

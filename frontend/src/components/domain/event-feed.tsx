@@ -44,7 +44,8 @@ export function EventFeed({ maxItems = 20, className }: EventFeedProps) {
         <div className="space-y-1.5">
           {events.map((event) => (
             <div
-              key={event.globalOffset}
+              // Offset and time: after an event store was created again, an offset comes twice.
+              key={`${event.globalOffset}-${event.timestamp}`}
               className="flex items-center gap-2 text-xs"
             >
               <Badge

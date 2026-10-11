@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.core.EventEnvelope;
@@ -15,6 +16,7 @@ import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -45,9 +47,15 @@ import reactor.core.publisher.FluxSink;
  *
  * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
  * the client is connected and nothing of what the store held before, so no caller makes the app
- * read its history: {@link LiveFeed} reads, one reader per connection, and the reader ends when its
- * client leaves. The frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
- * receives every one of them.
+ * read its history. The frames are unnamed (no {@code event:} field), so {@code
+ * EventSource.onmessage} receives every one of them.
+ *
+ * <p><b>One reader, a bounded number of connections.</b> {@link LiveFeed} reads: one reader for the
+ * application asks the event store once per polling interval and hands every frame to every
+ * connected client, so what the feed costs the store does not grow with the number of connections.
+ * The reader runs while a client is connected. The feed has {@link LiveFeed#MAX_CONNECTIONS}
+ * places; the connection that would be one more is answered {@code 503 Service Unavailable} with
+ * {@code Retry-After} ({@link LiveFeedFullException}).
  */
 @RestController
 @RequestMapping("/api/events")
@@ -58,12 +66,13 @@ public class EventExplorerController implements SmartLifecycle {
 
   private final EventStore eventStore;
   private final ObjectMapper objectMapper;
-  private final LiveFeed liveFeed = new LiveFeed();
+  private final LiveFeed liveFeed;
   private volatile boolean feedOpen;
 
   public EventExplorerController(EventStore eventStore, ObjectMapper objectMapper) {
     this.eventStore = eventStore;
     this.objectMapper = objectMapper;
+    this.liveFeed = new LiveFeed(eventStore);
   }
 
   @GetMapping
@@ -89,15 +98,38 @@ public class EventExplorerController implements SmartLifecycle {
 
   /**
    * The live feed: a frame for every event stored while the client is connected, open to every
-   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events. A
-   * client that reads too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that
-   * the stream fails and the client reconnects.
+   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events.
+   *
+   * <p>The place is taken before the answer starts: when the feed has none left, {@link
+   * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code GlobalExceptionHandler} answers
+   * {@code 503} with {@code Retry-After}.
+   *
+   * <p>The feed's reader hands a frame to the sink and goes on to the next client; it never waits
+   * for this one. A client that reads too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames
+   * buffered; beyond that its stream fails, its place is free again and the client reconnects.
+   *
+   * <p>Spring MVC writes the buffered frames to the sockets on its async task executor, by default
+   * a pool of eight threads. A client whose socket is full holds one of them for as long as the
+   * servlet container waits for that write, so a deployment that expects many such clients gives
+   * the executor virtual threads ({@code spring.threads.virtual.enabled}).
    */
   @GetMapping(value = "/sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<ServerSentEvent<String>> sseStream() {
+    LiveFeed.Place place = liveFeed.admit();
     return Flux.<ServerSentEvent<String>>create(
-            sink -> liveFeed.follow(eventStore, clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
+            sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @RequestMapping(value = "/sse", method = RequestMethod.HEAD)
+  public ResponseEntity<Void> sseHead() {
+    return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).build();
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */
@@ -139,6 +171,16 @@ public class EventExplorerController implements SmartLifecycle {
     return liveFeed.openConnections();
   }
 
+  /** Whether the feed's reader runs: it does while a client is connected. */
+  public boolean feedReaderRuns() {
+    return liveFeed.isReading();
+  }
+
+  /** How many times the feed's reader has asked the event store. */
+  public long feedStoreReads() {
+    return liveFeed.storeReads();
+  }
+
   // --- SmartLifecycle: the open feeds end before the web server waits for requests in flight ---
 
   @Override
@@ -150,8 +192,8 @@ public class EventExplorerController implements SmartLifecycle {
   /**
    * Ends the open feeds. An open feed is a request that never finishes on its own, and Spring
    * Boot's graceful shutdown waits for the requests in flight before it stops the web server. This
-   * bean has the default phase, the last to start and the first to stop: the feeds are told to end
-   * before that wait begins and are complete within one polling interval.
+   * bean has the default phase, the last to start and the first to stop: the feeds are completed
+   * and the reader has ended before that wait begins, and before the data source closes.
    */
   @Override
   public void stop() {

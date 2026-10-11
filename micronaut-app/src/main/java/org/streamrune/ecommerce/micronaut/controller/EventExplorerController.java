@@ -2,9 +2,11 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micronaut.http.HttpResponse;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.annotation.*;
 import io.micronaut.http.sse.Event;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import java.util.List;
@@ -17,6 +19,7 @@ import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -50,9 +53,15 @@ import reactor.core.publisher.FluxSink;
  *
  * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
  * the client is connected and nothing of what the store held before, so no caller makes the app
- * read its history: {@link LiveFeed} reads, one reader per connection, and the reader ends when its
- * client leaves. The frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
- * receives every one of them.
+ * read its history. The frames are unnamed (no {@code event:} field), so {@code
+ * EventSource.onmessage} receives every one of them.
+ *
+ * <p><b>One reader, a bounded number of connections.</b> {@link LiveFeed} reads: one reader for the
+ * application asks the event store once per polling interval and hands every frame to every
+ * connected client, so what the feed costs the store does not grow with the number of connections.
+ * The reader runs while a client is connected. The feed has {@link LiveFeed#MAX_CONNECTIONS}
+ * places; the connection that would be one more is answered {@code 503 Service Unavailable} with
+ * {@code Retry-After} ({@link LiveFeedFullException}).
  */
 @Controller("/api/events")
 public class EventExplorerController {
@@ -63,7 +72,9 @@ public class EventExplorerController {
   @Inject EventStore eventStore;
   @Inject ObjectMapper objectMapper;
 
-  private final LiveFeed liveFeed = new LiveFeed();
+  // One feed, and so one reader, for the application: a controller is a singleton. Built once the
+  // event store is injected.
+  private LiveFeed liveFeed;
 
   @Get
   public List<Map<String, Object>> listEvents(
@@ -95,15 +106,36 @@ public class EventExplorerController {
    * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
    * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
-   * <p>Uses a Flux with back-pressure buffering: a client that reads too slowly has up to {@link
-   * #SLOW_CLIENT_BUFFER} frames buffered; beyond that the stream fails and the client reconnects.
+   * <p>The place is taken before the answer starts: when the feed has none left, {@link
+   * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code LiveFeedFullExceptionHandler}
+   * answers {@code 503} with {@code Retry-After}. Taking a place and registering the client read
+   * nothing and wait for nothing, so they block no event loop; the store is read by the feed's own
+   * thread.
+   *
+   * <p>Uses a Flux with back-pressure buffering. The feed's reader hands a frame to the sink and
+   * goes on to the next client; it never waits for this one. A client that reads too slowly has up
+   * to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that its stream fails, its place is free
+   * again and the client reconnects.
    */
   @Get("/sse")
   @Produces(MediaType.TEXT_EVENT_STREAM)
   public Flux<Event<String>> sseStream() {
+    LiveFeed.Place place = liveFeed.admit();
     return Flux.<Event<String>>create(
-            sink -> liveFeed.follow(eventStore, clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
+            sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @Head("/sse")
+  @Produces(MediaType.TEXT_EVENT_STREAM)
+  public HttpResponse<?> sseHead() {
+    return HttpResponse.ok().contentType(MediaType.TEXT_EVENT_STREAM_TYPE);
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */
@@ -143,9 +175,25 @@ public class EventExplorerController {
     return liveFeed.openConnections();
   }
 
-  /** Ends the open feeds when the application stops. */
+  /** Whether the feed's reader runs: it does while a client is connected. */
+  public boolean feedReaderRuns() {
+    return liveFeed.isReading();
+  }
+
+  /** How many times the feed's reader has asked the event store. */
+  public long feedStoreReads() {
+    return liveFeed.storeReads();
+  }
+
+  /** Builds the feed when the application starts; its reader starts with the first client. */
+  @PostConstruct
+  public void openFeed() {
+    liveFeed = new LiveFeed(eventStore);
+  }
+
+  /** Completes the open feeds and ends the reader when the application stops. */
   @PreDestroy
-  void closeFeed() {
+  public void closeFeed() {
     liveFeed.close();
   }
 

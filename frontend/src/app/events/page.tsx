@@ -234,7 +234,7 @@ export default function EventsPage() {
             </div>
           ) : (
             recentEvents.map((event) => (
-              <LiveEventRow key={`live-${event.globalOffset}`} event={event} />
+              <LiveEventRow key={`live-${event.globalOffset}-${event.timestamp}`} event={event} />
             ))
           )}
         </div>
