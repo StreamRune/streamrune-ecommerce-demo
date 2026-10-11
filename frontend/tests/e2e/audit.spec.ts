@@ -53,8 +53,9 @@ test.describe("Audit Log page", () => {
     await actAs(page, "ADMIN");
     await page.goto("/audit");
     await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
+    // The heading is there before the list is asked for: wait for the request itself.
+    await expect.poll(() => requestsTo(requests, "/api/audit").length).toBeGreaterThan(0);
     const sent = requestsTo(requests, "/api/audit");
-    expect(sent.length).toBeGreaterThan(0);
     for (const request of sent) {
       expect(request.role).toBe("ADMIN");
       expect(request.userId).toBe("admin-1");

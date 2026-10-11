@@ -35,10 +35,20 @@ function order(orderId: string, customerId: string) {
   };
 }
 
-/** Picks a role in the sidebar's role switcher, the first select of the page. */
+/**
+ * Picks a role in the sidebar's role switcher, the first select of the page, with the keyboard.
+ * The switcher sits in the bottom-left corner, where the dev server the tests run against draws
+ * its own indicator: a pointer click there can land on the indicator instead of the switcher.
+ */
 async function switchRole(page: Page, role: "ADMIN" | "CUSTOMER" | "GUEST") {
-  await page.getByRole("combobox").first().click();
-  await page.getByRole("option", { name: role }).click();
+  const switcher = page.getByRole("combobox").first();
+  await switcher.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("option", { name: role })).toBeVisible();
+  // Type-ahead moves the highlight to the role, whose first letter no other role shares.
+  await page.keyboard.type(role.charAt(0));
+  await page.keyboard.press("Enter");
+  await expect(switcher).toContainText(role);
 }
 
 test.describe("Role switch inside a session — surface (no backend required)", () => {
