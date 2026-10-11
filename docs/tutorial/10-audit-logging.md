@@ -221,7 +221,12 @@ import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
 import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 
+/**
+ * The command audit log, for the ADMIN role (403 otherwise): a row names the user who sent a
+ * command and the aggregate it was sent to, for every customer.
+ */
 @RestController
 @RequestMapping("/api/audit")
 public class AuditController {
@@ -234,6 +239,7 @@ public class AuditController {
 
   @GetMapping("/commands")
   public List<Map<String, Object>> commandAuditLog(@RequestParam(defaultValue = "100") int limit) {
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =
@@ -263,7 +269,9 @@ public class AuditController {
 }
 ```
 
-This controller queries `audit_log` directly via JDBC rather than through a query handler. The endpoint is intentionally read-only and paginated — the `limit` parameter prevents runaway result sets. In a production system you would add filtering by date range, user ID, or outcome. You would also protect the endpoint with `@RequireRole("ADMIN")` using the authorization interceptor from Chapter 9.
+This controller queries `audit_log` directly via JDBC rather than through a query handler. The endpoint is intentionally read-only and paginated — the `limit` parameter prevents runaway result sets. In a production system you would add filtering by date range, user ID, or outcome.
+
+Its first line is the guard: the log says who sent which command to which aggregate, for every customer, so it is for operators. `@RequireRole` guards commands, and this is a read, so the controller calls `OwnerOrAdminAccess.requireAdminRole` from Chapter 9 with the caller `RequestCaller` hands it, and a request without the `ADMIN` role is answered `403`. The role is the `X-User-Role` header — the demo shortcut from Chapter 9, which a real deployment replaces with authentication.
 
 ### Step 6 — Create ComplianceReportQuery
 
@@ -329,7 +337,8 @@ curl -X POST http://localhost:8080/api/orders/order-audit-1/ship \
 **Query the audit log:**
 
 ```bash
-curl http://localhost:8080/api/audit/commands | jq .
+curl -s http://localhost:8080/api/audit/commands \
+  -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' | jq .
 ```
 
 You should see four entries, newest first. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:

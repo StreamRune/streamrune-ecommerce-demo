@@ -35,6 +35,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/circuit-breaker")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -53,6 +54,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/dead-letters")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -65,7 +67,13 @@ class AdminControllerIT extends AbstractIntegrationTest {
 
   @Test
   void deadLettersWithLimitQueryParamReturnsOk() {
-    client.get().uri("/api/admin/dead-letters?limit=10").exchange().expectStatus().isOk();
+    client
+        .get()
+        .uri("/api/admin/dead-letters?limit=10")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
   }
 
   @Test
@@ -75,6 +83,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/outbox")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -92,6 +101,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -111,6 +121,7 @@ class AdminControllerIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/payment-failure")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -162,6 +173,37 @@ class AdminControllerIT extends AbstractIntegrationTest {
         .isNotFound();
   }
 
+  /**
+   * The listings show operational state and, in the dead-letter and outbox lists, payloads of other
+   * people's commands and events: none answers without the ADMIN role. {@code /health} is the one
+   * open route.
+   */
+  @Test
+  void adminListings_withoutAdminRole_return403() {
+    for (String path :
+        new String[] {
+          "/api/admin/circuit-breaker",
+          "/api/admin/dead-letters",
+          "/api/admin/outbox",
+          "/api/admin/outbox/failed",
+          "/api/admin/saga-dead-letters",
+          "/api/admin/sagas/faulted",
+          "/api/admin/payment-failure"
+        }) {
+      client.get().uri(path).exchange().expectStatus().isForbidden();
+      client
+          .get()
+          .uri(path)
+          .header("X-User-Role", "CUSTOMER")
+          .header("X-User-Id", "cust-alice")
+          .exchange()
+          .expectStatus()
+          .isForbidden();
+      client.get().uri(path).header("X-User-Role", "ADMIN").exchange().expectStatus().isOk();
+    }
+    client.get().uri("/api/admin/health").exchange().expectStatus().isOk();
+  }
+
   @Test
   void mutatingAdminEndpoints_withoutAdminRole_return403() {
     client.post().uri("/api/admin/payment-failure/toggle").exchange().expectStatus().isForbidden();
@@ -178,9 +220,6 @@ class AdminControllerIT extends AbstractIntegrationTest {
         .exchange()
         .expectStatus()
         .isForbidden();
-    // Read-only listings stay open.
-    client.get().uri("/api/admin/outbox").exchange().expectStatus().isOk();
-    client.get().uri("/api/admin/outbox/failed").exchange().expectStatus().isOk();
   }
 
   @Test

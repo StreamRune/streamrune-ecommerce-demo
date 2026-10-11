@@ -6,19 +6,31 @@ import java.math.BigDecimal;
 import java.util.List;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
+/**
+ * The order commands. An order is placed, confirmed and cancelled by an authenticated {@code ADMIN}
+ * or by the customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else.
+ * Shipping and delivering are for the {@code ADMIN} role, which {@code @RequireRole} on the two
+ * commands enforces in the command bus.
+ */
 @Controller("/api/orders")
 public class OrderCommandController {
 
   private final VirtualThreadCommandBus commandBus;
+  private final OwnerOrAdminQueries queries;
 
-  public OrderCommandController(VirtualThreadCommandBus commandBus) {
+  public OrderCommandController(VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries) {
     this.commandBus = commandBus;
+    this.queries = queries;
   }
 
+  /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
   @Post
   public HttpResponse<Void> createOrder(@Body CreateOrderRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     List<OrderCommand.OrderLine> lines =
         req.lines().stream()
             .map(
@@ -32,6 +44,7 @@ public class OrderCommandController {
 
   @Post("/{id}/confirm")
   public HttpResponse<Void> confirmOrder(@PathVariable String id) {
+    queries.requireOrderAccess(RequestCaller.current(), id);
     commandBus.execute(new OrderCommand.ConfirmOrder(id));
     return HttpResponse.ok();
   }
@@ -50,6 +63,7 @@ public class OrderCommandController {
 
   @Post("/{id}/cancel")
   public HttpResponse<Void> cancelOrder(@PathVariable String id, @Body CancelOrderRequest req) {
+    queries.requireOrderAccess(RequestCaller.current(), id);
     commandBus.execute(new OrderCommand.CancelOrder(id, req.reason()));
     return HttpResponse.ok();
   }

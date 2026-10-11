@@ -182,6 +182,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
@@ -192,8 +193,8 @@ import reactor.core.publisher.Sinks;
  * <p><b>The list and the stream history are ADMIN only.</b> They return each event's payload as the
  * event store reads it, and the store decrypts {@code @Encrypted} fields on the way out. Until a
  * customer's key is erased, these two endpoints therefore show that customer's name, e-mail and
- * address in plain text. They are gated with the same {@code requireRole("ADMIN")} check as the
- * mutating admin endpoints.
+ * address in plain text. They are gated with the same {@code requireAdminRole} check as the admin
+ * endpoints.
  *
  * <p><b>DEMO SHORTCUT, protect this in production.</b> The role is whatever the client sent in
  * {@code X-User-Role} (the gateway stand-in chapter 9 describes), so the check keeps the tutorial
@@ -225,7 +226,7 @@ public class EventExplorerController {
   @GetMapping
   public List<Map<String, Object>> listEvents(
       @RequestParam(defaultValue = "0") long offset, @RequestParam(defaultValue = "50") int limit) {
-    AdminController.requireRole("ADMIN");
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
     return eventStore.readGlobalStream(new GlobalOffset(offset), limit).stream()
         .map(this::toMap)
         .toList();
@@ -234,7 +235,7 @@ public class EventExplorerController {
   @GetMapping("/{aggregateType}/{aggregateId}")
   public List<Map<String, Object>> streamEvents(
       @PathVariable String aggregateType, @PathVariable String aggregateId) {
-    AdminController.requireRole("ADMIN");
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
     // Both path values are client input: build them through the ingress doors.
     var stream = StreamId.of(AggregateType.of(aggregateType), AggregateId.of(aggregateId));
     return eventStore.load(stream).events().stream().map(this::toMap).toList();
@@ -312,11 +313,11 @@ The three endpoints serve different use cases:
 - `GET /api/events/{aggregateType}/{aggregateId}` — all events for a single stream, returned in append order, **ADMIN only**. A stream is the pair of the aggregate type its decider is registered under and the id the command bus's id extractor returned when the events were appended, written `<aggregateType>:<aggregateId>`. An order placed as `o-1` lives in `order:o-1`, and reserving stock for `p-1` writes to `inventory:p-1` while the product `p-1` stays in `product:p-1`. Both path values are client input and go through the ingress doors (`AggregateType.of`, `AggregateId.of`); a type outside `[a-z][a-z0-9_]{0,31}` is a `400`.
 - `GET /api/events/sse` — a persistent SSE connection, **open to every caller and without payloads**. The server starts a virtual thread that polls `readGlobalStream` from `GlobalOffset.initial()` (which is the exclusive offset `0`, so the first poll replays the full history) and emits one SSE frame per event. The `id` field is the global offset; the `data` field is a JSON object with `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `version` and `timestamp`. There is no `event` field: an unnamed frame is what the browser's `EventSource` hands to `onmessage`, and the frontend in Chapter 16 relies on that. When no new events are present, the thread sleeps one second before polling again.
 
-**Why two of them need ADMIN.** `payload` is `env.event()`: the event as the event store reads it. The store is the crypto-aware one from Chapter 6, and it decrypts `@Encrypted` fields on the way out. So the list and the stream history show a customer's name, e-mail, address and phone **in plain text** for as long as that customer's key exists; only after the key is erased (Chapter 7) do the same fields come back as `[REDACTED]`. Encryption at rest protects the database, not this endpoint. Both methods therefore start with `AdminController.requireRole("ADMIN")`, the check the mutating admin endpoints use (Chapter 14): without the role the answer is `403`, and no event is read.
+**Why two of them need ADMIN.** `payload` is `env.event()`: the event as the event store reads it. The store is the crypto-aware one from Chapter 6, and it decrypts `@Encrypted` fields on the way out. So the list and the stream history show a customer's name, e-mail, address and phone **in plain text** for as long as that customer's key exists; only after the key is erased (Chapter 7) do the same fields come back as `[REDACTED]`. Encryption at rest protects the database, not this endpoint. Both methods therefore start with `OwnerOrAdminAccess.requireAdminRole(RequestCaller.current())`, the check from Chapter 9 that the admin endpoints use (Chapters 12 and 14): without the role the answer is `403`, and no event is read.
 
 **Why the feed does not.** The browser opens the feed with `EventSource`, which cannot send request headers, so the feed cannot ask for a role. It stays open instead and says less: `toFrame` builds a frame from the envelope's coordinates and never touches `env.event()`. A dashboard that only needs to know *that* something happened to a stream loses nothing.
 
-> **Demo shortcut — protect this in production.** `requireRole` trusts the `X-User-Role` header, which any client can set to `ADMIN` (the gateway stand-in from Chapter 9). The check keeps the demo honest about *who should* see decrypted events, but it does not stop anyone who adds the header. In a real system an endpoint that returns raw event payloads belongs behind real authentication, with the role derived from the authenticated identity, on an operator-only network path — or it does not exist at all, and operators read events with tooling that has its own access control. The same goes for the open feed: stream ids and event types are metadata, and metadata can be sensitive too (a `customer:<id>` stream with a `CustomerForgotten` event tells a story). Decide per deployment whether an unauthenticated caller may see it.
+> **Demo shortcut — protect this in production.** `requireAdminRole` trusts the `X-User-Role` header, which any client can set to `ADMIN` (the gateway stand-in from Chapter 9). The check keeps the demo honest about *who should* see decrypted events, but it does not stop anyone who adds the header. In a real system an endpoint that returns raw event payloads belongs behind real authentication, with the role derived from the authenticated identity, on an operator-only network path — or it does not exist at all, and operators read events with tooling that has its own access control. The same goes for the open feed: stream ids and event types are metadata, and metadata can be sensitive too (a `customer:<id>` stream with a `CustomerForgotten` event tells a story). Decide per deployment whether an unauthenticated caller may see it.
 
 The SSE endpoint uses `spring-boot-starter-webflux` for the `Flux` return type. The `webflux` dependency is already present in `build.gradle.kts` from an earlier chapter. The virtual thread approach means no Reactor scheduler is consumed while the thread is sleeping — the thread is parked at `Thread.sleep` at zero cost.
 
@@ -344,7 +345,7 @@ streamrune:
 
 and decide who may open which stream. A frame of this endpoint carries the event with its `@Encrypted` fields decrypted (more on that below), so the decision is the application's whole part in it. The demo's rule: **an authenticated caller who is `ADMIN`, or the customer the stream belongs to; everyone else is refused.**
 
-The rule is plain Java with no Spring in it, so it goes into the shared `queries` module, where `quarkus-app` and `micronaut-app` use the same class. Create `queries/src/main/java/org/streamrune/ecommerce/queries/access/OwnerOrAdminStreamAccess.java`:
+The rule is plain Java with no Spring in it, so it goes into the shared `queries` module, next to `OwnerOrAdminAccess` from Chapter 9, where `quarkus-app` and `micronaut-app` use the same class. Create `queries/src/main/java/org/streamrune/ecommerce/queries/access/OwnerOrAdminStreamAccess.java`:
 
 ```java
 package org.streamrune.ecommerce.queries.access;
@@ -353,7 +354,6 @@ import java.util.function.Function;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
-import org.streamrune.core.types.UserId;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
@@ -367,9 +367,6 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  * type this class does not name.
  */
 public final class OwnerOrAdminStreamAccess {
-
-  private static final String ROLE_BAGGAGE_KEY = "role";
-  private static final String ADMIN = "ADMIN";
 
   private final Function<String, OrderView> orderById;
 
@@ -386,31 +383,25 @@ public final class OwnerOrAdminStreamAccess {
 
   /** The signature of the framework's SseAuthorizer, so a bean is {@code access::isAuthorized}. */
   public boolean isAuthorized(StreamRuneContext.RequestContext caller, StreamId streamId) {
-    if (caller == null || caller.userId() == null) {
+    if (OwnerOrAdminAccess.identityOf(caller) == null) {
       return false;
     }
-    UserId user = caller.userId();
-    boolean admin = ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return admin || user.value().equals(aggregateId);
+      return OwnerOrAdminAccess.mayAccessCustomer(caller, aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return admin || ownsOrder(user, aggregateId);
+      // An ADMIN needs no owner, so the read model is asked only for everyone else.
+      return OwnerOrAdminAccess.isAdmin(caller)
+          || OwnerOrAdminAccess.mayAccessOrder(caller, orderById.apply(aggregateId));
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return admin;
+      return OwnerOrAdminAccess.isAdmin(caller);
     }
     return false;
-  }
-
-  /** The order read model has a row for the order and names the caller as its customer. */
-  private boolean ownsOrder(UserId user, String orderId) {
-    OrderView order = orderById.apply(orderId);
-    return order != null && user.value().equals(order.customerId());
   }
 }
 ```
@@ -429,9 +420,9 @@ The framework asks an `SseAuthorizer` one question, `isAuthorized(StreamRuneCont
 
 Mind the `order` line: the read model is eventually consistent. `OrderProjection` writes the row a moment after `POST /api/orders` returns, and until it has, the order has no known owner — the customer is refused exactly as for an order that was never placed, and subscribes once `GET /api/orders/{id}` answers.
 
-`ADMIN` is decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the entry `AdminController.requireRole` and `requireAdminOrSelf` from Chapter 9 read and the one `HeaderUserRoleResolver` resolves the caller's authority from. The context the rule is handed carries that entry next to the caller's id, so `caller` is the only thing the rule reads: no `ScopedValue`, no request-scoped bean, nothing that differs between Spring, Quarkus and Micronaut. `caller.authority()` holds what `HeaderUserRoleResolver` returned for the caller at the request edge — for an identified caller the same role, with its permissions; the rule keeps to the baggage entry so that the demo has one definition of `ADMIN`. A resolver that looks roles up from real authentication writes no baggage entry, and a rule in such a deployment asks `caller.authority().hasRole("ADMIN")` instead.
+Who the caller is and who owns what is `OwnerOrAdminAccess`'s answer, the class from Chapter 9 that the REST routes of customers and orders ask: the SSE endpoint and `GET /api/customers/{id}` cannot disagree about whose data a customer's is. `ADMIN` is therefore decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the one `HeaderUserRoleResolver` resolves the caller's authority from. The context the rule is handed carries that entry next to the caller's id, so `caller` is the only thing the rule reads: no `ScopedValue`, no request-scoped bean, nothing that differs between Spring, Quarkus and Micronaut. `caller.authority()` holds what `HeaderUserRoleResolver` returned for the caller at the request edge — for an identified caller the same role, with its permissions; the rule keeps to the baggage entry so that the demo has one definition of `ADMIN`. A resolver that looks roles up from real authentication writes no baggage entry, and a rule in such a deployment asks `caller.authority().hasRole("ADMIN")` instead.
 
-> **Demo shortcut — whose order is it?** "The customer the order read model names" is the `customerId` of the order, and `POST /api/orders` takes it from the request body: the demo does not tie it to the caller. Whoever places an order chooses its owner. Nobody but the customer so named (and an `ADMIN`) can open its stream, so the rule leaks nothing, but a real deployment places an order for the authenticated caller and never reads the owner from the body.
+"The customer the order read model names" is the `customerId` of the order. `POST /api/orders` takes it from the request body, and Chapter 9 ties it to the caller: only that customer, or an `ADMIN`, may place the order. An order's stream therefore opens for the customer who placed it, or for whom an operator placed it.
 
 Now the bean. Add these imports to `StreamRuneConfig`:
 
@@ -585,6 +576,7 @@ The `-N` flag disables buffering. Leave the connection open and place an order i
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"orderId": "o-obs-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
 ```
 
@@ -636,6 +628,7 @@ That is the stream's opening comment. The endpoint writes it as soon as the clie
 ```bash
 curl -s -X PUT http://localhost:8080/api/customers/c-1 \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"name": "Alice Smith", "email": "alice.smith@example.com", "address": "123 Main St", "phone": "+1234567890"}'
 ```
 
@@ -662,6 +655,7 @@ It prints `: keepalive` and waits: the stream is open, though no event of that o
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"orderId": "o-obs-2", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
 ```
 

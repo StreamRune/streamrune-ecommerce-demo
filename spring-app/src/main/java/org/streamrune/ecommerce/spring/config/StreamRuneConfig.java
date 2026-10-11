@@ -38,6 +38,7 @@ import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.ecommerce.queries.query.ListProducts;
 import org.streamrune.integration.SseAuthorizer;
@@ -551,6 +552,17 @@ public class StreamRuneConfig {
   @Bean
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
     return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess} that the SSE endpoint above applies too.
+   * The customer and order controllers answer every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
   }
 
   /**

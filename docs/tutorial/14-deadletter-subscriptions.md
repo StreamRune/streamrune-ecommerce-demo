@@ -185,7 +185,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import org.streamrune.core.DeadLetterQueue;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -198,6 +197,7 @@ import org.streamrune.core.types.CommandId;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
@@ -245,6 +245,7 @@ public class AdminController {
 
   @GetMapping("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
+    requireAdmin();
     // "state" = the command-bus breaker; "paymentGateway" = the breaker around the payment gateway
     // call, which is the one the payment-failure toggle exercises.
     return Map.of(
@@ -255,12 +256,13 @@ public class AdminController {
   @GetMapping("/dead-letters")
   public List<DeadLetterQueue.DeadLetterEntry> listDeadLetters(
       @RequestParam(defaultValue = "50") int limit) {
+    requireAdmin();
     return deadLetterQueue.read(limit);
   }
 
   @PostMapping("/dead-letters/{id}/retry")
   public ResponseEntity<Void> retryDeadLetter(@PathVariable String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     // Re-dispatch the dead-lettered command through the bus (under DLQ_REPLAY + its original
     // request context); discarded on success, attempt count bumped on failure. 404 if no entry.
     boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
@@ -270,6 +272,7 @@ public class AdminController {
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */
   @GetMapping("/outbox")
   public List<OutboxEntry> listOutboxEntries(@RequestParam(defaultValue = "50") int limit) {
+    requireAdmin();
     return outboxStore.findByStatus(OutboxStatus.PENDING, limit);
   }
 
@@ -278,6 +281,7 @@ public class AdminController {
    */
   @GetMapping("/outbox/failed")
   public List<OutboxEntry> listFailedOutboxEntries(@RequestParam(defaultValue = "50") int limit) {
+    requireAdmin();
     return outboxStore.findByStatus(OutboxStatus.FAILED, limit);
   }
 
@@ -286,7 +290,7 @@ public class AdminController {
    */
   @PostMapping("/outbox/failed/{id}/replay")
   public Map<String, String> replayFailedOutboxEntry(@PathVariable String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = replayer().replay(OutboxEntryId.of(id));
     return Map.of("outcome", outcome.name());
   }
@@ -302,7 +306,7 @@ public class AdminController {
   @PostMapping("/outbox/failed/{id}/skip")
   public Map<String, String> skipFailedOutboxEntry(
       @PathVariable String id, @RequestBody SkipRequest request) {
-    requireRole("ADMIN");
+    requireAdmin();
     String by = currentUserId();
     if (by == null) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "no request identity (X-User-Id)");
@@ -323,35 +327,23 @@ public class AdminController {
     return r;
   }
 
-  /**
-   * Request identity from the bound StreamRune context; null when unbound (same as
-   * CustomerCommandController).
-   */
+  /** Request identity; null when none is bound. */
   private static String currentUserId() {
-    if (StreamRuneContext.CURRENT.isBound()) {
-      var ctx = StreamRuneContext.CURRENT.get();
-      if (ctx != null && ctx.userId() != null) {
-        return ctx.userId().value();
-      }
-    }
-    return null;
+    return OwnerOrAdminAccess.identityOf(RequestCaller.current());
   }
 
   /**
-   * DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
+   * Answers {@code 403} unless the request carries the ADMIN role ({@code
+   * OwnerOrAdminAccess#hasAdminRole}, the demo's one definition of it). Every route of this
+   * controller but {@code /health} asks: the reads show operational state and, in the dead-letter
+   * and outbox lists, payloads of other people's commands and events.
+   *
+   * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
    * X-User-Role (copied into the context baggage by the framework filter). It is checked here so
    * the tutorial does not model an admin surface anyone can call; a real deployment authenticates.
-   * Package-private because {@code SagaController}'s inject-failure route flips the same
-   * payment-failure flag as {@link #togglePaymentFailure()} and must apply the same check.
    */
-  static void requireRole(String role) {
-    String current = "GUEST";
-    if (StreamRuneContext.CURRENT.isBound() && StreamRuneContext.CURRENT.get() != null) {
-      current = StreamRuneContext.CURRENT.get().baggage().getOrDefault("role", "GUEST");
-    }
-    if (!role.equals(current)) {
-      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Required role: " + role);
-    }
+  private static void requireAdmin() {
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
   }
 
   /**
@@ -364,6 +356,7 @@ public class AdminController {
   @GetMapping("/saga-dead-letters")
   public List<Map<String, Object>> listSagaDeadLetters(
       @RequestParam(defaultValue = "50") int limit) {
+    requireAdmin();
     return sagaDeadLetterStore.findAll(limit).stream().map(this::toJson).toList();
   }
 
@@ -388,6 +381,7 @@ public class AdminController {
    */
   @GetMapping("/sagas/faulted")
   public List<String> listFaultedSagas(@RequestParam(defaultValue = "50") int limit) {
+    requireAdmin();
     return sagaStore
         .findByStatus(SagaType.fromClass(OrderFulfillmentState.class), SagaStatus.FAULTED, limit)
         .stream()
@@ -421,7 +415,7 @@ public class AdminController {
       @RequestParam(required = false) String sagaId,
       @RequestParam long eventOffset,
       @RequestParam(defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome =
         sagaDeadLetterReplayer.replay(
             sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(eventOffset), force);
@@ -438,7 +432,7 @@ public class AdminController {
   @PostMapping("/saga-dead-letters/replay-all")
   public Map<String, List<String>> replayAllSagaDeadLetters(
       @RequestParam String sagaId, @RequestParam(defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcomes = sagaDeadLetterReplayer.replayAll(SagaId.of(sagaId), force);
     return Map.of("outcomes", outcomes.stream().map(Enum::name).toList());
   }
@@ -460,7 +454,7 @@ public class AdminController {
   @PostMapping("/sagas/faulted/resume")
   public Map<String, String> resumeFaultedSaga(
       @RequestParam String sagaId, @RequestParam(defaultValue = "false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = sagaDeadLetterReplayer.resumeFaulted(SagaId.of(sagaId), force);
     return Map.of("outcome", outcome.name());
   }
@@ -476,7 +470,7 @@ public class AdminController {
   @DeleteMapping("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
       @RequestParam(required = false) String sagaId, @RequestParam long eventOffset) {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean discarded =
         sagaDeadLetterReplayer.discard(
             sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(eventOffset));
@@ -485,7 +479,7 @@ public class AdminController {
 
   @PostMapping("/payment-failure/toggle")
   public Map<String, Boolean> togglePaymentFailure() {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);
@@ -493,9 +487,11 @@ public class AdminController {
 
   @GetMapping("/payment-failure")
   public Map<String, Boolean> paymentFailureState() {
+    requireAdmin();
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 
+  /** Open to every caller: the answer says that the application runs and nothing else. */
   @GetMapping("/health")
   public Map<String, String> health() {
     return Map.of("status", "UP");
@@ -514,12 +510,12 @@ The `/outbox` endpoint lists `PENDING` entries with `outboxStore.findByStatus(Ou
 - `POST /api/admin/outbox/failed/{id}/replay` → `{"outcome":"REPLAYED"}` — the entry goes back to `PENDING` at its original position and is delivered before the entries that waited behind it. `NOT_FAILED` means someone already resolved it; `NOT_FOUND` means the id is unknown.
 - `POST /api/admin/outbox/failed/{id}/skip` with `{"reason":"…"}` → `{"outcome":"SKIPPED"}` — the entry will never be delivered; the row records who, when and why, and the aggregate's later entries flow again. The **who** is `skippedBy`, and the controller does not read it from a header: it takes the user id the framework's request filter already resolved into `StreamRuneContext.CURRENT` — in this demo's trusted-gateway mode that is `X-User-Id` (Chapter 9) — exactly as `CustomerCommandController.currentRequesterId()` does for the GDPR audit, and answers `400` when no identity is bound. `reason` is required.
 
-**Every mutating admin endpoint now checks a role.** `requireRole("ADMIN")` reads the `role` entry from the request context's baggage — the same entry `HeaderUserRoleResolver` reads, copied by the framework filter from `X-User-Role` — and answers `403` otherwise. It guards `dead-letters/{id}/retry`, the three saga recovery operations (`saga-dead-letters/replay`, `saga-dead-letters/replay-all`, `sagas/faulted/resume`), `DELETE saga-dead-letters`, `payment-failure/toggle` and the two new outbox operations; read-only listings stay open. The helper is package-private rather than private because one route outside this controller flips the same switch: `SagaController`'s `POST /api/saga/fulfillments/{id}/inject-failure` shorthand (Chapter 11) calls `AdminController.requireRole("ADMIN")` too, so the payment-failure flag cannot be flipped without the role through either route. This is the same demo shortcut Chapter 9 is honest about: the role is whatever the client claims, so this helper is a stand-in for the gateway that would authenticate the caller in a real deployment — without it the chapter would teach an admin surface that lets anyone drop a message. The frontend already sends `X-User-Role` on every call, so the Admin page keeps working when you pick the ADMIN persona.
+**Every route of the controller but `/health` checks the role.** `requireAdmin()` is the helper Chapter 12 gave the controller: it calls `OwnerOrAdminAccess.requireAdminRole` (Chapter 9), which reads the `role` entry from the request context's baggage — the same entry `HeaderUserRoleResolver` reads, copied by the framework filter from `X-User-Role` — and answers `403` otherwise. It guards the operations — `dead-letters/{id}/retry`, the three saga recovery operations (`saga-dead-letters/replay`, `saga-dead-letters/replay-all`, `sagas/faulted/resume`), `DELETE saga-dead-letters`, `payment-failure/toggle` and the two new outbox operations — and the listings too: a dead-lettered command and an outbox entry carry the payload of somebody's command or event, and the saga listings name other people's orders. One route outside this controller flips the same switch as `payment-failure/toggle`: `SagaController`'s `POST /api/saga/fulfillments/{id}/inject-failure` shorthand (Chapter 11) calls `requireAdminRole` too, so the payment-failure flag cannot be flipped without the role through either route. This is the same demo shortcut Chapter 9 is honest about: the role is whatever the client claims, so the check is a stand-in for the gateway that would authenticate the caller in a real deployment — without it the chapter would teach an admin surface that lets anyone read or drop a message. The frontend already sends `X-User-Role` on every call, so the Admin page keeps working when you pick the ADMIN persona.
 
 Try it (the ids come from the `failed` listing):
 
 ```bash
-curl -s "http://localhost:8080/api/admin/outbox/failed" | jq .
+curl -s -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/outbox/failed" | jq .
 curl -s -X POST -H "X-User-Id: ops-1" -H "X-User-Role: ADMIN" -H "Content-Type: application/json" \
   -d '{"reason":"OPS-42: consumer schema rejected the payload"}' \
   "http://localhost:8080/api/admin/outbox/failed/<entry-id>/skip"
@@ -576,10 +572,10 @@ The three `POST` operations also take `force=true` (below). The four mutating en
 
 ```bash
 # List quarantined saga dead-letters
-curl -s "http://localhost:8080/api/admin/saga-dead-letters?limit=50" | jq .
+curl -s -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/saga-dead-letters?limit=50" | jq .
 
 # Enumerate FAULTED sagas
-curl -s "http://localhost:8080/api/admin/sagas/faulted?limit=50" | jq .
+curl -s -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/sagas/faulted?limit=50" | jq .
 
 # Drain a saga after redeploying the fix
 curl -s -X POST -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/saga-dead-letters/replay-all?sagaId=fulfillment-o-100"
@@ -650,6 +646,7 @@ Temporarily introduce a failure into `OrderProjection.process` by throwing a `Ru
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"orderId":"o-fail-1","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":29.99}]}'
 ```
 
@@ -701,7 +698,7 @@ The lock does not lift the requirements on `process` described under `DLQ` at th
 Stop the application. While the runner is stopped, the event store still accepts commands — command processing does not depend on projections. Query the order projection endpoint:
 
 ```bash
-curl -s http://localhost:8080/api/orders/o-2
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/orders/o-2
 ```
 
 The response will not reflect orders written after the shutdown because the projection has not been updated.

@@ -861,7 +861,7 @@ curl -i -X POST http://localhost:8080/api/orders \
 
 The JSON `\n` puts a line feed into the product id. The response is `400 Bad Request` with the body `productId must not contain control characters (U+0000-U+001F, U+007F, U+0080-U+009F)`. The `OrderCommand.OrderLine` constructor refused the line before the command reached the bus, so `order-3` has no events.
 
-> **Heads up for chapter 9:** this `/ship` call succeeds in reaching `decide` only because authorization is not wired yet. In the next chapter you will add `@RequireRole("ADMIN")` to `ShipOrder` and `DeliverOrder` and an authorization interceptor that runs *before* `decide`. After that, this same unauthenticated call is rejected by authorization (an `AuthorizationException`) before the lifecycle guard ever runs, so you will need an ADMIN role on the request to see the `400` from the state machine.
+> **Heads up for chapter 9:** this `/ship` call succeeds in reaching `decide` only because authorization is not wired yet. In the next chapter you will add `@RequireRole("ADMIN")` to `ShipOrder` and `DeliverOrder` and an authorization interceptor that runs *before* `decide`. After that, this same unauthenticated call is rejected by authorization (an `AuthorizationException`) before the lifecycle guard ever runs, so you will need an ADMIN role on the request to see the `400` from the state machine. The other order routes change in Chapter 9 too: placing, confirming, cancelling and reading an order become the business of the order's customer or an `ADMIN`, so the calls of this chapter then need the caller's headers (`-H 'X-User-Id: c-1' -H 'X-User-Role: CUSTOMER'` for the customer the orders name) and answer `403` without them.
 
 **Trigger snapshot creation:**
 

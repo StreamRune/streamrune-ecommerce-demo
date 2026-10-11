@@ -8,17 +8,25 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 
+/**
+ * The command audit log, for the {@code ADMIN} role ({@code 403} otherwise): a row names the user
+ * who sent a command and the aggregate it was sent to, for every customer.
+ */
 @Path("/api/audit")
 @Produces(MediaType.APPLICATION_JSON)
 public class AuditController {
 
   @Inject DataSource dataSource;
+  @Inject StreamRuneRequestContextHolder requestContext;
 
   @GET
   @Path("/commands")
   public List<Map<String, Object>> commandAuditLog(
       @QueryParam("limit") @DefaultValue("100") int limit) {
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.of(requestContext));
     var results = new ArrayList<Map<String, Object>>();
     try (var conn = dataSource.getConnection();
         var ps =

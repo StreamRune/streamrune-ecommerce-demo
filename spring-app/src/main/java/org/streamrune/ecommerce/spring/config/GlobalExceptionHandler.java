@@ -6,6 +6,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.streamrune.core.DomainException;
 import org.streamrune.core.crypto.SubjectForgottenException;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -28,5 +29,14 @@ public class GlobalExceptionHandler {
   @ExceptionHandler(SubjectForgottenException.class)
   public ResponseEntity<String> handleSubjectForgotten(SubjectForgottenException e) {
     return ResponseEntity.status(HttpStatus.GONE).body(e.getMessage());
+  }
+
+  /**
+   * The caller may not read or change what the request names ({@code OwnerOrAdminAccess}): {@code
+   * 403}, the same answer for a request without an identity and for one with the wrong identity.
+   */
+  @ExceptionHandler(AccessRefusedException.class)
+  public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
   }
 }

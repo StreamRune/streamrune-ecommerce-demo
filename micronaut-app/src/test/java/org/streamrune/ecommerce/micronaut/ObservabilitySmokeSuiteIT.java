@@ -66,7 +66,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/circuit-breaker"),
+                HttpRequest.GET("/api/admin/circuit-breaker").header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
 
     assertThat(body).containsKey("state");
@@ -79,7 +79,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/dead-letters"),
+                HttpRequest.GET("/api/admin/dead-letters").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -91,7 +91,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/outbox"),
+                HttpRequest.GET("/api/admin/outbox").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -104,7 +104,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/payment-failure"),
+                HttpRequest.GET("/api/admin/payment-failure").header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
     boolean initialFlag = (Boolean) initial.get("failureInjected");
 
@@ -173,7 +173,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/outbox/failed"),
+                HttpRequest.GET("/api/admin/outbox/failed").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
     assertThat(failed).isEmpty();
 
@@ -203,7 +203,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
           client
               .toBlocking()
               .retrieve(
-                  HttpRequest.GET("/api/admin/outbox?limit=1000"),
+                  HttpRequest.GET("/api/admin/outbox?limit=1000").header("X-User-Role", "ADMIN"),
                   Argument.listOf(Argument.mapOf(String.class, Object.class)));
       assertThat(pending).anySatisfy(e -> assertThat(e.get("id")).isEqualTo(pendingId));
       assertThat(pending).allSatisfy(e -> assertThat(e.get("status")).isEqualTo("PENDING"));
@@ -213,7 +213,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
           client
               .toBlocking()
               .retrieve(
-                  HttpRequest.GET("/api/admin/outbox/failed"),
+                  HttpRequest.GET("/api/admin/outbox/failed").header("X-User-Role", "ADMIN"),
                   Argument.listOf(Argument.mapOf(String.class, Object.class)));
       assertThat(failed)
           .singleElement()
@@ -354,7 +354,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/saga/fulfillments"),
+                HttpRequest.GET("/api/saga/fulfillments").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(body).isNotNull();
@@ -370,18 +370,19 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                     .toBlocking()
                     .retrieve(
                         HttpRequest.GET(
-                            "/api/saga/fulfillments/does-not-exist-" + System.nanoTime())));
+                                "/api/saga/fulfillments/does-not-exist-" + System.nanoTime())
+                            .header("X-User-Role", "ADMIN")));
 
     assertThat(ex.getStatus().getCode()).isEqualTo(404);
   }
 
-  /** The flag both payment-failure routes flip, read through the open admin listing. */
+  /** The flag both payment-failure routes flip, read through the admin listing. */
   private boolean failureInjected() {
     Map<String, Object> state =
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/payment-failure"),
+                HttpRequest.GET("/api/admin/payment-failure").header("X-User-Role", "ADMIN"),
                 Argument.mapOf(String.class, Object.class));
     return (Boolean) state.get("failureInjected");
   }
@@ -457,7 +458,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/audit/commands"),
+                HttpRequest.GET("/api/audit/commands").header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(rows).isNotNull();

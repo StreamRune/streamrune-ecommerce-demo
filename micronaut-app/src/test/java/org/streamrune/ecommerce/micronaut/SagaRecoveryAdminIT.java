@@ -190,7 +190,8 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/sagas/faulted?limit=500"),
+                HttpRequest.GET("/api/admin/sagas/faulted?limit=500")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(String.class));
     assertThat(faulted).contains(sagaId.value());
 
@@ -198,7 +199,8 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
         client
             .toBlocking()
             .retrieve(
-                HttpRequest.GET("/api/admin/saga-dead-letters?limit=500"),
+                HttpRequest.GET("/api/admin/saga-dead-letters?limit=500")
+                    .header("X-User-Role", "ADMIN"),
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
     assertThat(entries)
         .anySatisfy(

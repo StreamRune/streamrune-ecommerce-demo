@@ -77,13 +77,20 @@ class OutboxAdminIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/admin/outbox/failed")
+        .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
         .isOk()
         .expectBody()
         .jsonPath("$[?(@.id == '" + n0 + "')].status")
         .isEqualTo(java.util.List.of("FAILED"));
-    client.get().uri("/api/admin/outbox").exchange().expectStatus().isOk();
+    client
+        .get()
+        .uri("/api/admin/outbox")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
     assertThat(statusOf(n1)).isEqualTo("PENDING");
 
     // Skip without an identity → 400; without the ADMIN role → 403; then the real skip.
@@ -139,6 +146,7 @@ class OutboxAdminIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/admin/outbox/failed")
+        .header("X-User-Role", "ADMIN")
         .exchange()
         .expectStatus()
         .isOk()

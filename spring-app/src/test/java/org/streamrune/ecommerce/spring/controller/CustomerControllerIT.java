@@ -85,8 +85,8 @@ class CustomerControllerIT extends AbstractIntegrationTest {
                   client
                       .get()
                       .uri("/api/customers")
-                      .header("X-User-Role", "CUSTOMER")
-                      .header("X-User-Id", "test-user")
+                      .header("X-User-Role", "ADMIN")
+                      .header("X-User-Id", "test-admin")
                       .exchange()
                       .expectStatus()
                       .isOk()
@@ -104,8 +104,8 @@ class CustomerControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/customers/does-not-exist-" + System.nanoTime())
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .exchange()
         .expectStatus()
         .isNotFound();

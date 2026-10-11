@@ -111,8 +111,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     return client
         .get()
         .uri("/api/orders/" + orderId)
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .exchange()
         .expectStatus()
         .isOk()
@@ -129,8 +129,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     return client
         .get()
         .uri("/api/orders/" + orderId)
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .exchange()
         .expectBody(OrderView.class)
         .returnResult()
@@ -219,7 +219,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
                       .getResponseBody();
               assertThat(orders).isNotNull();
               List<String> ids = orders.stream().map(o -> (String) o.get("orderId")).toList();
-              assertThat(ids).contains(oid1, oid2);
+              assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
   }
 
@@ -251,7 +251,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
                       .getResponseBody();
               assertThat(orders).isNotNull();
               assertThat(orders.stream().map(o -> (String) o.get("orderId")).toList())
-                  .contains(oid);
+                  .containsExactly(oid);
             });
   }
 
@@ -260,8 +260,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     client
         .get()
         .uri("/api/orders/does-not-exist-" + System.nanoTime())
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .exchange()
         .expectStatus()
         .isNotFound();
@@ -272,8 +272,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/orders")
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(
             """
@@ -294,8 +294,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/orders")
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(
             """
@@ -323,8 +323,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/orders/" + orderId + "/confirm")
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .exchange()
         .expectStatus()
         .isBadRequest()
@@ -350,8 +350,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
       client
           .post()
           .uri("/api/orders")
-          .header("X-User-Role", "CUSTOMER")
-          .header("X-User-Id", "test-user")
+          .header("X-User-Role", "ADMIN")
+          .header("X-User-Id", "test-admin")
           .contentType(MediaType.APPLICATION_JSON)
           .bodyValue(
               """
@@ -406,8 +406,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/orders")
-        .header("X-User-Role", "CUSTOMER")
-        .header("X-User-Id", "test-user")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(
             """

@@ -712,6 +712,8 @@ The response returns the customer with all fields decrypted:
 
 `CustomerView` is an 8-field record, so the response also carries `createdAt` and `updatedAt` (set from the event metadata timestamp the projection recorded).
 
+> **Heads up for chapter 9: these routes are open here.** As written in this chapter, anyone who can reach the API can register, change and read any customer: no request carries an identity yet. Chapter 9 switches the identity on and makes every customer route ask one rule — an authenticated `ADMIN`, or the customer themself — and the list return only what the caller may see. From then on the two calls above need the caller's headers, `-H 'X-User-Id: c-1' -H 'X-User-Role: CUSTOMER'`, and answer `403` without them.
+
 You can also confirm that a per-subject key was created:
 
 ```bash

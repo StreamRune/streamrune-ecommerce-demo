@@ -13,6 +13,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
@@ -23,8 +24,8 @@ import reactor.core.publisher.Sinks;
  * <p><b>The list and the stream history are ADMIN only.</b> They return each event's payload as the
  * event store reads it, and the store decrypts {@code @Encrypted} fields on the way out. Until a
  * customer's key is erased, these two endpoints therefore show that customer's name, e-mail and
- * address in plain text. They are gated with the same {@code requireRole("ADMIN")} check as the
- * mutating admin endpoints.
+ * address in plain text. They are gated with the same {@code requireAdminRole} check as the admin
+ * endpoints.
  *
  * <p><b>DEMO SHORTCUT, protect this in production.</b> The role is whatever the client sent in
  * {@code X-User-Role} (the gateway stand-in chapter 9 describes), so the check keeps the tutorial
@@ -56,7 +57,7 @@ public class EventExplorerController {
   @GetMapping
   public List<Map<String, Object>> listEvents(
       @RequestParam(defaultValue = "0") long offset, @RequestParam(defaultValue = "50") int limit) {
-    AdminController.requireRole("ADMIN");
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
     return eventStore.readGlobalStream(new GlobalOffset(offset), limit).stream()
         .map(this::toMap)
         .toList();
@@ -65,7 +66,7 @@ public class EventExplorerController {
   @GetMapping("/{aggregateType}/{aggregateId}")
   public List<Map<String, Object>> streamEvents(
       @PathVariable String aggregateType, @PathVariable String aggregateId) {
-    AdminController.requireRole("ADMIN");
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
     // Both path values are client input: build them through the ingress doors.
     var stream = StreamId.of(AggregateType.of(aggregateType), AggregateId.of(aggregateId));
     return eventStore.load(stream).events().stream().map(this::toMap).toList();

@@ -131,8 +131,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
               .toBlocking()
               .retrieve(
                   HttpRequest.GET("/api/orders/" + orderId)
-                      .header("X-User-Role", "CUSTOMER")
-                      .header("X-User-Id", "test-user"),
+                      .header("X-User-Role", "ADMIN")
+                      .header("X-User-Id", "test-admin"),
                   OrderView.class);
       return new GetResult(200, body);
     } catch (HttpClientResponseException e) {
@@ -212,9 +212,13 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
               List<OrderView> orders =
                   client
                       .toBlocking()
-                      .retrieve(HttpRequest.GET("/api/orders"), Argument.listOf(OrderView.class));
+                      .retrieve(
+                          HttpRequest.GET("/api/orders")
+                              .header("X-User-Role", "CUSTOMER")
+                              .header("X-User-Id", cid),
+                          Argument.listOf(OrderView.class));
               List<String> ids = orders.stream().map(OrderView::orderId).toList();
-              assertThat(ids).contains(oid1, oid2);
+              assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
   }
 
@@ -239,8 +243,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                                 """
                                 {"orderId": "", "customerId": "", "lines": []}""")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "CUSTOMER")
-                            .header("X-User-Id", "test-user")));
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "test-admin")));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
   }
 
@@ -262,8 +266,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                                 """
                                 {"orderId": "o-ctl\\nINFO forged-SECRET", "customerId": "c-ctl", "lines": [{"productId": "p-ctl", "quantity": 1, "unitPrice": 10}]}""")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "CUSTOMER")
-                            .header("X-User-Id", "test-user"),
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "test-admin"),
                         String.class));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
     assertThat(ex.getResponse().getBody(String.class).orElse(""))
@@ -287,8 +291,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                     .exchange(
                         HttpRequest.POST("/api/orders/" + orderId + "/confirm", "")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "CUSTOMER")
-                            .header("X-User-Id", "test-user"),
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "test-admin"),
                         String.class));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
     assertThat(ex.getResponse().getBody(String.class).orElse(""))
@@ -318,8 +322,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                                   {"orderId": "%s", "customerId": "c-saga-long", "lines": [{"productId": "p-saga-long", "quantity": 1, "unitPrice": 10}]}"""
                                       .formatted(orderId))
                               .contentType(MediaType.APPLICATION_JSON)
-                              .header("X-User-Role", "CUSTOMER")
-                              .header("X-User-Id", "test-user"),
+                              .header("X-User-Role", "ADMIN")
+                              .header("X-User-Id", "test-admin"),
                           String.class));
       assertThat(ex.getStatus().getCode()).isEqualTo(400);
       assertThat(ex.getResponse().getBody(String.class).orElse(""))
@@ -371,8 +375,8 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                                 {"orderId": "%s", "customerId": "c-pctl", "lines": [{"productId": "p-ok", "quantity": 1, "unitPrice": 10}, {"productId": "p-ctl\\nINFO forged-SECRET", "quantity": 1, "unitPrice": 10}]}"""
                                     .formatted(orderId))
                             .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "CUSTOMER")
-                            .header("X-User-Id", "test-user"),
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "test-admin"),
                         String.class));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
     assertThat(ex.getResponse().getBody(String.class).orElse(""))

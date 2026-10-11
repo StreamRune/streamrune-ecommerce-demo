@@ -187,6 +187,7 @@ class SagaRecoveryAdminIT {
 
     List<String> faulted =
         given()
+            .header("X-User-Role", "ADMIN")
             .queryParam("limit", 500)
             .when()
             .get("/api/admin/sagas/faulted")
@@ -199,6 +200,7 @@ class SagaRecoveryAdminIT {
 
     List<Map<String, Object>> entries =
         given()
+            .header("X-User-Role", "ADMIN")
             .queryParam("limit", 500)
             .when()
             .get("/api/admin/saga-dead-letters")

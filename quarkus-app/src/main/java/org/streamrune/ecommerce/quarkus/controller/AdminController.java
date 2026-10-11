@@ -9,7 +9,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.streamrune.core.DeadLetterQueue;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -24,6 +23,7 @@ import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewaySimulator;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
@@ -54,13 +54,14 @@ public class AdminController {
   /**
    * The request context the StreamRune filter parsed from the headers. A JAX-RS filter cannot bind
    * {@code StreamRuneContext.CURRENT} around the resource method, so identity and role are read
-   * from this holder (as {@code CustomerCommandController} does).
+   * from this holder (see {@link RequestCaller}).
    */
   @Inject StreamRuneRequestContextHolder requestContext;
 
   @GET
   @Path("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
+    requireAdmin();
     return Map.of(
         "state", circuitBreaker.circuitState(),
         "paymentGateway", paymentGatewayCircuitBreaker.state().name());
@@ -70,13 +71,14 @@ public class AdminController {
   @Path("/dead-letters")
   public List<DeadLetterQueue.DeadLetterEntry> listDeadLetters(
       @QueryParam("limit") @DefaultValue("50") int limit) {
+    requireAdmin();
     return deadLetterQueue.read(limit);
   }
 
   @POST
   @Path("/dead-letters/{id}/retry")
   public Response retryDeadLetter(@PathParam("id") String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
     return retried ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();
   }
@@ -85,6 +87,7 @@ public class AdminController {
   @GET
   @Path("/outbox")
   public List<OutboxEntry> listOutboxEntries(@QueryParam("limit") @DefaultValue("50") int limit) {
+    requireAdmin();
     return outboxStore.findByStatus(OutboxStatus.PENDING, limit);
   }
 
@@ -95,6 +98,7 @@ public class AdminController {
   @Path("/outbox/failed")
   public List<OutboxEntry> listFailedOutboxEntries(
       @QueryParam("limit") @DefaultValue("50") int limit) {
+    requireAdmin();
     return outboxStore.findByStatus(OutboxStatus.FAILED, limit);
   }
 
@@ -104,7 +108,7 @@ public class AdminController {
   @POST
   @Path("/outbox/failed/{id}/replay")
   public Map<String, String> replayFailedOutboxEntry(@PathParam("id") String id) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = replayer().replay(OutboxEntryId.of(id));
     return Map.of("outcome", outcome.name());
   }
@@ -123,7 +127,7 @@ public class AdminController {
   @Consumes(MediaType.APPLICATION_JSON)
   public Map<String, String> skipFailedOutboxEntry(
       @PathParam("id") String id, SkipRequest request) {
-    requireRole("ADMIN");
+    requireAdmin();
     String by = currentUserId();
     if (by == null) {
       throw new WebApplicationException("no request identity (X-User-Id)", 400);
@@ -144,48 +148,23 @@ public class AdminController {
     return r;
   }
 
-  /**
-   * The request context: the filter's request-scoped holder first; {@code
-   * StreamRuneContext.CURRENT} when bound; else {@code null}.
-   */
-  private StreamRuneContext.RequestContext context() {
-    return context(requestContext);
-  }
-
-  private static StreamRuneContext.RequestContext context(StreamRuneRequestContextHolder holder) {
-    var ctx = holder != null ? holder.context() : null;
-    if (ctx == null && StreamRuneContext.CURRENT.isBound()) {
-      ctx = StreamRuneContext.CURRENT.get();
-    }
-    return ctx;
-  }
-
-  /** Request identity; null when none is bound (same as CustomerCommandController). */
+  /** Request identity; null when none is bound. */
   private String currentUserId() {
-    var ctx = context();
-    return ctx != null && ctx.userId() != null ? ctx.userId().value() : null;
+    return OwnerOrAdminAccess.identityOf(RequestCaller.of(requestContext));
   }
 
   /**
-   * DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
+   * Answers {@code 403} unless the request carries the ADMIN role ({@code
+   * OwnerOrAdminAccess#hasAdminRole}, the demo's one definition of it). Every route of this
+   * controller but {@code /health} asks: the reads show operational state and, in the dead-letter
+   * and outbox lists, payloads of other people's commands and events.
+   *
+   * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 describes: the role is whatever the client sent in
    * X-User-Role (copied into the context baggage by the framework filter). It is checked here so
    * the tutorial does not model an admin surface anyone can call; a real deployment authenticates.
    */
-  private void requireRole(String role) {
-    requireRole(requestContext, role);
-  }
-
-  /**
-   * {@link #requireRole(String)} against the given request-context holder. Package-private because
-   * {@code SagaController}'s inject-failure route flips the same payment-failure flag as {@link
-   * #togglePaymentFailure()} and must apply the same check.
-   */
-  static void requireRole(StreamRuneRequestContextHolder holder, String role) {
-    var ctx = context(holder);
-    String current = ctx == null ? "GUEST" : ctx.baggage().getOrDefault("role", "GUEST");
-    if (!role.equals(current)) {
-      throw new WebApplicationException("Required role: " + role, 403);
-    }
+  private void requireAdmin() {
+    OwnerOrAdminAccess.requireAdminRole(RequestCaller.of(requestContext));
   }
 
   /**
@@ -196,6 +175,7 @@ public class AdminController {
   @Path("/saga-dead-letters")
   public List<Map<String, Object>> listSagaDeadLetters(
       @QueryParam("limit") @DefaultValue("50") int limit) {
+    requireAdmin();
     return sagaDeadLetterStore.findAll(limit).stream().map(AdminController::toJson).toList();
   }
 
@@ -219,6 +199,7 @@ public class AdminController {
   @GET
   @Path("/sagas/faulted")
   public List<String> listFaultedSagas(@QueryParam("limit") @DefaultValue("50") int limit) {
+    requireAdmin();
     return sagaStore
         .findByStatus(SagaType.fromClass(OrderFulfillmentState.class), SagaStatus.FAULTED, limit)
         .stream()
@@ -241,7 +222,7 @@ public class AdminController {
       @QueryParam("sagaId") String sagaId,
       @QueryParam("eventOffset") Long eventOffset,
       @QueryParam("force") @DefaultValue("false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     if (eventOffset == null) {
       throw new WebApplicationException("eventOffset is required", 400);
     }
@@ -260,7 +241,7 @@ public class AdminController {
   public Map<String, List<String>> replayAllSagaDeadLetters(
       @QueryParam("sagaId") String sagaId,
       @QueryParam("force") @DefaultValue("false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcomes = sagaDeadLetterReplayer.replayAll(requiredSagaId(sagaId), force);
     return Map.of("outcomes", outcomes.stream().map(Enum::name).toList());
   }
@@ -275,7 +256,7 @@ public class AdminController {
   public Map<String, String> resumeFaultedSaga(
       @QueryParam("sagaId") String sagaId,
       @QueryParam("force") @DefaultValue("false") boolean force) {
-    requireRole("ADMIN");
+    requireAdmin();
     var outcome = sagaDeadLetterReplayer.resumeFaulted(requiredSagaId(sagaId), force);
     return Map.of("outcome", outcome.name());
   }
@@ -289,7 +270,7 @@ public class AdminController {
   @Path("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
       @QueryParam("sagaId") String sagaId, @QueryParam("eventOffset") Long eventOffset) {
-    requireRole("ADMIN");
+    requireAdmin();
     if (eventOffset == null) {
       throw new WebApplicationException("eventOffset is required", 400);
     }
@@ -309,7 +290,7 @@ public class AdminController {
   @POST
   @Path("/payment-failure/toggle")
   public Map<String, Boolean> togglePaymentFailure() {
-    requireRole("ADMIN");
+    requireAdmin();
     boolean current = paymentGateway.isFailureInjected();
     paymentGateway.setFailureInjected(!current);
     return Map.of("failureInjected", !current);
@@ -318,9 +299,11 @@ public class AdminController {
   @GET
   @Path("/payment-failure")
   public Map<String, Boolean> paymentFailureState() {
+    requireAdmin();
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 
+  /** Open to every caller: the answer says that the application runs and nothing else. */
   @GET
   @Path("/health")
   public Map<String, String> health() {

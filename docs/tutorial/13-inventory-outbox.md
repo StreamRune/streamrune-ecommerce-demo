@@ -905,6 +905,7 @@ Wait for all services to be healthy. `SeedDataRunner` issues `ReceiveShipment` a
 # Place an order (adapt IDs to your seed data)
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"prod-widget","quantity":1,"unitPrice":29.99}]}'
 
 # The saga automatically progresses through payment and inventory;
@@ -924,6 +925,7 @@ You should see a JSON array containing an entry whose `type` is `"OrderConfirmed
 ```bash
 curl -s -X POST http://localhost:8080/api/customers \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: c-pii-test" -H "X-User-Role: CUSTOMER" \
   -d '{"customerId":"c-pii-test","name":"Eve","email":"eve@example.com"}'
 
 # Wait a moment, then check — the count should not increase

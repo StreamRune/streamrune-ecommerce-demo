@@ -145,6 +145,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/saga-dead-letters?limit=200")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
@@ -168,7 +169,13 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
 
   @Test
   void listSagaDeadLettersWithLimitQueryParamReturnsOk() {
-    client.get().uri("/api/admin/saga-dead-letters?limit=10").exchange().expectStatus().isOk();
+    client
+        .get()
+        .uri("/api/admin/saga-dead-letters?limit=10")
+        .header("X-User-Role", "ADMIN")
+        .exchange()
+        .expectStatus()
+        .isOk();
   }
 
   @Test
@@ -181,6 +188,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         client
             .get()
             .uri("/api/admin/sagas/faulted?limit=200")
+            .header("X-User-Role", "ADMIN")
             .exchange()
             .expectStatus()
             .isOk()
