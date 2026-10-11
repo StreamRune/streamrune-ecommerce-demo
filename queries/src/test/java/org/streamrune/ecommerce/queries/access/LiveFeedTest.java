@@ -47,17 +47,36 @@ class LiveFeedTest {
   private static final Duration KEEP_ALIVE = Duration.ofMillis(60);
   private static final int PLACES = 3;
 
+  /** How long a place waits for its client in these tests. */
+  private static final Duration FOLLOW_TIMEOUT = Duration.ofMillis(400);
+
   private final InMemoryEventStore store = new InMemoryEventStore();
 
   /** The store the feed reads: {@link #store}, with every call counted and one of them held. */
   private final ObservedStore observed = new ObservedStore(store);
 
-  private final LiveFeed feed = new LiveFeed(observed.asEventStore(), POLL, KEEP_ALIVE, PLACES);
+  private final LiveFeed feed =
+      new LiveFeed(observed.asEventStore(), POLL, KEEP_ALIVE, PLACES, FOLLOW_TIMEOUT);
 
+  /**
+   * Ends the reader and checks, after whatever the test did, that the places add up: the places
+   * taken are the pending ones and the registered clients, never fewer than none and never more
+   * than the feed has. With the reader ended nothing changes between the three readings.
+   */
   @AfterEach
-  void endTheReader() {
+  void endTheReaderAndCountThePlaces() {
+    observed.failure.set(null);
     observed.release();
     feed.close();
+
+    assertEquals(0, feed.registeredClients(), "clients registered on a closed feed");
+    assertPlacesAddUp();
+  }
+
+  private void assertPlacesAddUp() {
+    int taken = feed.openConnections();
+    assertEquals(feed.pendingPlaces() + feed.registeredClients(), taken, "places taken");
+    assertTrue(taken >= 0 && taken <= PLACES, "places taken: " + taken);
   }
 
   // --- where a connection starts ---
@@ -290,6 +309,144 @@ class LiveFeedTest {
     awaitTrue(() -> next.signals.contains("comment: connected"));
   }
 
+  // --- a place nobody follows ---
+
+  @Test
+  void aPlaceNobodyFollowsIsFreeAgainAfterTheFollowTimeout() throws Exception {
+    // What a framework does that takes the place and never subscribes the response stream.
+    for (int i = 0; i < PLACES; i++) {
+      feed.admit();
+    }
+    assertEquals(PLACES, feed.pendingPlaces());
+    assertEquals(PLACES, feed.openConnections());
+    assertThrows(LiveFeedFullException.class, feed::admit);
+
+    sleep(FOLLOW_TIMEOUT.multipliedBy(2));
+
+    assertEquals(0, feed.openConnections());
+    assertEquals(0, feed.pendingPlaces());
+    // The feed is not full: it takes its clients again, all of them.
+    List<RecordingClient> clients = new ArrayList<>();
+    for (int i = 0; i < PLACES; i++) {
+      RecordingClient client = new RecordingClient();
+      clients.add(client);
+      feed.admit().follow(client);
+    }
+    for (RecordingClient client : clients) {
+      awaitTrue(() -> client.signals.contains("comment: connected"));
+    }
+    register("c-1");
+    for (RecordingClient client : clients) {
+      awaitTrue(() -> client.signals.contains("event 1 CustomerRegistered"));
+    }
+    assertEquals(PLACES, feed.registeredClients());
+    assertPlacesAddUp();
+  }
+
+  @Test
+  void aPlaceNobodyFollowsIsDroppedByTheReadersRoundToo() throws Exception {
+    RecordingClient served = new RecordingClient();
+    feed.admit().follow(served);
+    awaitTrue(() -> served.signals.contains("comment: connected"));
+    feed.admit();
+    assertEquals(1, feed.pendingPlaces());
+
+    // Nobody asks the feed for a place or for its count: the reader's rounds drop the place.
+    awaitTrue(() -> feed.pendingPlaces() == 0);
+
+    assertEquals(1, feed.registeredClients());
+    assertEquals(1, feed.openConnections());
+  }
+
+  @Test
+  void aClientFollowedOnAPlaceThatWasDroppedIsCompletedAtOnce() throws Exception {
+    LiveFeed.Place abandoned = feed.admit();
+    sleep(FOLLOW_TIMEOUT.multipliedBy(2));
+    assertEquals(0, feed.openConnections());
+
+    RecordingClient late = new RecordingClient();
+    abandoned.follow(late);
+
+    assertEquals(List.of("ended"), late.signals);
+    assertEquals(0, feed.openConnections());
+    assertEquals(0, feed.pendingPlaces());
+    assertEquals(0, feed.registeredClients());
+    assertFalse(feed.isReading());
+  }
+
+  @Test
+  void aLateFollowDoesNotFreeAPlaceThatIsSomebodyElsesByNow() throws Exception {
+    List<LiveFeed.Place> abandoned = new ArrayList<>();
+    for (int i = 0; i < PLACES; i++) {
+      abandoned.add(feed.admit());
+    }
+    sleep(FOLLOW_TIMEOUT.multipliedBy(2));
+    // The same places, taken again by others, who follow them.
+    List<RecordingClient> served = new ArrayList<>();
+    for (int i = 0; i < PLACES; i++) {
+      RecordingClient client = new RecordingClient();
+      served.add(client);
+      feed.admit().follow(client);
+    }
+    for (RecordingClient client : served) {
+      awaitTrue(() -> client.signals.contains("comment: connected"));
+    }
+
+    List<RecordingClient> late = new ArrayList<>();
+    for (LiveFeed.Place place : abandoned) {
+      RecordingClient client = new RecordingClient();
+      late.add(client);
+      place.follow(client);
+    }
+
+    for (RecordingClient client : late) {
+      assertEquals(List.of("ended"), client.signals);
+    }
+    // The late ones freed nothing and took nothing: the feed is as full as it was.
+    assertEquals(PLACES, feed.openConnections());
+    assertEquals(PLACES, feed.registeredClients());
+    assertThrows(LiveFeedFullException.class, feed::admit);
+    register("c-1");
+    for (RecordingClient client : served) {
+      awaitTrue(() -> client.signals.contains("event 1 CustomerRegistered"));
+    }
+    assertPlacesAddUp();
+  }
+
+  @Test
+  void aFollowedPlaceIsNotDroppedWhileItsClientIsConnected() throws Exception {
+    RecordingClient client = new RecordingClient();
+    feed.admit().follow(client);
+    awaitTrue(() -> client.signals.contains("comment: connected"));
+
+    // Several follow timeouts, with the reader's rounds and a count in between.
+    for (int i = 0; i < 4; i++) {
+      sleep(FOLLOW_TIMEOUT);
+      assertEquals(1, feed.openConnections());
+    }
+
+    register("c-1");
+    awaitTrue(() -> client.signals.contains("event 1 CustomerRegistered"));
+    assertEquals(1, feed.registeredClients());
+    assertEquals(0, feed.pendingPlaces());
+    assertTrue(client.signals.stream().noneMatch(s -> s.equals("ended") || s.startsWith("failed")));
+    assertPlacesAddUp();
+  }
+
+  @Test
+  void aPlaceThatIsFollowedTwiceServesOneClient() {
+    LiveFeed.Place place = feed.admit();
+    RecordingClient first = new RecordingClient();
+    place.follow(first);
+
+    assertThrows(IllegalStateException.class, () -> place.follow(new RecordingClient()));
+
+    awaitTrue(() -> first.signals.contains("comment: connected"));
+    assertEquals(1, feed.openConnections());
+    assertEquals(1, feed.registeredClients());
+    assertPlacesAddUp();
+  }
+
   // --- a client that cannot keep up, a client that left ---
 
   @Test
@@ -425,6 +582,26 @@ class LiveFeedTest {
   }
 
   @Test
+  void aPlaceTakenBeforeTheFeedClosedIsFreeOnceItsClientIsCompleted() {
+    RecordingClient served = new RecordingClient();
+    feed.admit().follow(served);
+    awaitTrue(() -> served.signals.contains("comment: connected"));
+    LiveFeed.Place taken = feed.admit();
+
+    feed.close();
+    // The served client was completed by the close; the pending place is not a client's yet.
+    assertEquals("ended", served.signals.getLast());
+    assertEquals(0, feed.registeredClients());
+    RecordingClient late = new RecordingClient();
+    taken.follow(late);
+
+    assertEquals(List.of("ended"), late.signals);
+    assertEquals(0, feed.openConnections());
+    assertEquals(0, feed.pendingPlaces());
+    assertFalse(feed.isReading());
+  }
+
+  @Test
   void aFeedThatIsOpenedAgainServesClientsAgain() {
     feed.close();
     feed.open();
@@ -456,6 +633,46 @@ class LiveFeedTest {
     RecordingClient next = new RecordingClient();
     feed.admit().follow(next);
     awaitTrue(() -> next.signals.contains("comment: connected"));
+  }
+
+  @Test
+  void aReaderThatAnErrorEndsFailsItsClientsAndTheNextClientStartsANewOne() {
+    RecordingClient first = new RecordingClient();
+    RecordingClient second = new RecordingClient();
+    feed.admit().follow(first);
+    feed.admit().follow(second);
+    awaitTrue(() -> second.signals.contains("comment: connected"));
+    // The error is not swallowed: it reaches the handler of the reader's thread.
+    AtomicReference<Throwable> uncaught = new AtomicReference<>();
+    Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+    Thread.setDefaultUncaughtExceptionHandler(
+        (thread, thrown) -> {
+          if (thread.getName().equals(LiveFeed.READER_THREAD_NAME)) {
+            uncaught.set(thrown);
+          }
+        });
+    try {
+      // What a read throws when an event's class cannot be loaded.
+      NoClassDefFoundError error = new NoClassDefFoundError("org/example/AnEventThatIsGone");
+      observed.failure.set(error);
+
+      awaitTrue(() -> first.signals.contains("failed: The feed's reader has ended"));
+      awaitTrue(() -> second.signals.contains("failed: The feed's reader has ended"));
+      awaitTrue(() -> !feed.isReading() && readerThreads() == 0);
+      awaitTrue(() -> uncaught.get() == error);
+      assertEquals(0, feed.openConnections());
+      assertEquals(0, feed.registeredClients());
+    } finally {
+      Thread.setDefaultUncaughtExceptionHandler(before);
+    }
+
+    observed.failure.set(null);
+    RecordingClient next = new RecordingClient();
+    feed.admit().follow(next);
+    awaitTrue(() -> next.signals.contains("comment: connected"));
+    register("c-1");
+    awaitTrue(() -> next.signals.contains("event 1 CustomerRegistered"));
+    assertTrue(feed.isReading());
   }
 
   // --- helpers ---
@@ -500,13 +717,13 @@ class LiveFeedTest {
    * An event store that passes every call on to another one and counts the two calls the feed
    * makes. A test can hold the reader inside a read of the global stream, before that read reaches
    * the store, or inside a read of the head, after the store has answered it, and can make every
-   * call fail.
+   * call fail, with an exception or with an error.
    */
   private static final class ObservedStore {
 
     final AtomicInteger headReads = new AtomicInteger();
     final AtomicInteger streamReads = new AtomicInteger();
-    final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+    final AtomicReference<Throwable> failure = new AtomicReference<>();
 
     private final EventStore delegate;
     private volatile String heldMethod;
@@ -529,7 +746,7 @@ class LiveFeedTest {
                   streamReads.incrementAndGet();
                   holdIfAskedTo("readGlobalStream");
                 }
-                RuntimeException failing = failure.get();
+                Throwable failing = failure.get();
                 if (failing != null) {
                   throw failing;
                 }

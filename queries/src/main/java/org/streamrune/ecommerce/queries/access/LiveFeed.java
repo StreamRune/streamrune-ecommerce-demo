@@ -3,8 +3,11 @@ package org.streamrune.ecommerce.queries.access;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.streamrune.core.EventEnvelope;
@@ -27,10 +30,30 @@ import org.streamrune.core.types.GlobalOffset;
  * #MAX_CONNECTIONS} places: {@link #admit} refuses the connection that would be one more, and the
  * application answers it {@code 503 Service Unavailable} with {@code Retry-After}.
  *
+ * <p><b>A place nobody follows.</b> A place is taken before the answer starts, and its client is
+ * registered when the web framework subscribes the response stream. A framework does not always get
+ * that far: Quarkus, for one, does not subscribe the stream of a request whose connection was reset
+ * before the answer is written. Such a place has no client that could leave, so nothing else would
+ * ever free it, and a caller who abandons a hundred requests would leave the feed full until the
+ * application restarts. A place that is not followed within {@link #FOLLOW_TIMEOUT} is therefore
+ * free again: {@link #admit}, the reader's round and {@link #openConnections} drop the pending
+ * places that are older. A client that is registered on a place that was dropped is completed at
+ * once, and reconnects. A subscription takes milliseconds, so the timeout is far above what a
+ * served connection needs and far below what a caller would have to wait for a place. Taking the
+ * place only when the stream is subscribed would need no such rule, but by then the answer has
+ * started, and the connection that is one too many could not be refused with a status any more.
+ *
+ * <p><b>The places add up.</b> The number of places taken is the number of pending places (taken,
+ * not followed yet) plus the number of registered clients. The feed keeps these two collections and
+ * no counter beside them: a place leaves the first when it is followed or dropped, a client leaves
+ * the second when it left, was dropped or was completed, and removing either twice changes nothing.
+ * The number can therefore not drift, in either direction.
+ *
  * <p><b>When the reader runs.</b> It starts with the first client and ends when the last one has
  * left, so an application nobody watches reads nothing. Nothing is lost by stopping: a connection
  * starts at the head, so a reader that starts again has no position to keep. {@link #close} ends it
- * when the application stops.
+ * when the application stops. Whatever ends the reader's thread, an {@code Error} included, its
+ * clients are told and the feed knows that it has no reader: the next client starts a new one.
  *
  * <p><b>The feed is live.</b> A connection starts at the head of the global stream. Nothing that
  * was stored before the client connected is sent to it, whatever the request carries, and no
@@ -100,6 +123,13 @@ public final class LiveFeed implements AutoCloseable {
    */
   public static final int RETRY_AFTER_SECONDS = 5;
 
+  /**
+   * How long a place waits for its client. A framework registers the client of a connection within
+   * milliseconds of taking the place; a place that is still pending after this long belongs to a
+   * request the framework gave up, and is free again.
+   */
+  public static final Duration FOLLOW_TIMEOUT = Duration.ofSeconds(5);
+
   /** The text of the opening comment frame; the line on the wire is {@code : connected}. */
   public static final String CONNECTED_COMMENT = " connected";
 
@@ -145,28 +175,35 @@ public final class LiveFeed implements AutoCloseable {
   }
 
   /**
-   * One of the feed's places, taken by {@link #admit} for one connection. It is free again when its
-   * client has left, was dropped or was completed.
+   * One of the feed's places, taken by {@link #admit} for one connection. It is pending until
+   * {@link #follow} registers its client, and free again when that client has left, was dropped or
+   * was completed, or when nobody followed it within the feed's follow timeout.
    */
   public final class Place {
 
-    private boolean taken;
+    private final long admittedAt = System.nanoTime();
+    private boolean followed;
 
     private Place() {}
 
     /**
      * Registers the client and returns at once; the reader serves it from its next round on. On a
-     * closed feed the client is completed at once.
+     * closed feed, and on a place that was dropped because nobody followed it in time, the client
+     * is completed at once.
      *
      * @param client the connected client
      */
     public void follow(Client client) {
+      boolean served;
       synchronized (lock) {
-        if (taken) {
+        if (followed) {
           throw new IllegalStateException("a place serves one client");
         }
-        taken = true;
-        if (!closed) {
+        followed = true;
+        // Not pending any more: the place was dropped, and may be somebody else's by now.
+        boolean held = pending.remove(this);
+        served = held && !closed;
+        if (served) {
           followers.add(new Follower(client));
           if (reader == null) {
             reader =
@@ -176,11 +213,11 @@ public final class LiveFeed implements AutoCloseable {
                     .unstarted(LiveFeed.this::read);
             reader.start();
           }
-          return;
         }
-        places--;
       }
-      client.ended();
+      if (!served) {
+        client.ended();
+      }
     }
   }
 
@@ -211,13 +248,18 @@ public final class LiveFeed implements AutoCloseable {
   private final Duration pollingInterval;
   private final Duration keepAliveInterval;
   private final int maxConnections;
+  private final Duration followTimeout;
   private final AtomicLong storeReads = new AtomicLong();
 
   /** Guards the four fields below. Never held during a store read or a call to a client. */
   private final Object lock = new Object();
 
+  /** The places taken and not followed yet, oldest first. */
+  private final Set<Place> pending = new LinkedHashSet<>();
+
+  /** The registered clients. With {@link #pending}, all the places that are taken. */
   private final List<Follower> followers = new ArrayList<>();
-  private int places;
+
   private Thread reader;
   private boolean closed;
 
@@ -227,19 +269,21 @@ public final class LiveFeed implements AutoCloseable {
    * @param eventStore the store whose global stream the clients follow
    */
   public LiveFeed(EventStore eventStore) {
-    this(eventStore, POLLING_INTERVAL, KEEP_ALIVE_INTERVAL, MAX_CONNECTIONS);
+    this(eventStore, POLLING_INTERVAL, KEEP_ALIVE_INTERVAL, MAX_CONNECTIONS, FOLLOW_TIMEOUT);
   }
 
-  /** A feed with intervals and places of its own, for a test that cannot wait for the standard. */
+  /** A feed with intervals, places and a follow timeout of its own, for a test. */
   public LiveFeed(
       EventStore eventStore,
       Duration pollingInterval,
       Duration keepAliveInterval,
-      int maxConnections) {
+      int maxConnections,
+      Duration followTimeout) {
     this.eventStore = eventStore;
     this.pollingInterval = pollingInterval;
     this.keepAliveInterval = keepAliveInterval;
     this.maxConnections = maxConnections;
+    this.followTimeout = followTimeout;
   }
 
   /**
@@ -252,18 +296,38 @@ public final class LiveFeed implements AutoCloseable {
    */
   public Place admit() {
     synchronized (lock) {
-      if (places >= maxConnections) {
+      dropPlacesNobodyFollowed();
+      if (pending.size() + followers.size() >= maxConnections) {
         throw new LiveFeedFullException(maxConnections);
       }
-      places++;
-      return new Place();
+      Place place = new Place();
+      pending.add(place);
+      return place;
     }
   }
 
-  /** The number of places taken: the clients the feed serves. */
+  /**
+   * The number of places taken: the pending places and the clients the feed serves. A place nobody
+   * followed in time is not counted.
+   */
   public int openConnections() {
     synchronized (lock) {
-      return places;
+      dropPlacesNobodyFollowed();
+      return pending.size() + followers.size();
+    }
+  }
+
+  /** The number of places that are taken and not followed yet, whatever their age. */
+  int pendingPlaces() {
+    synchronized (lock) {
+      return pending.size();
+    }
+  }
+
+  /** The number of registered clients. */
+  int registeredClients() {
+    synchronized (lock) {
+      return followers.size();
     }
   }
 
@@ -365,6 +429,22 @@ public final class LiveFeed implements AutoCloseable {
     } catch (RuntimeException e) {
       // The store cannot be read: every client is told, and reconnects.
       endAll(client -> client.failed(e));
+    } finally {
+      // Whatever ended this thread, an Error that passes through here included: while the feed
+      // still takes it for its reader, no client would start another one and the clients it
+      // served would wait for ever. They are told, and the feed has no reader. An Error goes on
+      // to the thread's uncaught exception handler.
+      List<Follower> left = List.of();
+      synchronized (lock) {
+        if (reader == Thread.currentThread()) {
+          left = takeAll();
+        }
+      }
+      for (Follower follower : left) {
+        quietly(
+            follower.client,
+            client -> client.failed(new IllegalStateException("The feed's reader has ended")));
+      }
     }
   }
 
@@ -380,11 +460,8 @@ public final class LiveFeed implements AutoCloseable {
     List<Follower> left = registered.stream().filter(f -> f.dropped || f.client.isGone()).toList();
     List<Follower> completed;
     synchronized (lock) {
-      for (Follower follower : left) {
-        if (followers.remove(follower)) {
-          places--;
-        }
-      }
+      dropPlacesNobodyFollowed();
+      followers.removeAll(left);
       if (!closed) {
         if (followers.isEmpty()) {
           reader = null;
@@ -441,9 +518,21 @@ public final class LiveFeed implements AutoCloseable {
   private List<Follower> takeAll() {
     List<Follower> all = List.copyOf(followers);
     followers.clear();
-    places -= all.size();
     reader = null;
     return all;
+  }
+
+  /**
+   * Frees the pending places that are older than the follow timeout. They are kept oldest first, so
+   * the first one that is young enough ends the search. The caller holds the lock.
+   */
+  private void dropPlacesNobodyFollowed() {
+    long now = System.nanoTime();
+    Iterator<Place> oldestFirst = pending.iterator();
+    while (oldestFirst.hasNext()
+        && now - oldestFirst.next().admittedAt >= followTimeout.toNanos()) {
+      oldestFirst.remove();
+    }
   }
 
   /** A stream that cannot be ended is one the client has left already. */

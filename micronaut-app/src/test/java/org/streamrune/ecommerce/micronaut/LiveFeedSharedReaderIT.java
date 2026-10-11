@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micronaut.runtime.server.EmbeddedServer;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
 import jakarta.inject.Inject;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -160,6 +161,32 @@ class LiveFeedSharedReaderIT extends AbstractIntegrationTest {
   }
 
   @Test
+  void requestsWhoseClientIsGoneAtOnceLeaveNoPlaceTaken() throws Exception {
+    // Five times the feed's places. A framework that finds the connection gone may never
+    // subscribe the response stream, and then the place has no client that could leave.
+    int sent = 0;
+    for (int i = 0; i < LiveFeed.MAX_CONNECTIONS * 4; i++) {
+      sent += abandonedRequest(true) ? 1 : 0;
+    }
+    for (int i = 0; i < LiveFeed.MAX_CONNECTIONS; i++) {
+      sent += abandonedRequest(false) ? 1 : 0;
+    }
+    assertThat(sent)
+        .as("requests that were sent before their client went away")
+        .isGreaterThan(LiveFeed.MAX_CONNECTIONS * 3);
+
+    // A place whose client was registered is free once the app learns that the client left; a
+    // place nobody followed is free after the follow timeout.
+    awaitEveryPlaceFree();
+    awaitNoReader();
+    try (LiveFeedTestClient feed = new LiveFeedTestClient(server(), null, null)) {
+      feed.awaitConnected();
+      awaitFrameAt(feed, firstOffsetOf("customer", registeredCustomer()));
+      assertThat(controller.openFeedConnections()).isEqualTo(1);
+    }
+  }
+
+  @Test
   void aClientThatDoesNotReadDoesNotDelayTheOthers() throws Exception {
     try (Socket stalled = connectedAndNeverRead()) {
       awaitOpenConnections(1);
@@ -273,6 +300,33 @@ class LiveFeedSharedReaderIT extends AbstractIntegrationTest {
     Socket socket = new Socket();
     socket.setReceiveBufferSize(1024);
     socket.connect(new InetSocketAddress(server().getHost(), server().getPort()), 5_000);
+    sendFeedRequest(socket);
+    return socket;
+  }
+
+  /**
+   * A request for the feed whose client is gone at once: the connection is reset, or closed, right
+   * after the request was sent. Answers whether the request was sent: a server that is busy with
+   * the resets before this one may refuse a connection, and the test then gives it a moment.
+   */
+  private boolean abandonedRequest(boolean reset) throws InterruptedException {
+    // A few milliseconds apart: a burst of resets is not what the test is about.
+    Thread.sleep(2);
+    try (Socket socket = new Socket()) {
+      socket.connect(new InetSocketAddress(server().getHost(), server().getPort()), 5_000);
+      sendFeedRequest(socket);
+      if (reset) {
+        // No lingering: closing the socket resets the connection.
+        socket.setSoLinger(true, 0);
+      }
+      return true;
+    } catch (IOException refused) {
+      Thread.sleep(50);
+      return false;
+    }
+  }
+
+  private void sendFeedRequest(Socket socket) throws IOException {
     OutputStream request = socket.getOutputStream();
     request.write(
         ("GET /api/events/sse HTTP/1.1\r\nHost: "
@@ -282,7 +336,6 @@ class LiveFeedSharedReaderIT extends AbstractIntegrationTest {
                 + "\r\nAccept: text/event-stream\r\n\r\n")
             .getBytes(StandardCharsets.US_ASCII));
     request.flush();
-    return socket;
   }
 
   /** How many times the feed's reader asks the event store while the given time passes. */
@@ -319,7 +372,8 @@ class LiveFeedSharedReaderIT extends AbstractIntegrationTest {
   /**
    * Waits until no place is taken. A place is freed when the app learns that its client left, and a
    * servlet container learns that from a write that fails: this stores an event per polling
-   * interval, so the feed has a frame to write and the test does not wait for the keep-alive.
+   * interval, so the feed has a frame to write and the test does not wait for the keep-alive. A
+   * place nobody followed is free after the feed's follow timeout.
    */
   private void awaitEveryPlaceFree() throws Exception {
     long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
