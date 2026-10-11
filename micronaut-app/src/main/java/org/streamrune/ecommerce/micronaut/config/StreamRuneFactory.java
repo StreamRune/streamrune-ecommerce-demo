@@ -14,7 +14,6 @@ import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.EventTypeRegistry;
 import org.streamrune.core.SimpleEventTypeRegistry;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
@@ -55,7 +54,6 @@ import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
-import org.streamrune.micronaut.StreamRuneContextHelper;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.postgres.PostgresAuditStore;
@@ -89,23 +87,15 @@ public class StreamRuneFactory {
    * decrypted, so the application's part is this decision. Without an {@link SseAuthorizer} bean
    * the framework installs one that refuses every stream once {@code streamrune.sse.enabled=true}.
    *
-   * <p>The rule reads the caller's role from the request context. The framework's {@code
-   * StreamRuneContextFilter} binds it around the rest of the request, as the {@code
-   * StreamRuneContext.CURRENT} {@code ScopedValue} on the thread the filter runs on and as the
-   * {@link StreamRuneContextHelper} {@code ThreadLocal} on every thread Micronaut propagates the
-   * request to; the framework's SSE controller calls the authorizer inside that request, so one of
-   * the two is set. The controllers of this app read the context the same way.
+   * <p>The framework's SSE controller hands the rule the request context its {@code
+   * StreamRuneContextFilter} built for the subscribing request: the caller's id and the {@code
+   * role} entry the rule decides by are both in it, so the wiring is the rule and the order read
+   * model. That filter runs on the blocking executor and the controller with it, so the rule may
+   * read the database.
    */
   @Singleton
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
-    OwnerOrAdminStreamAccess access =
-        new OwnerOrAdminStreamAccess(
-            () ->
-                StreamRuneContext.CURRENT.isBound()
-                    ? StreamRuneContext.CURRENT.get()
-                    : StreamRuneContextHelper.get(),
-            orderProjection::get);
-    return access::isAuthorized;
+    return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
   }
 
   @Singleton

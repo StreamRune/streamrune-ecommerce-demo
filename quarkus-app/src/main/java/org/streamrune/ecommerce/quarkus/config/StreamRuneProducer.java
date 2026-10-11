@@ -20,7 +20,6 @@ import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.EventTypeRegistry;
 import org.streamrune.core.SimpleEventTypeRegistry;
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.crypto.CryptoEngine;
 import org.streamrune.core.outbox.OutboxEventMapper;
@@ -68,7 +67,6 @@ import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
 import org.streamrune.quarkus.StreamRuneQuarkusProperties;
-import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.DeciderRegistration;
 import org.streamrune.runtime.SagaDeadLetterReplayer;
@@ -223,11 +221,9 @@ public class StreamRuneProducer {
    * decrypted, so the application's part is this decision. Without an {@link SseAuthorizer} bean
    * the framework installs one that refuses every stream once {@code streamrune.sse.enabled=true}.
    *
-   * <p>The rule reads the caller's role from the request context. On Quarkus the framework's
-   * request filter stores it in the request-scoped {@link StreamRuneRequestContextHolder} before
-   * the resource method runs, and the framework's SSE resource calls the authorizer inside that
-   * method, where the request scope is active; {@code StreamRuneContext.CURRENT} is the fallback
-   * the controllers of this app use too.
+   * <p>The framework's SSE resource hands the rule the request context its request filter built for
+   * the subscribing request: the caller's id and the {@code role} entry the rule decides by are
+   * both in it, so the wiring is the rule and the order read model.
    *
    * <p>That resource method is a blocking one ({@code @Blocking}), so Quarkus REST runs the request
    * filter and the method, and with it this rule, on a worker thread, never on a Vert.x event loop.
@@ -236,19 +232,8 @@ public class StreamRuneProducer {
    */
   @Produces
   @Singleton
-  public SseAuthorizer sseAuthorizer(
-      StreamRuneRequestContextHolder requestContext, OrderProjection orderProjection) {
-    OwnerOrAdminStreamAccess access =
-        new OwnerOrAdminStreamAccess(
-            () -> {
-              StreamRuneContext.RequestContext context = requestContext.context();
-              if (context == null && StreamRuneContext.CURRENT.isBound()) {
-                context = StreamRuneContext.CURRENT.get();
-              }
-              return context;
-            },
-            orderProjection::get);
-    return access::isAuthorized;
+  public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
+    return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
   }
 
   @Produces
