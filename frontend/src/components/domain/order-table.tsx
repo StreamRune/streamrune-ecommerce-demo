@@ -261,12 +261,12 @@ function OrderRow({ order }: { order: OrderView }) {
           <div className="flex gap-1">
             {order.status === "CREATED" && (
               <>
-                <PermissionGate permission="ORDER_CANCEL_CONFIRMED">
+                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
                   <Button variant="outline" size="xs" onClick={() => handleAction("confirm")} disabled={isConfirming}>
                     Confirm
                   </Button>
                 </PermissionGate>
-                <PermissionGate permission="ORDER_CANCEL_OWN">
+                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
                   <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
                     Cancel
                   </Button>

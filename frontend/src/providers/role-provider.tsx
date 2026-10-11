@@ -15,8 +15,8 @@ import { userIdForRole } from "@/lib/identity";
 import { getPermissions, hasPermission as checkPermission } from "@/lib/permissions";
 
 export const DEFAULT_USERS = {
-  "cust-alice": { name: "Alice Smith", email: "alice@example.com" },
-  "cust-bob": { name: "Bob Jones", email: "bob@example.com" },
+  "cust-alice": { name: "Alice Johnson", email: "alice@example.com" },
+  "cust-bob": { name: "Bob Smith", email: "bob@example.com" },
 } as const;
 
 interface RoleContextValue {
