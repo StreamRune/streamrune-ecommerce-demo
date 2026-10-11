@@ -20,3 +20,11 @@ micronaut:
 streamrune:
   polling-interval-ms: 500
   polling-jitter-ms: 100
+  # Every test class starts an application of its own, and an application that stops does not
+  # give its leases back (its data source is closed before the runners resign). The projections
+  # and subscriptions of the next class therefore wait for those leases to expire: up to the
+  # lease's time to live, 15 s by default, which is also the limit of many awaits. With 5 s a
+  # class waits at most 5 s before its read models follow the event store.
+  subscription:
+    single-active-consumer:
+      lease-ttl: 5s
