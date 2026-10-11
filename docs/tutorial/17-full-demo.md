@@ -264,7 +264,7 @@ Expected output: `"UP"`
 
 ### Step 2: Open the Frontend
 
-Open `http://localhost:3000` in your browser. The Dashboard page loads with four stat cards and a live event feed. The green dot on the Event Explorer item in the sidebar confirms that the SSE connection to `/api/events/sse` is established. Seed data is loaded automatically on first startup — see the note below.
+Open `http://localhost:3000` in your browser. The Dashboard page loads with four stat cards and a live event feed. The feed panel is empty at first: it shows what happens while the page is open, and the events of the seed data are history by then (an `ADMIN` finds them in the Event Explorer's Historical Browser). The green dot on the Event Explorer item in the sidebar confirms that the SSE connection to `/api/events/sse` is established. Seed data is loaded automatically on first startup — see the note below.
 
 > **Where does the seed data come from?**
 >
@@ -532,7 +532,7 @@ Open a persistent SSE connection in a separate terminal to watch new events arri
 curl -N http://localhost:8080/api/events/sse
 ```
 
-Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
+The terminal prints `: connected` and nothing of the events above: the feed starts at the head of the store. Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
 
 ---
 

@@ -1,6 +1,6 @@
 # Chapter 13: Inventory Aggregate & Outbox
 
-> **What you'll learn:** How to model an inventory aggregate with three distinct stock pools — available, reserved, and committed — and how StreamRune's transactional outbox pattern reliably forwards a curated, PII-safe set of integration events to RabbitMQ. You will build `InventoryDecider` with full TDD coverage and wire the four outbox beans (`PostgresOutboxStore`, `EcommerceIntegrationEventMapper`, `RabbitMqConfig` publisher, and `streamrune.outbox.enabled=true`) that make end-to-end delivery real. A second Spring Boot application — the `notifications-service` — subscribes to the queue and exposes `GET /received` so you can verify cross-service delivery without touching the e-shop internals.
+> **What you'll learn:** How to model an inventory aggregate with three distinct stock pools — available, reserved, and committed — and how StreamRune's transactional outbox pattern reliably forwards a curated, PII-safe set of integration events to RabbitMQ. You will build `InventoryDecider` with full TDD coverage and wire the four outbox beans (`PostgresOutboxStore`, `EcommerceIntegrationEventMapper`, `RabbitMqConfig` publisher, and `streamrune.outbox.enabled=true`) that make end-to-end delivery real. A second Spring Boot application — the `notifications-service` — subscribes to the queue and exposes `GET /received`, for an `ADMIN`, so you can verify cross-service delivery without touching the e-shop internals.
 
 ---
 
@@ -21,7 +21,7 @@ The **transactional outbox** pattern closes this gap. Instead of publishing dire
 
 This pattern accepts **at-least-once delivery**: if the process restarts after the commit but before the poller marks the entry delivered, the poller will try again. Consumers must be idempotent (the `notifications-service` deduplicates by `entryId`). In exchange you get a strong guarantee: if the event was committed, the outbox entry exists, and the poller will eventually deliver it — unless an operator deliberately skips it (Chapter 14). In projection terms this is `EXTERNAL_EFFECT` (the delivery modes of Chapter 5): a projection whose job is a side effect writes an outbox row through the handed repository, so the row commits with its checkpoint; a relay you provide delivers it at-least-once, and the receiver dedups. The outbox in this chapter is the event store's own — its rows commit with the event append, and the framework's `OutboxPoller` is the relay.
 
-**What the demo wires end-to-end:** The auto-configured `postgresEventStoreFactory` picks up the `PostgresOutboxStore` and `OutboxEventMapper` beans you expose in this chapter and arranges for every appended event to be screened by the mapper. Only the allowlisted, PII-safe events produce `OutboxEntry` rows — written atomically with the event in the same JDBC transaction. The auto-configured `OutboxPoller` reads those entries and hands them to the `OutboxPublisher` (provided by `RabbitMqConfig`), which publishes to RabbitMQ. A separate `notifications-service` module consumes the queue and exposes `GET /received` (port 8090). The outbox channel is **`STRICT_PER_AGGREGATE`** (the framework default, stated explicitly in the demo): entries of one order, payment or product are delivered in order, and a terminal `FAILED` entry blocks its aggregate until an operator replays or skips it (Chapter 14 adds the admin endpoints for that).
+**What the demo wires end-to-end:** The auto-configured `postgresEventStoreFactory` picks up the `PostgresOutboxStore` and `OutboxEventMapper` beans you expose in this chapter and arranges for every appended event to be screened by the mapper. Only the allowlisted, PII-safe events produce `OutboxEntry` rows — written atomically with the event in the same JDBC transaction. The auto-configured `OutboxPoller` reads those entries and hands them to the `OutboxPublisher` (provided by `RabbitMqConfig`), which publishes to RabbitMQ. A separate `notifications-service` module consumes the queue and exposes `GET /received` (port 8090) to an `ADMIN`. The outbox channel is **`STRICT_PER_AGGREGATE`** (the framework default, stated explicitly in the demo): entries of one order, payment or product are delivered in order, and a terminal `FAILED` entry blocks its aggregate until an operator replays or skips it (Chapter 14 adds the admin endpoints for that).
 
 **PII boundary:** Customer events — `CustomerRegistered`, `ProfileUpdated`, `DataExportRequested`, `CustomerForgotten` — never cross the service boundary. `OrderPlaced` and `PaymentInitiated` are also excluded because they carry `customerId`. Only the order lifecycle outcomes, payment results, and product catalog changes are published. This is enforced by `EcommerceIntegrationEventMapper`'s allowlist, not by convention.
 
@@ -643,7 +643,7 @@ curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \
 
 ### Step 7: Create the `notifications-service` Module and Wire docker-compose
 
-The `notifications-service` is a separate, headless Spring Boot application. It subscribes to the `streamrune.integration` queue via `@RabbitListener` and exposes `GET /received` (port 8090) that returns the last 200 received integration events in memory. It runs independently of the e-shop — no access to the e-shop's database, no awareness of the event store. That decoupling is the whole point of the outbox pattern.
+The `notifications-service` is a separate, headless Spring Boot application. It subscribes to the `streamrune.integration` queue via `@RabbitListener` and exposes two endpoints on port 8090: `GET /received`, which returns the last 200 received integration events from memory to an `ADMIN`, and `GET /health`, an open `200` without a body. It runs independently of the e-shop — no access to the e-shop's database, no awareness of the event store. That decoupling is the whole point of the outbox pattern.
 
 **7a. Register the module in `settings.gradle.kts`.** Add it to the `include(...)` call alongside the other modules:
 
@@ -811,11 +811,35 @@ public class IntegrationEventListener {
 package org.streamrune.ecommerce.notifications;
 
 import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * The service's two HTTP endpoints: what it received, for an operator, and whether it runs, for a
+ * probe.
+ *
+ * <p><b>{@code GET /received} is ADMIN only.</b> It returns the body of every integration event the
+ * service holds, and a body names an order, a payment or a product and can carry the reason a
+ * customer typed when cancelling. The rule is the e-shop's definition of an {@code ADMIN}: the
+ * {@code ADMIN} role together with an identity. Everyone else gets {@code 403}, a caller without
+ * {@code X-User-Id} first of all.
+ *
+ * <p><b>DEMO SHORTCUT, the gateway stand-in the tutorial's chapter 9 describes.</b> The identity
+ * and the role are whatever the client sent in {@code X-User-Id} and {@code X-User-Role}. The
+ * service shares no code with the e-shop, so it reads the two headers itself. A real deployment
+ * authenticates the caller and derives the role from that identity.
+ *
+ * <p><b>{@code GET /health} is open and carries no body.</b> A {@code 200} says the service runs; a
+ * probe needs no headers and learns nothing else.
+ */
 @RestController
 public class ReceivedController {
+
+  private static final String ADMIN = "ADMIN";
 
   private final IntegrationEventListener listener;
 
@@ -824,11 +848,28 @@ public class ReceivedController {
   }
 
   @GetMapping("/received")
-  public List<IntegrationEventListener.Received> received() {
+  public List<IntegrationEventListener.Received> received(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestHeader(value = "X-User-Role", required = false) String role) {
+    if (!isAdmin(userId, role)) {
+      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Required role: ADMIN");
+    }
     return listener.recent();
+  }
+
+  @GetMapping("/health")
+  public ResponseEntity<Void> health() {
+    return ResponseEntity.ok().build();
+  }
+
+  /** An {@code ADMIN} is the role, spelled exactly, together with an identity. */
+  private static boolean isAdmin(String userId, String role) {
+    return userId != null && !userId.isBlank() && ADMIN.equals(role);
   }
 }
 ```
+
+`GET /received` answers an `ADMIN` only. A body it shows names an order, a payment or a product, and an `OrderCancelled` body carries the reason the customer gave, so the endpoint follows Chapter 9's definition: the `ADMIN` role together with an identity, `403` for everyone else. The service shares no code with the e-shop and reads the two headers itself; like every header check of the demo it is the gateway stand-in, not authentication. `GET /health` is the open endpoint: a `200` without a body, which is all a probe needs and all a caller without headers learns from this service.
 
 **7d. Create `notifications-service/src/main/resources/application.yml`:**
 
@@ -931,10 +972,10 @@ curl -s -X POST http://localhost:8080/api/orders \
 **8b. Check the notifications service.** Within a couple of seconds the poller claims the outbox entry and publishes it to RabbitMQ. The `notifications-service` receives it and stores it in memory:
 
 ```bash
-curl http://localhost:8090/received
+curl -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8090/received
 ```
 
-You should see a JSON array containing an entry whose `type` is `"OrderConfirmed"` and whose `body` contains the `orderId`. The response is newest-first.
+You should see a JSON array containing an entry whose `type` is `"OrderConfirmed"` and whose `body` contains the `orderId`. The response is newest-first. Without the two headers the answer is `403`: the bodies name orders, and the service shows them to an `ADMIN` only. `curl -i http://localhost:8090/health` answers `200` with an empty body to anyone.
 
 **8c. Confirm customer events are NOT forwarded.** Register a new customer and verify no notification arrives:
 
@@ -945,7 +986,7 @@ curl -s -X POST http://localhost:8080/api/customers \
   -d '{"customerId":"c-pii-test","name":"Eve","email":"eve@example.com"}'
 
 # Wait a moment, then check — the count should not increase
-curl http://localhost:8090/received | python3 -m json.tool | grep -c '"type"'
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8090/received | python3 -m json.tool | grep -c '"type"'
 ```
 
 The count does not change. `CustomerRegistered` is excluded by `EcommerceIntegrationEventMapper` (the `default -> List.of()` branch), so no outbox entry is written and no message is published. Customer PII never leaves the e-shop's database.
