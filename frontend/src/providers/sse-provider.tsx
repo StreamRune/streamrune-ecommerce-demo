@@ -105,6 +105,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   // stored from then on. A frame at or below this offset has been counted and is skipped.
   const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
+  const hasConnectedRef = useRef(false);
   const esRef = useRef<EventSource | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -125,6 +126,13 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       es.onopen = () => {
         setConnected(true);
         retryRef.current = 0;
+        // What was stored while the page was disconnected is not sent after the reconnect: a
+        // connection starts at the head. Every list is read again instead, each with the
+        // session's identity headers.
+        if (hasConnectedRef.current) {
+          void queryClient.invalidateQueries();
+        }
+        hasConnectedRef.current = true;
       };
 
       es.onmessage = (event) => {

@@ -74,7 +74,7 @@ When an SSE message arrives, the provider does two things. First, it prepends th
 
 The result is that placing an order in one browser tab instantly refreshes the order list in another tab — no polling, no manual refetch. Every page that uses TanStack Query is automatically kept in sync as long as the SSE connection is open.
 
-When the connection drops, the provider reconnects using exponential backoff. The delay starts at one second and doubles on each failure, capping at thirty seconds. The retry counter resets to zero when the connection reopens successfully.
+When the connection drops, the provider reconnects using exponential backoff. The delay starts at one second and doubles on each failure, capping at thirty seconds. The retry counter resets to zero when the connection reopens successfully. The feed does not send what was stored while the page was away, so when the connection is back the provider invalidates every query once: each visible list is read again with the session's headers, and the others are stale for their next use.
 
 ### Role Provider — `src/providers/role-provider.tsx`
 
