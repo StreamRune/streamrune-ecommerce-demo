@@ -38,6 +38,7 @@ import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.ecommerce.queries.query.ListProducts;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.postgres.*;
@@ -536,57 +537,25 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Server-Sent Events publisher. The demo's {@code SseController} ({@code
-   * /api/sse/{aggregateType}/{aggregateId}}) subscribes browser clients to it, and {@link
-   * #sseFanoutSubscription} feeds it every persisted event keyed by stream id. Without both halves
-   * the demo would expose the SSE feature but never deliver a frame.
-   */
-  @Bean(destroyMethod = "close")
-  public org.streamrune.runtime.SseEventPublisher sseEventPublisher() {
-    return new org.streamrune.runtime.SseEventPublisher();
-  }
-
-  /**
-   * Allow-all SSE authorizer. Without an application-provided {@link SseAuthorizer} bean, the
-   * framework installs a fail-closed deny-all authorizer once {@code streamrune.sse.enabled=true} —
-   * which would 403 every subscription, including {@code SseLiveE2EIT}'s (it never sends {@code
-   * X-User-Id} on the SSE {@code GET}, only on the preceding command, so an ownership-based check
-   * would also reject it). This is a public reference showcase with no real authentication, and the
-   * {@code streamId} itself carries no secret, so every stream is readable — a "look but can't
-   * touch" posture appropriate for a demo, not a production access-control model.
+   * Decides who may open {@code GET /api/sse/{aggregateType}/{aggregateId}}: an authenticated
+   * {@code ADMIN}, or the customer the stream belongs to (see {@link OwnerOrAdminStreamAccess} for
+   * the rule per aggregate type). With {@code streamrune.sse.enabled=true} the framework serves the
+   * endpoint and feeds it; a frame carries the event with {@code @Encrypted} fields decrypted, so
+   * the application's part is this decision. Without an {@link SseAuthorizer} bean the framework
+   * installs one that refuses every stream.
+   *
+   * <p>The rule reads the caller's role from the request context. The framework's {@code
+   * ScopedValueFilter} binds {@code StreamRuneContext.CURRENT} around the whole servlet chain, and
+   * the framework's SSE controller calls the authorizer on that request thread, so the context of
+   * the subscribing request is bound when the rule runs.
    */
   @Bean
-  public SseAuthorizer sseAuthorizer() {
-    return (principal, streamId) -> true;
-  }
-
-  /**
-   * Fans the global event stream out to the {@link org.streamrune.runtime.SseEventPublisher}. The
-   * framework publisher is a sink — something has to feed it. This polling subscription publishes
-   * each persisted event under its own stream id, so a client subscribed to {@code
-   * /api/sse/{aggregateType}/{aggregateId}} receives the live frame for that aggregate. Mirrors the
-   * saga subscription wiring below.
-   */
-  @Bean(destroyMethod = "close")
-  public PollingEventSubscription sseFanoutSubscription(
-      EventStore eventStore,
-      OffsetStore offsetStore,
-      org.streamrune.runtime.SseEventPublisher sseEventPublisher) {
-    var subscription =
-        PollingEventSubscription.builder()
-            .subscriptionName("sse-fanout")
-            .eventStore(eventStore)
-            .offsetStore(offsetStore)
-            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(100)))
-            .listener(
-                events -> {
-                  for (var envelope : events) {
-                    sseEventPublisher.publish(envelope.streamId(), envelope);
-                  }
-                })
-            .build();
-    subscription.start();
-    return subscription;
+  public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
+    OwnerOrAdminStreamAccess access =
+        new OwnerOrAdminStreamAccess(
+            () -> StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null,
+            orderProjection::get);
+    return access::isAuthorized;
   }
 
   /**

@@ -20,6 +20,7 @@ import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.EventTypeRegistry;
 import org.streamrune.core.SimpleEventTypeRegistry;
+import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.crypto.CryptoEngine;
 import org.streamrune.core.outbox.OutboxEventMapper;
@@ -61,11 +62,13 @@ import org.streamrune.ecommerce.projections.CustomerSubjectDataPurger;
 import org.streamrune.ecommerce.projections.InventoryProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
 import org.streamrune.quarkus.StreamRuneQuarkusProperties;
+import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.DeciderRegistration;
 import org.streamrune.runtime.SagaDeadLetterReplayer;
@@ -214,17 +217,38 @@ public class StreamRuneProducer {
   }
 
   /**
-   * Allow-all SSE authorizer. Without an application-provided {@link SseAuthorizer} bean, the
-   * framework installs a fail-closed deny-all authorizer once {@code streamrune.sse.enabled=true} —
-   * which would 403 every subscription. This is a public reference showcase with no real
-   * authentication, and the {@code streamId} itself carries no secret, so every stream is readable
-   * — a "look but can't touch" posture appropriate for a demo, not a production access-control
-   * model. Mirrors the Spring app's {@code StreamRuneConfig#sseAuthorizer}.
+   * Decides who may open {@code GET /api/sse/{aggregateType}/{aggregateId}}: an authenticated
+   * {@code ADMIN}, or the customer the stream belongs to (see {@link OwnerOrAdminStreamAccess} for
+   * the rule per aggregate type). A frame carries the event with {@code @Encrypted} fields
+   * decrypted, so the application's part is this decision. Without an {@link SseAuthorizer} bean
+   * the framework installs one that refuses every stream once {@code streamrune.sse.enabled=true}.
+   *
+   * <p>The rule reads the caller's role from the request context. On Quarkus the framework's
+   * request filter stores it in the request-scoped {@link StreamRuneRequestContextHolder} before
+   * the resource method runs, and the framework's SSE resource calls the authorizer inside that
+   * method, where the request scope is active; {@code StreamRuneContext.CURRENT} is the fallback
+   * the controllers of this app use too.
+   *
+   * <p>That resource method is a blocking one ({@code @Blocking}), so Quarkus REST runs the request
+   * filter and the method, and with it this rule, on a worker thread, never on a Vert.x event loop.
+   * The rule may therefore read the database, and it does so only for an order stream opened by a
+   * caller who is not an {@code ADMIN}: one primary-key read of the order read model.
    */
   @Produces
   @Singleton
-  public SseAuthorizer sseAuthorizer() {
-    return (principal, streamId) -> true;
+  public SseAuthorizer sseAuthorizer(
+      StreamRuneRequestContextHolder requestContext, OrderProjection orderProjection) {
+    OwnerOrAdminStreamAccess access =
+        new OwnerOrAdminStreamAccess(
+            () -> {
+              StreamRuneContext.RequestContext context = requestContext.context();
+              if (context == null && StreamRuneContext.CURRENT.isBound()) {
+                context = StreamRuneContext.CURRENT.get();
+              }
+              return context;
+            },
+            orderProjection::get);
+    return access::isAuthorized;
   }
 
   @Produces
