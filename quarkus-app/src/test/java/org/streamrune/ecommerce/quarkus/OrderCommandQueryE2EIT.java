@@ -419,7 +419,7 @@ class OrderCommandQueryE2EIT {
    * FAILURE} row that names the caller and the missing role, as on the Spring and Micronaut apps.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns400AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
     String oid = "q-o-ship-noadmin-" + System.nanoTime();
     String cid = "q-o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "q-prod-ship-noadmin-" + System.nanoTime();
@@ -427,9 +427,9 @@ class OrderCommandQueryE2EIT {
     placeOrder(oid, cid, pid);
 
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
-    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 400 (a
-    // DomainException subclass mapped by DomainExceptionMapper). The order is CONFIRMED, so a 400
-    // here proves the authz gate (not the state machine) rejected the command.
+    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 403
+    // (AuthorizationExceptionMapper). The order is CONFIRMED, so the state machine would accept the
+    // command: the 403 is the authorization interceptor's.
     given()
         .header("X-User-Role", "CUSTOMER")
         .header("X-User-Id", cid)
@@ -437,7 +437,7 @@ class OrderCommandQueryE2EIT {
         .when()
         .post("/api/orders/" + oid + "/ship")
         .then()
-        .statusCode(400);
+        .statusCode(403);
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);

@@ -488,7 +488,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
    * names the caller and the missing role.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns400AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
     String oid = "o-ship-noadmin-" + System.nanoTime();
     String cid = "o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "prod-ship-noadmin-" + System.nanoTime();
@@ -496,9 +496,9 @@ class OrderControllerIT extends AbstractIntegrationTest {
     placeOrder(oid, cid, pid);
 
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
-    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 400 (a
-    // DomainException subclass mapped by DomainExceptionMapper). The order is CONFIRMED, so a 400
-    // here proves the authz gate (not the state machine) rejected the command.
+    // CUSTOMER lacks the ADMIN role ShipOrder requires: AuthorizationException -> 403
+    // (GlobalExceptionHandler). The order is CONFIRMED, so the state machine would accept the
+    // command: the 403 is the authorization interceptor's.
     client
         .post()
         .uri("/api/orders/" + oid + "/ship")
@@ -506,7 +506,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
         .header("X-User-Id", cid)
         .exchange()
         .expectStatus()
-        .is4xxClientError();
+        .isForbidden();
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);

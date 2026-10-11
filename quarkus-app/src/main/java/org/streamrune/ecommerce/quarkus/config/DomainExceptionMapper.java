@@ -11,13 +11,12 @@ import org.streamrune.core.DomainException;
  * Spring {@code GlobalExceptionHandler} and the Micronaut {@code DomainExceptionHandler}.
  *
  * <p>{@code org.streamrune.core.AuthorizationException} extends {@link DomainException}, and the
- * command bus rethrows an interceptor's {@code before()} exception unwrapped, so a failed
- * authorization (e.g. shipping an order without the {@code ADMIN} role) reaches this mapper
- * directly and surfaces as a 400 client error rather than an unmapped 500 — bringing the Quarkus
- * app to parity with the Spring and Micronaut error semantics.
+ * command bus rethrows an interceptor's {@code before()} exception unwrapped. A failed
+ * authorization (e.g. shipping an order without the {@code ADMIN} role) is answered by the more
+ * specific {@link AuthorizationExceptionMapper} with 403, not by this mapper.
  *
- * <p>The more specific {@link SubjectForgottenExceptionMapper} (410) and {@link
- * CryptoShreddingFailureExceptionMapper} still win for crypto-shred failures: {@code
+ * <p>{@link SubjectForgottenExceptionMapper} (410) and {@link
+ * CryptoShreddingFailureExceptionMapper} answer crypto-shred failures: {@code
  * SubjectForgottenException} extends {@code RuntimeException}, not {@code DomainException}, so this
  * mapper never shadows them.
  */
