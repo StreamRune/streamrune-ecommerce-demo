@@ -48,6 +48,26 @@ class SseStreamAccessIT extends AbstractIntegrationTest {
     assertThat(statusOf("customer", customer, other, null)).isEqualTo(403);
   }
 
+  /**
+   * A forgotten customer's stream stays under the rule that guarded it: the former owner and an
+   * ADMIN open it (the personal data in its events reads {@code [REDACTED]} by then), and nobody
+   * else does.
+   */
+  @Test
+  void aForgottenCustomersStreamOpensForTheFormerOwnerAndAnAdminOnly() throws Exception {
+    String customer = registeredCustomer("forgotten");
+    String other = registeredCustomer("bystander");
+    assertThat(
+            send("POST", "/api/customers/" + customer + "/forget", customer, CUSTOMER, null)
+                .statusCode())
+        .isEqualTo(200);
+
+    assertThat(statusOf("customer", customer, customer, CUSTOMER)).isEqualTo(200);
+    assertThat(statusOf("customer", customer, uniqueId("ops"), ADMIN)).isEqualTo(200);
+    assertThat(statusOf("customer", customer, other, CUSTOMER)).isEqualTo(403);
+    assertThat(statusOf("customer", customer, null, ADMIN)).isEqualTo(403);
+  }
+
   @Test
   void aCustomerReceivesTheFramesOfTheirOwnStream() throws Exception {
     String customer = registeredCustomer("own");

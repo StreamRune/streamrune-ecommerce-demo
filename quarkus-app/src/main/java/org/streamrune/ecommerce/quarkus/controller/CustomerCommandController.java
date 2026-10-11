@@ -45,6 +45,7 @@ public class CustomerCommandController {
   @POST
   @Consumes(MediaType.APPLICATION_JSON)
   public Response registerCustomer(RegisterRequest req) {
+    requireWellFormed(req);
     OwnerOrAdminAccess.requireCustomerAccess(context(), req.customerId());
     executeInContext(
         new CustomerCommand.RegisterCustomer(
@@ -57,6 +58,7 @@ public class CustomerCommandController {
   @Path("/{id}")
   @Consumes(MediaType.APPLICATION_JSON)
   public Response updateProfile(@PathParam("id") String id, UpdateProfileRequest req) {
+    RequestChecks.present(req);
     OwnerOrAdminAccess.requireCustomerAccess(context(), id);
     executeInContext(
         new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
@@ -158,6 +160,14 @@ public class CustomerCommandController {
    */
   private String currentRequesterId() {
     return OwnerOrAdminAccess.identityOf(context());
+  }
+
+  /** The constraints of the Spring app's {@code RegisterRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(RegisterRequest req) {
+    RequestChecks.present(req);
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notBlank(req.name(), "name");
+    RequestChecks.email(req.email(), "email");
   }
 
   public record RegisterRequest(

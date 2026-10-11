@@ -48,6 +48,7 @@ public class OrderCommandController {
   /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
   @POST
   public Response createOrder(CreateOrderRequest req) {
+    requireWellFormed(req);
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.of(requestContext), req.customerId());
     List<OrderCommand.OrderLine> lines =
         req.lines().stream()
@@ -85,9 +86,26 @@ public class OrderCommandController {
   @POST
   @Path("/{id}/cancel")
   public Response cancelOrder(@PathParam("id") String id, CancelOrderRequest req) {
+    RequestChecks.present(req);
     queries.requireOrderAccess(RequestCaller.of(requestContext), id);
     executeInContext(new OrderCommand.CancelOrder(id, req.reason()));
     return Response.ok().build();
+  }
+
+  /** The constraints of the Spring app's {@code PlaceOrderRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(CreateOrderRequest req) {
+    RequestChecks.present(req);
+    RequestChecks.notBlank(req.orderId(), "orderId");
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notEmpty(req.lines(), "lines");
+    for (OrderLineRequest line : req.lines()) {
+      if (line == null) {
+        throw new IllegalArgumentException("lines must not hold null");
+      }
+      RequestChecks.notBlank(line.productId(), "lines.productId");
+      RequestChecks.positive(line.quantity(), "lines.quantity");
+      RequestChecks.positive(line.unitPrice(), "lines.unitPrice");
+    }
   }
 
   public record CreateOrderRequest(

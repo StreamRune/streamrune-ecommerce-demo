@@ -36,6 +36,7 @@ public class CustomerCommandController {
   /** A customer registers themself; an {@code ADMIN} registers anyone ({@code 403} otherwise). */
   @Post
   public HttpResponse<Void> registerCustomer(@Body RegisterRequest req) {
+    requireWellFormed(req);
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     commandBus.execute(
         new CustomerCommand.RegisterCustomer(
@@ -140,6 +141,13 @@ public class CustomerCommandController {
    */
   private static String currentRequesterId() {
     return OwnerOrAdminAccess.identityOf(RequestCaller.current());
+  }
+
+  /** The constraints of the Spring app's {@code RegisterRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(RegisterRequest req) {
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notBlank(req.name(), "name");
+    RequestChecks.email(req.email(), "email");
   }
 
   @Serdeable

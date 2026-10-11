@@ -30,6 +30,7 @@ public class OrderCommandController {
   /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
   @Post
   public HttpResponse<Void> createOrder(@Body CreateOrderRequest req) {
+    requireWellFormed(req);
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     List<OrderCommand.OrderLine> lines =
         req.lines().stream()
@@ -66,6 +67,21 @@ public class OrderCommandController {
     queries.requireOrderAccess(RequestCaller.current(), id);
     commandBus.execute(new OrderCommand.CancelOrder(id, req.reason()));
     return HttpResponse.ok();
+  }
+
+  /** The constraints of the Spring app's {@code PlaceOrderRequest}; {@code 400} when one fails. */
+  private static void requireWellFormed(CreateOrderRequest req) {
+    RequestChecks.notBlank(req.orderId(), "orderId");
+    RequestChecks.notBlank(req.customerId(), "customerId");
+    RequestChecks.notEmpty(req.lines(), "lines");
+    for (OrderLineRequest line : req.lines()) {
+      if (line == null) {
+        throw new IllegalArgumentException("lines must not hold null");
+      }
+      RequestChecks.notBlank(line.productId(), "lines.productId");
+      RequestChecks.positive(line.quantity(), "lines.quantity");
+      RequestChecks.positive(line.unitPrice(), "lines.unitPrice");
+    }
   }
 
   @io.micronaut.serde.annotation.Serdeable

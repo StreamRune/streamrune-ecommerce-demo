@@ -23,8 +23,8 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * round-trip (POST/PUT command → event → projection → GET query) over real HTTP against the running
  * Micronaut app backed by a real PostgreSQL (Testcontainers).
  *
- * <p>The Micronaut {@code ProductCommandController} exposes create / adjust-stock / update-price
- * (no discontinue endpoint, matching Quarkus), so the discontinue case is intentionally absent.
+ * <p>The suite covers create, adjust-stock and update-price. Discontinuing a product, and who may
+ * call each of the four writes, is {@code OwnerOrAdminRestAccessIT}'s.
  */
 @MicronautTest(transactional = false)
 class ProductCommandQueryE2EIT extends AbstractIntegrationTest {

@@ -23,12 +23,14 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * asks it, with the caller the request named, and which status a refused caller gets: {@code 403},
  * with or without an identity.
  *
- * <p>Each endpoint is called by four callers: one without an identity, an authenticated customer
- * who is not the owner, the owner, and an {@code ADMIN}. For a list the test asserts exactly which
- * rows come back. Every test registers customers and places orders of its own, so a list read as a
- * customer holds those rows and no others; a list read as an {@code ADMIN} holds every row of the
- * shared database, so the test asserts the rows it knows to be there and, with the {@code
- * customerId} filter, exactly one customer's.
+ * <p>Each endpoint is called by four callers: one without an identity (with and without the {@code
+ * ADMIN} role header), an authenticated customer who is not the owner, the owner, and an {@code
+ * ADMIN}. The endpoints that are for an {@code ADMIN} alone refuse the first three and an identity
+ * without a role. For a list the test asserts exactly which rows come back. Every test registers
+ * customers and places orders of its own, so a list read as a customer holds those rows and no
+ * others; a list read as an {@code ADMIN} holds every row of the shared database, so the test
+ * asserts the rows it knows to be there and, with the {@code customerId} filter, exactly one
+ * customer's.
  */
 class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
 
@@ -162,6 +164,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
   void aForgottenCustomerIsNotFoundForTheCustomerAndForAnAdminAndOnNoList() throws Exception {
     String alice = registeredCustomer("alice");
     String bob = registeredCustomer("bob");
+    String order = placedOrder(alice);
 
     assertThat(
             send("POST", "/api/customers/" + alice + "/forget", alice, CUSTOMER, null).statusCode())
@@ -181,6 +184,22 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .doesNotContain(alice);
     // To anyone else the forgotten customer answers as every other customer does.
     assertThat(get("/api/customers/" + alice, bob, CUSTOMER).statusCode()).isEqualTo(403);
+    // The forgotten customer's stream takes no further event: an export has nothing to hand out.
+    assertThat(
+            send("POST", "/api/customers/" + alice + "/export-data", alice, CUSTOMER, null)
+                .statusCode())
+        .isEqualTo(400);
+    assertThat(
+            send("POST", "/api/customers/" + alice + "/export-data", OPERATOR, ADMIN, null)
+                .statusCode())
+        .isEqualTo(400);
+    // Her order outlives the customer record, and the same rule guards it: the former owner
+    // and an ADMIN read it, nobody else does.
+    assertThat(get("/api/orders/" + order, alice, CUSTOMER).statusCode()).isEqualTo(200);
+    assertThat(ids(get("/api/orders", alice, CUSTOMER), "orderId")).containsExactly(order);
+    assertThat(get("/api/orders/" + order, OPERATOR, ADMIN).statusCode()).isEqualTo(200);
+    assertThat(get("/api/orders/" + order, bob, CUSTOMER).statusCode()).isEqualTo(403);
+    assertThat(get("/api/orders/" + order, null, ADMIN).statusCode()).isEqualTo(403);
   }
 
   // --- GET /api/orders/{id} ---
@@ -319,10 +338,10 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get("/api/orders/" + forged, OPERATOR, ADMIN).statusCode()).isEqualTo(404);
   }
 
-  // --- the reads that are for the ADMIN role, and the open ones ---
+  // --- the endpoints that are for an ADMIN, and the open ones ---
 
   @Test
-  void operationalReadsAreForTheAdminRole() throws Exception {
+  void operationalReadsAreForAnAdmin() throws Exception {
     String customer = registeredCustomer("alice");
     for (String path :
         new String[] {
@@ -338,24 +357,80 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
           "/api/admin/sagas/faulted",
           "/api/admin/payment-failure"
         }) {
-      assertThat(get(path, null, null).statusCode())
-          .as("%s without an identity", path)
-          .isEqualTo(403);
-      assertThat(get(path, customer, CUSTOMER).statusCode())
-          .as("%s as a customer", path)
-          .isEqualTo(403);
-      assertThat(get(path, customer, null).statusCode())
-          .as("%s as a caller without a role", path)
-          .isEqualTo(403);
+      assertRefusedForEveryoneButAnAdmin("GET", path, null, customer);
       assertThat(get(path, OPERATOR, ADMIN).statusCode()).as("%s as an ADMIN", path).isEqualTo(200);
     }
 
     // One saga: refused before the saga is looked up, so the status says nothing about its
     // existence; an ADMIN learns that it does not exist.
     String saga = "/api/saga/fulfillments/fulfillment-" + uniqueId("o-none");
-    assertThat(get(saga, null, null).statusCode()).isEqualTo(403);
-    assertThat(get(saga, customer, CUSTOMER).statusCode()).isEqualTo(403);
+    assertRefusedForEveryoneButAnAdmin("GET", saga, null, customer);
     assertThat(get(saga, OPERATOR, ADMIN).statusCode()).isEqualTo(404);
+
+    // A page size that cannot be read is the ADMIN's mistake, a 400, and still a 403 for the rest.
+    assertRefusedForEveryoneButAnAdmin("GET", "/api/events?limit=-1", null, customer);
+    assertThat(get("/api/events?limit=-1", OPERATOR, ADMIN).statusCode()).isEqualTo(400);
+  }
+
+  @Test
+  void operationalWritesAreForAnAdmin() throws Exception {
+    String customer = uniqueId("alice");
+    String none = uniqueId("none");
+    String failureSwitch = get("/api/admin/payment-failure", OPERATOR, ADMIN).body();
+
+    // Every POST carries a JSON body; the routes that read none ignore it.
+    String body = "{\"reason\": \"sent by a refused caller\"}";
+    String[][] writes = {
+      {"POST", "/api/admin/payment-failure/toggle", body},
+      {"POST", "/api/admin/dead-letters/" + none + "/retry", body},
+      {"POST", "/api/admin/outbox/failed/" + none + "/replay", body},
+      {"POST", "/api/admin/outbox/failed/" + none + "/skip", body},
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=" + none + "&eventOffset=1", body},
+      {"POST", "/api/admin/saga-dead-letters/replay-all?sagaId=" + none, body},
+      {"POST", "/api/admin/sagas/faulted/resume?sagaId=" + none, body},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=" + none + "&eventOffset=1", null},
+      {"POST", "/api/saga/fulfillments/fulfillment-" + none + "/inject-failure", body}
+    };
+    for (String[] write : writes) {
+      assertRefusedForEveryoneButAnAdmin(write[0], write[1], write[2], customer);
+    }
+
+    // Two of the routes flip the payment-failure switch: no refused call did.
+    assertThat(get("/api/admin/payment-failure", OPERATOR, ADMIN).body()).isEqualTo(failureSwitch);
+  }
+
+  // --- POST /api/products, PUT …/price, PUT …/stock, POST …/discontinue, POST /api/inventory ---
+
+  @Test
+  void productAndInventoryWritesAreForAnAdmin() throws Exception {
+    String customer = uniqueId("alice");
+    String product = uniqueId("p");
+    String[] create = {"POST", "/api/products", productBody(product)};
+    String[] price = {"PUT", "/api/products/" + product + "/price", "{\"price\": 0.01}"};
+    String[] stock = {
+      "PUT", "/api/products/" + product + "/stock", "{\"quantity\": 5, \"reason\": \"recount\"}"
+    };
+    String[] receive = {"POST", "/api/inventory/" + product + "/receive", "{\"quantity\": 1}"};
+    String[] discontinue = {"POST", "/api/products/" + product + "/discontinue", "{}"};
+
+    for (String[] write : new String[][] {create, price, stock, receive, discontinue}) {
+      assertRefusedForEveryoneButAnAdmin(write[0], write[1], write[2], customer);
+    }
+    // Nothing a refused caller sent was written: neither stream holds an event.
+    assertThat(JSON.readTree(get("/api/events/product/" + product, OPERATOR, ADMIN).body()))
+        .isEmpty();
+    assertThat(JSON.readTree(get("/api/events/inventory/" + product, OPERATOR, ADMIN).body()))
+        .isEmpty();
+
+    for (String[] write : new String[][] {create, price, stock, receive, discontinue}) {
+      assertThat(send(write[0], write[1], OPERATOR, ADMIN, write[2]).statusCode())
+          .as("%s %s as an ADMIN", write[0], write[1])
+          .isBetween(200, 299);
+    }
+    assertThat(JSON.readTree(get("/api/events/product/" + product, OPERATOR, ADMIN).body()))
+        .hasSize(4);
+    assertThat(JSON.readTree(get("/api/events/inventory/" + product, OPERATOR, ADMIN).body()))
+        .hasSize(1);
   }
 
   @Test
@@ -363,6 +438,106 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get("/api/products", null, null).statusCode()).isEqualTo(200);
     assertThat(get("/api/products/" + uniqueId("p-none"), null, null).statusCode()).isEqualTo(404);
     assertThat(get("/api/admin/health", null, null).statusCode()).isEqualTo(200);
+  }
+
+  // --- commands for an id nothing was created under ---
+
+  @Test
+  void aCommandForAnIdNothingWasCreatedUnderIsRefusedAndWritesNothing() throws Exception {
+    // A customer who never registered, as the caller the id belongs to and as an ADMIN: personal
+    // data stored under that id could never be erased, because a forget for it is refused too.
+    String nobody = uniqueId("nobody");
+    for (String[] caller : new String[][] {{nobody, CUSTOMER}, {OPERATOR, ADMIN}}) {
+      assertThat(
+              send(
+                      "PUT",
+                      "/api/customers/" + nobody,
+                      caller[0],
+                      caller[1],
+                      profileBody("Nobody", nobody))
+                  .statusCode())
+          .as("profile update of an unregistered id as %s", caller[1])
+          .isEqualTo(400);
+      for (String route : new String[] {"/export-data", "/forget"}) {
+        assertThat(
+                send("POST", "/api/customers/" + nobody + route, caller[0], caller[1], null)
+                    .statusCode())
+            .as("%s of an unregistered id as %s", route, caller[1])
+            .isEqualTo(400);
+      }
+    }
+    assertThat(JSON.readTree(get("/api/events/customer/" + nobody, OPERATOR, ADMIN).body()))
+        .isEmpty();
+
+    // An order nobody placed. A customer is refused by the access rule (403, no row); an ADMIN
+    // gets past it and the decider refuses to confirm, ship or deliver it. Cancelling is the
+    // saga's compensation and is accepted for any order that is not delivered.
+    String order = uniqueId("o-none");
+    for (String action : new String[] {"/confirm", "/ship", "/deliver"}) {
+      assertThat(
+              send(
+                      "POST",
+                      "/api/orders/" + order + action,
+                      OPERATOR,
+                      ADMIN,
+                      "{\"reason\": \"no such order\"}")
+                  .statusCode())
+          .as("%s of an order nobody placed", action)
+          .isEqualTo(400);
+    }
+    assertThat(JSON.readTree(get("/api/events/order/" + order, OPERATOR, ADMIN).body())).isEmpty();
+
+    // A product nobody created.
+    String product = uniqueId("p-none");
+    String[][] writes = {
+      {"PUT", "/api/products/" + product + "/price", "{\"price\": 0.01}"},
+      {"PUT", "/api/products/" + product + "/stock", "{\"quantity\": 5, \"reason\": \"recount\"}"},
+      {"POST", "/api/products/" + product + "/discontinue", "{}"}
+    };
+    for (String[] write : writes) {
+      assertThat(send(write[0], write[1], OPERATOR, ADMIN, write[2]).statusCode())
+          .as("%s %s of a product nobody created", write[0], write[1])
+          .isEqualTo(400);
+    }
+    assertThat(JSON.readTree(get("/api/events/product/" + product, OPERATOR, ADMIN).body()))
+        .isEmpty();
+  }
+
+  // --- a request that cannot be read is 400 before the caller is decided ---
+
+  @Test
+  void aMalformedRequestIsAnswered400WhoeverSendsIt() throws Exception {
+    String customer = uniqueId("alice");
+    String noBody = "";
+    String[][] malformed = {
+      {"POST", "/api/orders", noBody},
+      {"POST", "/api/orders", "{}"},
+      {"POST", "/api/orders", "{\"orderId\": \"o-1\", \"customerId\": \"" + customer + "\"}"},
+      {"POST", "/api/orders/" + uniqueId("o") + "/cancel", noBody},
+      {"POST", "/api/customers", noBody},
+      {"POST", "/api/customers", "{}"},
+      {
+        "POST",
+        "/api/customers",
+        "{\"customerId\": \"" + customer + "\", \"name\": \"Alice\", \"email\": \"no-at-sign\"}"
+      },
+      {"PUT", "/api/customers/" + customer, noBody},
+      {"POST", "/api/products", noBody},
+      {"POST", "/api/products", "{}"},
+      {"PUT", "/api/products/" + uniqueId("p") + "/price", "{}"},
+      {"PUT", "/api/products/" + uniqueId("p") + "/stock", noBody},
+      {"POST", "/api/inventory/" + uniqueId("p") + "/receive", "{\"quantity\": 0}"}
+    };
+    String[][] callers = {{null, null}, {null, ADMIN}, {customer, CUSTOMER}, {OPERATOR, ADMIN}};
+    for (String[] request : malformed) {
+      for (String[] caller : callers) {
+        assertThat(send(request[0], request[1], caller[0], caller[1], request[2]).statusCode())
+            .as(
+                "%s %s with the body '%s' as id=%s role=%s",
+                request[0], request[1], request[2], caller[0], caller[1])
+            .isEqualTo(400);
+      }
+    }
   }
 
   // --- helpers ---
@@ -414,6 +589,36 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
       ids.add(row.get(field).asText());
     }
     return ids;
+  }
+
+  /**
+   * The four callers an ADMIN-only endpoint refuses, each with {@code 403}: no header at all, the
+   * {@code ADMIN} role without an identity, a customer, and an identity without a role.
+   *
+   * @param body the JSON body, or {@code null} for a request without one
+   * @param customer the identity of the two callers who have one
+   */
+  private void assertRefusedForEveryoneButAnAdmin(
+      String method, String path, String body, String customer) throws Exception {
+    assertThat(send(method, path, null, null, body).statusCode())
+        .as("%s %s without an identity", method, path)
+        .isEqualTo(403);
+    assertThat(send(method, path, null, ADMIN, body).statusCode())
+        .as("%s %s with the ADMIN role and no identity", method, path)
+        .isEqualTo(403);
+    assertThat(send(method, path, customer, CUSTOMER, body).statusCode())
+        .as("%s %s as a customer", method, path)
+        .isEqualTo(403);
+    assertThat(send(method, path, customer, null, body).statusCode())
+        .as("%s %s as a caller without a role", method, path)
+        .isEqualTo(403);
+  }
+
+  private static String productBody(String product) {
+    return """
+        {"productId": "%s", "name": "Product %s", "description": "For the access test",
+         "category": "Test", "price": 12.50, "initialStock": 3}"""
+        .formatted(product, product);
   }
 
   private static String customerBody(String customer) {
