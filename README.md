@@ -161,6 +161,8 @@ All projections use explicit lowercase names to keep naming consistent and avoid
 |------------|------|----------|
 | `ProductProjection` | `products` | `products_view` |
 | `OrderProjection` | `orders` | `orders_view` |
+When an app stops, the open streams of the per-stream endpoint end with it. The Spring app completes them before its web server stops, and so does the Quarkus app, because it is built with `quarkus.shutdown.delay-enabled=true` (a build-time property in `quarkus-app/src/main/resources/application.properties`; without it Quarkus stops its HTTP server first and a client sees its connection cut). On the Micronaut app the server closes the connections as it stops. An `EventSource` reconnects in every case.
+
 | `CustomerProjection` | `customers` | `customers_view` |
 | `InventoryProjection` | `inventory` | `inventory_view` |
 
