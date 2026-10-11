@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micronaut.http.HttpResponse;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.annotation.*;
 import io.micronaut.http.sse.Event;
@@ -123,6 +124,18 @@ public class EventExplorerController {
     return Flux.<Event<String>>create(
             sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @Head("/sse")
+  @Produces(MediaType.TEXT_EVENT_STREAM)
+  public HttpResponse<?> sseHead() {
+    return HttpResponse.ok().contentType(MediaType.TEXT_EVENT_STREAM_TYPE);
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */

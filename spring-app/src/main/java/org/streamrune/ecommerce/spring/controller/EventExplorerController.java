@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.core.EventEnvelope;
@@ -118,6 +119,17 @@ public class EventExplorerController implements SmartLifecycle {
     return Flux.<ServerSentEvent<String>>create(
             sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @RequestMapping(value = "/sse", method = RequestMethod.HEAD)
+  public ResponseEntity<Void> sseHead() {
+    return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).build();
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */

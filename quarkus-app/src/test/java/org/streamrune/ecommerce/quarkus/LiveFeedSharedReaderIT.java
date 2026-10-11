@@ -142,6 +142,27 @@ class LiveFeedSharedReaderIT {
   }
 
   @Test
+  void aHeadRequestTakesNoPlace() throws Exception {
+    // A HEAD has no stream a client could leave, so a place taken for it would never be free
+    // again. It is sent on a connection of its own and with a time limit: an app that runs the
+    // feed for it does not answer, or answers and goes on writing.
+    try (HttpClient ofItsOwn = HttpClient.newHttpClient()) {
+      HttpResponse<Void> head =
+          ofItsOwn.send(
+              HttpRequest.newBuilder(server().resolve("/api/events/sse"))
+                  .header("Accept", "text/event-stream")
+                  .timeout(Duration.ofSeconds(10))
+                  .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                  .build(),
+              HttpResponse.BodyHandlers.discarding());
+
+      assertThat(head.statusCode()).isEqualTo(200);
+      assertThat(controller.openFeedConnections()).isZero();
+      assertThat(controller.feedReaderRuns()).isFalse();
+    }
+  }
+
+  @Test
   void aClientThatDoesNotReadDoesNotDelayTheOthers() throws Exception {
     try (Socket stalled = connectedAndNeverRead()) {
       awaitOpenConnections(1);

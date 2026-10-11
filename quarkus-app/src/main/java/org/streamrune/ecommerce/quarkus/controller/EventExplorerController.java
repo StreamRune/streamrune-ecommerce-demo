@@ -9,6 +9,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.sse.OutboundSseEvent;
 import java.util.List;
 import java.util.Map;
@@ -132,6 +133,19 @@ public class EventExplorerController {
             emitter -> place.follow(clientOf(emitter)), BackPressureStrategy.ERROR)
         .onOverflow()
         .buffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @HEAD
+  @Path("/sse")
+  @Produces(MediaType.SERVER_SENT_EVENTS)
+  public Response sseHead() {
+    return Response.ok().type(MediaType.SERVER_SENT_EVENTS).build();
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */

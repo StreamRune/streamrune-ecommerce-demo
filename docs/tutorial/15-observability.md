@@ -715,6 +715,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.core.EventEnvelope;
@@ -828,6 +829,17 @@ public class EventExplorerController implements SmartLifecycle {
     return Flux.<ServerSentEvent<String>>create(
             sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /**
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
+   */
+  @RequestMapping(value = "/sse", method = RequestMethod.HEAD)
+  public ResponseEntity<Void> sseHead() {
+    return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).build();
   }
 
   /** The client behind one response stream: what the feed's reader sends becomes its frames. */
@@ -946,6 +958,8 @@ public ResponseEntity<String> handleLiveFeedFull(LiveFeedFullException e) {
 The controller takes the place before it returns the `Flux`, so the refusal is a status and not a stream that ends at once. A browser's `EventSource` does not reconnect by itself after an answer that is not `200`; the frontend of Chapter 16 opens a new one with a growing delay. `LiveFeedSharedReaderIT` in each app opens five connections and compares their frames, counts the reader's store reads with one and with eight connections, fills the 100 places and reads the `503` of the next connection, and connects a client that never reads beside two that do.
 
 **When the reader runs, and how a place is freed.** The reader starts with the first client and ends when the last one has left: an app nobody watches reads nothing, and since every connection starts at the head, a reader that starts again has no position to keep. Quarkus and Micronaut cancel the response stream the moment the connection closes, and the reader sees `isGone()` in its next round. A servlet container learns of a closed connection only when a write to it fails, so on Spring the `: keepalive` comment is also what finds a client that left during a quiet period: the write fails, the `Flux` is cancelled, the reader forgets the client and its place is free. `LiveFeedAccessIT` in each app connects, disconnects and waits for `openFeedConnections()` to return to zero. On shutdown the controller's `stop()` closes the feed before Spring Boot's graceful shutdown starts waiting for the requests in flight: every client is completed and the reader has ended when `stop()` returns. Without it a single open browser tab holds the shutdown for the whole grace period.
+
+**`HEAD` gets a handler of its own.** Spring answers a `HEAD` request it finds no handler for by running the `GET` handler and leaving out the body. For a stream that never ends that would take one of the feed's places and register a client that can never leave: there is no body whose write could fail. `sseHead` answers with the feed's headers, takes no place and reads nothing; the two other apps have the same handler. `LiveFeedSharedReaderIT` sends a `HEAD` and finds no place taken and no reader running.
 
 **A client that cannot keep up.** The reader hands a frame to each client's `FluxSink` and moves on; it never waits for a socket. A client that reads too slowly has up to 256 frames buffered for it. Beyond that its stream fails, its place is free and it reconnects, at the head like everyone else. Spring MVC writes the buffered frames to the sockets on its async task executor, a pool of eight threads by default; a client whose socket is full holds one of them for as long as the servlet container waits for the write, so a deployment that expects many such clients runs that executor on virtual threads (`spring.threads.virtual.enabled`).
 
