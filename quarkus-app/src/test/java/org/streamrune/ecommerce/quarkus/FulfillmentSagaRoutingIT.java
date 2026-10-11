@@ -3,29 +3,35 @@ package org.streamrune.ecommerce.quarkus;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
+import org.streamrune.core.saga.SagaId;
+import org.streamrune.core.saga.SagaStatus;
+import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
-import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
@@ -34,11 +40,18 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * the order the event is about, so a caller who names another order's saga in that header does not
  * reach it.
  *
- * <p>Two customers place an order each. Both payments are held before their capture ({@link
- * AppendFailureInjection}), so both sagas wait in {@code AWAITING_PAYMENT} and both orders stay
- * {@code CREATED}. The first customer then confirms their own order with the second customer's saga
- * id as the correlation id. The second saga must still be waiting for its payment afterwards, and
- * must run to its own end once the payment is captured.
+ * <p>Two customers place an order each, and the saga of each order waits for its payment. The first
+ * customer then confirms their own order with the second customer's saga id as the correlation id.
+ * The second saga must still be waiting for its payment afterwards.
+ *
+ * <p><b>How the two sagas are kept waiting.</b> A fulfillment passes {@code AWAITING_PAYMENT} in
+ * well under a second, so the test stores each saga's row in that state before the order is placed
+ * ({@link #sagaAwaitingItsPayment}): the order's own {@code OrderPlaced} then finds its saga
+ * started and starts nothing, the saga stays where it is and the order stays {@code CREATED} for as
+ * long as the test needs. Holding a step of a real saga instead (refusing the append of {@code
+ * PaymentCaptured}, as {@code PaymentCaptureRetryIT} does) makes the payment process manager retry
+ * a failing command, and those failures open the command bus's circuit breaker for the requests
+ * this test sends.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
@@ -46,15 +59,19 @@ class FulfillmentSagaRoutingIT {
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
+  private static final SagaType FULFILLMENT = SagaType.fromClass(OrderFulfillmentState.class);
+
+  private static final Money PRICE = new Money(new BigDecimal("9.99"), "USD");
+
   /** An operator: an identity with the ADMIN role. */
   private static final String OPERATOR = "q-route-operator";
 
   @TestHTTPResource("/")
   URI server;
 
-  @Inject DataSource dataSource;
   @Inject VirtualThreadCommandBus commandBus;
   @Inject EventStore eventStore;
+  @Inject SagaStore sagaStore;
 
   private final HttpClient http = HttpClient.newHttpClient();
 
@@ -67,66 +84,75 @@ class FulfillmentSagaRoutingIT {
     String aliceOrder = uniqueId("o-alice");
     String bobOrder = uniqueId("o-bob");
     String laterOrder = uniqueId("o-later");
-    String bobSaga = "fulfillment-" + bobOrder;
 
-    try (var failures = new AppendFailureInjection(dataSource)) {
-      for (String order : List.of(bobOrder, aliceOrder, laterOrder)) {
-        failures.failAppend(PaymentState.TYPE, "pay-" + order, "PaymentCaptured");
-      }
-      try {
-        placeOrder(bobOrder, bob, product);
-        awaitFulfillmentStatus(bobSaga, "AWAITING_PAYMENT");
-        placeOrder(aliceOrder, alice, product);
-        awaitOrderReadableBy(aliceOrder, alice);
+    SagaId aliceSaga = sagaAwaitingItsPayment(aliceOrder, alice, product);
+    SagaId bobSaga = sagaAwaitingItsPayment(bobOrder, bob, product);
+    try {
+      placeOrder(bobOrder, bob, product);
+      placeOrder(aliceOrder, alice, product);
+      awaitOrderReadableBy(aliceOrder, alice);
 
-        // Alice confirms her own order and names Bob's saga in X-Correlation-Id.
-        HttpResponse<String> confirmed =
-            send("POST", "/api/orders/" + aliceOrder + "/confirm", alice, "CUSTOMER", bobSaga, "");
-        assertThat(confirmed.statusCode()).isEqualTo(200);
-        assertThat(correlationIdOf(OrderState.TYPE, aliceOrder, "OrderConfirmed"))
-            .as("the correlation id the stored event carries is the one the client sent")
-            .isEqualTo(bobSaga);
+      // Alice confirms her own order and names Bob's saga in X-Correlation-Id.
+      HttpResponse<String> confirmed =
+          send(
+              "POST",
+              "/api/orders/" + aliceOrder + "/confirm",
+              alice,
+              "CUSTOMER",
+              bobSaga.value(),
+              "");
+      assertThat(confirmed.statusCode()).isEqualTo(200);
+      assertThat(correlationIdOf(OrderState.TYPE, aliceOrder, "OrderConfirmed"))
+          .as("the correlation id the stored event carries is the one the client sent")
+          .isEqualTo(bobSaga.value());
 
-        // The saga subscription reads the global stream in order: once the saga of an order
-        // placed afterwards exists, the subscription is past Alice's OrderConfirmed.
-        placeOrder(laterOrder, alice, product);
-        awaitFulfillmentStatus("fulfillment-" + laterOrder, "AWAITING_PAYMENT");
+      // The saga subscription reads the global stream in order: once the saga of an order
+      // placed afterwards exists, the subscription is past Alice's OrderConfirmed.
+      placeOrder(laterOrder, alice, product);
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> assertThat(fulfillmentStatus("fulfillment-" + laterOrder)).isNotNull());
 
-        assertThat(fulfillmentStatus(bobSaga))
-            .as("Bob's saga after Alice's OrderConfirmed named it in its correlation id")
-            .isEqualTo("AWAITING_PAYMENT");
-        assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
-      } finally {
-        for (String order : List.of(bobOrder, aliceOrder, laterOrder)) {
-          failures.allowAppend(PaymentState.TYPE, "pay-" + order, "PaymentCaptured");
-        }
-      }
+      assertThat(fulfillmentStatus(bobSaga.value()))
+          .as("Bob's saga after Alice's OrderConfirmed named it in its correlation id")
+          .isEqualTo("AWAITING_PAYMENT");
+      // The event went to the saga of the order it is about, and that saga did not ask for a
+      // confirmation yet: it stays where it is too.
+      assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("AWAITING_PAYMENT");
+      assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
+    } finally {
+      sagaStore.delete(aliceSaga, FULFILLMENT);
+      sagaStore.delete(bobSaga, FULFILLMENT);
     }
 
-    // Bob's saga goes on to its own end: the payment is captured, the stock reserved, the order
-    // confirmed.
+    // The order placed last has a saga of its own, which runs to its end: nothing is left
+    // running.
     await()
-        .atMost(Duration.ofSeconds(90))
+        .atMost(Duration.ofSeconds(60))
         .untilAsserted(
-            () -> {
-              assertThat(eventTypes(OrderState.TYPE, bobOrder)).contains("OrderConfirmed");
-              assertThat(fulfillmentStatus(bobSaga)).isEqualTo("COMPLETED");
-            });
-    assertThat(eventTypes(PaymentState.TYPE, "pay-" + bobOrder))
-        .containsExactly("PaymentInitiated", "PaymentCaptured");
+            () ->
+                assertThat(fulfillmentStatus("fulfillment-" + laterOrder)).isEqualTo("COMPLETED"));
+  }
 
-    // Alice's two sagas reach an end as well, so the test leaves nothing running. The order she
-    // confirmed by hand is not confirmed a second time: its saga's ConfirmOrder is refused and the
-    // saga compensates.
-    await()
-        .atMost(Duration.ofSeconds(90))
-        .untilAsserted(
-            () -> {
-              assertThat(sagaStatus("fulfillment-" + aliceOrder))
-                  .isIn("COMPLETED", "COMPENSATED", "FAILED");
-              assertThat(sagaStatus("fulfillment-" + laterOrder))
-                  .isIn("COMPLETED", "COMPENSATED", "FAILED");
-            });
+  /**
+   * Stores the saga of an order as it is between {@code InitiatePayment} and the capture: started,
+   * waiting for its payment. Stored before the order is placed, it is the saga the order's {@code
+   * OrderPlaced} finds, so nothing drives it on.
+   */
+  private SagaId sagaAwaitingItsPayment(String order, String customer, String product) {
+    SagaId sagaId = new SagaId("fulfillment-" + order);
+    OrderFulfillmentState state =
+        new OrderFulfillmentState(
+            sagaId,
+            order,
+            customer,
+            "pay-" + order,
+            PRICE,
+            List.of(new OrderEvent.OrderLine(product, 1, PRICE)),
+            OrderFulfillmentStatus.AWAITING_PAYMENT);
+    sagaStore.create(sagaId, FULFILLMENT, state, SagaStatus.STARTED);
+    return sagaId;
   }
 
   // --- reads ---
@@ -140,25 +166,6 @@ class FulfillmentSagaRoutingIT {
     }
     assertThat(saga.statusCode()).isEqualTo(200);
     return JSON.readTree(saga.body()).path("fulfillmentStatus").asText();
-  }
-
-  /** The framework's status of one saga, from the saga list; {@code null} while it has no row. */
-  private String sagaStatus(String sagaId) throws Exception {
-    HttpResponse<String> list =
-        send("GET", "/api/saga/fulfillments?limit=100000", OPERATOR, "ADMIN", null, null);
-    assertThat(list.statusCode()).isEqualTo(200);
-    for (JsonNode row : JSON.readTree(list.body())) {
-      if (row.path("sagaId").asText().equals(sagaId)) {
-        return row.path("status").asText();
-      }
-    }
-    return null;
-  }
-
-  private void awaitFulfillmentStatus(String sagaId, String status) {
-    await()
-        .atMost(Duration.ofSeconds(30))
-        .untilAsserted(() -> assertThat(fulfillmentStatus(sagaId)).isEqualTo(status));
   }
 
   /** Waits for the order's read-model row: until it is there, its own customer is refused. */
