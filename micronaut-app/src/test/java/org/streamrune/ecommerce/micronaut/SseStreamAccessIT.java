@@ -21,8 +21,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The decisions are {@code OwnerOrAdminStreamAccess}'s (unit-tested as a table in the {@code
  * queries} module); this test proves that the app registers it, that the caller's id and role reach
- * it on the thread the framework's SSE controller calls it on, and which status a refused caller
- * gets: {@code 403}, with or without an identity.
+ * it in the request context the framework's SSE endpoint hands it, and which status a refused
+ * caller gets: {@code 403}, with or without an identity.
  */
 @MicronautTest(transactional = false)
 class SseStreamAccessIT extends AbstractIntegrationTest {

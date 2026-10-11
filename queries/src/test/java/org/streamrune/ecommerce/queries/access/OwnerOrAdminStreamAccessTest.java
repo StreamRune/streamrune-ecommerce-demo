@@ -10,12 +10,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.core.UserAuthority;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.CorrelationId;
@@ -39,9 +41,6 @@ class OwnerOrAdminStreamAccessTest {
   /** A request without {@code X-User-Role}: the context has no {@code role} baggage entry. */
   private static final String NO_ROLE = null;
 
-  /** No request context is bound at all. */
-  private static final String NO_CONTEXT = "<no request context>";
-
   private static final Map<String, OrderView> ORDERS =
       Map.of(
           "o-1",
@@ -62,14 +61,11 @@ class OwnerOrAdminStreamAccessTest {
         Arguments.of(null, "ADMIN", "customer:c-1", false),
         Arguments.of(null, "ADMIN", "order:o-1", false),
         Arguments.of(null, "ADMIN", "product:p-1", false),
-        Arguments.of(null, NO_CONTEXT, "customer:c-1", false),
         // customer: the customer themself, or ADMIN.
         Arguments.of("c-1", "CUSTOMER", "customer:c-1", true),
         Arguments.of("c-1", NO_ROLE, "customer:c-1", true),
-        Arguments.of("c-1", NO_CONTEXT, "customer:c-1", true),
         Arguments.of("c-2", "CUSTOMER", "customer:c-1", false),
         Arguments.of("c-2", NO_ROLE, "customer:c-1", false),
-        Arguments.of("c-2", NO_CONTEXT, "customer:c-1", false),
         Arguments.of("C-1", "CUSTOMER", "customer:c-1", false),
         Arguments.of("ops-1", "ADMIN", "customer:c-1", true),
         // The role is matched exactly, as the admin endpoints match it.
@@ -77,7 +73,7 @@ class OwnerOrAdminStreamAccessTest {
         Arguments.of("ops-1", "GUEST", "customer:c-1", false),
         // order: the customer the read model names, or ADMIN.
         Arguments.of("c-1", "CUSTOMER", "order:o-1", true),
-        Arguments.of("c-1", NO_CONTEXT, "order:o-1", true),
+        Arguments.of("c-1", NO_ROLE, "order:o-1", true),
         Arguments.of("c-2", "CUSTOMER", "order:o-1", false),
         Arguments.of("ops-1", "ADMIN", "order:o-1", true),
         // An order the read model has no row for has no known owner.
@@ -93,7 +89,7 @@ class OwnerOrAdminStreamAccessTest {
         Arguments.of("c-1", "CUSTOMER", "product:p-1", false),
         Arguments.of("c-1", NO_ROLE, "product:p-1", false),
         Arguments.of("ops-1", "ADMIN", "product:p-1", true),
-        Arguments.of("ops-1", NO_CONTEXT, "product:p-1", false),
+        Arguments.of("ops-1", NO_ROLE, "product:p-1", false),
         // A type the rule does not name: refused, for ADMIN and for a caller whose id matches.
         Arguments.of("ops-1", "ADMIN", "shipment:s-1", false),
         Arguments.of("c-1", "CUSTOMER", "shipment:c-1", false),
@@ -103,17 +99,15 @@ class OwnerOrAdminStreamAccessTest {
   @ParameterizedTest(name = "caller {0} with role {1} on {2} -> {3}")
   @MethodSource("decisions")
   void decides(String caller, String role, String stream, boolean allowed) {
-    OwnerOrAdminStreamAccess access =
-        new OwnerOrAdminStreamAccess(() -> requestContext(caller, role), ORDERS::get);
+    OwnerOrAdminStreamAccess access = new OwnerOrAdminStreamAccess(ORDERS::get);
 
-    assertEquals(
-        allowed, access.isAuthorized(caller == null ? null : UserId.of(caller), stream(stream)));
+    assertEquals(allowed, access.isAuthorized(requestContext(caller, role), stream(stream)));
   }
 
   @Test
   void adminMayOpenEveryAggregateTypeOfTheDomain() {
-    OwnerOrAdminStreamAccess access =
-        new OwnerOrAdminStreamAccess(() -> requestContext("ops-1", "ADMIN"), ORDERS::get);
+    OwnerOrAdminStreamAccess access = new OwnerOrAdminStreamAccess(ORDERS::get);
+    StreamRuneContext.RequestContext operator = requestContext("ops-1", "ADMIN");
 
     for (AggregateType type :
         List.of(
@@ -123,66 +117,69 @@ class OwnerOrAdminStreamAccessTest {
             InventoryState.TYPE,
             ProductState.TYPE)) {
       assertTrue(
-          access.isAuthorized(UserId.of("ops-1"), StreamId.of(type, AggregateId.of("x-1"))),
+          access.isAuthorized(operator, StreamId.of(type, AggregateId.of("x-1"))),
           () -> "ADMIN on " + type.value());
     }
   }
 
   /**
-   * The caller's id and the role reach the rule by two ways: the principal the framework hands it
-   * and the request context the application supplies. They belong to one request, and the rule does
-   * not take that on trust: the ADMIN role of a context that names another user, or no user, opens
-   * nothing.
+   * The framework's SSE endpoint refuses a request without a request context itself and never hands
+   * the rule {@code null}. The rule does not rely on that: no caller is nobody.
    */
   @Test
-  void theAdminRoleCountsOnlyInTheCallersOwnRequestContext() {
-    OwnerOrAdminStreamAccess inAnOperatorsContext =
-        new OwnerOrAdminStreamAccess(() -> requestContext("ops-1", "ADMIN"), ORDERS::get);
+  void aMissingRequestContextIsRefused() {
+    OwnerOrAdminStreamAccess access = new OwnerOrAdminStreamAccess(ORDERS::get);
 
-    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("customer:c-1")));
-    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("order:o-1")));
-    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("payment:pay-o-1")));
-    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("inventory:p-1")));
-    assertFalse(inAnOperatorsContext.isAuthorized(UserId.of("c-2"), stream("product:p-1")));
-    // What the caller owns needs no role, so it stays open.
-    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("c-1"), stream("customer:c-1")));
-    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("c-1"), stream("order:o-1")));
-    // The operator the context does name is still an operator.
-    assertTrue(inAnOperatorsContext.isAuthorized(UserId.of("ops-1"), stream("product:p-1")));
+    assertFalse(access.isAuthorized(null, stream("customer:c-1")));
+    assertFalse(access.isAuthorized(null, stream("order:o-1")));
+    assertFalse(access.isAuthorized(null, stream("product:p-1")));
+  }
 
-    OwnerOrAdminStreamAccess inAContextWithoutAUser =
-        new OwnerOrAdminStreamAccess(() -> requestContext(null, "ADMIN"), ORDERS::get);
+  /**
+   * The caller's id and role come from the one request context the rule is handed. The authority
+   * the request filter captured for the caller is a second place a role could be read from, and the
+   * rule does not read it: {@code ADMIN} is the {@code role} baggage entry, here and on the admin
+   * endpoints.
+   */
+  @Test
+  void adminIsTheRoleBaggageEntryNotTheCapturedAuthority() {
+    OwnerOrAdminStreamAccess access = new OwnerOrAdminStreamAccess(ORDERS::get);
+    UserAuthority adminAuthority = new UserAuthority(Set.of("ADMIN"), Set.of());
 
-    assertFalse(inAContextWithoutAUser.isAuthorized(UserId.of("ops-1"), stream("product:p-1")));
-    assertFalse(inAContextWithoutAUser.isAuthorized(UserId.of("ops-1"), stream("customer:c-1")));
+    StreamRuneContext.RequestContext customerWithAdminAuthority =
+        requestContext("c-2", "CUSTOMER").withAuthority(adminAuthority);
+    assertFalse(access.isAuthorized(customerWithAdminAuthority, stream("customer:c-1")));
+    assertFalse(access.isAuthorized(customerWithAdminAuthority, stream("product:p-1")));
+
+    StreamRuneContext.RequestContext operatorWithoutAuthority = requestContext("ops-1", "ADMIN");
+    assertTrue(access.isAuthorized(operatorWithoutAuthority, stream("customer:c-1")));
+    assertTrue(access.isAuthorized(operatorWithoutAuthority, stream("product:p-1")));
   }
 
   @Test
   void theOrderReadModelIsAskedOnlyForAnOrderStreamOfANonAdminCaller() {
     List<String> lookups = new ArrayList<>();
-    OwnerOrAdminStreamAccess asCustomer =
+    OwnerOrAdminStreamAccess access =
         new OwnerOrAdminStreamAccess(
-            () -> requestContext("c-1", "CUSTOMER"),
             orderId -> {
               lookups.add(orderId);
               return ORDERS.get(orderId);
             });
+    StreamRuneContext.RequestContext customer = requestContext("c-1", "CUSTOMER");
 
-    assertTrue(asCustomer.isAuthorized(UserId.of("c-1"), stream("customer:c-1")));
-    assertFalse(asCustomer.isAuthorized(UserId.of("c-1"), stream("product:p-1")));
-    assertFalse(asCustomer.isAuthorized(null, stream("order:o-1")));
+    assertTrue(access.isAuthorized(customer, stream("customer:c-1")));
+    assertFalse(access.isAuthorized(customer, stream("product:p-1")));
+    assertFalse(access.isAuthorized(requestContext(null, "CUSTOMER"), stream("order:o-1")));
+    assertTrue(access.isAuthorized(requestContext("ops-1", "ADMIN"), stream("order:o-1")));
     assertEquals(List.of(), lookups);
 
-    assertTrue(asCustomer.isAuthorized(UserId.of("c-1"), stream("order:o-1")));
+    assertTrue(access.isAuthorized(customer, stream("order:o-1")));
     assertEquals(List.of("o-1"), lookups);
   }
 
   @Test
-  void bothCollaboratorsAreRequired() {
-    assertThrows(
-        IllegalArgumentException.class, () -> new OwnerOrAdminStreamAccess(null, ORDERS::get));
-    assertThrows(
-        IllegalArgumentException.class, () -> new OwnerOrAdminStreamAccess(() -> null, null));
+  void theOrderReadModelIsRequired() {
+    assertThrows(IllegalArgumentException.class, () -> new OwnerOrAdminStreamAccess(null));
   }
 
   private static StreamId stream(String typeAndId) {
@@ -197,9 +194,6 @@ class OwnerOrAdminStreamAccessTest {
    * {@code X-User-Id} and the {@code role} baggage entry from {@code X-User-Role}.
    */
   private static StreamRuneContext.RequestContext requestContext(String caller, String role) {
-    if (NO_CONTEXT.equals(role)) {
-      return null;
-    }
     return new StreamRuneContext.RequestContext(
         null,
         caller == null ? null : UserId.of(caller),

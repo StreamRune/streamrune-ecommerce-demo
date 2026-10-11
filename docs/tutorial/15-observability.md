@@ -350,7 +350,6 @@ The rule is plain Java with no Spring in it, so it goes into the shared `queries
 package org.streamrune.ecommerce.queries.access;
 
 import java.util.function.Function;
-import java.util.function.Supplier;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
@@ -372,66 +371,51 @@ public final class OwnerOrAdminStreamAccess {
   private static final String ROLE_BAGGAGE_KEY = "role";
   private static final String ADMIN = "ADMIN";
 
-  private final Supplier<StreamRuneContext.RequestContext> requestContext;
   private final Function<String, OrderView> orderById;
 
   /**
-   * @param requestContext the request context of the HTTP request being served, or null when none
-   *     is bound
    * @param orderById the order read model: the order with the given id, or null when the read model
    *     has no row for it
    */
-  public OwnerOrAdminStreamAccess(
-      Supplier<StreamRuneContext.RequestContext> requestContext,
-      Function<String, OrderView> orderById) {
-    if (requestContext == null) {
-      throw new IllegalArgumentException("requestContext is required");
-    }
+  public OwnerOrAdminStreamAccess(Function<String, OrderView> orderById) {
     if (orderById == null) {
       throw new IllegalArgumentException("orderById is required");
     }
-    this.requestContext = requestContext;
     this.orderById = orderById;
   }
 
   /** The signature of the framework's SseAuthorizer, so a bean is {@code access::isAuthorized}. */
-  public boolean isAuthorized(UserId principal, StreamId streamId) {
-    if (principal == null) {
+  public boolean isAuthorized(StreamRuneContext.RequestContext caller, StreamId streamId) {
+    if (caller == null || caller.userId() == null) {
       return false;
     }
+    UserId user = caller.userId();
+    boolean admin = ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return callerIsAdmin(principal) || principal.value().equals(aggregateId);
+      return admin || user.value().equals(aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return callerIsAdmin(principal) || ownsOrder(principal, aggregateId);
+      return admin || ownsOrder(user, aggregateId);
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return callerIsAdmin(principal);
+      return admin;
     }
     return false;
   }
 
-  /** The current request context is the caller's own and its role baggage entry is ADMIN. */
-  private boolean callerIsAdmin(UserId principal) {
-    StreamRuneContext.RequestContext context = requestContext.get();
-    return context != null
-        && principal.equals(context.userId())
-        && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
-  }
-
   /** The order read model has a row for the order and names the caller as its customer. */
-  private boolean ownsOrder(UserId principal, String orderId) {
+  private boolean ownsOrder(UserId user, String orderId) {
     OrderView order = orderById.apply(orderId);
-    return order != null && principal.value().equals(order.customerId());
+    return order != null && user.value().equals(order.customerId());
   }
 }
 ```
 
-The framework asks an `SseAuthorizer` one question, `isAuthorized(UserId principal, StreamId streamId)`, before it subscribes anybody. `principal` is the request identity from Chapter 9 — in the demo's trusted-gateway mode the `X-User-Id` header — and `null` when the request has none. The class answers per aggregate type and fails closed:
+The framework asks an `SseAuthorizer` one question, `isAuthorized(StreamRuneContext.RequestContext caller, StreamId streamId)`, before it subscribes anybody. `caller` is the request context of the request that asks for the stream — the object the framework's request filter built for it in Chapter 9, the same one a command of that request runs under. `caller.userId()` is the request identity — in the demo's trusted-gateway mode the `X-User-Id` header — and `null` when the request has none. A request no context is bound for never reaches the authorizer: the framework answers it `403` itself. The class answers per aggregate type and fails closed:
 
 | Stream | Who may open it | Why |
 |--------|-----------------|-----|
@@ -445,14 +429,13 @@ The framework asks an `SseAuthorizer` one question, `isAuthorized(UserId princip
 
 Mind the `order` line: the read model is eventually consistent. `OrderProjection` writes the row a moment after `POST /api/orders` returns, and until it has, the order has no known owner — the customer is refused exactly as for an order that was never placed, and subscribes once `GET /api/orders/{id}` answers.
 
-`ADMIN` is decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the entry `AdminController.requireRole` and `requireAdminOrSelf` from Chapter 9 read. The authorizer is handed the caller but not the request, so the rule takes the request context as a `Supplier` and each app says where its context lives. The caller and the role therefore reach the rule by two ways, and `callerIsAdmin` ties them together: the role counts only when the supplied context names the same user as `principal`. On all three integrations both come from the same request, so the check changes no answer today; it keeps the one branch that opens every customer's data from depending on that.
+`ADMIN` is decided the way the rest of the demo decides it — the `role` baggage entry of the request context, the entry `AdminController.requireRole` and `requireAdminOrSelf` from Chapter 9 read and the one `HeaderUserRoleResolver` resolves the caller's authority from. The context the rule is handed carries that entry next to the caller's id, so `caller` is the only thing the rule reads: no `ScopedValue`, no request-scoped bean, nothing that differs between Spring, Quarkus and Micronaut. `caller.authority()` holds what `HeaderUserRoleResolver` returned for the caller at the request edge — for an identified caller the same role, with its permissions; the rule keeps to the baggage entry so that the demo has one definition of `ADMIN`. A resolver that looks roles up from real authentication writes no baggage entry, and a rule in such a deployment asks `caller.authority().hasRole("ADMIN")` instead.
 
 > **Demo shortcut — whose order is it?** "The customer the order read model names" is the `customerId` of the order, and `POST /api/orders` takes it from the request body: the demo does not tie it to the caller. Whoever places an order chooses its owner. Nobody but the customer so named (and an `ADMIN`) can open its stream, so the rule leaks nothing, but a real deployment places an order for the authenticated caller and never reads the owner from the body.
 
 Now the bean. Add these imports to `StreamRuneConfig`:
 
 ```java
-import org.streamrune.core.StreamRuneContext;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
 ```
@@ -462,19 +445,15 @@ and the bean method:
 ```java
 @Bean
 public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
-  OwnerOrAdminStreamAccess access =
-      new OwnerOrAdminStreamAccess(
-          () -> StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null,
-          orderProjection::get);
-  return access::isAuthorized;
+  return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
 }
 ```
 
-On Spring the supplier is one line: the framework's `ScopedValueFilter` binds `StreamRuneContext.CURRENT` around the whole servlet chain, and the framework's SSE controller calls the authorizer on that request thread, so the context of the subscribing request is bound when the rule runs.
+The rule needs the order read model and nothing else: the caller arrives as the argument of every call.
 
 That is the whole wiring. With `streamrune.sse.enabled=true` the Spring integration registers three things:
 
-- **`SseController`** — the endpoint. It builds the `StreamId` from the two path segments (an invalid one is a `400`), asks the `SseAuthorizer` whether the caller may read that stream, and subscribes the client. A refused caller gets `403 Forbidden` — the same answer whether the request named no caller at all or the wrong one; the framework does not answer `401`. The caller is the request identity from Chapter 9: in the demo's trusted-gateway mode, the `X-User-Id` header.
+- **`SseController`** — the endpoint. It builds the `StreamId` from the two path segments (an invalid one is a `400`), asks the `SseAuthorizer` whether the caller may read that stream, and subscribes the client. A refused caller gets `403 Forbidden` — the same answer whether the request named no caller at all or the wrong one; the framework does not answer `401`. The caller it hands the authorizer is the request context from Chapter 9: in the demo's trusted-gateway mode, `X-User-Id` as its user and `X-User-Role` as its `role` entry.
 - **`SseEventPublisher`** — the in-process fan-out the controller subscribes its clients to, one bounded queue per client. A client that cannot keep up is disconnected, not skipped.
 - **`SseEventFeed`** — what publishes. One per application instance: a polling subscription on the global stream that starts at the **head** of the stream when the application starts, reads every `streamrune.sse.polling-interval`, and hands each event to the clients of that event's own stream. It keeps its position in memory — no row in the offset store — and stops with the application. It reads, and decrypts, every event of the store whether or not anybody is connected.
 
@@ -486,7 +465,7 @@ That is the whole wiring. With `streamrune.sse.enabled=true` the Spring integrat
 
 > **Demo shortcut — protect this in production.** The rule is the one a real deployment keeps; what it is handed is not. The demo runs in the trusted-gateway mode without a gateway (Chapter 9), so the caller's id and role are whatever the client wrote into `X-User-Id` and `X-User-Role`: anyone who sends `X-User-Id: c-1` is customer `c-1`, and anyone who adds `X-User-Role: ADMIN` is an operator. Behind real authentication the same class decides on an identity the client cannot choose.
 
-> **Quarkus and Micronaut.** The same property and an `SseAuthorizer` bean built from the same `OwnerOrAdminStreamAccess` switch the endpoint on in `quarkus-app` (`StreamRuneProducer#sseAuthorizer`) and `micronaut-app` (`StreamRuneFactory#sseAuthorizer`), and the framework feeds it there too; both apps keep the default polling interval of one second. Only the supplier of the request context differs, because each integration keeps the context somewhere else. On Quarkus a JAX-RS filter cannot wrap the resource method in a `ScopedValue`, so the framework's filter stores the context in the request-scoped `StreamRuneRequestContextHolder`, and the supplier reads that holder; the framework's SSE resource method is a blocking one (`@Blocking`), so Quarkus REST runs the request filter and the rule — with its one read of the order read model — on a worker thread with the request scope active, never on a Vert.x event loop. On Micronaut the framework's `StreamRuneContextFilter` binds both `StreamRuneContext.CURRENT` and the `StreamRuneContextHelper` thread-local, and the supplier reads the first and falls back to the second, as that app's controllers do; that filter runs on the blocking executor and the controller with it, so the rule may read the database there too. On Micronaut the frame's `data` is written by Micronaut Serialization, so every domain event (and each record nested in one) needs a serializer: the events live in the framework-agnostic `domain` module, and `MicronautEcommerceApplication` imports them with `@SerdeImport`. Each of the three apps has an `SseLiveE2EIT` that opens a stream over HTTP, sends a command over HTTP and waits for the frame, and an `SseStreamAccessIT` that walks the table above over HTTP; the table itself is unit-tested in `queries` (`OwnerOrAdminStreamAccessTest`).
+> **Quarkus and Micronaut.** The same property and an `SseAuthorizer` bean built from the same `OwnerOrAdminStreamAccess` switch the endpoint on in `quarkus-app` (`StreamRuneProducer#sseAuthorizer`) and `micronaut-app` (`StreamRuneFactory#sseAuthorizer`), and the framework feeds it there too; both apps keep the default polling interval of one second. The bean is the same one line in all three, because the rule reads the caller from its argument and each integration hands over the request context its own request filter built. The rule may read the database on all three — its one read of the order read model: on Spring it runs on the servlet request thread; on Quarkus the framework's SSE resource method is a blocking one (`@Blocking`), so Quarkus REST runs the request filter and the rule on a worker thread, never on a Vert.x event loop; on Micronaut the framework's `StreamRuneContextFilter` runs on the blocking executor and the controller with it. On Micronaut the frame's `data` is written by Micronaut Serialization, so every domain event (and each record nested in one) needs a serializer: the events live in the framework-agnostic `domain` module, and `MicronautEcommerceApplication` imports them with `@SerdeImport`. Each of the three apps has an `SseLiveE2EIT` that opens a stream over HTTP, sends a command over HTTP and waits for the frame, and an `SseStreamAccessIT` that walks the table above over HTTP; the table itself is unit-tested in `queries` (`OwnerOrAdminStreamAccessTest`).
 
 ### Step 7: Verify — Health, Metrics, and SSE
 

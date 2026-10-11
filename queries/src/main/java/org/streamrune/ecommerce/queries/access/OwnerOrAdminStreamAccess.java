@@ -1,7 +1,6 @@
 package org.streamrune.ecommerce.queries.access;
 
 import java.util.function.Function;
-import java.util.function.Supplier;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
@@ -47,16 +46,14 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       added here.
  * </ul>
  *
- * <p><b>Where the role comes from.</b> {@code ADMIN} is the {@code role} entry of the request
- * context's baggage, the entry {@code AdminController#requireRole} and {@code
- * CustomerCommandController#requireAdminOrSelf} check. The request context is handed in as a
- * supplier because each integration keeps it somewhere else: a {@code ScopedValue} on Spring, a
- * request-scoped holder on Quarkus, a {@code ScopedValue} or a {@code ThreadLocal} on Micronaut.
- * The caller's id is the {@code principal} the framework's SSE controller resolved with the same
- * identity policy its request filter uses. The role is honoured only when the supplied context is
- * the caller's own, that is when its user id equals the {@code principal}: the two come from the
- * same request on all three integrations, and the {@code ADMIN} branch, the one that opens every
- * customer's data, does not rely on that.
+ * <p><b>Who the caller is.</b> The framework's SSE endpoint hands the rule the request context of
+ * the request that asks for the stream, and that one object answers both questions. {@code
+ * caller.userId()} is the caller's id, {@code null} for a request without an identity. {@code
+ * ADMIN} is the {@code role} entry of {@code caller.baggage()}: the entry the framework's request
+ * filter writes from {@code X-User-Role}, the one {@code AdminController#requireRole} and {@code
+ * CustomerCommandController#requireAdminOrSelf} check and each app's {@code HeaderUserRoleResolver}
+ * resolves the caller's authority from. The demo has this one definition of {@code ADMIN}. The role
+ * counts only for a caller with an identity, so {@code X-User-Role: ADMIN} alone opens nothing.
  *
  * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 of the tutorial describes: the demo runs in the
  * trusted-gateway mode without a gateway, so the id and the role are whatever the client put in
@@ -78,74 +75,53 @@ public final class OwnerOrAdminStreamAccess {
   private static final String ROLE_BAGGAGE_KEY = "role";
   private static final String ADMIN = "ADMIN";
 
-  private final Supplier<StreamRuneContext.RequestContext> requestContext;
   private final Function<String, OrderView> orderById;
 
   /**
-   * @param requestContext the request context of the HTTP request being served, or {@code null}
-   *     when none is bound; read on the thread the framework's SSE controller calls the authorizer
-   *     on
    * @param orderById the order read model: the order with the given id, or {@code null} when the
    *     read model has no row for it ({@code OrderProjection::get})
    */
-  public OwnerOrAdminStreamAccess(
-      Supplier<StreamRuneContext.RequestContext> requestContext,
-      Function<String, OrderView> orderById) {
-    if (requestContext == null) {
-      throw new IllegalArgumentException("requestContext is required");
-    }
+  public OwnerOrAdminStreamAccess(Function<String, OrderView> orderById) {
     if (orderById == null) {
       throw new IllegalArgumentException("orderById is required");
     }
-    this.requestContext = requestContext;
     this.orderById = orderById;
   }
 
   /**
-   * Whether {@code principal} may open the stream {@code streamId}.
+   * Whether {@code caller} may open the stream {@code streamId}.
    *
-   * @param principal the caller the framework resolved for the request; {@code null} when the
-   *     request carries no identity
+   * @param caller the request context of the request that asks for the stream; its {@code userId()}
+   *     is {@code null} when the request carries no identity
    * @param streamId the requested aggregate stream
    * @return {@code true} for an {@code ADMIN} on a stream of a known type and for the customer the
    *     stream belongs to; {@code false} for everyone else
    */
-  public boolean isAuthorized(UserId principal, StreamId streamId) {
-    if (principal == null) {
+  public boolean isAuthorized(StreamRuneContext.RequestContext caller, StreamId streamId) {
+    if (caller == null || caller.userId() == null) {
       return false;
     }
+    UserId user = caller.userId();
+    boolean admin = ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
     AggregateType type = streamId.aggregateType();
     String aggregateId = streamId.aggregateId().value();
     if (CustomerState.TYPE.equals(type)) {
-      return callerIsAdmin(principal) || principal.value().equals(aggregateId);
+      return admin || user.value().equals(aggregateId);
     }
     if (OrderState.TYPE.equals(type)) {
-      return callerIsAdmin(principal) || ownsOrder(principal, aggregateId);
+      return admin || ownsOrder(user, aggregateId);
     }
     if (PaymentState.TYPE.equals(type)
         || InventoryState.TYPE.equals(type)
         || ProductState.TYPE.equals(type)) {
-      return callerIsAdmin(principal);
+      return admin;
     }
     return false;
   }
 
-  /**
-   * The current request context is the caller's own and its {@code role} baggage entry is {@code
-   * ADMIN}. The caller's id and the role reach this class by two ways, the {@code principal}
-   * parameter and the supplied context; the role counts only when the context names the same user,
-   * so a context that belongs to another request can never make this caller an operator.
-   */
-  private boolean callerIsAdmin(UserId principal) {
-    StreamRuneContext.RequestContext context = requestContext.get();
-    return context != null
-        && principal.equals(context.userId())
-        && ADMIN.equals(context.baggage().get(ROLE_BAGGAGE_KEY));
-  }
-
   /** The order read model has a row for the order and names the caller as its customer. */
-  private boolean ownsOrder(UserId principal, String orderId) {
+  private boolean ownsOrder(UserId user, String orderId) {
     OrderView order = orderById.apply(orderId);
-    return order != null && principal.value().equals(order.customerId());
+    return order != null && user.value().equals(order.customerId());
   }
 }

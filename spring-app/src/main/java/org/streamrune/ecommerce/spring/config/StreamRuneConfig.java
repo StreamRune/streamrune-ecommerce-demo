@@ -544,18 +544,13 @@ public class StreamRuneConfig {
    * the application's part is this decision. Without an {@link SseAuthorizer} bean the framework
    * installs one that refuses every stream.
    *
-   * <p>The rule reads the caller's role from the request context. The framework's {@code
-   * ScopedValueFilter} binds {@code StreamRuneContext.CURRENT} around the whole servlet chain, and
-   * the framework's SSE controller calls the authorizer on that request thread, so the context of
-   * the subscribing request is bound when the rule runs.
+   * <p>The framework's SSE controller hands the rule the request context its {@code
+   * ScopedValueFilter} built for the subscribing request: the caller's id and the {@code role}
+   * entry the rule decides by are both in it, so the wiring is the rule and the order read model.
    */
   @Bean
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
-    OwnerOrAdminStreamAccess access =
-        new OwnerOrAdminStreamAccess(
-            () -> StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null,
-            orderProjection::get);
-    return access::isAuthorized;
+    return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
   }
 
   /**
