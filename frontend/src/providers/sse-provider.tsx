@@ -11,7 +11,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import type { LiveEvent } from "@/lib/types";
 import { API_URL } from "@/lib/api";
-import { refreshAndAgainOnceSettled } from "@/lib/read-model-sync";
+import { cancelPendingReReads, readAgainUntilSettled } from "@/lib/read-model-sync";
 
 const MAX_RECENT = 50;
 const BASE_BACKOFF_MS = 1_000;
@@ -26,6 +26,17 @@ const SSEContext = createContext<SSEContextValue>({
   connected: false,
   recentEvents: [],
 });
+
+/** The root of every query key of `queries.ts`: what is read again when the feed is back. */
+const EVERY_KEY: string[][] = [
+  ["products"],
+  ["orders"],
+  ["customers"],
+  ["fulfillment"],
+  ["events"],
+  ["audit"],
+  ["admin"],
+];
 
 /**
  * The queries an event of the given type makes stale. A frame names no stream,
@@ -129,9 +140,9 @@ export function SSEProvider({ children }: { children: ReactNode }) {
         retryRef.current = 0;
         // What was stored while the page was disconnected is not sent after the reconnect: a
         // connection starts at the head. Every list is read again instead, each with the
-        // session's identity headers.
+        // session's identity headers, and re-read while the read models settle.
         if (hasConnectedRef.current) {
-          void queryClient.invalidateQueries();
+          readAgainUntilSettled(queryClient, EVERY_KEY);
         }
         hasConnectedRef.current = true;
       };
@@ -144,8 +155,8 @@ export function SSEProvider({ children }: { children: ReactNode }) {
           setRecentEvents((prev) => [entry, ...prev].slice(0, MAX_RECENT));
 
           // The frame arrives within a second of the event; the read models the queries show
-          // follow the event store by seconds. Read at once, and once more when they have settled.
-          refreshAndAgainOnceSettled(queryClient, invalidationKeysFor(entry.eventType));
+          // follow the event store by seconds. Read at once, and again while they settle.
+          readAgainUntilSettled(queryClient, invalidationKeysFor(entry.eventType));
         } catch {
           // ignore parse errors
         }
@@ -169,6 +180,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
     return () => {
       esRef.current?.close();
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      cancelPendingReReads();
     };
   }, [queryClient]);
 

@@ -12,6 +12,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { Role } from "@/lib/types";
 import { setApiAuth } from "@/lib/api";
 import { userIdForRole } from "@/lib/identity";
+import { cancelPendingReReads } from "@/lib/read-model-sync";
 import { getPermissions, hasPermission as checkPermission } from "@/lib/permissions";
 
 export const DEFAULT_USERS = {
@@ -94,7 +95,9 @@ export function RoleProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // What the backend returns depends on the identity (a CUSTOMER gets their own orders, an
     // ADMIN everyone's), so the cache of the identity that was active is dropped, not just
-    // marked stale: nothing it loaded is shown under the next one.
+    // marked stale: nothing it loaded is shown under the next one. The re-reads that identity
+    // was still waiting for are dropped with it.
+    cancelPendingReReads();
     void queryClient.resetQueries();
   }, [role, userId, queryClient]);
 

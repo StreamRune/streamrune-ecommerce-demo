@@ -19,12 +19,12 @@ import {
   togglePaymentFailure,
   injectSagaFailure,
 } from "./api";
-import { refreshAndAgainOnceSettled } from "./read-model-sync";
+import { readAgainUntilSettled } from "./read-model-sync";
 
 /**
  * A command and the queries its result shows in. The backend answers a command
  * once its events are stored; the read models follow, so the queries are read
- * again at once and once more when the read models have settled.
+ * again at once and a few more times while the read models settle.
  */
 function useInvalidatingMutation<TData, TVariables>(
   mutationFn: (vars: TVariables) => Promise<TData>,
@@ -33,7 +33,7 @@ function useInvalidatingMutation<TData, TVariables>(
   const queryClient = useQueryClient();
   return useMutation<TData, Error, TVariables>({
     mutationFn,
-    onSuccess: () => refreshAndAgainOnceSettled(queryClient, invalidateKeys),
+    onSuccess: () => readAgainUntilSettled(queryClient, invalidateKeys),
   });
 }
 
