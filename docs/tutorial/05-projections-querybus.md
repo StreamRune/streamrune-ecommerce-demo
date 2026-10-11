@@ -375,6 +375,8 @@ curl -X POST http://localhost:8080/api/products \
   -d '{"productId":"p-2","name":"Gizmo","description":"A handy gizmo","category":"Gadgets","price":14.99,"initialStock":5}'
 ```
 
+> **Heads up for chapter 9:** the product writes are open as written here. Chapter 9 makes them an `ADMIN`'s, and from then on the three writes of this chapter need `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'` (see the note at the end of Chapter 2).
+
 List them:
 
 ```bash
@@ -438,6 +440,7 @@ public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
     OffsetStore offsetStore,
     JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
     ProductProjection productProjection,
     CacheInvalidator cacheInvalidator) {
 
@@ -445,6 +448,7 @@ public MultiProjectionRunner projectionRunner(
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
           .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
           // Each TRANSACTIONAL_LOCAL registration commits its read-model write and its
           // checkpoint in ONE transaction, through the repository bean from Step 4.
           .atomicProcessor(projectionRepository)
@@ -460,6 +464,19 @@ public MultiProjectionRunner projectionRunner(
   return runner;
 }
 ```
+
+`projectionPolling(properties)` says how often each projection reads the event store for new events. Add the helper next to the bean (imports `java.time.Duration`, `org.streamrune.core.subscription.SubscriptionConfig` and `org.streamrune.spring.StreamRuneProperties`):
+
+```java
+private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+  return new SubscriptionConfig(
+      true,
+      Duration.ofMillis(properties.pollingIntervalMs()),
+      Duration.ofMillis(properties.pollingJitterMs()));
+}
+```
+
+`StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval-ms` and `streamrune.polling-jitter-ms` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval-ms=500` to keep their waits short.
 
 Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own offset namespace in `PostgresOffsetStore`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
 

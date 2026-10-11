@@ -1663,7 +1663,7 @@ curl -s -X POST http://localhost:8080/api/orders \
 The order lands in the event store as `OrderPlaced`, the saga's polling subscription feeds it to the runner, and the runner starts the saga and dispatches `InitiatePayment`. That records `PaymentInitiated` on the `payment:pay-o-100` stream; the `PaymentProcessManager`'s subscription picks that up, calls the gateway (the failure flag is off, so it succeeds), and dispatches `CapturePayment`. `PaymentCaptured` flows back to the saga, which reserves stock, confirms the order, and reaches `COMPLETED`. Because each leg goes through a separate polling subscription, the round-trip takes a moment — give it a second or two, then query the saga store (the `SagaController` you build in Step 8):
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100 | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100 | jq .fulfillmentStatus
 # "COMPLETED"
 ```
 
@@ -1674,27 +1674,27 @@ The order itself ends up `CONFIRMED` (the saga's final `ConfirmOrder`), which yo
 To watch the failure/compensation path instead, flip the gateway failure flag on before placing the order (see the toggle below). The manager then calls `processPayment`, the gateway throws, the manager dispatches `FailPayment`, and the saga moves to `FAILED` and cancels the order:
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-<orderId> | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-<orderId> | jq .fulfillmentStatus
 # "FAILED"
 ```
 
 There is an admin endpoint that flips the gateway's failure flag, which Chapter 12 uses to demonstrate the circuit breaker:
 
 ```bash
-curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
 # {"failureInjected":true}
 ```
 
-The toggle is an admin endpoint, so the call carries the ADMIN role header: the demo's `AdminController` answers `403` without it. The check is `OwnerOrAdminAccess.requireAdminRole` from Chapter 9, the first line of every route of that controller but `/health` (Chapters 12 and 14) — a stand-in for the gateway that would authenticate the caller in a real deployment. The saga reads above carry the header for the same reason (Step 8).
+The toggle is an admin endpoint, so the call carries an `ADMIN`'s two headers, the identity and the role: the demo's `AdminController` answers `403` without either. The check is `OwnerOrAdminAccess.requireAdmin` from Chapter 9, the first line of every route of that controller but `/health` (Chapters 12 and 14) — a stand-in for the gateway that would authenticate the caller in a real deployment. The saga reads above carry the two headers for the same reason (Step 8).
 
 ### Step 8 — SagaController: inspect sagas and inject failures via REST
 
-The demo includes a `SagaController` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/SagaController.java`) that exposes three endpoints for interacting with running sagas. All three are for the `ADMIN` role: a saga's state names the order, the customer, the payment and the total of one purchase, and the list holds every customer's. Each handler starts with `OwnerOrAdminAccess.requireAdminRole(RequestCaller.current())` (Chapter 9) and answers `403` to a request without the role, before a saga is looked up — so the answer says nothing about whether a saga exists. A customer follows their own order through `GET /api/orders/{id}`.
+The demo includes a `SagaController` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/SagaController.java`) that exposes three endpoints for interacting with running sagas. All three are for the `ADMIN` role: a saga's state names the order, the customer, the payment and the total of one purchase, and the list holds every customer's. Each handler starts with `OwnerOrAdminAccess.requireAdmin(RequestCaller.current())` (Chapter 9) and answers `403` to anyone but an `ADMIN`, before a saga is looked up — so the answer says nothing about whether a saga exists. A customer follows their own order through `GET /api/orders/{id}`.
 
 **List all fulfillment sagas** (reads directly from the `saga_state` table):
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments | jq .
 ```
 
 Example response:
@@ -1715,13 +1715,13 @@ The `sagaType` field is the saga state class's fully-qualified name, the value `
 **Fetch a single saga by id:**
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100 | jq .
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100 | jq .
 ```
 
 ```java
 @GetMapping("/{id}")
 public ResponseEntity<OrderFulfillmentState> getSaga(@PathVariable String id) {
-  OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+  OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
   return sagaStore
       .load(
           new SagaId(id),
@@ -1738,16 +1738,16 @@ The load is type-scoped: it names the saga type the row must belong to (`SagaTyp
 **Inject a payment failure** (toggles `PaymentGatewaySimulator.failureInjected`):
 
 ```bash
-curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100/inject-failure | jq .
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100/inject-failure | jq .
 # {"failureInjected":true}
 ```
 
-The `{id}` path variable is accepted but not used — the endpoint flips the single shared `PaymentGatewaySimulator` flag rather than scoping the failure to one saga. Calling it a second time toggles the flag back off. This is a convenient shorthand for the `/api/admin/payment-failure/toggle` endpoint exposed by `AdminController` — both toggle the same `PaymentGatewaySimulator` bean, so both need the ADMIN role header (Step 7). The saga route applies the check the admin endpoint applies, `OwnerOrAdminAccess.requireAdminRole`:
+The `{id}` path variable is accepted but not used — the endpoint flips the single shared `PaymentGatewaySimulator` flag rather than scoping the failure to one saga. Calling it a second time toggles the flag back off. This is a convenient shorthand for the `/api/admin/payment-failure/toggle` endpoint exposed by `AdminController` — both toggle the same `PaymentGatewaySimulator` bean, so both need the ADMIN role header (Step 7). The saga route applies the check the admin endpoint applies, `OwnerOrAdminAccess.requireAdmin`:
 
 ```java
 @PostMapping("/{id}/inject-failure")
 public Map<String, Boolean> injectFailure(@PathVariable String id) {
-  OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+  OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
   boolean current = paymentGateway.isFailureInjected();
   paymentGateway.setFailureInjected(!current);
   return Map.of("failureInjected", !current);

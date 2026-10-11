@@ -98,19 +98,24 @@ All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` heade
 
 One rule guards a customer's data, in all three apps: **an authenticated caller who holds the `ADMIN` role, or the customer the data belongs to** (`OwnerOrAdminAccess` in the `queries` module). A customer record belongs to the caller whose `X-User-Id` equals the customer id; an order belongs to the customer it names. Everyone else gets `403` — a caller without `X-User-Id` first of all, whatever `X-User-Role` says. The per-stream SSE endpoint applies the same rule.
 
-- **A refusal is always `403` and says nothing about existence.** Another customer's record and a record that does not exist are refused alike, and so are another customer's order and an order id without a row. `404` is an answer for the two callers who may know: the customer for their own record, and an `ADMIN`. The read model follows the event store by up to the projection's polling interval (five seconds by default), so for that moment after `POST /api/orders` the order has no row and its own customer gets `403` for it as well.
-- **A list holds what the caller may see.** An `ADMIN` gets every row; any other authenticated caller gets their own record from `GET /api/customers` and their own orders from `GET /api/orders`, selected by their id before anything is returned. No query parameter widens that: `?customerId=` may repeat the caller's own id, and naming another customer is a `403`.
-- **Operational reads are for the `ADMIN` role**: the audit log, the saga list, the event history and everything under `/api/admin` except `/api/admin/health`.
-- **The product catalogue is open**, and so is the payload-free live event feed.
+- **An `ADMIN` is the role together with an identity**, on every endpoint: `X-User-Role: ADMIN` on a request without `X-User-Id` is nobody (`OwnerOrAdminAccess.isAdmin`, the demo's one definition).
+- **A refusal is always `403`, and the refusal says nothing about existence.** Another customer's record and a record that does not exist are refused alike, and so are another customer's order and an order id without a row. `404` is an answer for the two callers who may know: the customer for their own record, and an `ADMIN`. The read model follows the event store by up to the projection's polling interval (five seconds by default), so for that moment after `POST /api/orders` the order has no row and its own customer gets `403` for it as well. A command refused by `@RequireRole` in the command bus (ship, deliver, discontinue) is a `403` too.
+- **Ids are not secrets.** The refusal is silent about existence; the demo as a whole is not. The live event feed (`GET /api/events/sse`) is open to every caller and shows the stream id (customer ids and order ids among them), the event type and the timestamp of every event, without a payload. And `POST /api/orders` answers `400 Order already exists` to a caller who places an order of their own under an id that is taken. What the rule keeps from a refused caller is the data behind an id: the record, the order, the payloads.
+- **A list holds what the caller may see.** An `ADMIN` gets every row; any other authenticated caller gets their own record from `GET /api/customers` and their own orders from `GET /api/orders`. The rows are chosen inside `OwnerOrAdminQueries` and the read models, before a controller sees one. No query parameter widens that: `?customerId=` may repeat the caller's own id, and naming another customer is a `403`.
+- **Operations are for an `ADMIN`**: the audit log, the saga list, the event history and everything under `/api/admin` except `/api/admin/health`, reads and writes alike.
+- **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price or stock, discontinuing it and receiving a shipment into the inventory are for an `ADMIN`.
+- **A request is read before the caller is decided.** A request without a body, with malformed JSON or without a required field is `400` for every caller, in all three apps; a well-formed request from a caller the rule refuses is `403`.
+- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a confirm, ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not delivered.
 
 ### Products
 
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
-| `POST` | `/api/products` | Create product | anyone |
-| `PUT` | `/api/products/{id}/stock` | Adjust stock | anyone |
-| `PUT` | `/api/products/{id}/price` | Update price | anyone |
+| `POST` | `/api/products` | Create product | `ADMIN` |
+| `PUT` | `/api/products/{id}/stock` | Adjust stock | `ADMIN` |
+| `PUT` | `/api/products/{id}/price` | Update price | `ADMIN` |
 | `POST` | `/api/products/{id}/discontinue` | Discontinue product | `ADMIN` (`@RequireRole`) |
+| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment into the inventory the fulfillment saga reserves from | `ADMIN` |
 | `GET` | `/api/products/{id}` | Get product | anyone: the public catalogue |
 | `GET` | `/api/products` | List products | anyone: the public catalogue |
 
@@ -139,7 +144,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 
 ### Operations
 
-All of these answer `403` without the `ADMIN` role, except the health answer.
+All of these answer `403` to everyone but an `ADMIN` (the role together with `X-User-Id`), except the health answer.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -154,7 +159,7 @@ All of these answer `403` without the `ADMIN` role, except the health answer.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload |
+| `GET` | `/api/events/sse` | Live event feed (SSE), open to every caller. A frame names the event (global offset, type, stream type and id, version, timestamp) and carries no payload: every caller sees which customer ids and order ids exist and what happens to them when |
 | `GET` | `/api/sse/{aggregateType}/{aggregateId}` | Live events of one stream (SSE). The framework's endpoint (`streamrune.sse.enabled`), fed by the framework from the head of the global stream: live, at-most-once, no replay. A frame carries the event **with its payload**, so the demo's `SseAuthorizer` lets in only an authenticated `ADMIN` or the customer the stream belongs to (their own `customer` stream, the streams of their own orders); `403` for everyone else. An order belongs to the customer it names, and only that customer or an `ADMIN` may place it |
 | `GET` | `/api/events?offset=0&limit=10` | Paginated event history with payloads. ADMIN only, `403` otherwise |
 | `GET` | `/api/events/{aggregateType}/{aggregateId}` | One stream's events with payloads. ADMIN only, `403` otherwise |

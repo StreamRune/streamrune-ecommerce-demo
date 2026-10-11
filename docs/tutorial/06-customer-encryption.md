@@ -268,6 +268,35 @@ class CustomerDeciderTest {
             .when(new CustomerCommand.ForgetCustomer("c-unknown"))
             .expectException(DomainException.class);
     }
+
+    @Test
+    void updateProfile_neverRegistered_throws() {
+        // Personal data stored under an id no customer registered could never be erased: the
+        // decider refuses a forget for such an id, so it refuses the write that would need one.
+        fixture
+            .given()
+            .when(new CustomerCommand.UpdateProfile(
+                "c-unknown", "Mallory", "mallory@example.com", "1 Other St", null))
+            .expectFailedWith(DomainException.class, "Customer not found");
+    }
+
+    @Test
+    void requestDataExport_neverRegistered_throws() {
+        fixture
+            .given()
+            .when(new CustomerCommand.RequestDataExport("c-unknown"))
+            .expectFailedWith(DomainException.class, "Customer not found");
+    }
+
+    @Test
+    void requestDataExport_forgotten_throws() {
+        // Nothing is left to export, and the stream of an erased customer takes no further event.
+        fixture
+            .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+            .when(new CustomerCommand.RequestDataExport("c-1"))
+            .expectFailedWith(
+                DomainException.class, "Cannot export the data of a forgotten customer");
+    }
 }
 ```
 
@@ -314,6 +343,9 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
             }
 
             case CustomerCommand.UpdateProfile c -> {
+                // An id no customer registered is refused, as ForgetCustomer refuses it below:
+                // personal data stored under such an id could never be erased.
+                if (state.customerId() == null) throw new DomainException("Customer not found");
                 if (state.status() == CustomerStatus.FORGOTTEN)
                     throw new DomainException("Cannot update a forgotten customer");
                 yield List.of(new CustomerEvent.ProfileUpdated(
@@ -324,8 +356,14 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
                     c.phone()   != null ? c.phone()   : state.phone()));
             }
 
-            case CustomerCommand.RequestDataExport c ->
-                List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+            case CustomerCommand.RequestDataExport c -> {
+                if (state.customerId() == null) throw new DomainException("Customer not found");
+                // Nothing is left to export, and the stream of an erased customer takes no
+                // further event.
+                if (state.status() == CustomerStatus.FORGOTTEN)
+                    throw new DomainException("Cannot export the data of a forgotten customer");
+                yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+            }
 
             case CustomerCommand.ForgetCustomer c -> {
                 if (state.customerId() == null) throw new DomainException("Customer not found");
@@ -733,6 +771,7 @@ public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
     OffsetStore offsetStore,
     JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
     ProductProjection productProjection,
     CustomerProjection customerProjection,
     CacheInvalidator cacheInvalidator) {
@@ -741,6 +780,7 @@ public MultiProjectionRunner projectionRunner(
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
           .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
           .atomicProcessor(projectionRepository)
           .register(
               "products",

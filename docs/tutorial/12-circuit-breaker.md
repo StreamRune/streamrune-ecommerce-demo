@@ -225,14 +225,14 @@ public class AdminController {
     return Map.of("status", "UP");
   }
 
-  /** Answers 403 unless the request carries the ADMIN role (Chapter 9). */
+  /** Answers 403 unless the caller is an ADMIN: an identity with the ADMIN role (Chapter 9). */
   private static void requireAdmin() {
-    OwnerOrAdminAccess.requireAdminRole(RequestCaller.current());
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
   }
 }
 ```
 
-Every route but `/health` starts with `requireAdmin()`: the controller is the operators' panel, and what it shows and switches is internal state of the running system. The check is `OwnerOrAdminAccess.requireAdminRole` from Chapter 9 — the `X-User-Role` header in this demo, a stand-in for the gateway that would authenticate an operator in a real deployment — so a call without the role is answered `403`. `/health` stays open: its answer says that the application runs and nothing else.
+Every route but `/health` starts with `requireAdmin()`: the controller is the operators' panel, and what it shows and switches is internal state of the running system. The check is `OwnerOrAdminAccess.requireAdmin` from Chapter 9 — the `X-User-Id` and `X-User-Role` headers in this demo, a stand-in for the gateway that would authenticate an operator in a real deployment — so a call from anyone but an `ADMIN` is answered `403`, the role without an identity included. `/health` stays open: its answer says that the application runs and nothing else.
 
 The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circuitState()` delegates to `state.get().name()` inside the command-bus interceptor; `paymentGatewayCircuitBreaker.state().name()` is the gateway breaker. Both return one of `"CLOSED"`, `"OPEN"`, or `"HALF_OPEN"` as a plain string — no dedicated DTO needed. The toggle in Step 5 exercises the **`paymentGateway`** value, not `state`.
 
@@ -241,14 +241,14 @@ The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circu
 Start the application and confirm both circuits start closed:
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"CLOSED"}
 ```
 
 Now turn on payment failure and place a few orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which throws; the manager records the failure on the gateway breaker. After three consecutive gateway failures the gateway breaker opens:
 
 ```bash
-curl -s -X POST -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
 # {"failureInjected":true}
 
 # place three orders (different ids), e.g.:
@@ -258,14 +258,14 @@ for i in 1 2 3; do
     -d "{\"orderId\":\"cb-$i\",\"customerId\":\"c-1\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1,\"unitPrice\":9.99}]}"
 done
 
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 ```
 
 Each of those orders fails at the payment step, so their sagas land in `FAILED`:
 
 ```bash
-curl -s -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
 # "FAILED"
 ```
 

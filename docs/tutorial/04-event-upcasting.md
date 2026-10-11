@@ -254,6 +254,8 @@ curl -X PUT http://localhost:8080/api/products/p-legacy/price \
   -d '{"price": 12.99}'
 ```
 
+> **Heads up for chapter 9:** the product writes are open as written here. Chapter 9 makes them an `ADMIN`'s, and from then on this call needs `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'` (see the note at the end of Chapter 2).
+
 The `CommandBus` loads the `p-legacy` stream, finds the v1 `ProductCreated` row, passes it through the `UpcasterChain`, and the `ProductCreatedUpcaster` inserts `"category": "Uncategorized"` before the JSON is deserialised into a `ProductEvent.ProductCreated` record. The `evolve` function receives a fully-formed record with a non-null `category`, and state is rebuilt correctly.
 
 If you query the product in a later chapter (once the read-side projection is wired up), it will show `category: "Uncategorized"` — populated by the upcaster, never written back to disk.

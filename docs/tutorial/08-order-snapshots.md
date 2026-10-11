@@ -346,6 +346,44 @@ class OrderDeciderTest {
         .when(new OrderCommand.CancelOrder("o-1", "Too late"))
         .expectException(DomainException.class);
   }
+
+  // An order that was never placed is not confirmed, shipped or delivered: its empty state reads
+  // CREATED, so without the check ConfirmOrder would open a stream for an id nobody placed.
+
+  @Test
+  void confirmOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.ConfirmOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void shipOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.ShipOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void deliverOrder_neverPlaced_throws() {
+    fixture
+        .given()
+        .when(new OrderCommand.DeliverOrder("o-none"))
+        .expectFailedWith(DomainException.class, "Order not found: o-none");
+  }
+
+  @Test
+  void cancelOrder_neverPlaced_isAccepted() {
+    // CancelOrder is the last step of the fulfillment saga's compensation, and a refused
+    // compensation command ends the saga FAILED: the decider accepts it for any order that is not
+    // delivered, an id nobody placed included.
+    fixture
+        .given()
+        .when(new OrderCommand.CancelOrder("o-none", "Compensation"))
+        .expectEvents(new OrderEvent.OrderCancelled("o-none", "Compensation"));
+  }
 }
 ```
 
@@ -396,6 +434,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.ConfirmOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.CREATED)
           throw new DomainException(
               "Can only confirm CREATED orders, current status: " + state.status());
@@ -403,6 +442,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.ShipOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.CONFIRMED)
           throw new DomainException(
               "Can only ship CONFIRMED orders, current status: " + state.status());
@@ -410,6 +450,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.DeliverOrder c -> {
+        requirePlaced(state, c.orderId());
         if (state.status() != OrderStatus.SHIPPED)
           throw new DomainException(
               "Can only deliver SHIPPED orders, current status: " + state.status());
@@ -417,11 +458,24 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.CancelOrder c -> {
+        // No requirePlaced here. CancelOrder is the last step of the fulfillment saga's
+        // compensation, and a compensation command the decider refuses ends the saga FAILED
+        // instead of COMPENSATED: it is accepted whatever the order's stream holds, short of a
+        // delivered order.
         if (state.status() == OrderStatus.DELIVERED)
           throw new DomainException("Cannot cancel DELIVERED orders");
         yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason()));
       }
     };
+  }
+
+  /**
+   * An order that was never placed is not confirmed, shipped or delivered. Its empty state reads
+   * {@code CREATED}, so without this check {@code ConfirmOrder} would open a stream for an id
+   * nobody placed.
+   */
+  private static void requirePlaced(OrderState state, String orderId) {
+    if (state.orderId() == null) throw new DomainException("Order not found: " + orderId);
   }
 
   @Override
@@ -438,7 +492,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 }
 ```
 
-The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
+The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. `requirePlaced` is the other half of that guard: the empty state of an id nobody placed reads `CREATED`, so `ConfirmOrder` would pass the status check and open a stream for an order that does not exist. Confirming, shipping and delivering such an id are refused with `Order not found`. `CancelOrder` is deliberately left out: in Chapter 11 it becomes the last step of the fulfillment saga's compensation, and a compensation command the decider refuses ends the saga `FAILED` instead of `COMPENSATED`. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
 
 Run the tests again:
 
@@ -733,6 +787,7 @@ public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
     OffsetStore offsetStore,
     JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
     ProductProjection productProjection,
     CustomerProjection customerProjection,
     OrderProjection orderProjection,
@@ -742,6 +797,7 @@ public MultiProjectionRunner projectionRunner(
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
           .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
           .atomicProcessor(projectionRepository)
           .register(
               "products",

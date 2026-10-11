@@ -138,6 +138,8 @@ curl -X POST http://localhost:8080/api/products \
   -d '{"productId":"p-valid","name":"Sprocket","description":"A sturdy sprocket","category":"Gadgets","price":4.99,"initialStock":40}'
 ```
 
+> **Heads up for chapter 9:** the product writes are open as written here. Chapter 9 makes them an `ADMIN`'s, and from then on the calls of this chapter need `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'` (see the note at the end of Chapter 2).
+
 Expected: `200 OK` with empty body. The interceptor validated the command, found no violations, and execution proceeded to the `Decider` as before. (The request uses a new id because `p-1` exists since chapter 2: its decider would refuse a second `CreateProduct` with `400 Product already exists: p-1` — also a 400, but from the business rule, after validation passed.)
 
 ### Step 5 — Verify: the interceptor rejects an invalid command
