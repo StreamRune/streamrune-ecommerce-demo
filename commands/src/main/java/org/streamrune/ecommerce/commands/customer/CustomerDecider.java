@@ -28,6 +28,9 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
       }
 
       case CustomerCommand.UpdateProfile c -> {
+        // An id no customer registered is refused, as ForgetCustomer refuses it below: personal
+        // data stored under such an id could never be erased.
+        if (state.customerId() == null) throw new DomainException("Customer not found");
         if (state.status() == CustomerStatus.FORGOTTEN)
           throw new DomainException("Cannot update a forgotten customer");
         yield List.of(
@@ -39,8 +42,13 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
                 c.phone() != null ? c.phone() : state.phone()));
       }
 
-      case CustomerCommand.RequestDataExport c ->
-          List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+      case CustomerCommand.RequestDataExport c -> {
+        if (state.customerId() == null) throw new DomainException("Customer not found");
+        // Nothing is left to export, and the stream of an erased customer takes no further event.
+        if (state.status() == CustomerStatus.FORGOTTEN)
+          throw new DomainException("Cannot export the data of a forgotten customer");
+        yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+      }
 
       case CustomerCommand.ForgetCustomer c -> {
         // An id no customer registered is refused: the forget endpoint shreds the key after this

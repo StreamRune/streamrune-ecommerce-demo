@@ -110,4 +110,33 @@ class CustomerDeciderTest {
         .when(new CustomerCommand.ForgetCustomer("c-unknown"))
         .expectException(DomainException.class);
   }
+
+  @Test
+  void updateProfile_neverRegistered_throws() {
+    // Personal data stored under an id no customer registered could never be erased: the decider
+    // refuses a forget for such an id, so it refuses the write that would need one too.
+    fixture
+        .given()
+        .when(
+            new CustomerCommand.UpdateProfile(
+                "c-unknown", "Mallory", "mallory@example.com", "1 Other St", null))
+        .expectFailedWith(DomainException.class, "Customer not found");
+  }
+
+  @Test
+  void requestDataExport_neverRegistered_throws() {
+    fixture
+        .given()
+        .when(new CustomerCommand.RequestDataExport("c-unknown"))
+        .expectFailedWith(DomainException.class, "Customer not found");
+  }
+
+  @Test
+  void requestDataExport_forgotten_throws() {
+    // Nothing is left to export, and the stream of an erased customer takes no further event.
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(new CustomerCommand.RequestDataExport("c-1"))
+        .expectFailedWith(DomainException.class, "Cannot export the data of a forgotten customer");
+  }
 }
