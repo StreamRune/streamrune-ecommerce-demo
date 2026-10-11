@@ -386,13 +386,13 @@ curl -s -X POST http://localhost:8080/api/orders \
   }' | jq .
 ```
 
-The `OrderDecider` appends `OrderPlaced`. From there the order-fulfillment saga (Chapter 11) runs all the way to completion, driven by three polling subscriptions cooperating through correlation ids:
+The `OrderDecider` appends `OrderPlaced`. From there the order-fulfillment saga (Chapter 11) runs all the way to completion, driven by three polling subscriptions, each reacting to the events of the one before:
 
 1. `SagaRunner` reacts to `OrderPlaced`, starts the `OrderFulfillmentSaga`, and dispatches `InitiatePayment` (correlation id `fulfillment-ord-1`). `PaymentDecider` appends `PaymentInitiated`.
 2. The `PaymentProcessManager` reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)` (the failure flag is off, so it succeeds), and dispatches `CapturePayment`. `PaymentCaptured` flows back to the saga, which moves to `AWAITING_INVENTORY` and dispatches `ReserveStock`.
 3. `StockReserved` returns the saga to `AWAITING_CONFIRMATION`; it dispatches `ConfirmOrder`; `OrderConfirmed` drives the saga to `COMPLETED`.
 
-The saga's full design (see the Javadoc on `OrderFulfillmentSaga`) is `OrderPlaced → InitiatePayment → PaymentCaptured → ReserveStock → StockReserved → ConfirmOrder → COMPLETED`. The link that makes this work end-to-end is that `SagaRunner` binds the saga id as the request correlation id on every command it dispatches, so each resulting event carries `fulfillment-ord-1` and `correlate()` routes it back to the right saga; the `PaymentProcessManager` preserves that correlation id when it dispatches the capture command.
+The saga's full design (see the Javadoc on `OrderFulfillmentSaga`) is `OrderPlaced → InitiatePayment → PaymentCaptured → ReserveStock → StockReserved → ConfirmOrder → COMPLETED`. The link that makes this work end-to-end is that every event of the process names its order: `correlate()` reads `ord-1` from the event and routes it to the saga `fulfillment-ord-1`. `SagaRunner` also binds the saga id as the request correlation id on every command it dispatches, and the `PaymentProcessManager` preserves it when it dispatches the capture command, so the audit trail shows the whole fulfillment under one correlation id; the saga does not route by it, because a client chooses the correlation id of its own requests.
 
 Because each leg hops through a separate polling subscription, give it a second or two, then inspect the saga state:
 

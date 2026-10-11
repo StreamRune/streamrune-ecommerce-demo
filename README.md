@@ -90,7 +90,7 @@ docker compose up -d postgres rabbitmq
 
 ## API
 
-All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing).
+All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing). Both are tracing metadata a client chooses freely: a correlation id addresses nothing, and the fulfillment saga routes an event by the order the event names, never by its correlation id.
 
 > **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md).
 
