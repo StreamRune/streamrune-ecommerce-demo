@@ -69,10 +69,10 @@ public class AdminController {
 
   @GET
   @Path("/dead-letters")
-  public List<DeadLetterQueue.DeadLetterEntry> listDeadLetters(
-      @QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<DeadLetterQueue.DeadLetterEntry> listDeadLetters(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     requireAdmin();
-    return deadLetterQueue.read(limit);
+    return deadLetterQueue.read(rows);
   }
 
   @POST
@@ -86,9 +86,10 @@ public class AdminController {
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */
   @GET
   @Path("/outbox")
-  public List<OutboxEntry> listOutboxEntries(@QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<OutboxEntry> listOutboxEntries(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     requireAdmin();
-    return outboxStore.findByStatus(OutboxStatus.PENDING, limit);
+    return outboxStore.findByStatus(OutboxStatus.PENDING, rows);
   }
 
   /**
@@ -96,10 +97,10 @@ public class AdminController {
    */
   @GET
   @Path("/outbox/failed")
-  public List<OutboxEntry> listFailedOutboxEntries(
-      @QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<OutboxEntry> listFailedOutboxEntries(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     requireAdmin();
-    return outboxStore.findByStatus(OutboxStatus.FAILED, limit);
+    return outboxStore.findByStatus(OutboxStatus.FAILED, rows);
   }
 
   /**
@@ -172,10 +173,10 @@ public class AdminController {
    */
   @GET
   @Path("/saga-dead-letters")
-  public List<Map<String, Object>> listSagaDeadLetters(
-      @QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<Map<String, Object>> listSagaDeadLetters(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     requireAdmin();
-    return sagaDeadLetterStore.findAll(limit).stream().map(AdminController::toJson).toList();
+    return sagaDeadLetterStore.findAll(rows).stream().map(AdminController::toJson).toList();
   }
 
   private static Map<String, Object> toJson(SagaDeadLetterStore.SagaDeadLetterEntry entry) {
@@ -197,10 +198,11 @@ public class AdminController {
    */
   @GET
   @Path("/sagas/faulted")
-  public List<String> listFaultedSagas(@QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<String> listFaultedSagas(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     requireAdmin();
     return sagaStore
-        .findByStatus(SagaType.fromClass(OrderFulfillmentState.class), SagaStatus.FAULTED, limit)
+        .findByStatus(SagaType.fromClass(OrderFulfillmentState.class), SagaStatus.FAULTED, rows)
         .stream()
         .map(SagaId::value)
         .toList();
@@ -219,15 +221,13 @@ public class AdminController {
   @Path("/saga-dead-letters/replay")
   public Map<String, String> replaySagaDeadLetter(
       @QueryParam("sagaId") String sagaId,
-      @QueryParam("eventOffset") Long eventOffset,
+      @QueryParam("eventOffset") String eventOffset,
       @QueryParam("force") @DefaultValue("false") boolean force) {
+    long offset = RequestChecks.requiredWholeNumber(eventOffset, "eventOffset");
     requireAdmin();
-    if (eventOffset == null) {
-      throw new WebApplicationException("eventOffset is required", 400);
-    }
     var outcome =
         sagaDeadLetterReplayer.replay(
-            sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(eventOffset), force);
+            sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(offset), force);
     return Map.of("outcome", outcome.name());
   }
 
@@ -240,8 +240,9 @@ public class AdminController {
   public Map<String, List<String>> replayAllSagaDeadLetters(
       @QueryParam("sagaId") String sagaId,
       @QueryParam("force") @DefaultValue("false") boolean force) {
+    SagaId saga = requiredSagaId(sagaId);
     requireAdmin();
-    var outcomes = sagaDeadLetterReplayer.replayAll(requiredSagaId(sagaId), force);
+    var outcomes = sagaDeadLetterReplayer.replayAll(saga, force);
     return Map.of("outcomes", outcomes.stream().map(Enum::name).toList());
   }
 
@@ -255,8 +256,9 @@ public class AdminController {
   public Map<String, String> resumeFaultedSaga(
       @QueryParam("sagaId") String sagaId,
       @QueryParam("force") @DefaultValue("false") boolean force) {
+    SagaId saga = requiredSagaId(sagaId);
     requireAdmin();
-    var outcome = sagaDeadLetterReplayer.resumeFaulted(requiredSagaId(sagaId), force);
+    var outcome = sagaDeadLetterReplayer.resumeFaulted(saga, force);
     return Map.of("outcome", outcome.name());
   }
 
@@ -268,14 +270,12 @@ public class AdminController {
   @DELETE
   @Path("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
-      @QueryParam("sagaId") String sagaId, @QueryParam("eventOffset") Long eventOffset) {
+      @QueryParam("sagaId") String sagaId, @QueryParam("eventOffset") String eventOffset) {
+    long offset = RequestChecks.requiredWholeNumber(eventOffset, "eventOffset");
     requireAdmin();
-    if (eventOffset == null) {
-      throw new WebApplicationException("eventOffset is required", 400);
-    }
     boolean discarded =
         sagaDeadLetterReplayer.discard(
-            sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(eventOffset));
+            sagaId == null ? null : SagaId.of(sagaId), GlobalOffset.of(offset));
     return Map.of("discarded", discarded);
   }
 

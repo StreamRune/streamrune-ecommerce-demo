@@ -12,7 +12,9 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 
 /**
@@ -33,6 +35,8 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * customer's.
  */
 class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
+
+  @Autowired DataSource dataSource;
 
   private static final String ADMIN = "ADMIN";
   private static final String CUSTOMER = "CUSTOMER";
@@ -450,6 +454,31 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get(list + "?limit=-1", null, ADMIN).statusCode()).isEqualTo(403);
   }
 
+  @Test
+  void theFulfillmentListHoldsNoSagaOfAnotherType() throws Exception {
+    // A row of the framework's saga table that belongs to another saga type, under an id that
+    // looks like a fulfillment saga's.
+    String otherSaga = "fulfillment-" + uniqueId("zz-another-saga-type");
+    try (var connection = dataSource.getConnection();
+        var insert =
+            connection.prepareStatement(
+                "INSERT INTO saga_state (saga_id, saga_type, status, state_json)"
+                    + " VALUES (?, 'org.example.AnotherSaga', 'COMPLETED', '{}'::jsonb)")) {
+      insert.setString(1, otherSaga);
+      insert.executeUpdate();
+    }
+    try {
+      assertThat(ids(get("/api/saga/fulfillments?limit=100000", OPERATOR, ADMIN), "sagaId"))
+          .doesNotContain(otherSaga);
+    } finally {
+      try (var connection = dataSource.getConnection();
+          var delete = connection.prepareStatement("DELETE FROM saga_state WHERE saga_id = ?")) {
+        delete.setString(1, otherSaga);
+        delete.executeUpdate();
+      }
+    }
+  }
+
   // --- the endpoints that are for an ADMIN, and the open ones ---
 
   @Test
@@ -640,6 +669,40 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
             .as(
                 "%s %s with the body '%s' as id=%s role=%s",
                 request[0], request[1], request[2], caller[0], caller[1])
+            .isEqualTo(400);
+      }
+    }
+  }
+
+  @Test
+  void aQueryParameterThatCannotBeReadIsAnswered400WhoeverSendsIt() throws Exception {
+    String customer = uniqueId("alice");
+    String[][] unreadable = {
+      // A number that is not one, on every endpoint that takes a page size or an offset.
+      {"GET", "/api/saga/fulfillments?limit=abc"},
+      {"GET", "/api/saga/fulfillments?limit=1.5"},
+      {"GET", "/api/saga/fulfillments?limit=99999999999"},
+      {"GET", "/api/events?limit=abc"},
+      {"GET", "/api/events?offset=abc"},
+      {"GET", "/api/audit/commands?limit=abc"},
+      {"GET", "/api/admin/dead-letters?limit=abc"},
+      {"GET", "/api/admin/outbox?limit=abc"},
+      {"GET", "/api/admin/outbox/failed?limit=abc"},
+      {"GET", "/api/admin/saga-dead-letters?limit=abc"},
+      {"GET", "/api/admin/sagas/faulted?limit=abc"},
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1&eventOffset=abc"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1&eventOffset=abc"},
+      // A required parameter that is missing.
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1"},
+      {"POST", "/api/admin/saga-dead-letters/replay-all"},
+      {"POST", "/api/admin/sagas/faulted/resume"}
+    };
+    String[][] callers = {{null, null}, {null, ADMIN}, {customer, CUSTOMER}, {OPERATOR, ADMIN}};
+    for (String[] request : unreadable) {
+      for (String[] caller : callers) {
+        assertThat(send(request[0], request[1], caller[0], caller[1], null).statusCode())
+            .as("%s %s as id=%s role=%s", request[0], request[1], caller[0], caller[1])
             .isEqualTo(400);
       }
     }

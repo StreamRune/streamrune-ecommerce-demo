@@ -29,6 +29,9 @@ import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 @Produces(MediaType.APPLICATION_JSON)
 public class SagaController {
 
+  /** The type the saga store records a fulfillment saga under: the list and the single read. */
+  private static final SagaType FULFILLMENT = SagaType.fromClass(OrderFulfillmentState.class);
+
   @Inject SagaStore sagaStore;
   @Inject PaymentGatewaySimulator paymentGateway;
   @Inject DataSource dataSource;
@@ -38,13 +41,15 @@ public class SagaController {
   @Inject StreamRuneRequestContextHolder requestContext;
 
   /**
-   * Every saga for an {@code ADMIN}; for anyone else the sagas of the caller's own orders, selected
-   * by their ids where the rows are read. A request without an identity is refused.
+   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
+   * orders, selected by their ids where the rows are read. A request without an identity is
+   * refused.
    */
   @GET
-  public List<Map<String, Object>> listSagas(@QueryParam("limit") @DefaultValue("50") int limit) {
+  public List<Map<String, Object>> listSagas(@QueryParam("limit") String limit) {
+    int rows = RequestChecks.wholeNumber(limit, "limit", 50);
     FulfillmentScope scope = queries.fulfillments(RequestCaller.of(requestContext));
-    return FulfillmentSagaRows.read(dataSource, scope, limit);
+    return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, rows);
   }
 
   /**
@@ -57,10 +62,7 @@ public class SagaController {
   public Response getSaga(@PathParam("id") String id) {
     queries.requireFulfillmentAccess(RequestCaller.of(requestContext), id);
     return sagaStore
-        .load(
-            new SagaId(id),
-            SagaType.fromClass(OrderFulfillmentState.class),
-            OrderFulfillmentState.class)
+        .load(new SagaId(id), FULFILLMENT, OrderFulfillmentState.class)
         .map(LoadedSaga::state)
         .map(state -> Response.ok(state).build())
         .orElse(Response.status(Response.Status.NOT_FOUND).build());

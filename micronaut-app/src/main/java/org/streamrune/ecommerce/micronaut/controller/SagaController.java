@@ -28,6 +28,9 @@ import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 @Controller("/api/saga/fulfillments")
 public class SagaController {
 
+  /** The type the saga store records a fulfillment saga under: the list and the single read. */
+  private static final SagaType FULFILLMENT = SagaType.fromClass(OrderFulfillmentState.class);
+
   @Inject SagaStore sagaStore;
   @Inject PaymentGatewaySimulator paymentGateway;
   @Inject DataSource dataSource;
@@ -35,14 +38,15 @@ public class SagaController {
   @Inject ObjectMapper objectMapper;
 
   /**
-   * Every saga for an {@code ADMIN}; for anyone else the sagas of the caller's own orders, selected
-   * by their ids where the rows are read. A request without an identity is refused.
+   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
+   * orders, selected by their ids where the rows are read. A request without an identity is
+   * refused.
    */
   @Get
   public List<Map<String, Object>> listSagas(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
     FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
-    return FulfillmentSagaRows.read(dataSource, scope, limit);
+    return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
   }
 
   /**
@@ -55,10 +59,7 @@ public class SagaController {
     queries.requireFulfillmentAccess(RequestCaller.current(), id);
     TypeReference<Map<String, Object>> typeRef = new TypeReference<>() {};
     return sagaStore
-        .load(
-            new SagaId(id),
-            SagaType.fromClass(OrderFulfillmentState.class),
-            OrderFulfillmentState.class)
+        .load(new SagaId(id), FULFILLMENT, OrderFulfillmentState.class)
         .map(LoadedSaga::state)
         .map(
             state ->

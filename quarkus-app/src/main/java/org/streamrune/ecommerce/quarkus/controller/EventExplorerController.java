@@ -71,13 +71,14 @@ public class EventExplorerController {
 
   @GET
   public List<Map<String, Object>> listEvents(
-      @QueryParam("offset") @DefaultValue("0") long offset,
-      @QueryParam("limit") @DefaultValue("50") int limit) {
+      @QueryParam("offset") String offset, @QueryParam("limit") String limit) {
+    long after = RequestChecks.wholeNumber(offset, "offset", 0L);
+    int count = RequestChecks.wholeNumber(limit, "limit", 50);
     OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
-    if (limit < 0) {
+    if (count < 0) {
       throw new IllegalArgumentException("limit must not be negative");
     }
-    return eventStore.readGlobalStream(new GlobalOffset(offset), limit).stream()
+    return eventStore.readGlobalStream(new GlobalOffset(after), count).stream()
         .map(this::toMap)
         .toList();
   }
