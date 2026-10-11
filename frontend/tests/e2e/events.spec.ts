@@ -9,7 +9,12 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
-import { mockBackendRoutes, collectConsoleErrors, BACKEND_URL } from "./helpers";
+import {
+  mockBackendRoutes,
+  mockFeedThatSendsOnce,
+  collectConsoleErrors,
+  BACKEND_URL,
+} from "./helpers";
 
 /** Opens the page as the given role, as the role switcher would have saved it. */
 async function actAs(page: Page, role: "ADMIN" | "CUSTOMER") {
@@ -97,15 +102,11 @@ test.describe("Event Explorer page", () => {
     await mockBackendRoutes(page);
     // An unnamed frame, as the backend sends it: an id and a data line with the offset, the two
     // types and the timestamp, and no stream id, aggregate id or payload.
-    await page.route(`${BACKEND_URL}/api/events/sse`, (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          "id:7\n" +
-          'data:{"globalOffset":7,"aggregateType":"customer","eventType":"CustomerRegistered",' +
-          '"timestamp":"2026-10-04T00:00:00Z"}\n\n',
-      })
+    await mockFeedThatSendsOnce(
+      page,
+      "id:7\n" +
+        'data:{"globalOffset":7,"aggregateType":"customer","eventType":"CustomerRegistered",' +
+        '"timestamp":"2026-10-04T00:00:00Z"}\n\n'
     );
 
     await page.goto("/events");
@@ -116,8 +117,8 @@ test.describe("Event Explorer page", () => {
     await expect(liveFeed.getByText("CustomerRegistered")).toBeVisible();
     await expect(liveFeed.getByText("customer", { exact: true })).toBeVisible();
     await expect(liveFeed.getByText("#7")).toBeVisible();
-    // The mocked feed ends after its one frame and the page reconnects to the same frame; an
-    // event already listed is not listed again.
+    // The mocked feed ends after its one frame and the page reconnects to a quiet feed: the
+    // event stays listed, once.
     await page.waitForTimeout(2_500);
     await expect(liveFeed.getByText("CustomerRegistered")).toHaveCount(1);
   });
