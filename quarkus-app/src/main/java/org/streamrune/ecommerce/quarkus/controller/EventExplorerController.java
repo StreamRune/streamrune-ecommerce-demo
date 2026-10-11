@@ -3,10 +3,12 @@ package org.streamrune.ecommerce.quarkus.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.subscription.BackPressureStrategy;
+import io.smallrye.mutiny.subscription.MultiEmitter;
+import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
-import java.time.Duration;
+import jakarta.ws.rs.sse.OutboundSseEvent;
 import java.util.List;
 import java.util.Map;
 import org.streamrune.core.EventEnvelope;
@@ -15,6 +17,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
@@ -44,17 +47,27 @@ import org.streamrune.quarkus.StreamRuneRequestContextHolder;
  * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
  * <p>Same paths, response shape and frame format as the Spring app's {@code
- * EventExplorerController}. The feed reads the global stream from its first event and then polls
- * once a second. Its frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
+ * EventExplorerController}.
+ *
+ * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
+ * the client is connected and nothing of what the store held before, so no caller makes the app
+ * read its history: {@link LiveFeed} reads, one reader per connection, and the reader ends when its
+ * client leaves. The frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
  * receives every one of them.
  */
 @Path("/api/events")
 @Produces(MediaType.APPLICATION_JSON)
 public class EventExplorerController {
 
+  /** Maximum number of frames buffered for a slow feed client before its stream is failed. */
+  static final int SLOW_CLIENT_BUFFER = 256;
+
   @Inject EventStore eventStore;
   @Inject ObjectMapper objectMapper;
   @Inject StreamRuneRequestContextHolder requestContext;
+
+  // One feed for the application: Quarkus REST keeps a single instance of a resource class.
+  private final LiveFeed liveFeed = new LiveFeed();
 
   @GET
   public List<Map<String, Object>> listEvents(
@@ -81,57 +94,69 @@ public class EventExplorerController {
   }
 
   /**
-   * The live feed: every event of the global stream as a Server-Sent Event, open to every caller.
+   * The live feed: a frame for every event stored while the client is connected, open to every
+   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events.
    *
    * <p>Frame wire format (matching Spring): {@code id} = globalOffset, no {@code event} name,
    * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
    * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
-   * <p>Uses a bounded Mutiny emitter with back-pressure buffering: slow clients will have up to 256
-   * events buffered; beyond that the stream fails and the client must reconnect.
+   * <p>Uses a bounded Mutiny emitter with back-pressure buffering: a client that reads too slowly
+   * has up to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that the stream fails and the
+   * client reconnects.
    */
   @GET
   @Path("/sse")
   @Produces(MediaType.SERVER_SENT_EVENTS)
-  public Multi<jakarta.ws.rs.sse.OutboundSseEvent> sseStream() {
+  public Multi<OutboundSseEvent> sseStream() {
     return Multi.createFrom()
-        .<jakarta.ws.rs.sse.OutboundSseEvent>emitter(
-            emitter -> {
-              Thread.ofVirtual()
-                  .name("sse-global-event-stream")
-                  .start(
-                      () -> {
-                        GlobalOffset offset = GlobalOffset.initial();
-                        while (!emitter.isCancelled()) {
-                          try {
-                            var events = eventStore.readGlobalStream(offset, 100);
-                            for (var env : events) {
-                              if (emitter.isCancelled()) break;
-                              var data = objectMapper.writeValueAsString(LiveFeedFrame.of(env));
-                              emitter.emit(
-                                  new SseEventFrame(
-                                      String.valueOf(env.globalOffset().value()), data));
-                              offset = env.globalOffset().next();
-                            }
-                            if (events.isEmpty()) {
-                              Thread.sleep(Duration.ofSeconds(1));
-                            }
-                          } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            break;
-                          } catch (Exception e) {
-                            emitter.fail(e);
-                            return;
-                          }
-                        }
-                        if (!emitter.isCancelled()) {
-                          emitter.complete();
-                        }
-                      });
-            },
-            BackPressureStrategy.ERROR)
+        .<OutboundSseEvent>emitter(
+            emitter -> liveFeed.follow(eventStore, clientOf(emitter)), BackPressureStrategy.ERROR)
         .onOverflow()
-        .buffer(256);
+        .buffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /** The client behind one response stream: what the feed's reader sends becomes its frames. */
+  private LiveFeed.Client clientOf(MultiEmitter<? super OutboundSseEvent> emitter) {
+    return new LiveFeed.Client() {
+      @Override
+      public boolean isGone() {
+        return emitter.isCancelled();
+      }
+
+      @Override
+      public void comment(String text) {
+        emitter.emit(new SseFrame(null, null, text));
+      }
+
+      @Override
+      public void event(long globalOffset, Map<String, Object> frame) throws Exception {
+        emitter.emit(
+            new SseFrame(
+                String.valueOf(globalOffset), objectMapper.writeValueAsString(frame), null));
+      }
+
+      @Override
+      public void failed(Exception cause) {
+        emitter.fail(cause);
+      }
+
+      @Override
+      public void ended() {
+        emitter.complete();
+      }
+    };
+  }
+
+  /** The number of clients connected to the live feed. */
+  public int openFeedConnections() {
+    return liveFeed.openConnections();
+  }
+
+  /** Ends the open feeds when the application stops. */
+  @PreDestroy
+  void closeFeed() {
+    liveFeed.close();
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {
@@ -145,9 +170,11 @@ public class EventExplorerController {
         "payload", env.event());
   }
 
-  /** An unnamed SSE frame: an id and a data line, as the Spring app sends it. */
-  private record SseEventFrame(String id, String data)
-      implements jakarta.ws.rs.sse.OutboundSseEvent {
+  /**
+   * An unnamed SSE frame: an id and a data line, as the Spring app sends it, or a comment line
+   * alone. Quarkus REST leaves out a field whose value is {@code null}.
+   */
+  private record SseFrame(String id, String data, String comment) implements OutboundSseEvent {
 
     @Override
     public Class<?> getType() {
@@ -176,7 +203,7 @@ public class EventExplorerController {
 
     @Override
     public String getComment() {
-      return null;
+      return comment;
     }
 
     @Override

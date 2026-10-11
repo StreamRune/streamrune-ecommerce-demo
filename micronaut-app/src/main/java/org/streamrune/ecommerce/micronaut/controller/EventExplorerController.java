@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.annotation.*;
 import io.micronaut.http.sse.Event;
+import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.streamrune.core.EventEnvelope;
@@ -15,6 +15,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
@@ -45,9 +46,13 @@ import reactor.core.publisher.FluxSink;
  * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
  * <p>Same paths, response shape and frame format as the Spring app's {@code
- * EventExplorerController}. The feed reads the global stream from its first event and then polls
- * once a second; a slow client is cut off after 256 buffered events. Its frames are unnamed (no
- * {@code event:} field), so {@code EventSource.onmessage} receives every one of them.
+ * EventExplorerController}.
+ *
+ * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
+ * the client is connected and nothing of what the store held before, so no caller makes the app
+ * read its history: {@link LiveFeed} reads, one reader per connection, and the reader ends when its
+ * client leaves. The frames are unnamed (no {@code event:} field), so {@code EventSource.onmessage}
+ * receives every one of them.
  */
 @Controller("/api/events")
 public class EventExplorerController {
@@ -57,6 +62,8 @@ public class EventExplorerController {
 
   @Inject EventStore eventStore;
   @Inject ObjectMapper objectMapper;
+
+  private final LiveFeed liveFeed = new LiveFeed();
 
   @Get
   public List<Map<String, Object>> listEvents(
@@ -81,54 +88,65 @@ public class EventExplorerController {
   }
 
   /**
-   * The live feed: every event of the global stream as a Server-Sent Event, open to every caller.
+   * The live feed: a frame for every event stored while the client is connected, open to every
+   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events.
    *
    * <p>Frame wire format (matching Spring): {@code id} = globalOffset, no {@code event} name,
    * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
    * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
-   * <p>Uses a Flux with back-pressure buffering: slow clients will have up to {@link
-   * #SLOW_CLIENT_BUFFER} events buffered; beyond that the stream fails and the client must
-   * reconnect.
+   * <p>Uses a Flux with back-pressure buffering: a client that reads too slowly has up to {@link
+   * #SLOW_CLIENT_BUFFER} frames buffered; beyond that the stream fails and the client reconnects.
    */
   @Get("/sse")
   @Produces(MediaType.TEXT_EVENT_STREAM)
   public Flux<Event<String>> sseStream() {
     return Flux.<Event<String>>create(
-            sink -> {
-              Thread.ofVirtual()
-                  .name("sse-global-event-stream")
-                  .start(
-                      () -> {
-                        GlobalOffset offset = GlobalOffset.initial();
-                        while (!sink.isCancelled()) {
-                          try {
-                            var events = eventStore.readGlobalStream(offset, 100);
-                            for (var env : events) {
-                              if (sink.isCancelled()) break;
-                              var data = objectMapper.writeValueAsString(LiveFeedFrame.of(env));
-                              sink.next(
-                                  Event.of(data).id(String.valueOf(env.globalOffset().value())));
-                              offset = env.globalOffset().next();
-                            }
-                            if (events.isEmpty()) {
-                              Thread.sleep(Duration.ofSeconds(1));
-                            }
-                          } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            break;
-                          } catch (Exception e) {
-                            sink.error(e);
-                            return;
-                          }
-                        }
-                        if (!sink.isCancelled()) {
-                          sink.complete();
-                        }
-                      });
-            },
-            FluxSink.OverflowStrategy.ERROR)
+            sink -> liveFeed.follow(eventStore, clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
+  }
+
+  /** The client behind one response stream: what the feed's reader sends becomes its frames. */
+  private LiveFeed.Client clientOf(FluxSink<Event<String>> sink) {
+    return new LiveFeed.Client() {
+      @Override
+      public boolean isGone() {
+        return sink.isCancelled();
+      }
+
+      @Override
+      public void comment(String text) {
+        // Micronaut writes one blank after the colon of every line itself.
+        sink.next(Event.of("").comment(text.strip()));
+      }
+
+      @Override
+      public void event(long globalOffset, Map<String, Object> frame) throws Exception {
+        sink.next(
+            Event.of(objectMapper.writeValueAsString(frame)).id(String.valueOf(globalOffset)));
+      }
+
+      @Override
+      public void failed(Exception cause) {
+        sink.error(cause);
+      }
+
+      @Override
+      public void ended() {
+        sink.complete();
+      }
+    };
+  }
+
+  /** The number of clients connected to the live feed. */
+  public int openFeedConnections() {
+    return liveFeed.openConnections();
+  }
+
+  /** Ends the open feeds when the application stops. */
+  @PreDestroy
+  void closeFeed() {
+    liveFeed.close();
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {

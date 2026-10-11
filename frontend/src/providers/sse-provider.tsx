@@ -101,8 +101,8 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [connected, setConnected] = useState(false);
   const [recentEvents, setRecentEvents] = useState<LiveEvent[]>([]);
-  // The feed starts at the first event of the store on every connection, so after a reconnect
-  // it repeats what was already received. Events up to this offset are known and skipped.
+  // The feed is live: a connection starts at the head of the event store and is sent what is
+  // stored from then on. A frame at or below this offset has been counted and is skipped.
   const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
   const esRef = useRef<EventSource | null>(null);
