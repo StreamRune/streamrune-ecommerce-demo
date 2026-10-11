@@ -532,7 +532,7 @@ Open a persistent SSE connection in a separate terminal to watch new events arri
 curl -N http://localhost:8080/api/events/sse
 ```
 
-The terminal prints `: connected` and nothing of the events above: the feed starts at the head of the store. Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
+The terminal prints `: connected` within a second and nothing of the events above: the feed starts at the head of the store. Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
 
 ---
 
