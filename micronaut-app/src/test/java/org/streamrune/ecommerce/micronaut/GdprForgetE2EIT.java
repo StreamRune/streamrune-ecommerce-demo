@@ -354,7 +354,8 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
     // while the key exists (the projection consumed the event and the engine decrypted the fields).
     // 30 s, not 15: every Micronaut test class starts its own application context, and the previous
     // class's context can still hold the projection leases when this one starts. Its projections
-    // then stay on standby until those leases expire (15 s TTL, retried every 5 s).
+    // then stay on standby until those leases expire (5 s TTL in the test profile, retried about
+    // every 1.7 s).
     await()
         .atMost(Duration.ofSeconds(30))
         .pollInterval(Duration.ofMillis(200))
