@@ -226,10 +226,10 @@ public class AdminController {
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue("eventOffset") @Nullable Long eventOffset,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
+    GlobalOffset offset = requiredOffset(eventOffset);
     requireAdmin();
     var outcome =
-        sagaDeadLetterReplayer.replay(
-            sagaId == null ? null : SagaId.of(sagaId), requiredOffset(eventOffset), force);
+        sagaDeadLetterReplayer.replay(sagaId == null ? null : SagaId.of(sagaId), offset, force);
     return Map.of("outcome", outcome.name());
   }
 
@@ -241,8 +241,9 @@ public class AdminController {
   public Map<String, List<String>> replayAllSagaDeadLetters(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
+    SagaId saga = requiredSagaId(sagaId);
     requireAdmin();
-    var outcomes = sagaDeadLetterReplayer.replayAll(requiredSagaId(sagaId), force);
+    var outcomes = sagaDeadLetterReplayer.replayAll(saga, force);
     return Map.of("outcomes", outcomes.stream().map(Enum::name).toList());
   }
 
@@ -255,8 +256,9 @@ public class AdminController {
   public Map<String, String> resumeFaultedSaga(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue(value = "force", defaultValue = "false") boolean force) {
+    SagaId saga = requiredSagaId(sagaId);
     requireAdmin();
-    var outcome = sagaDeadLetterReplayer.resumeFaulted(requiredSagaId(sagaId), force);
+    var outcome = sagaDeadLetterReplayer.resumeFaulted(saga, force);
     return Map.of("outcome", outcome.name());
   }
 
@@ -269,10 +271,10 @@ public class AdminController {
   public Map<String, Boolean> discardSagaDeadLetter(
       @QueryValue("sagaId") @Nullable String sagaId,
       @QueryValue("eventOffset") @Nullable Long eventOffset) {
+    GlobalOffset offset = requiredOffset(eventOffset);
     requireAdmin();
     boolean discarded =
-        sagaDeadLetterReplayer.discard(
-            sagaId == null ? null : SagaId.of(sagaId), requiredOffset(eventOffset));
+        sagaDeadLetterReplayer.discard(sagaId == null ? null : SagaId.of(sagaId), offset);
     return Map.of("discarded", discarded);
   }
 

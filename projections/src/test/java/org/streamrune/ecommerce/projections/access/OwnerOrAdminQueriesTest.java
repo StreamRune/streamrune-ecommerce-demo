@@ -219,6 +219,111 @@ class OwnerOrAdminQueriesTest {
     assertThat(reads).isEmpty();
   }
 
+  // --- fulfillment sagas ---
+
+  @Test
+  void aFulfillmentIsReadByTheCustomerOfItsOrderAndByAnAdmin() {
+    queries.requireFulfillmentAccess(ALICE, "fulfillment-o-a1");
+    queries.requireFulfillmentAccess(ALICE, "fulfillment-o-a2");
+    queries.requireFulfillmentAccess(BOB, "fulfillment-o-b1");
+    queries.requireFulfillmentAccess(OPERATOR, "fulfillment-o-a1");
+    queries.requireFulfillmentAccess(OPERATOR, "fulfillment-o-b1");
+
+    assertThat(reads)
+        .as("the owner is the customer the order's row names; an ADMIN needs no owner")
+        .containsExactly("orders.get(o-a1)", "orders.get(o-a2)", "orders.get(o-b1)");
+  }
+
+  @Test
+  void theFulfillmentOfAnotherCustomersOrderAndOfAnOrderWithoutARowAreRefusedAlike() {
+    assertRefused(() -> queries.requireFulfillmentAccess(BOB, "fulfillment-o-a1"));
+    assertRefused(() -> queries.requireFulfillmentAccess(CAROL, "fulfillment-o-a1"));
+    // The order's read-model row does not exist (yet): no known owner, as for the order itself.
+    assertRefused(() -> queries.requireFulfillmentAccess(BOB, "fulfillment-o-none"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "fulfillment-o-none"));
+  }
+
+  @Test
+  void aSagaIdThatIsNotTheFulfillmentIdOfAnOrderHasNoOwner() {
+    // The order id alone, the caller's own id, the prefix alone, another spelling, no id.
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "o-a1"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "alice"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "fulfillment-"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "fulfillment- "));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, "FULFILLMENT-o-a1"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, " fulfillment-o-a1"));
+    assertRefused(() -> queries.requireFulfillmentAccess(ALICE, null));
+  }
+
+  @Test
+  void anAdminGetsPastASagaIdWithoutAnOrder() {
+    queries.requireFulfillmentAccess(OPERATOR, "fulfillment-o-none");
+    queries.requireFulfillmentAccess(OPERATOR, "o-a1");
+
+    assertThat(reads).isEmpty();
+  }
+
+  @Test
+  void aFulfillmentIsRefusedWithoutAnIdentityBeforeTheReadModelIsAsked() {
+    assertRefused(() -> queries.requireFulfillmentAccess(ANONYMOUS, "fulfillment-o-a1"));
+    assertRefused(
+        () -> queries.requireFulfillmentAccess(ROLE_WITHOUT_IDENTITY, "fulfillment-o-a1"));
+    assertRefused(() -> queries.requireFulfillmentAccess(NO_CONTEXT, "fulfillment-o-a1"));
+
+    assertThat(reads).isEmpty();
+  }
+
+  @Test
+  void anAdminListsEverySaga() {
+    FulfillmentScope scope = queries.fulfillments(OPERATOR);
+
+    assertThat(scope.everySaga()).isTrue();
+    assertThat(scope.sagaIds()).isEmpty();
+    assertThat(reads).isEmpty();
+  }
+
+  @Test
+  void aCustomerListsTheFulfillmentsOfTheirOwnOrdersByTheirIds() {
+    assertThat(queries.fulfillments(ALICE).everySaga()).isFalse();
+    assertThat(queries.fulfillments(ALICE).sagaIds())
+        .containsExactlyInAnyOrder("fulfillment-o-a1", "fulfillment-o-a2");
+    assertThat(queries.fulfillments(BOB).everySaga()).isFalse();
+    assertThat(queries.fulfillments(BOB).sagaIds()).containsExactly("fulfillment-o-b1");
+    // An identity without an order, and an identity without a role: their own, which is nothing.
+    assertThat(queries.fulfillments(CAROL).everySaga()).isFalse();
+    assertThat(queries.fulfillments(CAROL).sagaIds()).isEmpty();
+    assertThat(queries.fulfillments(caller("alice", null)).everySaga()).isFalse();
+    assertThat(queries.fulfillments(caller("alice", null)).sagaIds())
+        .containsExactlyInAnyOrder("fulfillment-o-a1", "fulfillment-o-a2");
+
+    assertThat(reads)
+        .as("a customer's list comes from the read of their own orders, never from all orders")
+        .doesNotContain("orders.listAll()")
+        .contains("orders.listByCustomer(alice)", "orders.listByCustomer(bob)");
+  }
+
+  @Test
+  void theFulfillmentListIsRefusedWithoutAnIdentity() {
+    assertRefused(() -> queries.fulfillments(ANONYMOUS));
+    assertRefused(() -> queries.fulfillments(ROLE_WITHOUT_IDENTITY));
+    assertRefused(() -> queries.fulfillments(NO_CONTEXT));
+
+    assertThat(reads).isEmpty();
+  }
+
+  @Test
+  void aScopeThatIsNotEverySagaHoldsItsIdsAndOneThatIsHoldsNone() {
+    assertThat(FulfillmentScope.all().everySaga()).isTrue();
+    assertThat(FulfillmentScope.all().sagaIds()).isEmpty();
+    assertThat(FulfillmentScope.only(List.of("fulfillment-o-1")).everySaga()).isFalse();
+    assertThat(FulfillmentScope.only(List.of("fulfillment-o-1")).sagaIds())
+        .containsExactly("fulfillment-o-1");
+    assertThatThrownBy(() -> new FulfillmentScope(true, List.of("fulfillment-o-1")))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new FulfillmentScope(false, null))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
   @Test
   void bothReadModelsAreRequired() {
     assertThatThrownBy(() -> new OwnerOrAdminQueries(null, new OrderProjection(repository)))

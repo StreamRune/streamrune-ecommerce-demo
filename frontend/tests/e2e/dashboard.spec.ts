@@ -10,32 +10,28 @@ import { test, expect } from "@playwright/test";
 import {
   actAs,
   mockBackendRoutes,
+  mockFeedThatSendsOnce,
   collectConsoleErrors,
   recordApiRequests,
   requestsTo,
-  BACKEND_URL,
 } from "./helpers";
 
 test.describe("Dashboard page", () => {
-  test("the live event feed lists a payload-free frame", async ({ page }) => {
+  test("the live event feed lists a frame that names no stream", async ({ page }) => {
     await mockBackendRoutes(page);
-    // An unnamed frame, as the backend sends it: an id and a data line without a payload.
-    await page.route(`${BACKEND_URL}/api/events/sse`, (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          "id:3\n" +
-          'data:{"globalOffset":3,"streamId":"product:prod-widget","aggregateType":"product",' +
-          '"aggregateId":"prod-widget","eventType":"ProductCreated","version":1,' +
-          '"timestamp":"2026-10-04T00:00:00Z"}\n\n',
-      })
+    // An unnamed frame, as the backend sends it: an id and a data line with the offset, the two
+    // types and the timestamp, and no stream id, aggregate id or payload.
+    await mockFeedThatSendsOnce(
+      page,
+      "id:3\n" +
+        'data:{"globalOffset":3,"aggregateType":"product","eventType":"ProductCreated",' +
+        '"timestamp":"2026-10-04T00:00:00Z"}\n\n'
     );
 
     await page.goto("/");
 
     await expect(page.getByText("ProductCreated")).toBeVisible();
-    await expect(page.getByText("product:prod-widget")).toBeVisible();
+    await expect(page.getByText("product", { exact: true })).toBeVisible();
   });
 
   test("renders heading and SSE indicator without console errors", async ({ page }) => {

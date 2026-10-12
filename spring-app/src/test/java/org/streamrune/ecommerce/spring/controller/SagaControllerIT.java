@@ -267,23 +267,34 @@ class SagaControllerIT extends AbstractIntegrationTest {
   }
 
   /**
-   * A saga's state names the order, the customer, the payment and the total of one purchase, and
-   * the list holds every customer's: both reads are for the ADMIN role.
+   * A saga's state names the order, the customer, the payment and the total of one purchase: an
+   * ADMIN reads every saga, a customer the sagas of their own orders ({@code
+   * OwnerOrAdminRestAccessIT} has the table of callers). A request without an identity is refused
+   * on both reads, and a customer is refused the saga of an order that is not theirs.
    */
   @Test
-  void theSagaReadsRequireTheAdminRole() {
+  void theSagaReadsAreForAnAdminOrTheCustomerOfTheOrder() {
     for (String path :
         new String[] {"/api/saga/fulfillments", "/api/saga/fulfillments/fulfillment-any"}) {
       client.get().uri(path).exchange().expectStatus().isForbidden();
-      client
-          .get()
-          .uri(path)
-          .header("X-User-Role", "CUSTOMER")
-          .header("X-User-Id", "cust-alice")
-          .exchange()
-          .expectStatus()
-          .isForbidden();
+      client.get().uri(path).header("X-User-Role", "ADMIN").exchange().expectStatus().isForbidden();
     }
+    client
+        .get()
+        .uri("/api/saga/fulfillments")
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", "cust-alice")
+        .exchange()
+        .expectStatus()
+        .isOk();
+    client
+        .get()
+        .uri("/api/saga/fulfillments/fulfillment-any")
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", "cust-alice")
+        .exchange()
+        .expectStatus()
+        .isForbidden();
     client
         .get()
         .uri("/api/saga/fulfillments")

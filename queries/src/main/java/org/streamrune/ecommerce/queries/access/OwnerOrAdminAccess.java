@@ -9,11 +9,12 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  * first of all.
  *
  * <p>Every place that hands out or changes one customer's data decides here: the REST reads and
- * writes of customers and orders ({@code OwnerOrAdminQueries} for the reads, the command
- * controllers for the writes) and the per-stream SSE endpoint ({@link OwnerOrAdminStreamAccess}).
- * The {@code ADMIN}-only endpoints (the admin panel, the audit log, the event history, the saga
- * list, the product and inventory writes) ask {@link #requireAdmin}. Both go through {@link
- * #isAdmin}, the demo's one definition of an {@code ADMIN}: the role together with an identity.
+ * writes of customers and orders and the reads of the fulfillment sagas ({@code
+ * OwnerOrAdminQueries} for the reads, the command controllers for the writes) and the per-stream
+ * SSE endpoint ({@link OwnerOrAdminStreamAccess}). The {@code ADMIN}-only endpoints (the admin
+ * panel, the audit log, the event history, the payment-failure switch, the product and inventory
+ * writes) ask {@link #requireAdmin}. Both go through {@link #isAdmin}, the demo's one definition of
+ * an {@code ADMIN}: the role together with an identity.
  *
  * <p><b>Who the caller is.</b> The request context the framework's request filter built for the
  * request. Its {@code userId()} is the caller's identity, {@code null} for a request without one.
@@ -28,6 +29,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *   <li>An order belongs to the customer its read-model row names. An order without a row has no
  *       known owner: only an {@code ADMIN} gets past it, and a customer is answered as for an order
  *       of somebody else. The refusal therefore does not tell a caller whether an order exists.
+ *   <li>A fulfillment saga belongs to the order it fulfils, the order its id names ({@code
+ *       "fulfillment-" + orderId}), and so to that order's customer.
  * </ul>
  *
  * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 of the tutorial describes: the demo runs in the

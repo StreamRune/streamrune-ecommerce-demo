@@ -21,9 +21,9 @@ import org.junit.jupiter.api.Test;
  * Who gets what from the REST API of the running Micronaut app, over real HTTP. The rule is {@code
  * OwnerOrAdminAccess}'s (unit-tested as a table in the {@code queries} module, and for the rows of
  * a list in {@code OwnerOrAdminQueriesTest}): an authenticated {@code ADMIN}, or the customer the
- * data belongs to. This test proves that every customer and order endpoint of the app asks it, with
- * the caller the request named, and which status a refused caller gets: {@code 403}, with or
- * without an identity.
+ * data belongs to. This test proves that every customer, order and fulfillment endpoint of the app
+ * asks it, with the caller the request named, and which status a refused caller gets: {@code 403},
+ * with or without an identity.
  *
  * <p>Each endpoint is called by four callers: one without an identity (with and without the {@code
  * ADMIN} role header), an authenticated customer who is not the owner, the owner, and an {@code
@@ -343,6 +343,118 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get("/api/orders/" + forged, OPERATOR, ADMIN).statusCode()).isEqualTo(404);
   }
 
+  // --- GET /api/saga/fulfillments/{id} ---
+
+  @Test
+  void oneFulfillmentIsReadByTheCustomerOfItsOrderAndByAnAdminOnly() throws Exception {
+    String alice = uniqueId("alice");
+    String bob = uniqueId("bob");
+    String order = placedOrder(alice);
+    String saga = "/api/saga/fulfillments/fulfillment-" + order;
+    awaitFulfillmentStatus(order, "COMPLETED");
+
+    // No identity: refused, whatever the role header says.
+    assertThat(get(saga, null, null).statusCode()).isEqualTo(403);
+    assertThat(get(saga, null, ADMIN).statusCode()).isEqualTo(403);
+    // Another customer: refused, with the answer an order of somebody else gets.
+    HttpResponse<String> refused = get(saga, bob, CUSTOMER);
+    assertThat(refused.statusCode()).isEqualTo(403);
+    assertThat(refused.body()).isEqualTo(get("/api/orders/" + order, bob, CUSTOMER).body());
+    assertThat(refused.body()).doesNotContain(order, alice);
+    // The saga of an order without a row answers a customer as another customer's saga does.
+    String none = "/api/saga/fulfillments/fulfillment-" + uniqueId("o-none");
+    assertThat(get(none, bob, CUSTOMER).statusCode()).isEqualTo(403);
+    assertThat(get(none, alice, CUSTOMER).statusCode()).isEqualTo(403);
+    assertThat(get(none, alice, CUSTOMER).body()).isEqualTo(refused.body());
+    // An id that is not the fulfillment id of an order has no owner: the order id alone, the
+    // caller's own id, the prefix with nothing behind it.
+    assertThat(get("/api/saga/fulfillments/" + order, alice, CUSTOMER).statusCode()).isEqualTo(403);
+    assertThat(get("/api/saga/fulfillments/" + alice, alice, CUSTOMER).statusCode()).isEqualTo(403);
+    assertThat(get("/api/saga/fulfillments/fulfillment-", alice, CUSTOMER).statusCode())
+        .isEqualTo(403);
+
+    // The order's customer, with or without a role header: the saga of their own order.
+    HttpResponse<String> own = get(saga, alice, CUSTOMER);
+    assertThat(own.statusCode()).isEqualTo(200);
+    JsonNode state = JSON.readTree(own.body());
+    List<String> fields = new ArrayList<>();
+    state.fieldNames().forEachRemaining(fields::add);
+    assertThat(fields)
+        .containsExactlyInAnyOrder(
+            "sagaId",
+            "orderId",
+            "customerId",
+            "paymentId",
+            "orderTotal",
+            "lines",
+            "fulfillmentStatus");
+    assertThat(state.get("orderId").asText()).isEqualTo(order);
+    assertThat(state.get("customerId").asText()).isEqualTo(alice);
+    assertThat(state.get("paymentId").asText()).isEqualTo("pay-" + order);
+    assertThat(state.get("fulfillmentStatus").asText()).isEqualTo("COMPLETED");
+    assertThat(get(saga, alice, null).statusCode()).isEqualTo(200);
+
+    // An ADMIN reads any saga, the same answer the owner gets, and learns that one does not exist.
+    HttpResponse<String> asAdmin = get(saga, OPERATOR, ADMIN);
+    assertThat(asAdmin.statusCode()).isEqualTo(200);
+    assertThat(JSON.readTree(asAdmin.body())).isEqualTo(state);
+    assertThat(get(none, OPERATOR, ADMIN).statusCode()).isEqualTo(404);
+  }
+
+  // --- GET /api/saga/fulfillments ---
+
+  @Test
+  void theFulfillmentListHoldsTheSagasOfTheCallersOwnOrdersAndEverySagaForAnAdmin()
+      throws Exception {
+    String alice = uniqueId("alice");
+    String bob = uniqueId("bob");
+    String a1 = "fulfillment-" + placedOrder(alice);
+    String a2 = "fulfillment-" + placedOrder(alice);
+    String b1 = "fulfillment-" + placedOrder(bob);
+    String list = "/api/saga/fulfillments";
+
+    assertThat(get(list, null, null).statusCode()).isEqualTo(403);
+    assertThat(get(list, null, ADMIN).statusCode()).isEqualTo(403);
+    assertThat(get(list + "?limit=1000", null, null).statusCode()).isEqualTo(403);
+
+    assertThat(ids(get(list, alice, CUSTOMER), "sagaId")).containsExactlyInAnyOrder(a1, a2);
+    assertThat(ids(get(list, bob, CUSTOMER), "sagaId")).containsExactly(b1);
+    assertThat(ids(get(list, alice, null), "sagaId")).containsExactlyInAnyOrder(a1, a2);
+    // An identity without an order: an empty list, not everybody's.
+    assertThat(ids(get(list, uniqueId("carol"), CUSTOMER), "sagaId")).isEmpty();
+    // No parameter widens the list, and naming another customer selects nothing of theirs.
+    assertThat(ids(get(list + "?limit=1000&offset=0&all=true", alice, CUSTOMER), "sagaId"))
+        .containsExactlyInAnyOrder(a1, a2);
+    assertThat(ids(get(list + "?customerId=" + bob, alice, CUSTOMER), "sagaId"))
+        .containsExactlyInAnyOrder(a1, a2);
+    // The page size narrows the caller's own rows: the highest saga id first.
+    assertThat(ids(get(list + "?limit=1", alice, CUSTOMER), "sagaId"))
+        .containsExactly(a1.compareTo(a2) > 0 ? a1 : a2);
+    assertThat(ids(get(list + "?limit=0", alice, CUSTOMER), "sagaId")).isEmpty();
+
+    // A row: the saga, its type, the framework's status and the state, which names the caller.
+    for (JsonNode row : JSON.readTree(get(list, alice, CUSTOMER).body())) {
+      List<String> fields = new ArrayList<>();
+      row.fieldNames().forEachRemaining(fields::add);
+      assertThat(fields).containsExactlyInAnyOrder("sagaId", "sagaType", "status", "state");
+      JsonNode state = JSON.readTree(row.get("state").asText());
+      assertThat(state.get("customerId").asText()).isEqualTo(alice);
+      assertThat("fulfillment-" + state.get("orderId").asText())
+          .isEqualTo(row.get("sagaId").asText());
+    }
+    assertThat(get(list, alice, CUSTOMER).body()).doesNotContain(bob, b1);
+
+    // An ADMIN lists every saga.
+    assertThat(ids(get(list + "?limit=100000", OPERATOR, ADMIN), "sagaId")).contains(a1, a2, b1);
+    assertThat(ids(get(list + "?limit=1", OPERATOR, ADMIN), "sagaId")).hasSize(1);
+
+    // A page size that cannot be read is a 400 for a caller the rule lets in, a 403 for the rest.
+    assertThat(get(list + "?limit=-1", alice, CUSTOMER).statusCode()).isEqualTo(400);
+    assertThat(get(list + "?limit=-1", OPERATOR, ADMIN).statusCode()).isEqualTo(400);
+    assertThat(get(list + "?limit=-1", null, null).statusCode()).isEqualTo(403);
+    assertThat(get(list + "?limit=-1", null, ADMIN).statusCode()).isEqualTo(403);
+  }
+
   // --- the endpoints that are for an ADMIN, and the open ones ---
 
   @Test
@@ -351,7 +463,6 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     for (String path :
         new String[] {
           "/api/audit/commands",
-          "/api/saga/fulfillments",
           "/api/events",
           "/api/events/customer/" + customer,
           "/api/admin/circuit-breaker",
@@ -365,12 +476,6 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
       assertRefusedForEveryoneButAnAdmin("GET", path, null, customer);
       assertThat(get(path, OPERATOR, ADMIN).statusCode()).as("%s as an ADMIN", path).isEqualTo(200);
     }
-
-    // One saga: refused before the saga is looked up, so the status says nothing about its
-    // existence; an ADMIN learns that it does not exist.
-    String saga = "/api/saga/fulfillments/fulfillment-" + uniqueId("o-none");
-    assertRefusedForEveryoneButAnAdmin("GET", saga, null, customer);
-    assertThat(get(saga, OPERATOR, ADMIN).statusCode()).isEqualTo(404);
 
     // A page size that cannot be read is the ADMIN's mistake, a 400, and still a 403 for the rest.
     assertRefusedForEveryoneButAnAdmin("GET", "/api/events?limit=-1", null, customer);
@@ -545,6 +650,40 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     }
   }
 
+  @Test
+  void aQueryParameterThatCannotBeReadIsAnswered400WhoeverSendsIt() throws Exception {
+    String customer = uniqueId("alice");
+    String[][] unreadable = {
+      // A number that is not one, on every endpoint that takes a page size or an offset.
+      {"GET", "/api/saga/fulfillments?limit=abc"},
+      {"GET", "/api/saga/fulfillments?limit=1.5"},
+      {"GET", "/api/saga/fulfillments?limit=99999999999"},
+      {"GET", "/api/events?limit=abc"},
+      {"GET", "/api/events?offset=abc"},
+      {"GET", "/api/audit/commands?limit=abc"},
+      {"GET", "/api/admin/dead-letters?limit=abc"},
+      {"GET", "/api/admin/outbox?limit=abc"},
+      {"GET", "/api/admin/outbox/failed?limit=abc"},
+      {"GET", "/api/admin/saga-dead-letters?limit=abc"},
+      {"GET", "/api/admin/sagas/faulted?limit=abc"},
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1&eventOffset=abc"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1&eventOffset=abc"},
+      // A required parameter that is missing.
+      {"POST", "/api/admin/saga-dead-letters/replay?sagaId=fulfillment-o-1"},
+      {"DELETE", "/api/admin/saga-dead-letters?sagaId=fulfillment-o-1"},
+      {"POST", "/api/admin/saga-dead-letters/replay-all"},
+      {"POST", "/api/admin/sagas/faulted/resume"}
+    };
+    String[][] callers = {{null, null}, {null, ADMIN}, {customer, CUSTOMER}, {OPERATOR, ADMIN}};
+    for (String[] request : unreadable) {
+      for (String[] caller : callers) {
+        assertThat(send(request[0], request[1], caller[0], caller[1], null).statusCode())
+            .as("%s %s as id=%s role=%s", request[0], request[1], caller[0], caller[1])
+            .isEqualTo(400);
+      }
+    }
+  }
+
   // --- helpers ---
 
   private URI server() {
@@ -712,6 +851,20 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .isBetween(200, 299);
     awaitOrderStatus(order, "CONFIRMED");
     return order;
+  }
+
+  /** Waits until the fulfillment saga of the order reached the given fulfillment status. */
+  private void awaitFulfillmentStatus(String order, String status) {
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              HttpResponse<String> response =
+                  get("/api/saga/fulfillments/fulfillment-" + order, OPERATOR, ADMIN);
+              assertThat(response.statusCode()).isEqualTo(200);
+              assertThat(response.body()).contains("\"fulfillmentStatus\":\"" + status + "\"");
+            });
   }
 
   private void awaitOrderStatus(String order, String status) {

@@ -92,16 +92,16 @@ export interface OrderFulfillmentState {
 }
 
 /**
- * One frame of the live feed (GET /api/events/sse): which event, of which
- * stream, and when. The feed is open to every role, so it carries no payload.
+ * One frame of the live feed (GET /api/events/sse): an event of this type
+ * happened to an aggregate of this type, and when. The feed is open and cannot
+ * ask who is calling, so a frame names no stream: no stream id, no aggregate
+ * id, no payload. It is the signal to read again; what changed is read from
+ * the guarded endpoints with the session's identity headers.
  */
 export interface LiveEvent {
   globalOffset: number;
-  streamId: string;
   aggregateType: string;
-  aggregateId: string;
   eventType: string;
-  version: number;
   timestamp: string;
 }
 

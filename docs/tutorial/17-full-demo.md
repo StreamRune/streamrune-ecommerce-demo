@@ -264,7 +264,7 @@ Expected output: `"UP"`
 
 ### Step 2: Open the Frontend
 
-Open `http://localhost:3000` in your browser. The Dashboard page loads with four stat cards and a live event feed. The green dot on the Event Explorer item in the sidebar confirms that the SSE connection to `/api/events/sse` is established. Seed data is loaded automatically on first startup — see the note below.
+Open `http://localhost:3000` in your browser. The Dashboard page loads with four stat cards and a live event feed. The feed panel is empty at first: it shows what happens while the page is open, and the events of the seed data are history by then (an `ADMIN` finds them in the Event Explorer's Historical Browser). The green dot on the Event Explorer item in the sidebar confirms that the SSE connection to `/api/events/sse` is established. Seed data is loaded automatically on first startup — see the note below.
 
 > **Where does the seed data come from?**
 >
@@ -403,7 +403,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
 
 Expected output: `"COMPLETED"`
 
-The saga endpoints are for the ADMIN role (Chapter 11): a saga names the order, the customer and the payment. In the browser, switch to `ADMIN` and open the Fulfillment page. The order row for `ord-1` walks through Payment → Inventory → Confirmation → Completed; the step visualizer updates in real time via SSE — no page refresh needed.
+A fulfillment saga is read by whoever may read its order (Chapter 11): an `ADMIN`, or the order's customer. `cust-walkthrough` gets the same answer with `-H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER"`; any other customer, and a caller without an identity, gets `403`. In the browser, switch to `ADMIN` and open the Fulfillment page. The card `fulfillment-ord-1` moves from Started through In Progress to Completed; the tracker updates via SSE — no page refresh needed. As a `CUSTOMER` the same page lists the sagas of that persona's own orders (the role switcher offers the two seeded customers, so `cust-walkthrough`'s saga is not among them).
 
 Confirm the order state — the saga's final `ConfirmOrder` emitted `OrderConfirmed`, so the projection reports:
 
@@ -532,7 +532,7 @@ Open a persistent SSE connection in a separate terminal to watch new events arri
 curl -N http://localhost:8080/api/events/sse
 ```
 
-Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame names the event — global offset, type, stream, version, timestamp — and carries no payload.
+The terminal prints `: connected` within a second and nothing of the events above: the feed starts at the head of the store. Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
 
 ---
 

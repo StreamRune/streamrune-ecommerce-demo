@@ -2,11 +2,13 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micronaut.http.HttpResponse;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.annotation.*;
 import io.micronaut.http.sse.Event;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.streamrune.core.EventEnvelope;
@@ -15,6 +17,9 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeed;
+import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -35,17 +40,28 @@ import reactor.core.publisher.FluxSink;
  * the two headers. A real deployment authenticates the caller, derives the role from that identity,
  * and does not expose raw event payloads outside an operator's tooling.
  *
- * <p><b>The live feed is open and carries no payload.</b> The browser's {@code EventSource} cannot
- * send the role header, and the dashboard only needs to know that something happened to a stream. A
- * frame holds the event's global offset, its type, the stream it belongs to, its version in that
- * stream and its timestamp, never the event itself. Every caller therefore sees which streams
- * exist, customer ids and order ids among them, and which events happen on them when: the ids are
- * public here, the data behind them is not.
+ * <p><b>The live feed is open and names no stream.</b> The browser's {@code EventSource} cannot
+ * send the two headers, so the feed cannot ask who is calling and every connection is anonymous. A
+ * frame is a {@link LiveFeedFrame}: the event's global offset, the type of its aggregate, the event
+ * type and the timestamp. It holds no stream id, no aggregate id and no payload, for an {@code
+ * ADMIN} as for everyone else, so no caller learns a customer id or an order id from it: the feed
+ * says that a customer registered or an order was placed, and when, not which one. A view that
+ * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
  * <p>Same paths, response shape and frame format as the Spring app's {@code
- * EventExplorerController}. The feed reads the global stream from its first event and then polls
- * once a second; a slow client is cut off after 256 buffered events. Its frames are unnamed (no
- * {@code event:} field), so {@code EventSource.onmessage} receives every one of them.
+ * EventExplorerController}.
+ *
+ * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
+ * the client is connected and nothing of what the store held before, so no caller makes the app
+ * read its history. The frames are unnamed (no {@code event:} field), so {@code
+ * EventSource.onmessage} receives every one of them.
+ *
+ * <p><b>One reader, a bounded number of connections.</b> {@link LiveFeed} reads: one reader for the
+ * application asks the event store once per polling interval and hands every frame to every
+ * connected client, so what the feed costs the store does not grow with the number of connections.
+ * The reader runs while a client is connected. The feed has {@link LiveFeed#MAX_CONNECTIONS}
+ * places; the connection that would be one more is answered {@code 503 Service Unavailable} with
+ * {@code Retry-After} ({@link LiveFeedFullException}).
  */
 @Controller("/api/events")
 public class EventExplorerController {
@@ -55,6 +71,10 @@ public class EventExplorerController {
 
   @Inject EventStore eventStore;
   @Inject ObjectMapper objectMapper;
+
+  // One feed, and so one reader, for the application: a controller is a singleton. Built once the
+  // event store is injected.
+  private LiveFeed liveFeed;
 
   @Get
   public List<Map<String, Object>> listEvents(
@@ -79,70 +99,103 @@ public class EventExplorerController {
   }
 
   /**
-   * The live feed: every event of the global stream as a Server-Sent Event, open to every caller.
+   * The live feed: a frame for every event stored while the client is connected, open to every
+   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events.
    *
    * <p>Frame wire format (matching Spring): {@code id} = globalOffset, no {@code event} name,
-   * {@code data} = JSON map
-   * (globalOffset/streamId/aggregateType/aggregateId/eventType/version/timestamp), without the
-   * event's payload.
+   * {@code data} = the JSON of a {@link LiveFeedFrame} (global offset, aggregate type, event type
+   * and timestamp), without a stream id, an aggregate id or the event's payload.
    *
-   * <p>Uses a Flux with back-pressure buffering: slow clients will have up to {@link
-   * #SLOW_CLIENT_BUFFER} events buffered; beyond that the stream fails and the client must
-   * reconnect.
+   * <p>The place is taken before the answer starts: when the feed has none left, {@link
+   * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code LiveFeedFullExceptionHandler}
+   * answers {@code 503} with {@code Retry-After}. Taking a place and registering the client read
+   * nothing and wait for nothing, so they block no event loop; the store is read by the feed's own
+   * thread. The client is registered when Micronaut subscribes the {@code Flux}; a place whose
+   * stream is never subscribed is free again after {@link LiveFeed#FOLLOW_TIMEOUT}.
+   *
+   * <p>Uses a Flux with back-pressure buffering. The feed's reader hands a frame to the sink and
+   * goes on to the next client; it never waits for this one. A client that reads too slowly has up
+   * to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that its stream fails, its place is free
+   * again and the client reconnects.
    */
   @Get("/sse")
   @Produces(MediaType.TEXT_EVENT_STREAM)
   public Flux<Event<String>> sseStream() {
+    LiveFeed.Place place = liveFeed.admit();
     return Flux.<Event<String>>create(
-            sink -> {
-              Thread.ofVirtual()
-                  .name("sse-global-event-stream")
-                  .start(
-                      () -> {
-                        GlobalOffset offset = GlobalOffset.initial();
-                        while (!sink.isCancelled()) {
-                          try {
-                            var events = eventStore.readGlobalStream(offset, 100);
-                            for (var env : events) {
-                              if (sink.isCancelled()) break;
-                              var data = objectMapper.writeValueAsString(toFrame(env));
-                              sink.next(
-                                  Event.of(data).id(String.valueOf(env.globalOffset().value())));
-                              offset = env.globalOffset().next();
-                            }
-                            if (events.isEmpty()) {
-                              Thread.sleep(Duration.ofSeconds(1));
-                            }
-                          } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            break;
-                          } catch (Exception e) {
-                            sink.error(e);
-                            return;
-                          }
-                        }
-                        if (!sink.isCancelled()) {
-                          sink.complete();
-                        }
-                      });
-            },
-            FluxSink.OverflowStrategy.ERROR)
+            sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
         .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
   }
 
   /**
-   * What the live feed says about an event: which one, of which stream, and when. No payload — the
-   * feed is open to every caller.
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
    */
-  private static Map<String, Object> toFrame(EventEnvelope env) {
-    return Map.of(
-        "globalOffset", env.globalOffset().value(),
-        "streamId", env.streamId().value(),
-        "aggregateType", env.aggregateType().value(),
-        "aggregateId", env.aggregateId().value(),
-        "eventType", env.eventType().name(),
-        "version", env.version().value(),
-        "timestamp", env.metadata().timestamp().toString());
+  @Head("/sse")
+  @Produces(MediaType.TEXT_EVENT_STREAM)
+  public HttpResponse<?> sseHead() {
+    return HttpResponse.ok().contentType(MediaType.TEXT_EVENT_STREAM_TYPE);
+  }
+
+  /** The client behind one response stream: what the feed's reader sends becomes its frames. */
+  private LiveFeed.Client clientOf(FluxSink<Event<String>> sink) {
+    return new LiveFeed.Client() {
+      @Override
+      public boolean isGone() {
+        return sink.isCancelled();
+      }
+
+      @Override
+      public void comment(String text) {
+        // Micronaut writes one blank after the colon of every line itself.
+        sink.next(Event.of("").comment(text.strip()));
+      }
+
+      @Override
+      public void event(long globalOffset, Map<String, Object> frame) throws Exception {
+        sink.next(
+            Event.of(objectMapper.writeValueAsString(frame)).id(String.valueOf(globalOffset)));
+      }
+
+      @Override
+      public void failed(Exception cause) {
+        sink.error(cause);
+      }
+
+      @Override
+      public void ended() {
+        sink.complete();
+      }
+    };
+  }
+
+  /** The number of clients connected to the live feed. */
+  public int openFeedConnections() {
+    return liveFeed.openConnections();
+  }
+
+  /** Whether the feed's reader runs: it does while a client is connected. */
+  public boolean feedReaderRuns() {
+    return liveFeed.isReading();
+  }
+
+  /** How many times the feed's reader has asked the event store. */
+  public long feedStoreReads() {
+    return liveFeed.storeReads();
+  }
+
+  /** Builds the feed when the application starts; its reader starts with the first client. */
+  @PostConstruct
+  public void openFeed() {
+    liveFeed = new LiveFeed(eventStore);
+  }
+
+  /** Completes the open feeds and ends the reader when the application stops. */
+  @PreDestroy
+  public void closeFeed() {
+    liveFeed.close();
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {

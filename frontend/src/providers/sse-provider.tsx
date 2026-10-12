@@ -26,6 +26,12 @@ const SSEContext = createContext<SSEContextValue>({
   recentEvents: [],
 });
 
+/**
+ * The queries an event of the given type makes stale. A frame names no stream,
+ * so the decision is by event type alone and every query of a kind is read
+ * again, each with the session's identity headers: the backend answers with
+ * what that identity may see.
+ */
 function invalidationKeysFor(eventType: string): string[][] {
   const keys: string[][] = [["dashboard"], ["events"]];
 
@@ -46,6 +52,8 @@ function invalidationKeysFor(eventType: string): string[][] {
     ].includes(eventType)
   ) {
     keys.push(["orders"]);
+    // The saga starts with OrderPlaced and ends with OrderConfirmed or OrderCancelled.
+    keys.push(["fulfillment"]);
   }
   if (
     [
@@ -93,10 +101,12 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [connected, setConnected] = useState(false);
   const [recentEvents, setRecentEvents] = useState<LiveEvent[]>([]);
-  // The feed starts at the first event of the store on every connection, so after a reconnect
-  // it repeats what was already received. Events up to this offset are known and skipped.
+  // The feed is live: a connection starts at the head of the event store and is sent what is
+  // stored from then on. Within one connection a frame at or below this offset has been counted
+  // and is skipped; every connection starts counting again (see onopen).
   const lastOffsetRef = useRef(0);
   const retryRef = useRef(0);
+  const hasConnectedRef = useRef(false);
   const esRef = useRef<EventSource | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -108,15 +118,26 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       }
 
       // An EventSource cannot send request headers, so the feed is the one endpoint the browser
-      // calls without X-User-Role. The backend keeps it open to everyone and sends frames
-      // without the event's payload (see LiveEvent); the frames are unnamed, so onmessage
-      // receives them all.
+      // calls without X-User-Id and X-User-Role. The backend keeps it open to everyone and
+      // sends frames that name no stream and carry no payload (see LiveEvent); the frames are
+      // unnamed, so onmessage receives them all.
       const es = new EventSource(`${API_URL}/api/events/sse`);
       esRef.current = es;
 
       es.onopen = () => {
         setConnected(true);
         retryRef.current = 0;
+        // A connection is sent nothing that was stored before it, so there is nothing to skip
+        // across connections, and the offsets of the new one need not be above the old ones: an
+        // event store that was created again counts from the start.
+        lastOffsetRef.current = 0;
+        // What was stored while the page was disconnected is not sent after the reconnect: a
+        // connection starts at the head. Every list is read again instead, each with the
+        // session's identity headers.
+        if (hasConnectedRef.current) {
+          void queryClient.invalidateQueries();
+        }
+        hasConnectedRef.current = true;
       };
 
       es.onmessage = (event) => {

@@ -8,10 +8,10 @@
  *
  * Uses mocked backend throughout — runs without the Spring Boot backend.
  *
- * The flow runs as GUEST (an empty localStorage). Orders and Customers require
- * the CUSTOMER or ADMIN role and Fulfillment and Audit Log the ADMIN role, so a
- * GUEST sees "Access Restricted" there: the rendered state that proves the
- * page loaded without crashing.
+ * The flow runs as GUEST (an empty localStorage). Orders, Customers and
+ * Fulfillment require the CUSTOMER or ADMIN role and Audit Log the ADMIN role,
+ * so a GUEST sees "Access Restricted" there: the rendered state that proves
+ * the page loaded without crashing.
  */
 
 import { test, expect } from "@playwright/test";

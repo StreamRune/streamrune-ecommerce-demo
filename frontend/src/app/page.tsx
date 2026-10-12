@@ -94,7 +94,7 @@ export default function DashboardPage() {
         <StatCard
           title="Live Events"
           value={recentEvents.length}
-          subtitle="Last 50 events"
+          subtitle="Since this page opened"
           icon={Zap}
           href="/events"
         />

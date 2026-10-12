@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.projections.access;
 
 import java.util.List;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
@@ -14,7 +15,9 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  * to every read. The three applications answer {@code GET /api/customers}, {@code GET
  * /api/customers/{id}}, {@code GET /api/orders} and {@code GET /api/orders/{id}} from this class
  * and hand it the caller's request context; a refusal is an {@link AccessRefusedException}, which
- * each application answers with {@code 403}.
+ * each application answers with {@code 403}. The fulfillment sagas, {@code GET
+ * /api/saga/fulfillments} and {@code GET /api/saga/fulfillments/{id}}, are decided here too: a
+ * fulfillment belongs to its order.
  *
  * <ul>
  *   <li><b>One customer, one order:</b> an authenticated {@code ADMIN} or the owner; {@code null}
@@ -23,6 +26,10 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
  *       rows that are their own, selected by their id before anything is returned; a request
  *       without an identity is refused.
+ *   <li><b>A fulfillment saga:</b> whoever may read the order it fulfils. The saga of an order has
+ *       the id {@code "fulfillment-" + orderId}, the id {@code OrderFulfillmentSaga} derives from
+ *       {@code OrderPlaced}, so the order is known from the saga id and its owner is the customer
+ *       the order's read-model row names.
  * </ul>
  *
  * <p>A forgotten customer has no row: {@code CustomerProjection} deletes it. The customer and an
@@ -119,5 +126,59 @@ public final class OwnerOrAdminQueries {
    */
   public void requireOrderAccess(StreamRuneContext.RequestContext caller, String orderId) {
     order(caller, orderId);
+  }
+
+  /**
+   * Refuses a caller who may not read the fulfillment saga with the given id: the guard of {@code
+   * GET /api/saga/fulfillments/{id}}. An {@code ADMIN} gets past it for any id. Any other caller
+   * must be the customer of the order the saga fulfils, decided as {@link #order} decides it: the
+   * order id is what follows {@code "fulfillment-"} in the saga id, and the owner is the customer
+   * the order's read-model row names.
+   *
+   * <p>A saga id of another shape belongs to no order and has no owner. Neither has the saga of an
+   * order without a row: {@code OrderProjection} writes the row after {@code OrderPlaced} is
+   * stored, so for a moment after {@code POST /api/orders} the order's customer is refused here
+   * exactly as {@code GET /api/orders/{id}} refuses them, and reads the fulfillment once the order
+   * answers. The refusal is the same in every case, so it does not tell a caller whether a saga or
+   * an order exists.
+   *
+   * @throws AccessRefusedException unless the caller is an {@code ADMIN} or that customer
+   */
+  public void requireFulfillmentAccess(StreamRuneContext.RequestContext caller, String sagaId) {
+    OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return;
+    }
+    String orderId = orderIdOf(sagaId);
+    OwnerOrAdminAccess.requireOrderAccess(caller, orderId == null ? null : orders.get(orderId));
+  }
+
+  /** The id of the order a fulfillment saga id names, or {@code null} when it names none. */
+  private static String orderIdOf(String sagaId) {
+    String prefix = OrderCommand.PlaceOrder.SAGA_ID_PREFIX;
+    if (sagaId == null || !sagaId.startsWith(prefix)) {
+      return null;
+    }
+    String orderId = sagaId.substring(prefix.length());
+    return orderId.isBlank() ? null : orderId;
+  }
+
+  /**
+   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
+   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
+   * the order read model holds for the caller's id, so an order without a row yet has no saga on
+   * the caller's list yet.
+   *
+   * @throws AccessRefusedException for a request without an identity
+   */
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return FulfillmentScope.all();
+    }
+    return FulfillmentScope.only(
+        orders.listByCustomer(identity).stream()
+            .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
+            .toList());
   }
 }

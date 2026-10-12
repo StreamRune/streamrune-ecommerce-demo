@@ -1,6 +1,8 @@
 package org.streamrune.ecommerce.spring.config;
 
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -8,6 +10,8 @@ import org.streamrune.core.AuthorizationException;
 import org.streamrune.core.DomainException;
 import org.streamrune.core.crypto.SubjectForgottenException;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
+import org.streamrune.ecommerce.queries.access.LiveFeed;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -50,5 +54,19 @@ public class GlobalExceptionHandler {
   @ExceptionHandler(AccessRefusedException.class)
   public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
     return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  /**
+   * The open live feed has no place for another connection ({@code LiveFeed.admit}): {@code 503}
+   * with {@code Retry-After}. The limit is the application's and not the caller's, hence not {@code
+   * 429}. The body is plain text whatever the request accepts: a feed client asks for an event
+   * stream, and this answer is not one.
+   */
+  @ExceptionHandler(LiveFeedFullException.class)
+  public ResponseEntity<String> handleLiveFeedFull(LiveFeedFullException e) {
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .header(HttpHeaders.RETRY_AFTER, String.valueOf(LiveFeed.RETRY_AFTER_SECONDS))
+        .contentType(MediaType.TEXT_PLAIN)
+        .body(e.getMessage());
   }
 }

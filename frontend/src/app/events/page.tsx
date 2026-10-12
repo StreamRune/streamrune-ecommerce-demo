@@ -44,7 +44,11 @@ function EventRow({ event }: { event: EventEntry }) {
   );
 }
 
-/** A live feed row: the event's type, stream and version. The feed carries no payload. */
+/**
+ * A live feed row: the event's type and the type of its aggregate. The feed names no stream and
+ * carries no payload; an ADMIN finds both in the history below, which is read again on every
+ * frame.
+ */
 function LiveEventRow({ event }: { event: LiveEvent }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border last:border-0">
@@ -54,8 +58,7 @@ function LiveEventRow({ event }: { event: LiveEvent }) {
       <Badge className={cn("text-xs shrink-0", getAggregateBadgeClass(event.eventType))}>
         {event.eventType}
       </Badge>
-      <span className="text-xs text-muted-foreground truncate flex-1">{event.streamId}</span>
-      <span className="text-xs text-muted-foreground shrink-0 tabular-nums">v{event.version}</span>
+      <span className="text-xs text-muted-foreground truncate flex-1">{event.aggregateType}</span>
       <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
         {new Date(event.timestamp).toLocaleTimeString()}
       </span>
@@ -97,8 +100,8 @@ function HistoricalBrowser() {
         <div>
           <p className="text-sm font-medium">Requires ADMIN role to browse the event history.</p>
           <p className="text-xs text-muted-foreground mt-1">
-            The history shows each event with its payload, decrypted. The live feed above lists
-            events without their payload.
+            The history shows each event with its stream and its payload, decrypted. The live
+            feed above lists the type of each event and names no stream.
           </p>
         </div>
       </div>
@@ -231,7 +234,7 @@ export default function EventsPage() {
             </div>
           ) : (
             recentEvents.map((event) => (
-              <LiveEventRow key={`live-${event.globalOffset}-${event.streamId}`} event={event} />
+              <LiveEventRow key={`live-${event.globalOffset}-${event.timestamp}`} event={event} />
             ))
           )}
         </div>

@@ -164,16 +164,647 @@ No additional code is required for this step. Proceed to Step 5 and return here 
 
 ### Step 5: Create EventExplorerController
 
-Create `EventExplorerController` in the `org.streamrune.ecommerce.spring.controller` package. This controller exposes three endpoints on `/api/events`:
+The controller of this step exposes three endpoints on `/api/events`: two that read the event history for an `ADMIN`, and a live feed that is open to every caller. What the open feed may say about an event is a decision of its own, shared by the three apps, so it gets a class of its own next to the access rule of Chapter 9. Create `queries/src/main/java/org/streamrune/ecommerce/queries/access/LiveFeedFrame.java`:
+
+```java
+package org.streamrune.ecommerce.queries.access;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.streamrune.core.EventEnvelope;
+
+/**
+ * What the open live feed, {@code GET /api/events/sse}, says about one event: that an event of this
+ * type happened to an aggregate of this type, when, and where it stands in the global stream. The
+ * three applications build every frame of the feed here.
+ *
+ * <p><b>A frame names no stream.</b> It carries no stream id, no aggregate id, no version within a
+ * stream and no payload. A stream id holds a customer id or an order id, and the feed cannot ask
+ * who is calling: a browser's {@code EventSource} sends no {@code X-User-Id} and no {@code
+ * X-User-Role}, so every connection is anonymous. What an anonymous caller may not learn is
+ * therefore left out for everyone, an {@code ADMIN} included. A caller of the feed learns that a
+ * customer registered or that an order was placed, and when; not which customer, and not which
+ * order.
+ *
+ * <p><b>Where the detail is.</b> A view that wants to know what changed reads it from the guarded
+ * endpoints, with the caller's two headers: the customer and order reads ({@link
+ * OwnerOrAdminAccess}), and for an {@code ADMIN} the event history, {@code GET /api/events}. The
+ * frame is the signal to read again; the aggregate type and the event type say which read.
+ */
+public final class LiveFeedFrame {
+
+  private LiveFeedFrame() {}
+
+  /**
+   * The frame of one event, with its fields in the order they are written.
+   *
+   * @param event an event of the global stream
+   * @return {@code globalOffset}, {@code aggregateType}, {@code eventType} and {@code timestamp},
+   *     and nothing else
+   */
+  public static Map<String, Object> of(EventEnvelope event) {
+    Map<String, Object> frame = new LinkedHashMap<>();
+    frame.put("globalOffset", event.globalOffset().value());
+    frame.put("aggregateType", event.aggregateType().value());
+    frame.put("eventType", event.eventType().name());
+    frame.put("timestamp", event.metadata().timestamp().toString());
+    return frame;
+  }
+}
+```
+
+The frame says what the feed tells; the reader says what the feed may cost. A connection of the open feed is anonymous, so everything the app does for one connection it does for anybody, as often as they connect. Two rules follow. A connection starts at the head of the global stream and is sent what is stored while it is open: a caller who could ask for the history would make the app read and decrypt every event of the store. And the app reads the store once for all its connections: one reader polls the global stream and hands each frame to every connected client, and the feed takes a bounded number of connections. The connection that would be one more is refused with an exception of its own. Create `LiveFeedFullException.java` in the same package:
+
+```java
+package org.streamrune.ecommerce.queries.access;
+
+/**
+ * The open live feed has no place for another connection: thrown by {@link LiveFeed#admit} when
+ * {@link LiveFeed#MAX_CONNECTIONS} clients are connected. Each application answers it with {@code
+ * 503 Service Unavailable} and a {@code Retry-After} of {@link LiveFeed#RETRY_AFTER_SECONDS}
+ * seconds.
+ *
+ * <p>{@code 503} and not {@code 429}: the limit is the application's, shared by every caller, and
+ * says nothing about how many requests this caller sent. The feed cannot tell its callers apart, so
+ * it has nobody to count requests for.
+ */
+public final class LiveFeedFullException extends RuntimeException {
+
+  private static final long serialVersionUID = 1L;
+
+  public LiveFeedFullException(int places) {
+    super(
+        "The live feed serves "
+            + places
+            + " connections at once and all of them are taken; try again in a few seconds");
+  }
+}
+```
+
+Then create `LiveFeed.java` next to it:
+
+```java
+package org.streamrune.ecommerce.queries.access;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.EventStore;
+import org.streamrune.core.types.GlobalOffset;
+
+/**
+ * The reader behind the open live feed, {@code GET /api/events/sse}: one thread per application,
+ * the same loop in the three applications. It polls the global stream once per {@link
+ * #POLLING_INTERVAL} and hands the frame of every event it reads to every connected client. An
+ * application takes a {@link Place} for a connection and hands it a {@link Client} that writes to
+ * its own kind of response stream.
+ *
+ * <p><b>What a connection costs.</b> The feed is open to every caller, so what one connection costs
+ * the application is what any number of anonymous callers can make it pay. The event store is asked
+ * by the one reader: one read of the global stream per polling interval, however many clients are
+ * connected, and one read of its head in an interval in which clients joined. An event is read, and
+ * its {@code @Encrypted} fields are decrypted, once per application and not once per connection. A
+ * connection costs its socket and the frames buffered for it, and the feed has {@link
+ * #MAX_CONNECTIONS} places: {@link #admit} refuses the connection that would be one more, and the
+ * application answers it {@code 503 Service Unavailable} with {@code Retry-After}.
+ *
+ * <p><b>A place nobody follows.</b> A place is taken before the answer starts, and its client is
+ * registered when the web framework subscribes the response stream. A framework does not always get
+ * that far: Quarkus, for one, does not subscribe the stream of a request whose connection was reset
+ * before the answer is written. Such a place has no client that could leave, so nothing else would
+ * ever free it, and a caller who abandons a hundred requests would leave the feed full until the
+ * application restarts. A place that is not followed within {@link #FOLLOW_TIMEOUT} is therefore
+ * free again: {@link #admit}, the reader's round and {@link #openConnections} drop the pending
+ * places that are older. A client that is registered on a place that was dropped is completed at
+ * once, and reconnects. A subscription takes milliseconds, so the timeout is far above what a
+ * served connection needs and far below what a caller would have to wait for a place. Taking the
+ * place only when the stream is subscribed would need no such rule, but by then the answer has
+ * started, and the connection that is one too many could not be refused with a status any more.
+ *
+ * <p><b>The places add up.</b> The number of places taken is the number of pending places (taken,
+ * not followed yet) plus the number of registered clients. The feed keeps these two collections and
+ * no counter beside them: a place leaves the first when it is followed or dropped, a client leaves
+ * the second when it left, was dropped or was completed, and removing either twice changes nothing.
+ * The number can therefore not drift, in either direction.
+ *
+ * <p><b>When the reader runs.</b> It starts with the first client and ends when the last one has
+ * left, so an application nobody watches reads nothing. Nothing is lost by stopping: a connection
+ * starts at the head, so a reader that starts again has no position to keep. {@link #close} ends it
+ * when the application stops. Whatever ends the reader's thread, an {@code Error} included, its
+ * clients are told and the feed knows that it has no reader: the next client starts a new one.
+ *
+ * <p><b>The feed is live.</b> A connection starts at the head of the global stream. Nothing that
+ * was stored before the client connected is sent to it, whatever the request carries, and no
+ * connection makes the reader go back. A view that wants what happened earlier reads it from the
+ * guarded endpoints: the lists of the read models, and for an {@code ADMIN} the event history,
+ * {@code GET /api/events}.
+ *
+ * <p><b>The opening frame, and why no event after it is missed.</b> A client that has received the
+ * comment frame {@code : connected} receives a frame for every event stored from then on, for as
+ * long as it stays connected. The order of three steps makes that true:
+ *
+ * <ol>
+ *   <li>{@link Place#follow} registers the client;
+ *   <li>the reader, in its next round, takes the clients registered so far and <em>then</em> reads
+ *       the head of the global stream, {@code EventStore.lastGlobalOffset()}; that offset, {@code
+ *       H}, is where these clients start;
+ *   <li>the reader sends them {@code : connected} and from then on hands them every event it reads
+ *       whose offset is above {@code H}.
+ * </ol>
+ *
+ * <p>The event store's contract for the head is that an event which becomes readable after {@code
+ * lastGlobalOffset()} returned has a greater offset than the one returned. An event stored after
+ * the client received {@code : connected} became readable after step 2, so its offset is above
+ * {@code H}. The reader's own position is a head it read earlier or the offset of an event it has
+ * read, so it is at or below {@code H}; from there it reads the global stream in offset order, as
+ * every polling subscription does, so it reaches every event above {@code H}, and by then the
+ * client is among the clients it hands frames to, because the client was registered before {@code
+ * H} was read. Had the head been read first and the client registered afterwards, an event stored
+ * between the two would be above that head and could be read and handed out before the client was
+ * there to receive it. An event at or below {@code H} is never sent to the client: it was stored
+ * before the client's {@code : connected}. Events stored while a client is away are not sent after
+ * it reconnects; the client reads its lists again instead.
+ *
+ * <p><b>A client that cannot keep up.</b> The reader never waits for a client: a {@link Client}
+ * takes a frame without blocking, and the response stream behind it buffers a bounded number of
+ * frames for a client that reads slowly. A client whose buffer is full is dropped: its stream
+ * fails, its place is free again and it reconnects. A slow or dead client therefore never holds up
+ * the reader, which is all the clients share, and a client whose write fails is dropped alone.
+ *
+ * <p><b>A client that went away.</b> The reader forgets a client within one polling interval of
+ * {@link Client#isGone} turning {@code true}. A server that learns of a closed connection only when
+ * a write to it fails gets that write from the keep-alive: a comment frame after every {@link
+ * #KEEP_ALIVE_INTERVAL} without an event.
+ *
+ * <p><b>An application that stops.</b> {@link #close} completes every client and returns when the
+ * reader has ended, so no open stream holds a shutdown that waits for requests in flight, and no
+ * read is under way when the data source closes.
+ */
+public final class LiveFeed implements AutoCloseable {
+
+  /** How long the reader waits before it asks the store again. */
+  public static final Duration POLLING_INTERVAL = Duration.ofSeconds(1);
+
+  /** How long the feed stays without a frame before the reader sends a keep-alive comment. */
+  public static final Duration KEEP_ALIVE_INTERVAL = Duration.ofSeconds(5);
+
+  /**
+   * How many clients the feed serves at once. A browser tab holds one connection, so a hundred is
+   * far more than a demo is shown to, and it bounds what anonymous callers can hold: a hundred
+   * sockets and the frames buffered for them.
+   */
+  public static final int MAX_CONNECTIONS = 100;
+
+  /**
+   * The {@code Retry-After} of the answer to a connection the feed has no place for, in seconds. A
+   * place is free again within seconds of its client leaving.
+   */
+  public static final int RETRY_AFTER_SECONDS = 5;
+
+  /**
+   * How long a place waits for its client. A framework registers the client of a connection within
+   * milliseconds of taking the place; a place that is still pending after this long belongs to a
+   * request the framework gave up, and is free again.
+   */
+  public static final Duration FOLLOW_TIMEOUT = Duration.ofSeconds(5);
+
+  /** The text of the opening comment frame; the line on the wire is {@code : connected}. */
+  public static final String CONNECTED_COMMENT = " connected";
+
+  /** The text of the keep-alive comment frame; the line on the wire is {@code : keepalive}. */
+  public static final String KEEP_ALIVE_COMMENT = " keepalive";
+
+  /** The name of the reader's thread. */
+  public static final String READER_THREAD_NAME = "live-feed-reader";
+
+  private static final int BATCH_SIZE = 100;
+
+  /** How long {@link #close} waits for a read that is under way. */
+  private static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(10);
+
+  /**
+   * One connected client, as its application's response stream sees it. The reader calls every
+   * method from its one thread, and no method may wait for the client: {@link #comment} and {@link
+   * #event} hand the frame to a response stream that buffers it, and a stream whose buffer is full
+   * fails itself and from then on answers {@link #isGone} with {@code true}.
+   */
+  public interface Client {
+
+    /** Whether the client disconnected or was dropped; the reader then forgets it. */
+    boolean isGone();
+
+    /** Takes a comment frame: a line that starts with a colon and carries no event. */
+    void comment(String text) throws Exception;
+
+    /**
+     * Takes the frame of one event.
+     *
+     * @param globalOffset the event's global offset, the frame's {@code id}
+     * @param frame the event's {@link LiveFeedFrame}, the frame's {@code data}; one unmodifiable
+     *     map for all the clients
+     */
+    void event(long globalOffset, Map<String, Object> frame) throws Exception;
+
+    /** Ends the stream with an error: the feed sends this client nothing more. */
+    void failed(Exception cause);
+
+    /** Ends the stream normally: the feed is closing. */
+    void ended();
+  }
+
+  /**
+   * One of the feed's places, taken by {@link #admit} for one connection. It is pending until
+   * {@link #follow} registers its client, and free again when that client has left, was dropped or
+   * was completed, or when nobody followed it within the feed's follow timeout.
+   */
+  public final class Place {
+
+    private final long admittedAt = System.nanoTime();
+    private boolean followed;
+
+    private Place() {}
+
+    /**
+     * Registers the client and returns at once; the reader serves it from its next round on. On a
+     * closed feed, and on a place that was dropped because nobody followed it in time, the client
+     * is completed at once.
+     *
+     * @param client the connected client
+     */
+    public void follow(Client client) {
+      boolean served;
+      synchronized (lock) {
+        if (followed) {
+          throw new IllegalStateException("a place serves one client");
+        }
+        followed = true;
+        // Not pending any more: the place was dropped, and may be somebody else's by now.
+        boolean held = pending.remove(this);
+        served = held && !closed;
+        if (served) {
+          followers.add(new Follower(client));
+          if (reader == null) {
+            reader =
+                Thread.ofPlatform()
+                    .daemon()
+                    .name(READER_THREAD_NAME)
+                    .unstarted(LiveFeed.this::read);
+            reader.start();
+          }
+        }
+      }
+      if (!served) {
+        client.ended();
+      }
+    }
+  }
+
+  /** What one step of the reader hands a client. */
+  private interface Frame {
+    void handTo(Client client) throws Exception;
+  }
+
+  /** A registered client. Only the reader's thread reads and writes the two fields. */
+  private static final class Follower {
+
+    private static final long NOT_STARTED = -1;
+
+    final Client client;
+
+    /** The offset this client starts after: the head the reader read once it was registered. */
+    long after = NOT_STARTED;
+
+    /** Set when a write to the client failed; it is sent nothing more. */
+    boolean dropped;
+
+    Follower(Client client) {
+      this.client = client;
+    }
+  }
+
+  private final EventStore eventStore;
+  private final Duration pollingInterval;
+  private final Duration keepAliveInterval;
+  private final int maxConnections;
+  private final Duration followTimeout;
+  private final AtomicLong storeReads = new AtomicLong();
+
+  /** Guards the four fields below. Never held during a store read or a call to a client. */
+  private final Object lock = new Object();
+
+  /** The places taken and not followed yet, oldest first. */
+  private final Set<Place> pending = new LinkedHashSet<>();
+
+  /** The registered clients. With {@link #pending}, all the places that are taken. */
+  private final List<Follower> followers = new ArrayList<>();
+
+  private Thread reader;
+  private boolean closed;
+
+  /**
+   * A feed with the intervals and the number of places of the running applications.
+   *
+   * @param eventStore the store whose global stream the clients follow
+   */
+  public LiveFeed(EventStore eventStore) {
+    this(eventStore, POLLING_INTERVAL, KEEP_ALIVE_INTERVAL, MAX_CONNECTIONS, FOLLOW_TIMEOUT);
+  }
+
+  /** A feed with intervals, places and a follow timeout of its own, for a test. */
+  public LiveFeed(
+      EventStore eventStore,
+      Duration pollingInterval,
+      Duration keepAliveInterval,
+      int maxConnections,
+      Duration followTimeout) {
+    this.eventStore = eventStore;
+    this.pollingInterval = pollingInterval;
+    this.keepAliveInterval = keepAliveInterval;
+    this.maxConnections = maxConnections;
+    this.followTimeout = followTimeout;
+  }
+
+  /**
+   * Takes a place for one connection. An application calls this before it answers, so a connection
+   * the feed has no place for gets a status and not a stream. It never waits and reads nothing, so
+   * an event loop may call it.
+   *
+   * @return the place; hand its client to {@link Place#follow}
+   * @throws LiveFeedFullException when every place is taken
+   */
+  public Place admit() {
+    synchronized (lock) {
+      dropPlacesNobodyFollowed();
+      if (pending.size() + followers.size() >= maxConnections) {
+        throw new LiveFeedFullException(maxConnections);
+      }
+      Place place = new Place();
+      pending.add(place);
+      return place;
+    }
+  }
+
+  /**
+   * The number of places taken: the pending places and the clients the feed serves. A place nobody
+   * followed in time is not counted.
+   */
+  public int openConnections() {
+    synchronized (lock) {
+      dropPlacesNobodyFollowed();
+      return pending.size() + followers.size();
+    }
+  }
+
+  /** The number of places that are taken and not followed yet, whatever their age. */
+  int pendingPlaces() {
+    synchronized (lock) {
+      return pending.size();
+    }
+  }
+
+  /** The number of registered clients. */
+  int registeredClients() {
+    synchronized (lock) {
+      return followers.size();
+    }
+  }
+
+  /** Whether the reader runs. */
+  public boolean isReading() {
+    synchronized (lock) {
+      return reader != null;
+    }
+  }
+
+  /** How many times the reader has asked the event store, for its head or for events. */
+  public long storeReads() {
+    return storeReads.get();
+  }
+
+  /**
+   * Completes every client and waits until the reader has ended. A client that connects while the
+   * feed is closed is completed at once.
+   */
+  @Override
+  public void close() {
+    Thread ending;
+    synchronized (lock) {
+      closed = true;
+      ending = reader;
+      lock.notifyAll();
+    }
+    if (ending != null) {
+      try {
+        ending.join(CLOSE_TIMEOUT);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /** Serves clients again after a {@link #close}: an application that is started a second time. */
+  public void open() {
+    synchronized (lock) {
+      closed = false;
+    }
+  }
+
+  // --- the reader's thread ---
+
+  private void read() {
+    try {
+      GlobalOffset position = null;
+      long quietSince = System.nanoTime();
+      while (true) {
+        // The clients registered so far, and only then the head: steps 1 and 2 of the class
+        // comment.
+        List<Follower> round = clientsOfThisRound();
+        if (round.isEmpty()) {
+          return;
+        }
+        List<Follower> joining =
+            round.stream().filter(follower -> follower.after == Follower.NOT_STARTED).toList();
+        if (position == null || !joining.isEmpty()) {
+          GlobalOffset head = head();
+          if (position == null) {
+            // The head, not the start: the reader never reads the store's history.
+            position = head;
+          }
+          for (Follower follower : joining) {
+            follower.after = head.value();
+            hand(follower, client -> client.comment(CONNECTED_COMMENT));
+          }
+        }
+        List<EventEnvelope> events = eventsAfter(position);
+        for (EventEnvelope event : events) {
+          long offset = event.globalOffset().value();
+          Map<String, Object> frame = Collections.unmodifiableMap(LiveFeedFrame.of(event));
+          for (Follower follower : round) {
+            if (offset > follower.after) {
+              hand(follower, client -> client.event(offset, frame));
+            }
+          }
+          // readGlobalStream reads the events after the offset it is given.
+          position = event.globalOffset();
+        }
+        if (!events.isEmpty()) {
+          quietSince = System.nanoTime();
+        } else if (System.nanoTime() - quietSince >= keepAliveInterval.toNanos()) {
+          for (Follower follower : round) {
+            hand(follower, client -> client.comment(KEEP_ALIVE_COMMENT));
+          }
+          quietSince = System.nanoTime();
+        }
+        // A full batch means there is more to read; otherwise the store is asked again after the
+        // polling interval, whoever connects in between.
+        if (events.size() < BATCH_SIZE) {
+          pause();
+        }
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      endAll(Client::ended);
+    } catch (RuntimeException e) {
+      // The store cannot be read: every client is told, and reconnects.
+      endAll(client -> client.failed(e));
+    } finally {
+      // Whatever ended this thread, an Error that passes through here included: while the feed
+      // still takes it for its reader, no client would start another one and the clients it
+      // served would wait for ever. They are told, and the feed has no reader. An Error goes on
+      // to the thread's uncaught exception handler.
+      List<Follower> left = List.of();
+      synchronized (lock) {
+        if (reader == Thread.currentThread()) {
+          left = takeAll();
+        }
+      }
+      for (Follower follower : left) {
+        quietly(
+            follower.client,
+            client -> client.failed(new IllegalStateException("The feed's reader has ended")));
+      }
+    }
+  }
+
+  /**
+   * The clients the reader serves in one round, without the ones that left. Empty when the reader
+   * is to end: the feed is closed (its clients are completed here), or no client is left.
+   */
+  private List<Follower> clientsOfThisRound() {
+    List<Follower> registered;
+    synchronized (lock) {
+      registered = List.copyOf(followers);
+    }
+    List<Follower> left = registered.stream().filter(f -> f.dropped || f.client.isGone()).toList();
+    List<Follower> completed;
+    synchronized (lock) {
+      dropPlacesNobodyFollowed();
+      followers.removeAll(left);
+      if (!closed) {
+        if (followers.isEmpty()) {
+          reader = null;
+        }
+        return List.copyOf(followers);
+      }
+      completed = takeAll();
+    }
+    completed.forEach(follower -> quietly(follower.client, Client::ended));
+    return List.of();
+  }
+
+  private GlobalOffset head() {
+    storeReads.incrementAndGet();
+    return eventStore.lastGlobalOffset();
+  }
+
+  private List<EventEnvelope> eventsAfter(GlobalOffset position) {
+    storeReads.incrementAndGet();
+    return eventStore.readGlobalStream(position, BATCH_SIZE);
+  }
+
+  /** Hands one frame to one client. A client that cannot take it is dropped, alone. */
+  private void hand(Follower follower, Frame frame) {
+    if (follower.dropped || follower.client.isGone()) {
+      return;
+    }
+    try {
+      frame.handTo(follower.client);
+    } catch (Exception e) {
+      follower.dropped = true;
+      quietly(follower.client, client -> client.failed(e));
+    }
+  }
+
+  /** Waits one polling interval, or until the feed is closed. */
+  private void pause() throws InterruptedException {
+    synchronized (lock) {
+      if (!closed) {
+        lock.wait(Math.max(1, pollingInterval.toMillis()));
+      }
+    }
+  }
+
+  private void endAll(Consumer<Client> ending) {
+    List<Follower> all;
+    synchronized (lock) {
+      all = takeAll();
+    }
+    all.forEach(follower -> quietly(follower.client, ending));
+  }
+
+  /** Forgets every client, frees their places and ends the reader. The caller holds the lock. */
+  private List<Follower> takeAll() {
+    List<Follower> all = List.copyOf(followers);
+    followers.clear();
+    reader = null;
+    return all;
+  }
+
+  /**
+   * Frees the pending places that are older than the follow timeout. They are kept oldest first, so
+   * the first one that is young enough ends the search. The caller holds the lock.
+   */
+  private void dropPlacesNobodyFollowed() {
+    long now = System.nanoTime();
+    Iterator<Place> oldestFirst = pending.iterator();
+    while (oldestFirst.hasNext()
+        && now - oldestFirst.next().admittedAt >= followTimeout.toNanos()) {
+      oldestFirst.remove();
+    }
+  }
+
+  /** A stream that cannot be ended is one the client has left already. */
+  private static void quietly(Client client, Consumer<Client> ending) {
+    try {
+      ending.accept(client);
+    } catch (RuntimeException alreadyOver) {
+      // nothing to end
+    }
+  }
+}
+```
+
+`admit` takes one of the feed's 100 places or throws `LiveFeedFullException`; `Place.follow` registers the client and starts the reader's thread if it is not running. The reader works in rounds, one per second. A round takes the clients registered so far, reads `eventStore.lastGlobalOffset()` if a client joined (that head is where the new clients start, and they are sent `: connected`), reads `readGlobalStream` once with the offset of the last event it read, and hands every frame to every client that started below it; `readGlobalStream` returns the events *after* the offset it is given, so that offset is the position itself. The order matters: the client is registered first and the head is read second, and the class comment shows why no event stored after a client's `: connected` can then be missed. The `Client` interface is what keeps the class free of Spring: each of the three apps implements its five methods on its own kind of response stream.
+
+Then create `EventExplorerController` in the `org.streamrune.ecommerce.spring.controller` package:
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.core.EventEnvelope;
@@ -182,9 +813,12 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.queries.access.LiveFeed;
+import org.streamrune.ecommerce.queries.access.LiveFeedFrame;
+import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Sinks;
+import reactor.core.publisher.FluxSink;
 
 /**
  * The demo's window on the event store: the global event list, one stream's history, and a live
@@ -202,27 +836,42 @@ import reactor.core.publisher.Sinks;
  * the two headers. A real deployment authenticates the caller, derives the role from that identity,
  * and does not expose raw event payloads outside an operator's tooling.
  *
- * <p><b>The live feed is open and carries no payload.</b> The browser's {@code EventSource} cannot
- * send the role header, and the dashboard only needs to know that something happened to a stream. A
- * frame holds the event's global offset, its type, the stream it belongs to, its version in that
- * stream and its timestamp, never the event itself. Every caller therefore sees which streams
- * exist, customer ids and order ids among them, and which events happen on them when: the ids are
- * public here, the data behind them is not.
+ * <p><b>The live feed is open and names no stream.</b> The browser's {@code EventSource} cannot
+ * send the two headers, so the feed cannot ask who is calling and every connection is anonymous. A
+ * frame is a {@link LiveFeedFrame}: the event's global offset, the type of its aggregate, the event
+ * type and the timestamp. It holds no stream id, no aggregate id and no payload, for an {@code
+ * ADMIN} as for everyone else, so no caller learns a customer id or an order id from it: the feed
+ * says that a customer registered or an order was placed, and when, not which one. A view that
+ * wants the detail reads it from the guarded endpoints, with the caller's headers.
  *
- * <p>The feed reads the global stream from its first event and then polls once a second. Its frames
- * are unnamed (no {@code event:} field), so {@code EventSource.onmessage} receives every one of
- * them.
+ * <p><b>A connection starts at the head.</b> The feed sends a frame for every event stored while
+ * the client is connected and nothing of what the store held before, so no caller makes the app
+ * read its history. The frames are unnamed (no {@code event:} field), so {@code
+ * EventSource.onmessage} receives every one of them.
+ *
+ * <p><b>One reader, a bounded number of connections.</b> {@link LiveFeed} reads: one reader for the
+ * application asks the event store once per polling interval and hands every frame to every
+ * connected client, so what the feed costs the store does not grow with the number of connections.
+ * The reader runs while a client is connected. The feed has {@link LiveFeed#MAX_CONNECTIONS}
+ * places; the connection that would be one more is answered {@code 503 Service Unavailable} with
+ * {@code Retry-After} ({@link LiveFeedFullException}).
  */
 @RestController
 @RequestMapping("/api/events")
-public class EventExplorerController {
+public class EventExplorerController implements SmartLifecycle {
+
+  /** Maximum number of frames buffered for a slow feed client before its stream is failed. */
+  static final int SLOW_CLIENT_BUFFER = 256;
 
   private final EventStore eventStore;
   private final ObjectMapper objectMapper;
+  private final LiveFeed liveFeed;
+  private volatile boolean feedOpen;
 
   public EventExplorerController(EventStore eventStore, ObjectMapper objectMapper) {
     this.eventStore = eventStore;
     this.objectMapper = objectMapper;
+    this.liveFeed = new LiveFeed(eventStore);
   }
 
   @GetMapping
@@ -246,57 +895,116 @@ public class EventExplorerController {
     return eventStore.load(stream).events().stream().map(this::toMap).toList();
   }
 
+  /**
+   * The live feed: a frame for every event stored while the client is connected, open to every
+   * caller. {@link LiveFeed} reads; this method writes what it reads as Server-Sent Events.
+   *
+   * <p>The place is taken before the answer starts: when the feed has none left, {@link
+   * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code GlobalExceptionHandler} answers
+   * {@code 503} with {@code Retry-After}. The client is registered when Spring MVC subscribes the
+   * {@code Flux}; a place whose stream is never subscribed is free again after {@link
+   * LiveFeed#FOLLOW_TIMEOUT}.
+   *
+   * <p>The feed's reader hands a frame to the sink and goes on to the next client; it never waits
+   * for this one. A client that reads too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames
+   * buffered; beyond that its stream fails, its place is free again and the client reconnects.
+   *
+   * <p>Spring MVC writes the buffered frames to the sockets on its async task executor, by default
+   * a pool of eight threads. A client whose socket is full holds one of them for as long as the
+   * servlet container waits for that write, so a deployment that expects many such clients gives
+   * the executor virtual threads ({@code spring.threads.virtual.enabled}).
+   */
   @GetMapping(value = "/sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<ServerSentEvent<String>> sseStream() {
-    Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().unicast().onBackpressureBuffer();
-
-    Thread.ofVirtual()
-        .name("sse-event-stream")
-        .start(
-            () -> {
-              GlobalOffset offset = GlobalOffset.initial();
-              while (sink.currentSubscriberCount() > 0 || !Thread.currentThread().isInterrupted()) {
-                try {
-                  var events = eventStore.readGlobalStream(offset, 100);
-                  for (var env : events) {
-                    var data = objectMapper.writeValueAsString(toFrame(env));
-                    sink.tryEmitNext(
-                        ServerSentEvent.<String>builder()
-                            .id(String.valueOf(env.globalOffset().value()))
-                            .data(data)
-                            .build());
-                    offset = env.globalOffset().next();
-                  }
-                  if (events.isEmpty()) {
-                    Thread.sleep(Duration.ofSeconds(1));
-                  }
-                } catch (InterruptedException e) {
-                  Thread.currentThread().interrupt();
-                  break;
-                } catch (Exception e) {
-                  sink.tryEmitError(e);
-                  return;
-                }
-              }
-              sink.tryEmitComplete();
-            });
-
-    return sink.asFlux();
+    LiveFeed.Place place = liveFeed.admit();
+    return Flux.<ServerSentEvent<String>>create(
+            sink -> place.follow(clientOf(sink)), FluxSink.OverflowStrategy.ERROR)
+        .onBackpressureBuffer(SLOW_CLIENT_BUFFER);
   }
 
   /**
-   * What the live feed says about an event: which one, of which stream, and when. No payload — the
-   * feed is open to every caller.
+   * {@code HEAD} for the live feed: the headers of the feed's answer and nothing else. A framework
+   * answers a {@code HEAD} it finds no handler for by running the {@code GET} handler and leaving
+   * out the body; for a stream that never ends that would take one of the feed's places and
+   * register a client that can never leave. This handler takes no place and reads nothing.
    */
-  private static Map<String, Object> toFrame(EventEnvelope env) {
-    return Map.of(
-        "globalOffset", env.globalOffset().value(),
-        "streamId", env.streamId().value(),
-        "aggregateType", env.aggregateType().value(),
-        "aggregateId", env.aggregateId().value(),
-        "eventType", env.eventType().name(),
-        "version", env.version().value(),
-        "timestamp", env.metadata().timestamp().toString());
+  @RequestMapping(value = "/sse", method = RequestMethod.HEAD)
+  public ResponseEntity<Void> sseHead() {
+    return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).build();
+  }
+
+  /** The client behind one response stream: what the feed's reader sends becomes its frames. */
+  private LiveFeed.Client clientOf(FluxSink<ServerSentEvent<String>> sink) {
+    return new LiveFeed.Client() {
+      @Override
+      public boolean isGone() {
+        return sink.isCancelled();
+      }
+
+      @Override
+      public void comment(String text) {
+        sink.next(ServerSentEvent.<String>builder().comment(text).build());
+      }
+
+      @Override
+      public void event(long globalOffset, Map<String, Object> frame) throws Exception {
+        sink.next(
+            ServerSentEvent.<String>builder()
+                .id(String.valueOf(globalOffset))
+                .data(objectMapper.writeValueAsString(frame))
+                .build());
+      }
+
+      @Override
+      public void failed(Exception cause) {
+        sink.error(cause);
+      }
+
+      @Override
+      public void ended() {
+        sink.complete();
+      }
+    };
+  }
+
+  /** The number of clients connected to the live feed. */
+  public int openFeedConnections() {
+    return liveFeed.openConnections();
+  }
+
+  /** Whether the feed's reader runs: it does while a client is connected. */
+  public boolean feedReaderRuns() {
+    return liveFeed.isReading();
+  }
+
+  /** How many times the feed's reader has asked the event store. */
+  public long feedStoreReads() {
+    return liveFeed.storeReads();
+  }
+
+  // --- SmartLifecycle: the open feeds end before the web server waits for requests in flight ---
+
+  @Override
+  public void start() {
+    liveFeed.open();
+    feedOpen = true;
+  }
+
+  /**
+   * Ends the open feeds. An open feed is a request that never finishes on its own, and Spring
+   * Boot's graceful shutdown waits for the requests in flight before it stops the web server. This
+   * bean has the default phase, the last to start and the first to stop: the feeds are completed
+   * and the reader has ended before that wait begins, and before the data source closes.
+   */
+  @Override
+  public void stop() {
+    liveFeed.close();
+    feedOpen = false;
+  }
+
+  @Override
+  public boolean isRunning() {
+    return feedOpen;
   }
 
   private Map<String, Object> toMap(EventEnvelope env) {
@@ -316,17 +1024,41 @@ The three endpoints serve different use cases:
 
 - `GET /api/events?offset=0&limit=50` — paginated read of the global stream, **ADMIN only**. The `offset` is **exclusive** — `readGlobalStream` returns events whose global offset is strictly greater than it. Because offsets start at 1, `offset=0` returns the full history; use the last `globalOffset` you received as the next request's `offset` to page forward. Each response item includes `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `timestamp`, and the deserialized `payload`.
 - `GET /api/events/{aggregateType}/{aggregateId}` — all events for a single stream, returned in append order, **ADMIN only**. A stream is the pair of the aggregate type its decider is registered under and the id the command bus's id extractor returned when the events were appended, written `<aggregateType>:<aggregateId>`. An order placed as `o-1` lives in `order:o-1`, and reserving stock for `p-1` writes to `inventory:p-1` while the product `p-1` stays in `product:p-1`. Both path values are client input and go through the ingress doors (`AggregateType.of`, `AggregateId.of`); a type outside `[a-z][a-z0-9_]{0,31}` is a `400`.
-- `GET /api/events/sse` — a persistent SSE connection, **open to every caller and without payloads**. The server starts a virtual thread that polls `readGlobalStream` from `GlobalOffset.initial()` (which is the exclusive offset `0`, so the first poll replays the full history) and emits one SSE frame per event. The `id` field is the global offset; the `data` field is a JSON object with `globalOffset`, `streamId`, `aggregateType`, `aggregateId`, `eventType`, `version` and `timestamp`. There is no `event` field: an unnamed frame is what the browser's `EventSource` hands to `onmessage`, and the frontend in Chapter 16 relies on that. When no new events are present, the thread sleeps one second before polling again.
+- `GET /api/events/sse` — a persistent SSE connection, **open to every caller, naming no stream and carrying no payload, and live**. `LiveFeed` registers the connection with the app's one reader, which reads the head of the global stream for it (`lastGlobalOffset()`), sends a `: connected` comment, and hands it what its polls of `readGlobalStream` return from that offset on: one SSE frame per event stored while the client is connected, none for the events before. The `id` field is the global offset; the `data` field is the JSON of a `LiveFeedFrame`, an object with `globalOffset`, `aggregateType`, `eventType` and `timestamp`. There is no `event` field: an unnamed frame is what the browser's `EventSource` hands to `onmessage`, and the frontend in Chapter 16 relies on that. The reader polls once a second, and after five quiet seconds it sends every client a `: keepalive` comment. When 100 connections are open, the next one is answered `503 Service Unavailable` with `Retry-After: 5`.
 
 **Why two of them need ADMIN.** `payload` is `env.event()`: the event as the event store reads it. The store is the crypto-aware one from Chapter 6, and it decrypts `@Encrypted` fields on the way out. So the list and the stream history show a customer's name, e-mail, address and phone **in plain text** for as long as that customer's key exists; only after the key is erased (Chapter 7) do the same fields come back as `[REDACTED]`. Encryption at rest protects the database, not this endpoint. Both methods therefore start with `OwnerOrAdminAccess.requireAdmin(RequestCaller.current())`, the check from Chapter 9 that the admin endpoints use (Chapters 12 and 14): for anyone but an `ADMIN` — the role together with an identity — the answer is `403`, and no event is read.
 
-**Why the feed does not.** The browser opens the feed with `EventSource`, which cannot send request headers, so the feed cannot ask who is calling. It stays open instead and says less: `toFrame` builds a frame from the envelope's coordinates and never touches `env.event()`. A dashboard that only needs to know *that* something happened to a stream loses nothing.
+**Why the feed does not.** The browser opens the feed with `EventSource`, which cannot send request headers, so the feed cannot ask who is calling: every connection is anonymous, an `ADMIN`'s browser included. It stays open instead and says only what an anonymous caller may know. `LiveFeedFrame.of` builds a frame from four of the envelope's coordinates and never touches `env.event()`, `env.streamId()` or `env.aggregateId()`.
 
-**What the feed does tell everyone.** Each frame names its stream, so a caller without any header reads `customer:c-1` and `order:o-1` off the feed, with every event type and its time: which customer ids and order ids exist, when an order was placed, confirmed or cancelled, and which customer asked for an export or was forgotten. Chapter 9's `403` says nothing about whether an id exists; the feed does. The ids are public in this demo, and what the access rule protects is the data behind them.
+**What the feed tells everyone, and what it keeps.** A frame says that an event of a type happened to an aggregate of a type, and when: a caller without any header reads `customer` / `CustomerRegistered` and `order` / `OrderPlaced` off the feed, with their times. It does not say which customer or which order. A stream id is `customer:c-1` or `order:o-1`, and a customer id or an order id in an open feed would tell every caller who exists, who ordered when, who asked for an export and who was forgotten; Chapter 9's `403` keeps exactly that to itself. So the frame leaves out the stream id, the aggregate id and the version within the stream for everyone, rather than for some: the feed has no caller to tell an `ADMIN` from a guest.
 
-> **Demo shortcut — protect this in production.** `requireAdmin` trusts the `X-User-Id` and `X-User-Role` headers, which any client can set (the gateway stand-in from Chapter 9). The check keeps the demo honest about *who should* see decrypted events, but it does not stop anyone who adds the two headers. In a real system an endpoint that returns raw event payloads belongs behind real authentication, with the role derived from the authenticated identity, on an operator-only network path — or it does not exist at all, and operators read events with tooling that has its own access control. The same goes for the open feed: stream ids and event types are metadata, and metadata can be sensitive too (a `customer:<id>` stream with a `CustomerForgotten` event tells a story). Decide per deployment whether an unauthenticated caller may see it.
+**Why the feed starts at the head.** The feed has no caller to refuse, so everything it does for one connection it does for anybody, as often as they connect. A feed that began at offset `0` would hand every connection the whole history: one read and one decryption of every event in the store per connection, and one frame per event for the page to react to. Starting at the head keeps the feed's reading to one small read per second. The feed takes no start position from the request either: no query parameter, and no `Last-Event-ID`. What happened before the connection is read where the caller is known, from the read-model lists and, for an `ADMIN`, from `GET /api/events`; a client that was away reads those again when it reconnects.
 
-The SSE endpoint uses `spring-boot-starter-webflux` for the `Flux` return type. The `webflux` dependency is already present in `build.gradle.kts` from an earlier chapter. The virtual thread approach means no Reactor scheduler is consumed while the thread is sleeping — the thread is parked at `Thread.sleep` at zero cost.
+**Why one reader, and a bounded number of connections.** A reader per connection makes the store's load a number anonymous callers choose: every open connection is one statement per second against the connection pool the command path uses, and every stored event is read, deserialized and decrypted once per connection. With one reader per app the store is asked once per second and an event is read once, whether one browser tab is open or a hundred; what a connection still costs is its socket and the frames buffered for it, and `MAX_CONNECTIONS` bounds that. The connection after the last place gets `503 Service Unavailable` with `Retry-After: 5`, and not `429`: the limit is the app's and is shared by all callers, and the feed could not count the requests of one caller anyway. `GlobalExceptionHandler` maps the exception; add the imports of `org.springframework.http.HttpHeaders`, `org.springframework.http.MediaType`, `org.streamrune.ecommerce.queries.access.LiveFeed` and `org.streamrune.ecommerce.queries.access.LiveFeedFullException` and this method to it:
+
+```java
+@ExceptionHandler(LiveFeedFullException.class)
+public ResponseEntity<String> handleLiveFeedFull(LiveFeedFullException e) {
+  return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+      .header(HttpHeaders.RETRY_AFTER, String.valueOf(LiveFeed.RETRY_AFTER_SECONDS))
+      .contentType(MediaType.TEXT_PLAIN)
+      .body(e.getMessage());
+}
+```
+
+The controller takes the place before it returns the `Flux`, so the refusal is a status and not a stream that ends at once. The client is registered a moment later, when Spring MVC subscribes the `Flux`, and between the two a place is pending. A framework that never subscribes the stream leaves the place without a client that could leave it: Quarkus does that for a request whose connection was reset before the answer is written. `LiveFeed` therefore frees a place nobody followed within `FOLLOW_TIMEOUT`, five seconds, and completes a client that is registered on such a place afterwards. The places taken are always the pending places plus the registered clients; the class keeps those two collections and no counter that could drift. A browser's `EventSource` does not reconnect by itself after an answer that is not `200`; the frontend of Chapter 16 opens a new one with a growing delay. `LiveFeedSharedReaderIT` in each app opens five connections and compares their frames, counts the reader's store reads with one and with eight connections, fills the 100 places and reads the `503` of the next connection, connects a client that never reads beside two that do, and sends five hundred requests whose client is gone at once before it connects a client that is served.
+
+**When the reader runs, and how a place is freed.** The reader starts with the first client and ends when the last one has left: an app nobody watches reads nothing, and since every connection starts at the head, a reader that starts again has no position to keep. Whatever ends the reader's thread, an `Error` included, its clients are told and the next client starts a new reader. Quarkus and Micronaut cancel the response stream the moment the connection closes, and the reader sees `isGone()` in its next round. A servlet container learns of a closed connection only when a write to it fails, so on Spring the `: keepalive` comment is also what finds a client that left during a quiet period: the write fails, the `Flux` is cancelled, the reader forgets the client and its place is free. `LiveFeedAccessIT` in each app connects, disconnects and waits for `openFeedConnections()` to return to zero. On shutdown the controller's `stop()` closes the feed before Spring Boot's graceful shutdown starts waiting for the requests in flight: every client is completed and the reader has ended when `stop()` returns. Without it a single open browser tab holds the shutdown for the whole grace period.
+
+**`HEAD` gets a handler of its own.** Spring answers a `HEAD` request it finds no handler for by running the `GET` handler and leaving out the body. For a stream that never ends that would take one of the feed's places and register a client that can never leave: there is no body whose write could fail. `sseHead` answers with the feed's headers, takes no place and reads nothing; the two other apps have the same handler. `LiveFeedSharedReaderIT` sends a `HEAD` and finds no place taken and no reader running.
+
+**A client that cannot keep up.** The reader hands a frame to each client's `FluxSink` and moves on; it never waits for a socket. A client that reads too slowly has up to 256 frames buffered for it. Beyond that its stream fails, its place is free and it reconnects, at the head like everyone else. Spring MVC writes the buffered frames to the sockets on its async task executor, a pool of eight threads by default; a client whose socket is full holds one of them for as long as the servlet container waits for the write, so a deployment that expects many such clients runs that executor on virtual threads (`spring.threads.virtual.enabled`).
+
+**How a view gets the detail.** A frame is a signal to read again. The frontend of Chapter 16 uses the event type to decide which of its queries are stale and reads them again through the guarded endpoints, with the session's `X-User-Id` and `X-User-Role`: the customer and order reads of Chapter 9 return what that caller may see, and the event history above returns streams and payloads to an `ADMIN`. A client that wants the events of one stream as they happen opens the per-stream endpoint of the next step, which does know its caller.
+
+> **Demo shortcut — protect this in production.** `requireAdmin` trusts the `X-User-Id` and `X-User-Role` headers, which any client can set (the gateway stand-in from Chapter 9). The check keeps the demo honest about *who should* see decrypted events, but it does not stop anyone who adds the two headers. In a real system an endpoint that returns raw event payloads belongs behind real authentication, with the role derived from the authenticated identity, on an operator-only network path — or it does not exist at all, and operators read events with tooling that has its own access control. The same goes for the open feed: event types and their times are metadata, and metadata can be sensitive too (a burst of `OrderPlaced` frames is a sales figure, a `CustomerForgotten` frame says that somebody left). The feed names nobody, but decide per deployment whether an unauthenticated caller may see even that.
+
+The SSE endpoint uses `spring-boot-starter-webflux` for the `Flux` return type. The `webflux` dependency is already present in `build.gradle.kts` from an earlier chapter. `Flux.create` hands the method a `FluxSink`; `clientOf(sink)` adapts it to `LiveFeed.Client`, so `sink.isCancelled()` is how the reader learns that a client left. A client that reads too slowly gets up to 256 frames buffered (`onBackpressureBuffer`) and is then failed, and it reconnects. The reader is a thread of its own, one daemon thread per app named `live-feed-reader`, so no Reactor scheduler and no request thread is held while it waits for its next round.
 
 The controller injects `com.fasterxml.jackson.databind.ObjectMapper` — the Jackson 2 type. Spring Boot 4 auto-configures Jackson 3 (`tools.jackson.databind.ObjectMapper`), so this parameter resolves to the `legacyObjectMapper()` bean you declared in `StreamRuneConfig` (the framework still uses Jackson 2). If you have not defined that bean yet, the controller will fail to start with a no-such-bean error.
 
@@ -578,7 +1310,7 @@ The name, e-mail and address are there in plain text, although the `payload` col
 curl -N http://localhost:8080/api/events/sse
 ```
 
-The `-N` flag disables buffering. Leave the connection open and place an order in a separate terminal:
+The `-N` flag disables buffering. The first line is `: connected`, a comment: the connection stands at the head of the global stream. Nothing stored earlier follows it, however many events the store holds. Leave the connection open and place an order in a separate terminal:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
@@ -587,12 +1319,14 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"orderId": "o-obs-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
 ```
 
-Within one second you should see SSE frames appear in the first terminal, one per event appended. The feed needs no header, and a frame carries no payload:
+Within one second you should see SSE frames appear in the first terminal, one per event appended. The feed needs no header, and a frame names no stream and carries no payload:
 
 ```
 id:17
-data:{"aggregateType":"order","eventType":"OrderPlaced","aggregateId":"o-obs-1","streamId":"order:o-obs-1","globalOffset":17,"version":1,"timestamp":"2026-10-04T08:45:09.326626042Z"}
+data:{"globalOffset":17,"aggregateType":"order","eventType":"OrderPlaced","timestamp":"2026-10-04T08:45:09.326626042Z"}
 ```
+
+The frame says that an order was placed and when. It does not say that the order is `o-obs-1` or that `c-1` placed it: the stream id is not in it. The frames of the payment, the inventory and the order's confirmation follow, each with its own aggregate type and event type. When nothing happens for five seconds the terminal shows `: keepalive`, another comment. Stop `curl` and start it again: the new connection begins with `: connected` and shows none of the frames the first one received.
 
 **Live SSE stream of one aggregate:**
 
@@ -692,7 +1426,7 @@ Two details of the wire. Lines that start with a colon are comments, which an SS
 
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
 
-**`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to an `ADMIN`; that check is a demo shortcut on two client-supplied headers, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open and carries no payload, but it names every stream, so the ids of customers and orders are public: it starts a virtual thread that polls `EventStore.readGlobalStream` in a tight loop, sleeping one second when no new events are found, and emits each event as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and the event's type, stream and version as its data. The `Sinks.Many` unicast sink bridges the imperative polling thread to the reactive `Flux` returned to WebFlux.
+**`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to an `ADMIN`; that check is a demo shortcut on two client-supplied headers, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open, and because it cannot ask who is calling it names no stream and carries no payload: `LiveFeed` runs one reader per app for at most 100 connections: a connection begins at the head of the global stream, the reader polls `EventStore.readGlobalStream` once a second, and each event stored from then on goes to every connected client as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and a `LiveFeedFrame` — the global offset, the aggregate type, the event type and the timestamp — as its data. A connection is never served the store's history, and its reader ends when the client leaves or the app stops. A view that wants the detail reads it from the guarded endpoints. `Flux.create` bridges the imperative polling thread to the reactive `Flux` the controller returns.
 
 **The framework's SSE endpoint** (`GET /api/sse/{aggregateType}/{aggregateId}`, `streamrune.sse.enabled=true`) streams the events of one aggregate with their payloads. The integration serves it and feeds it: an `SseEventFeed` per application instance reads the global stream from its head every `streamrune.sse.polling-interval`, while a client is connected to that instance, and publishes each event through `SseEventPublisher.publish(EventEnvelope)` to the clients of that event's stream; with no client connected it reads the head of the stream and no event. The application writes no feeder; it supplies the `SseAuthorizer` that decides who may open which stream, and without one every stream answers `403`. The demo's is `OwnerOrAdminStreamAccess`, one framework-agnostic class the three apps share: an authenticated `ADMIN`, or the customer the stream belongs to — the customer themself for a `customer` stream, the customer the order read model names for an `order` stream — and `403` for everyone else, for every other aggregate type, and for a caller without an identity. The rule is asked once, when a stream opens; the stream then opens with a `: keepalive` comment, written as soon as the client is subscribed. Delivery is live, best-effort and at-most-once — no replay, no `Last-Event-ID` — so a frame is a notification, and a consumer that must see every event is a projection.
 

@@ -150,7 +150,11 @@ export function useHealth(enabled = true) {
   });
 }
 
-/** The saga list is ADMIN only on the backend; `enabled: false` sends no request. */
+/**
+ * The saga list is served to an authenticated caller only: every saga to an
+ * ADMIN, the sagas of their own orders to a CUSTOMER. The caller passes
+ * `enabled: false` for a GUEST and no request is sent.
+ */
 export function useSagaList(limit = 50, enabled = true) {
   return useQuery({
     queryKey: ["fulfillment", "sagas", limit],

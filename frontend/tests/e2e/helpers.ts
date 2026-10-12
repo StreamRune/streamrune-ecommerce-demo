@@ -137,12 +137,27 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
       body: JSON.stringify({ status: "UP" }),
     })
   );
-  // SSE endpoint — fulfill immediately so EventSource doesn't hang
-  await page.route(`${BACKEND_URL}/api/events/sse`, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "text/event-stream",
-      body: "",
-    })
-  );
+  // The live feed is left unanswered: a quiet feed, whose connection stays as it is. A mocked
+  // route can only answer with a complete body, which the page sees as a feed that ended, and
+  // the page then reconnects and reads its lists again. A spec that wants frames or a reconnect
+  // routes the feed itself.
+  await page.route(`${BACKEND_URL}/api/events/sse`, () => {});
+}
+
+/**
+ * Routes the live feed so that its first connection sends the given frames and
+ * every later one stays quiet. A mocked route can only answer with a complete
+ * body, so the first connection ends after its frames and the page reconnects;
+ * a backend sends a frame once, as a connection starts at the head and is sent
+ * nothing of what was sent before it.
+ */
+export async function mockFeedThatSendsOnce(page: Page, frames: string): Promise<void> {
+  let connections = 0;
+  await page.route(`${BACKEND_URL}/api/events/sse`, (route) => {
+    connections += 1;
+    if (connections === 1) {
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body: frames });
+    }
+    // Left unanswered: the connection stays as it is.
+  });
 }
