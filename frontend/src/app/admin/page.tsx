@@ -35,9 +35,7 @@ import { cn } from "@/lib/utils";
 function CircuitBreakerCard({ locked }: { locked: boolean }) {
   const { data, isLoading } = useCircuitBreaker(!locked);
 
-  const state = isLoading
-    ? "LOADING"
-    : ((data as Record<string, unknown>)?.state as string | undefined) ?? "UNKNOWN";
+  const state = isLoading ? "LOADING" : (data?.state ?? "UNKNOWN");
 
   const dotColor =
     state === "CLOSED"
@@ -77,7 +75,7 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
   async function handleRetry(id: string) {
     try {
       await retry(id);
-      toast.success("Retrying dead letter");
+      toast.success("Dead letter retried");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to retry");
     }
@@ -105,17 +103,17 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
             </TableHeader>
             <TableBody>
               {entries.map((entry) => (
-                <TableRow key={entry.id}>
-                  <TableCell className="text-sm">{entry.commandType}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground max-w-48 truncate">{entry.error}</TableCell>
+                <TableRow key={entry.commandId}>
+                  <TableCell className="text-sm">{entry.commandType.split(/[.$]/).pop()}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground max-w-48 truncate">{entry.errorMessage}</TableCell>
                   <TableCell className="text-xs text-muted-foreground tabular-nums">
-                    {new Date(entry.timestamp).toLocaleString()}
+                    {new Date(entry.firstAttemptAt).toLocaleString()}
                   </TableCell>
                   <TableCell>
                     <Button
                       variant="outline"
                       size="xs"
-                      onClick={() => handleRetry(entry.id)}
+                      onClick={() => handleRetry(entry.commandId)}
                       disabled={isPending || locked}
                     >
                       <RefreshCw className="size-3" />
@@ -159,8 +157,8 @@ function OutboxCard({ locked }: { locked: boolean }) {
             <TableBody>
               {entries.map((entry) => (
                 <TableRow key={entry.id}>
-                  <TableCell className="font-mono text-xs">{entry.id.slice(0, 8)}…</TableCell>
-                  <TableCell className="text-sm">{entry.eventType}</TableCell>
+                  <TableCell className="font-mono text-xs">{entry.id}</TableCell>
+                  <TableCell className="text-sm">{entry.payloadType}</TableCell>
                   <TableCell className="text-xs text-muted-foreground tabular-nums">
                     {new Date(entry.createdAt).toLocaleString()}
                   </TableCell>
@@ -182,8 +180,8 @@ function PaymentFailureCard({ locked }: { locked: boolean }) {
 
   async function handleToggle() {
     try {
-      await toggle(undefined);
-      toast.success("Payment failure toggled");
+      const next = await toggle(undefined);
+      toast.success(next.failureInjected ? "Payment failure injection enabled" : "Payment failure disabled");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to toggle");
     }
@@ -200,12 +198,12 @@ function PaymentFailureCard({ locked }: { locked: boolean }) {
         ) : (
           <div className="flex items-center gap-3">
             <Switch
-              checked={data?.enabled ?? false}
+              checked={data?.failureInjected ?? false}
               onCheckedChange={handleToggle}
               disabled={isPending || locked}
             />
-            <Label className={cn("text-sm", data?.enabled ? "text-red-400" : "text-muted-foreground")}>
-              {data?.enabled ? "Enabled — payments will fail" : "Disabled"}
+            <Label className={cn("text-sm", data?.failureInjected ? "text-red-400" : "text-muted-foreground")}>
+              {data?.failureInjected ? "Enabled — payments will fail" : "Disabled"}
             </Label>
           </div>
         )}
@@ -218,9 +216,7 @@ function PaymentFailureCard({ locked }: { locked: boolean }) {
 
 function SystemHealthCard({ locked }: { locked: boolean }) {
   const { data, isLoading } = useHealth(!locked);
-  const status = isLoading
-    ? "CHECKING"
-    : ((data as Record<string, unknown>)?.status as string | undefined) ?? "UNKNOWN";
+  const status = isLoading ? "CHECKING" : (data?.status ?? "UNKNOWN");
   const isUp = status === "UP";
 
   return (

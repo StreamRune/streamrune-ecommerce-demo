@@ -147,6 +147,44 @@ jobs:
         working-directory: streamrune-ecommerce-demo
         run: bash scripts/wait-for-http.sh http://localhost:8080/actuator/health '"status":"UP"' http://localhost:8090/health '' http://localhost:3000 ''
 
+      # The frontend against the backend, with the stack of the Quick Start up: the Playwright
+      # suite drives the frontend container at :3000. Its backend-dependent specs run here and
+      # nowhere else in CI. writes.live.spec.ts performs every write action of the pages against
+      # the backend container (register a customer, place and cancel an order, ship and deliver,
+      # create a product and change its price and stock, the payment-failure switch, edit, export
+      # and forget) and asserts each result through the page. E2E_REQUIRE_BACKEND makes a backend
+      # that does not answer a failure instead of a skip; E2E_REUSE_SERVER has Playwright use the
+      # frontend that is already up instead of starting its own.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: streamrune-ecommerce-demo/frontend/package-lock.json
+
+      - name: Quick Start - install the Playwright suite
+        working-directory: streamrune-ecommerce-demo/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Quick Start - Playwright suite against the running stack
+        working-directory: streamrune-ecommerce-demo/frontend
+        env:
+          E2E_REQUIRE_BACKEND: '1'
+          E2E_REUSE_SERVER: '1'
+        # line for the job log, html for the artifact: with the traces the config keeps for
+        # failed tests, the upload below shows what the page looked like when a test failed.
+        run: npx playwright test --reporter=line,html
+
+      - name: Quick Start - upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-running-stack
+          path: |
+            streamrune-ecommerce-demo/frontend/playwright-report/
+            streamrune-ecommerce-demo/frontend/test-results/
+
       - name: Quick Start - logs on failure
         if: failure()
         working-directory: streamrune-ecommerce-demo
@@ -205,9 +243,12 @@ jobs:
 
       - name: Run Playwright tests
         # Backend-dependent specs in tests/e2e/ self-skip via
-        # isBackendReachable() when the Spring backend is not running.
-        # CI exercises the no-backend path — the page-render contract.
-        run: npx playwright test --reporter=line
+        # isBackendReachable() when the backend is not running.
+        # This job exercises the no-backend path: the page-render contract
+        # and, in write-contracts.spec.ts, the request each write action
+        # sends. The run-paths job runs the suite against the started stack.
+        # line for the job log, html and the failed tests' traces for the upload below.
+        run: npx playwright test --reporter=line,html
 
       - name: Upload Playwright report on failure
         if: failure()

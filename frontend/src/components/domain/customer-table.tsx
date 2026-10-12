@@ -12,6 +12,7 @@ import {
   useForgetCustomer,
 } from "@/lib/mutations";
 import type { CustomerView } from "@/lib/types";
+import { newId } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import { AccessRestricted } from "@/components/domain/access-restricted";
 import { useRole } from "@/providers/role-provider";
@@ -55,9 +56,12 @@ function RegisterCustomerDialog() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // The backend takes the customer id from the request. An ADMIN may register any id; the
+    // page offers this dialog to the ADMIN role only.
     try {
-      await mutateAsync({ name, email, address, phone });
-      toast.success("Customer registered");
+      const customerId = newId("cust");
+      await mutateAsync({ customerId, name, email, address, phone });
+      toast.success(`Customer registered: ${customerId}`);
       setOpen(false);
       setName(""); setEmail(""); setAddress(""); setPhone("");
     } catch (err) {
@@ -284,6 +288,7 @@ export function CustomerTable() {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>ID</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Email</TableHead>
               <TableHead>Phone</TableHead>
@@ -294,7 +299,7 @@ export function CustomerTable() {
           <TableBody>
             {customers.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                   {ownOnly ? `No customer record for ${userId}.` : "No customers yet."}
                 </TableCell>
               </TableRow>
@@ -307,6 +312,9 @@ export function CustomerTable() {
                     className={cn("cursor-pointer", isForgotten && "opacity-50")}
                     onClick={() => router.push(`/orders?customerId=${customer.customerId}`)}
                   >
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {customer.customerId}
+                    </TableCell>
                     <TableCell className="font-medium">
                       {isForgotten ? "[REDACTED]" : customer.name}
                     </TableCell>

@@ -59,20 +59,71 @@ seeded customers and needs no customer list from the backend.
 | Path | Contents |
 |------|----------|
 | `src/app/` | One directory per page |
-| `src/lib/api.ts` | Every HTTP call to the backend |
+| `src/lib/api.ts` | Every HTTP call to the backend, in the shape the backend's controllers read |
+| `src/lib/ids.ts` | The ids the page picks for the orders, customers and products it creates |
 | `src/lib/queries.ts`, `src/lib/mutations.ts` | TanStack Query hooks over those calls |
+| `src/lib/read-model-sync.ts` | Reading a list again when the read models have caught up with a change |
 | `src/providers/sse-provider.tsx` | The live feed connection and the query invalidation it drives |
 | `src/providers/role-provider.tsx`, `src/lib/permissions.ts` | The selected role and what it may do |
 | `src/components/` | Domain components and the UI primitives they are built from |
 | `tests/e2e/` | Playwright tests |
+
+## Writing to the backend
+
+A write action sends the request the backend's controller reads, field for field
+(`src/lib/api.ts`). Three things follow from the backend's contracts:
+
+- **The page picks the id.** `POST /api/orders`, `POST /api/customers` and `POST /api/products`
+  take the id from the request body, so the page generates one in the form of the seed data:
+  `order-`, `cust-` or `prod-` and eight hex digits (`src/lib/ids.ts`). The toast of a successful
+  action shows it.
+- **An order line carries its unit price**: the price of the product picked, as the catalogue
+  lists it. The backend accepts the price it is sent (a demo shortcut, see the repository README).
+- **Cancel is offered for a confirmed order too**, and says what it does there: the order becomes
+  `CANCELLED`, the payment stays captured and the stock stays reserved. The demo has no refund
+  flow for an order whose fulfillment is complete.
+- **A command is answered before the lists show it.** The backend answers `200` with an empty
+  body once the events are stored; the read models follow by up to the projections' polling
+  interval (five seconds and up to one of jitter by default). The page therefore reads a list
+  again at once and 2, 7, 15 and 30 seconds after the last change (`src/lib/read-model-sync.ts`),
+  so a placed order appears in the table by itself, a few seconds after its toast, and a read
+  model that is late still shows up. A burst of feed frames is answered by one read per list.
+
+An action is offered to the roles the backend accepts it from (`src/lib/permissions.ts`). A
+request the backend refuses is shown in a toast with the backend's reason: "Not allowed for the
+selected role (403): …" or "The backend refused the request (400): …".
+
+Receive Shipment on the Products page adds to the inventory the fulfillment saga reserves from.
+The inventory is its own aggregate: the Stock column of the catalogue is the product's own figure
+(Adjust Stock changes it) and does not move with a shipment. An order for a product created on
+the page is fulfilled once a shipment for it is received; without one the saga cancels the order.
 
 ## Checks
 
 ```bash
 npm run lint
 npm run build
-npm test        # Playwright; install the browser once with: npx playwright install chromium
+npm test             # Playwright; install the browser once with: npx playwright install chromium
+npm run test:live    # the same suite against a running backend, which it requires
 ```
 
-The Playwright tests start the dev server themselves. Tests that need the backend skip when none
-answers on `http://localhost:8080` (override with `BACKEND_URL`).
+The Playwright tests start the dev server themselves, or use the one already running on
+`http://localhost:3000`.
+
+- `npm test` needs no backend. Most specs mock it; `write-contracts.spec.ts` drives every write
+  action and compares the request the page sends with the backend's contract. The specs that
+  need a backend skip when none answers on `http://localhost:8080` (override with `BACKEND_URL`).
+- `npm run test:live` runs the same suite with `E2E_REQUIRE_BACKEND=1`: a backend that does not
+  answer fails it instead of skipping. Start the stack first (`docker compose up -d --wait` in the
+  repository root, or PostgreSQL, RabbitMQ and `./gradlew :spring-app:bootRun`).
+  `writes.live.spec.ts` then performs each write through the pages against the backend — register
+  a customer, place and cancel an order, ship and deliver, create a product and change its price
+  and stock, receive a shipment, the payment-failure switch, edit, export and forget — and asserts
+  the result through the pages. It brings what it consumes: a customer it registers and a product
+  it creates and stocks through the API before the first test, so it changes no seed data and
+  passes run after run on the same database. Each run leaves a forgotten customer, two products
+  and four orders with their events behind.
+
+CI runs both: the suite without a backend in its own job, and the suite against the Docker
+Compose stack of the Quick Start (`E2E_REUSE_SERVER=1` points Playwright at the frontend
+container instead of a dev server).

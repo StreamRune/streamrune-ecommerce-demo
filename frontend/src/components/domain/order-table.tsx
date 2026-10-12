@@ -12,6 +12,7 @@ import {
   useCancelOrder,
 } from "@/lib/mutations";
 import type { OrderView, OrderStatus } from "@/lib/types";
+import { newId } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import { AccessRestricted } from "@/components/domain/access-restricted";
 import { useRole } from "@/providers/role-provider";
@@ -84,14 +85,26 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const validLines = lines.filter((l) => l.productId && l.quantity > 0);
-    if (validLines.length === 0) {
+    // The backend takes the order id and each line's unit price from the request: the id is
+    // picked here, the price is the one of the product the line names.
+    const orderLines = lines
+      .filter((l) => l.productId && l.quantity > 0)
+      .map((l) => ({
+        productId: l.productId,
+        quantity: l.quantity,
+        unitPrice: products.find((p) => p.productId === l.productId)?.price.amount,
+      }))
+      .filter((l): l is { productId: string; quantity: number; unitPrice: number } =>
+        l.unitPrice !== undefined
+      );
+    if (orderLines.length === 0) {
       toast.error("Add at least one product line");
       return;
     }
     try {
-      await mutateAsync({ customerId, lines: validLines });
-      toast.success("Order placed");
+      const orderId = newId("order");
+      await mutateAsync({ orderId, customerId, lines: orderLines });
+      toast.success(`Order placed: ${orderId}`);
       setOpen(false);
       setLines([{ productId: "", quantity: 1 }]);
       if (!initialCustomerId) setCustomerId("");
@@ -188,12 +201,23 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
 
 // ─── Cancel Dialog ────────────────────────────────────────────────────────────
 
-function CancelOrderDialog({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+function CancelOrderDialog({
+  orderId,
+  confirmed,
+  onClose,
+}: {
+  orderId: string;
+  /** The order is CONFIRMED: the fulfillment saga has captured its payment and reserved its stock. */
+  confirmed: boolean;
+  onClose: () => void;
+}) {
+  const [reason, setReason] = useState("");
   const { mutateAsync, isPending } = useCancelOrder();
 
   async function handleConfirm() {
     try {
-      await mutateAsync(orderId);
+      // The backend reads the reason from the request body and refuses a request without one.
+      await mutateAsync({ orderId, reason: reason.trim() || "Cancelled in the demo frontend" });
       toast.success("Order cancelled");
       onClose();
     } catch (err) {
@@ -207,8 +231,20 @@ function CancelOrderDialog({ orderId, onClose }: { orderId: string; onClose: () 
         <DialogTitle>Cancel Order</DialogTitle>
       </DialogHeader>
       <p className="text-sm text-muted-foreground">
-        Are you sure you want to cancel this order? This action cannot be undone.
+        Are you sure you want to cancel order <span className="font-mono">{orderId}</span>? This
+        action cannot be undone.
       </p>
+      {confirmed && (
+        <p className="text-sm text-amber-700 dark:text-amber-400" role="note">
+          This order is confirmed: its payment is captured and its stock is reserved. Cancelling
+          sets its status to CANCELLED and does nothing else. The demo does not refund the
+          payment and does not release the reservation.
+        </p>
+      )}
+      <div className="space-y-1">
+        <Label htmlFor="co-reason">Reason (optional)</Label>
+        <Input id="co-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
+      </div>
       <DialogFooter showCloseButton>
         <Button variant="destructive" onClick={handleConfirm} disabled={isPending}>
           {isPending ? "Cancelling…" : "Cancel Order"}
@@ -219,6 +255,8 @@ function CancelOrderDialog({ orderId, onClose }: { orderId: string; onClose: () 
 }
 
 // ─── Order Row ────────────────────────────────────────────────────────────────
+
+const DONE = { confirm: "confirmed", ship: "shipped", deliver: "delivered" } as const;
 
 function OrderRow({ order }: { order: OrderView }) {
   const [expanded, setExpanded] = useState(false);
@@ -232,7 +270,7 @@ function OrderRow({ order }: { order: OrderView }) {
       if (action === "confirm") await confirm(order.orderId);
       else if (action === "ship") await ship(order.orderId);
       else await deliver(order.orderId);
-      toast.success(`Order ${action}ed`);
+      toast.success(`Order ${DONE[action]}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `Failed to ${action} order`);
     }
@@ -249,8 +287,8 @@ function OrderRow({ order }: { order: OrderView }) {
             {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
           </button>
         </TableCell>
-        <TableCell className="font-mono text-xs">{order.orderId.slice(0, 8)}…</TableCell>
-        <TableCell className="font-mono text-xs">{order.customerId.slice(0, 8)}…</TableCell>
+        <TableCell className="font-mono text-xs">{order.orderId}</TableCell>
+        <TableCell className="font-mono text-xs">{order.customerId}</TableCell>
         <TableCell>{formatMoney(order.total.amount, order.total.currency)}</TableCell>
         <TableCell>
           <Badge className={cn("text-xs", STATUS_STYLES[order.status])}>
@@ -260,23 +298,29 @@ function OrderRow({ order }: { order: OrderView }) {
         <TableCell>
           <div className="flex gap-1">
             {order.status === "CREATED" && (
-              <>
-                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
-                  <Button variant="outline" size="xs" onClick={() => handleAction("confirm")} disabled={isConfirming}>
-                    Confirm
-                  </Button>
-                </PermissionGate>
-                <PermissionGate permission="ORDER_CONFIRM_CANCEL">
-                  <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
-                    Cancel
-                  </Button>
-                </PermissionGate>
-              </>
+              <PermissionGate permission="ORDER_CONFIRM_CANCEL">
+                <Button variant="outline" size="xs" onClick={() => handleAction("confirm")} disabled={isConfirming}>
+                  Confirm
+                </Button>
+              </PermissionGate>
             )}
             {order.status === "CONFIRMED" && (
               <PermissionGate permission="ORDER_SHIP">
                 <Button variant="outline" size="xs" onClick={() => handleAction("ship")} disabled={isShipping}>
                   Ship
+                </Button>
+              </PermissionGate>
+            )}
+            {/* The backend accepts a cancel for any order that is not delivered, from the order's
+                customer or an ADMIN, and the fulfillment saga confirms a placed order within
+                seconds: the page offers Cancel for an order that is not shipped yet, confirmed
+                or not. A cancel of a confirmed order changes the order's status and nothing
+                else: the saga is complete by then, so no refund and no release of the stock
+                follow. The dialog says so before the customer decides. */}
+            {(order.status === "CREATED" || order.status === "CONFIRMED") && (
+              <PermissionGate permission="ORDER_CONFIRM_CANCEL">
+                <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
+                  Cancel
                 </Button>
               </PermissionGate>
             )}
@@ -308,7 +352,11 @@ function OrderRow({ order }: { order: OrderView }) {
       )}
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
         <DialogContent>
-          <CancelOrderDialog orderId={order.orderId} onClose={() => setCancelOpen(false)} />
+          <CancelOrderDialog
+            orderId={order.orderId}
+            confirmed={order.status === "CONFIRMED"}
+            onClose={() => setCancelOpen(false)}
+          />
         </DialogContent>
       </Dialog>
     </>
