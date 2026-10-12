@@ -118,6 +118,11 @@ public class EventExplorerController {
    * nothing and wait for nothing, so this method is safe on the event loop it is called on; the
    * store is read by the feed's own thread.
    *
+   * <p>The client is registered when Quarkus REST subscribes the {@code Multi}, and it does not
+   * subscribe the one of a request whose connection was reset before the answer is written. The
+   * place taken for such a request has no client that could leave; the feed frees it after {@link
+   * LiveFeed#FOLLOW_TIMEOUT}.
+   *
    * <p>Uses a bounded Mutiny emitter with back-pressure buffering. The feed's reader hands a frame
    * to the emitter and goes on to the next client; it never waits for this one. A client that reads
    * too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames buffered; beyond that its stream fails,

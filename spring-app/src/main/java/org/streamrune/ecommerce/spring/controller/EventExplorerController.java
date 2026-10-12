@@ -102,7 +102,9 @@ public class EventExplorerController implements SmartLifecycle {
    *
    * <p>The place is taken before the answer starts: when the feed has none left, {@link
    * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code GlobalExceptionHandler} answers
-   * {@code 503} with {@code Retry-After}.
+   * {@code 503} with {@code Retry-After}. The client is registered when Spring MVC subscribes the
+   * {@code Flux}; a place whose stream is never subscribed is free again after {@link
+   * LiveFeed#FOLLOW_TIMEOUT}.
    *
    * <p>The feed's reader hands a frame to the sink and goes on to the next client; it never waits
    * for this one. A client that reads too slowly has up to {@link #SLOW_CLIENT_BUFFER} frames

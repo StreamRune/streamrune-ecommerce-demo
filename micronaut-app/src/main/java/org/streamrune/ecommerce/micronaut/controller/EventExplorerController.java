@@ -110,7 +110,8 @@ public class EventExplorerController {
    * LiveFeed#admit} throws {@link LiveFeedFullException} and {@code LiveFeedFullExceptionHandler}
    * answers {@code 503} with {@code Retry-After}. Taking a place and registering the client read
    * nothing and wait for nothing, so they block no event loop; the store is read by the feed's own
-   * thread.
+   * thread. The client is registered when Micronaut subscribes the {@code Flux}; a place whose
+   * stream is never subscribed is free again after {@link LiveFeed#FOLLOW_TIMEOUT}.
    *
    * <p>Uses a Flux with back-pressure buffering. The feed's reader hands a frame to the sink and
    * goes on to the next client; it never waits for this one. A client that reads too slowly has up
