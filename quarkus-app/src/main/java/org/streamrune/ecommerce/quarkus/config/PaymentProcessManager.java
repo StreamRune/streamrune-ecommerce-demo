@@ -57,8 +57,9 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * </ul>
  *
  * <p>Each command runs with the incoming event's correlation id bound, so the resulting {@code
- * PaymentCaptured}/{@code PaymentFailed} carries the saga's correlation id and the saga correlates
- * it back.
+ * PaymentCaptured}/{@code PaymentFailed} carries the correlation id of the fulfillment it belongs
+ * to: one id for the whole process in the log and in the audit trail. The saga does not route by
+ * it. It finds the event by the order the payment names.
  */
 @Singleton
 public class PaymentProcessManager implements EventListener {

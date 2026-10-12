@@ -25,6 +25,8 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
@@ -166,17 +168,246 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
+  // ---- An event is routed to the saga of the order it is about, read from the event's own data.
+  // The correlation id of an event is whatever the request that caused it carried: a client sets
+  // X-Correlation-Id, so it says nothing about whose saga an event belongs to. ----
+
   @Test
-  void correlate_matchesSagaId() {
-    var evt =
+  void correlate_routesEveryEventOfTheProcessToTheSagaOfTheOrderItNames() {
+    var money = new Money(BigDecimal.TEN, "USD");
+    List<EventEnvelope> eventsOfOrderOne =
+        List.of(
+            envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "corr-1"),
+            envelope(new OrderEvent.OrderCancelled("o-1", "why"), OrderState.TYPE, "o-1", "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentRefunded("pay-o-1", "why"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
+                InventoryState.TYPE,
+                "prod-1",
+                "corr-1"),
+            envelope(
+                new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10),
+                InventoryState.TYPE,
+                "prod-1",
+                "corr-1"));
+
+    for (EventEnvelope event : eventsOfOrderOne) {
+      assertThat(saga.correlate(event))
+          .as("the saga of %s", event.eventType().name())
+          .contains(new SagaId("fulfillment-o-1"));
+    }
+  }
+
+  @Test
+  void correlate_ignoresACorrelationIdThatNamesAnotherOrdersSaga() {
+    // The caller confirmed their own order o-1 and sent X-Correlation-Id: fulfillment-o-2.
+    var confirmed =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+    var cancelled =
+        envelope(
+            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            OrderState.TYPE,
+            "o-1",
+            "fulfillment-o-2");
+
+    assertThat(saga.correlate(confirmed)).contains(new SagaId("fulfillment-o-1"));
+    assertThat(saga.correlate(cancelled)).contains(new SagaId("fulfillment-o-1"));
+  }
+
+  @Test
+  void correlate_anEventOutsideTheProcessBelongsToNoSaga_whateverItsCorrelationId() {
+    List<EventEnvelope> outside =
+        List.of(
+            envelope(new OrderEvent.OrderShipped("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
+            envelope(
+                new OrderEvent.OrderDelivered("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
+            envelope(
+                new InventoryEvent.ShipmentReceived("prod-1", 5, 5),
+                InventoryState.TYPE,
+                "prod-1",
+                "fulfillment-o-1"),
+            envelope(
+                new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2),
+                InventoryState.TYPE,
+                "prod-1",
+                "fulfillment-o-1"));
+
+    for (EventEnvelope event : outside) {
+      assertThat(saga.correlate(event)).as(event.eventType().name()).isEmpty();
+    }
+  }
+
+  @Test
+  void correlate_aPaymentEventWithoutAnOrderId_isRoutedByThePaymentIdTheSagaDerived() {
+    var failed =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    var notAFulfillmentPayment =
+        envelope(
+            new PaymentEvent.PaymentFailed("invoice-7", "declined"),
+            PaymentState.TYPE,
+            "invoice-7",
+            "fulfillment-o-2");
+
+    assertThat(saga.correlate(failed)).contains(new SagaId("fulfillment-o-1"));
+    assertThat(saga.correlate(notAFulfillmentPayment)).isEmpty();
+  }
+
+  @Test
+  void correlate_anOrderIdNoSagaIdCanHold_belongsToNoSaga() {
+    // PlaceOrder refuses such an id, so no saga exists for it; correlate answers "not mine"
+    // rather than throwing, which the framework would quarantine as a poison event.
+    var orderId = "o".repeat(OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH + 1);
+    var cancelled =
+        envelope(new OrderEvent.OrderCancelled(orderId, "why"), OrderState.TYPE, orderId, "c-1");
+
+    assertThat(saga.correlate(cancelled)).isEmpty();
+  }
+
+  // ---- A saga that is handed an event of another order neither evolves nor dispatches. ----
+
+  @Test
+  void evolve_anotherOrdersConfirmation_leavesTheSagaWhereItIs() {
+    // AWAITING_CONFIRMATION is the one state in which a confirmation completes the saga.
+    var state = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    var foreign =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+
+    assertThat(saga.evolve(state, foreign)).isEqualTo(state);
+    assertThat(saga.handle(state, foreign)).isEmpty();
+  }
+
+  @Test
+  void evolve_anotherOrdersEvent_isIgnoredWhateverRoutedItHere() {
+    // A router that sends every event to the saga of order o-2: evolve and handle compare the
+    // event with the ids the saga stores, so they do not depend on correlate being right.
+    var misrouting =
+        new OrderFulfillmentSaga() {
+          @Override
+          public Optional<SagaId> correlate(EventEnvelope event) {
+            return Optional.of(new SagaId("fulfillment-o-2"));
+          }
+        };
+    var awaitingConfirmation = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    var foreignConfirmation =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingConfirmation, foreignConfirmation))
+        .isEqualTo(awaitingConfirmation);
+
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    var foreignFailure =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
+    assertThat(misrouting.handle(awaitingPayment, foreignFailure)).isEmpty();
+  }
+
+  @Test
+  void evolve_anotherOrdersPaymentAndStock_leaveTheSagaWhereItIs() {
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    var foreignCapture =
         envelope(
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
             "pay-o-1",
-            "fulfillment-o-1");
-    Optional<SagaId> result = saga.correlate(evt);
-    assertThat(result).isPresent();
-    assertThat(result.get()).isEqualTo(new SagaId("fulfillment-o-1"));
+            "fulfillment-o-2");
+    var foreignFailure =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(awaitingPayment, foreignCapture)).isEqualTo(awaitingPayment);
+    assertThat(saga.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
+
+    // A capture of another order must not reserve this order's stock either.
+    var awaitingInventory = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_INVENTORY);
+    assertThat(saga.handle(awaitingInventory, foreignCapture)).isEmpty();
+
+    var foreignReservation =
+        envelope(
+            new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
+            InventoryState.TYPE,
+            "prod-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(awaitingInventory, foreignReservation)).isEqualTo(awaitingInventory);
+
+    var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
+    var foreignCancel =
+        envelope(
+            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            OrderState.TYPE,
+            "o-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(cancelling, foreignCancel)).isEqualTo(cancelling);
+  }
+
+  @Test
+  void evolve_anotherOrdersStartEvent_leavesTheSagaWhereItIs() {
+    var state = saga.initialState(new SagaId("fulfillment-o-2"));
+    var foreign =
+        envelope(
+            new OrderEvent.OrderPlaced("o-1", "c-1", List.of(), new Money(BigDecimal.TEN, "USD")),
+            OrderState.TYPE,
+            "o-1",
+            "corr-1");
+
+    assertThat(saga.evolve(state, foreign)).isEqualTo(state);
+    assertThat(saga.handle(state, foreign)).isEmpty();
+  }
+
+  // ---- The order's own confirmation completes the saga only where the saga asked for it. A
+  // caller who confirms their own order by hand while the saga still waits for the payment does
+  // not complete the saga: it goes on, and its ConfirmOrder is refused later. ----
+
+  @Test
+  void evolve_theOrdersOwnConfirmation_completesTheSagaOnlyWhileItAwaitsConfirmation() {
+    var confirmed =
+        envelope(new OrderEvent.OrderConfirmed("o-2"), OrderState.TYPE, "o-2", "corr-by-hand");
+
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    assertThat(saga.evolve(awaitingPayment, confirmed)).isEqualTo(awaitingPayment);
+
+    var awaitingConfirmation = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    assertThat(saga.evolve(awaitingConfirmation, confirmed).fulfillmentStatus())
+        .isEqualTo(OrderFulfillmentStatus.COMPLETED);
+  }
+
+  private static OrderFulfillmentState stateOfOrderTwo(OrderFulfillmentStatus status) {
+    var line = new OrderEvent.OrderLine("prod-2", 1, new Money(BigDecimal.TEN, "USD"));
+    return new OrderFulfillmentState(
+        new SagaId("fulfillment-o-2"),
+        "o-2",
+        "c-2",
+        "pay-o-2",
+        new Money(BigDecimal.TEN, "USD"),
+        List.of(line),
+        status);
   }
 
   // ---- AWAITING_INVENTORY must gate on PaymentCaptured, like its sibling branches ----
@@ -231,11 +462,11 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
-  // ---- PaymentFailed must actually cancel the order. A direct evolve-to-FAILED made the
-  // handle() FAILED branch unreachable, because SagaRunner.persistStatusFor returns before
-  // calling handle() once evolve() lands on a terminal SagaStatus. Fixed via a non-terminal
-  // CANCELLING intermediate: evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches
-  // CancelOrder, then evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
+  // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
+  // the CancelOrder dispatch unreachable, because SagaRunner skips handle() once evolve() lands
+  // on a terminal SagaStatus. Hence the non-terminal CANCELLING intermediate:
+  // evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches CancelOrder, then
+  // evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
 
   @Test
   void paymentFailed_evolvesToCancelling_andHandleEmitsCancelOrder() {

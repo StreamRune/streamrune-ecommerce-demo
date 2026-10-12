@@ -162,7 +162,7 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
   /**
    * 30 s: every Micronaut test class starts its own application context, and the previous class's
    * context can still hold the projection leases when this one starts; the projection then stays on
-   * standby until those leases expire (15 s TTL, retried every 5 s).
+   * standby until those leases expire (5 s TTL in the test profile, retried about every 1.7 s).
    */
   private void awaitStatus(String pid, String status) {
     await()

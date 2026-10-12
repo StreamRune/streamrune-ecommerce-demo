@@ -45,8 +45,8 @@ This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, and the
 
 > **What makes the saga complete in the assembled demo.** When you place an order end-to-end, the saga does not stall — it runs all the way to `COMPLETED`. Two pieces make that work:
 >
-> - **`SagaRunner` binds the saga id as the request correlation id** when it dispatches each saga command. Every event those commands produce (`PaymentInitiated`, `PaymentCaptured`, `StockReserved`, `OrderConfirmed`) therefore carries the saga's `fulfillment-<orderId>` correlation id, so `OrderFulfillmentSaga.correlate()` routes the event straight back to the right saga instance. This correlation plumbing was the missing link that previously left the saga waiting in `AWAITING_PAYMENT`.
-> - **A `PaymentProcessManager` drives the capture leg.** It is an `EventListener` (fed by its own `PollingEventSubscription`) that reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)`, and dispatches `CapturePayment` when the gateway succeeds or `FailPayment` when the gateway fails — under the incoming event's correlation id, so the resulting event correlates back to the saga. A command it cannot dispatch is delivered again, never turned into a failed payment.
+> - **Every event of the process names its order, and the saga routes by that.** `PaymentInitiated`, `PaymentCaptured` and `StockReserved` carry the `orderId` the saga put into the command, `OrderConfirmed` carries its own, and a payment event without one carries the payment id the saga derived (`pay-<orderId>`). `OrderFulfillmentSaga.correlate()` reads that id and answers `fulfillment-<orderId>`, the saga of that order. `SagaRunner` also binds the saga id as the request correlation id of each command it dispatches, so the whole fulfillment shares one correlation id in the log; the saga does not route by it (Step 3 says why).
+> - **A `PaymentProcessManager` drives the capture leg.** It is an `EventListener` (fed by its own `PollingEventSubscription`) that reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)`, and dispatches `CapturePayment` when the gateway succeeds or `FailPayment` when the gateway fails — under the incoming event's correlation id, so the capture stays under the fulfillment's correlation id in the log. A command it cannot dispatch is delivered again, never turned into a failed payment.
 >
 > You build the `PaymentProcessManager` in Step 5b and wire it in Step 6. Chapter 12 then wraps its gateway call in a circuit breaker.
 
@@ -116,7 +116,7 @@ public sealed interface PaymentEvent extends DomainEvent {
 }
 ```
 
-`PaymentCaptured` carries `orderId` so consumers — including the saga — can correlate the event back to the order without querying state.
+`PaymentCaptured` carries `orderId` so consumers — including the saga — can correlate the event back to the order without querying state. `PaymentFailed` and `PaymentRefunded` carry the payment id only; the saga gives a fulfillment's payment the id `pay-<orderId>`, so the order is read from that.
 
 ### PaymentState
 
@@ -404,15 +404,24 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * CancelOrder; a post-reservation failure → ReleaseStock + RefundPayment + CancelOrder (see {@link
  * #compensate}).
  *
- * <p>Correlation: every command this saga dispatches is executed by {@code SagaRunner} with the
- * saga id ({@code "fulfillment-<orderId>"}) bound as the request correlation id, so the resulting
- * events ({@code PaymentInitiated}, {@code PaymentCaptured}, {@code StockReserved}, {@code
- * OrderConfirmed}) carry that correlation id and {@link #correlate} routes them back here. A {@code
- * SagaId} holds 255 characters at most, so {@code OrderCommand.PlaceOrder} refuses an order id
- * longer than 255 minus the prefix ({@code SAGA_ID_PREFIX}, which this class uses to build and to
- * match the id) when the order is placed; an order id that got past it would make {@link
- * #extractSagaId} throw on {@code OrderPlaced}, and the order would stay {@code CREATED} with no
- * saga.
+ * <p>Correlation: an event belongs to the saga of the order it is about, and {@link #correlate}
+ * reads that order from the event's own data: the {@code orderId} of an order, payment or inventory
+ * event, or the payment id of a payment event that carries no order id ({@code "pay-<orderId>"},
+ * the id {@link #evolve} derives from {@code OrderPlaced}). The event's correlation id decides
+ * nothing. {@code SagaRunner} binds the saga id as the correlation id of every command the saga
+ * dispatches, which is useful for tracing one fulfillment through the log, but a correlation id is
+ * request metadata: an HTTP request's is whatever the client put in {@code X-Correlation-Id}, and a
+ * client that could address a saga with it would have its own order's {@code OrderConfirmed}
+ * evolved by another order's saga. {@link #evolve} and {@link #handle} check the same thing from
+ * the other side, against the order id and the payment id the saga stores in its own state: an
+ * event that is not about this saga's order changes nothing and dispatches nothing, whoever hands
+ * it over and whatever routed it.
+ *
+ * <p>A {@code SagaId} holds 255 characters at most, so {@code OrderCommand.PlaceOrder} refuses an
+ * order id longer than 255 minus the prefix ({@code SAGA_ID_PREFIX}, which this class uses to build
+ * the id) when the order is placed; an order id that got past it would make {@link #extractSagaId}
+ * throw on {@code OrderPlaced}, and the order would stay {@code CREATED} with no saga. For every
+ * other event of such an order {@link #correlate} answers "no saga", which is the truth.
  *
  * <p>The capture leg is driven by a payment process manager (in the runtime app), which reacts to
  * {@code PaymentInitiated} by calling the payment gateway and dispatching {@code CapturePayment}
@@ -439,6 +448,9 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  */
 public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentState> {
 
+  /** A fulfillment's payment id is this prefix and the order id. */
+  private static final String PAYMENT_ID_PREFIX = "pay-";
+
   @Override
   public Class<OrderFulfillmentState> stateType() {
     return OrderFulfillmentState.class;
@@ -463,17 +475,88 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
     throw new IllegalArgumentException("Not a start event: " + event.eventType().name());
   }
 
+  /**
+   * The saga an event belongs to: the saga of the order the event is about. Only the events of the
+   * fulfillment process are routed, each by the field that names its order; every other event, and
+   * an event whose order no saga id can hold, belongs to no saga.
+   *
+   * <p>The order, payment and inventory events below are written by commands this saga dispatched
+   * (and, for the capture leg, by the payment process manager), with ids taken from the saga's own
+   * state. {@code OrderConfirmed} and {@code OrderCancelled} are also written by a request of the
+   * order's customer or an {@code ADMIN}: such an event reaches the saga of that order and no
+   * other, and {@link #evolve} decides what it means there.
+   */
   @Override
   public Optional<SagaId> correlate(EventEnvelope event) {
-    var corrId = event.metadata().correlationId();
-    if (corrId != null && corrId.value().startsWith(OrderCommand.PlaceOrder.SAGA_ID_PREFIX)) {
-      return Optional.of(new SagaId(corrId.value()));
+    return switch (event.event()) {
+      case OrderEvent.OrderConfirmed e -> sagaOfOrder(e.orderId());
+      case OrderEvent.OrderCancelled e -> sagaOfOrder(e.orderId());
+      case PaymentEvent.PaymentInitiated e -> sagaOfOrder(e.orderId());
+      case PaymentEvent.PaymentCaptured e -> sagaOfOrder(e.orderId());
+      case PaymentEvent.PaymentFailed e -> sagaOfPayment(e.paymentId());
+      case PaymentEvent.PaymentRefunded e -> sagaOfPayment(e.paymentId());
+      case InventoryEvent.StockReserved e -> sagaOfOrder(e.orderId());
+      case InventoryEvent.StockReleased e -> sagaOfOrder(e.orderId());
+      default -> Optional.empty();
+    };
+  }
+
+  /** The saga that fulfils the given order, or none for an id no saga id can hold. */
+  private static Optional<SagaId> sagaOfOrder(String orderId) {
+    if (orderId == null
+        || orderId.isEmpty()
+        || orderId.length() > OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH) {
+      return Optional.empty();
     }
-    return Optional.empty();
+    return Optional.of(new SagaId(OrderCommand.PlaceOrder.SAGA_ID_PREFIX + orderId));
+  }
+
+  /**
+   * The saga behind a payment id. A fulfillment's payment id is {@code "pay-" + orderId}, set by
+   * {@link #evolve} on {@code OrderPlaced}; a payment under any other id is not a fulfillment's.
+   */
+  private static Optional<SagaId> sagaOfPayment(String paymentId) {
+    if (paymentId == null || !paymentId.startsWith(PAYMENT_ID_PREFIX)) {
+      return Optional.empty();
+    }
+    return sagaOfOrder(paymentId.substring(PAYMENT_ID_PREFIX.length()));
+  }
+
+  /**
+   * Whether the event is about this saga's order, answered from what the saga itself stores and
+   * without asking {@link #correlate}: the {@code OrderPlaced} that starts this saga names the
+   * order the saga id is built from, and every later event names the order id or the payment id the
+   * saga recorded from that {@code OrderPlaced}. The answer holds whoever routed the event here.
+   */
+  private static boolean isAboutThisSaga(OrderFulfillmentState state, EventEnvelope event) {
+    return switch (event.event()) {
+      case OrderEvent.OrderPlaced e ->
+          sagaOfOrder(e.orderId()).filter(state.sagaId()::equals).isPresent();
+      case OrderEvent.OrderConfirmed e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case OrderEvent.OrderCancelled e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentInitiated e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentCaptured e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case PaymentEvent.PaymentFailed e -> isTheSagasOwn(state.paymentId(), e.paymentId());
+      case PaymentEvent.PaymentRefunded e -> isTheSagasOwn(state.paymentId(), e.paymentId());
+      case InventoryEvent.StockReserved e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case InventoryEvent.StockReleased e -> isTheSagasOwn(state.orderId(), e.orderId());
+      default -> false;
+    };
+  }
+
+  /**
+   * Whether an id an event carries is the id this saga recorded; a saga that recorded none has
+   * none.
+   */
+  private static boolean isTheSagasOwn(String recorded, String inTheEvent) {
+    return recorded != null && recorded.equals(inTheEvent);
   }
 
   @Override
   public OrderFulfillmentState evolve(OrderFulfillmentState state, EventEnvelope event) {
+    if (!isAboutThisSaga(state, event)) {
+      return state;
+    }
     Object evt = event.event();
     return switch (evt) {
       case OrderEvent.OrderPlaced e ->
@@ -481,7 +564,7 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
               state.sagaId(),
               e.orderId(),
               e.customerId(),
-              "pay-" + e.orderId(),
+              PAYMENT_ID_PREFIX + e.orderId(),
               e.total(),
               e.lines(),
               OrderFulfillmentStatus.AWAITING_PAYMENT);
@@ -534,15 +617,20 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
                   OrderFulfillmentStatus.AWAITING_CONFIRMATION)
               : state;
 
+      // The confirmation this saga asked for, after the payment and the reservation. An order its
+      // customer or an ADMIN confirms by hand earlier does not complete the saga: it goes on, and
+      // its own ConfirmOrder is then refused and compensated.
       case OrderEvent.OrderConfirmed e ->
-          new OrderFulfillmentState(
-              state.sagaId(),
-              state.orderId(),
-              state.customerId(),
-              state.paymentId(),
-              state.orderTotal(),
-              state.lines(),
-              OrderFulfillmentStatus.COMPLETED);
+          state.fulfillmentStatus() == OrderFulfillmentStatus.AWAITING_CONFIRMATION
+              ? new OrderFulfillmentState(
+                  state.sagaId(),
+                  state.orderId(),
+                  state.customerId(),
+                  state.paymentId(),
+                  state.orderTotal(),
+                  state.lines(),
+                  OrderFulfillmentStatus.COMPLETED)
+              : state;
 
       default -> state;
     };
@@ -550,6 +638,9 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
 
   @Override
   public List<SagaCommand> handle(OrderFulfillmentState state, EventEnvelope event) {
+    if (!isAboutThisSaga(state, event)) {
+      return List.of();
+    }
     return switch (state.fulfillmentStatus()) {
       case AWAITING_PAYMENT -> {
         if (event.event() instanceof OrderEvent.OrderPlaced) {
@@ -660,10 +751,13 @@ The methods that carry the weight here:
 
 - `isStartEvent` tells `SagaRunner` which event creates a new saga instance. Only `OrderPlaced` qualifies.
 - `extractSagaId` derives the saga's stable identity from the start event. The pattern `"fulfillment-" + orderId` is predictable and unique per order. The prefix is `OrderCommand.PlaceOrder.SAGA_ID_PREFIX`, the constant that also fixes the longest order id `PlaceOrder` accepts (243 characters, chapter 8), so the id this method builds always fits the 255 characters of a `SagaId`.
-- `correlate` connects subsequent events to an existing saga. Because `SagaRunner` binds the saga id as the correlation id on every command it dispatches, the events those commands produce — `PaymentInitiated`, `PaymentCaptured`, `StockReserved`, `OrderConfirmed` — all carry a correlation id of the form `"fulfillment-..."`, so this method returns the matching saga without consulting any other state.
-- `handle` advances the process. `AWAITING_INVENTORY` is gated on `PaymentEvent.PaymentCaptured` — the same `instanceof` discipline as every other branch — before it reads the first order line out of `state.lines()` and dispatches `ReserveStock` (targeting the inventory stream `inventory:<productId>` — the bus resolves the `inventory` type from `ReserveStock`'s registration). Without that gate a redelivered or unrelated event sharing the `fulfillment-...` correlation id (for example a replayed `OrderConfirmed`) would re-issue `ReserveStock` while the saga sat in `AWAITING_INVENTORY` — this was fixed as part of the saga-reliability adaptation. The demo's orders carry a single line, so one `ReserveStock` produces one `StockReserved`, which moves the saga to `AWAITING_CONFIRMATION`, where the next `handle` call issues `ConfirmOrder`. A multi-line order would need per-line reservation tracking before confirming — out of scope for the demo. `CANCELLING` mirrors that same gating discipline: it dispatches `CancelOrder` only for the `PaymentEvent.PaymentFailed` that put the saga there.
-- `evolve` for `StockReserved` is guarded on `AWAITING_INVENTORY`, and for `OrderEvent.OrderCancelled` is guarded on `CANCELLING`: either an unrelated event sharing the correlation id, or an `OrderCancelled` seen outside the cancelling flow, cannot push a saga past its current step.
-- `compensate` is called by `SagaRunner` when a dispatched `SagaCommand` throws. The compensation strategy is now step-appropriate, not a blanket cancel: `AWAITING_PAYMENT` cancels only (nothing was ever captured); `AWAITING_INVENTORY` refunds the payment and cancels (captured but not reserved); `AWAITING_CONFIRMATION` releases the stock reservation *before* refunding and cancelling (captured **and** reserved — releasing first avoids stranding held stock). Every other state — including terminal ones — returns an empty list; the framework classifies an empty compensation list as `FAILED`, which is correct because there is nothing left to undo. `SagaCommand` pairs each command with an `AggregateId`, not a bare string — the type carries the routing target through `SagaRunner`'s dispatch. The saga builds it with `new AggregateId(...)`, not the `AggregateId.of(...)` your id extractors use. `of` is the factory for ids a client sends, and it refuses control characters and ids longer than 255 characters (chapter 2). Every id here comes from the saga's stored state instead: the order, payment and product ids it recorded from `OrderPlaced`. Inside `handle()` or `compensate()`, `of` would throw on such a value, and the framework would quarantine the event as poison, with the payment captured and never refunded. The order endpoints never record a product id that `of` would refuse here: the `OrderCommand.OrderLine` constructor (chapter 8) refuses one that carries a control character, or is longer than 255 characters, when the order is placed. The client gets a `400`, and no payment is taken. With the constructor, the command still reaches the bus, and the id extractor applies `AggregateId.of` there. A product id that reached the log without crossing the order-line check, such as one in an `OrderPlaced` event an application appended itself, is refused at that point with an `IllegalArgumentException`. The saga treats that like a business rejection: it compensates the step with a refund and a cancel.
+- `correlate` connects subsequent events to an existing saga. It reads the order the event is about from the event's own data — the `orderId` of `OrderConfirmed`, `OrderCancelled`, `PaymentInitiated`, `PaymentCaptured`, `StockReserved` and `StockReleased`, the payment id of `PaymentFailed` and `PaymentRefunded` — and returns that order's saga, without consulting any other state. Every other event belongs to no saga, and so does an event whose order id no `SagaId` can hold. The event's correlation id is not read.
+- `handle` advances the process. `AWAITING_INVENTORY` is gated on `PaymentEvent.PaymentCaptured` — the same `instanceof` discipline as every other branch — before it reads the first order line out of `state.lines()` and dispatches `ReserveStock` (targeting the inventory stream `inventory:<productId>` — the bus resolves the `inventory` type from `ReserveStock`'s registration). Without that gate a redelivered or unrelated event of the same order (for example a replayed `OrderConfirmed`) would re-issue `ReserveStock` while the saga sat in `AWAITING_INVENTORY`. The demo's orders carry a single line, so one `ReserveStock` produces one `StockReserved`, which moves the saga to `AWAITING_CONFIRMATION`, where the next `handle` call issues `ConfirmOrder`. A multi-line order would need per-line reservation tracking before confirming — out of scope for the demo. `CANCELLING` mirrors that same gating discipline: it dispatches `CancelOrder` only for the `PaymentEvent.PaymentFailed` that put the saga there.
+- `evolve` for `StockReserved` is guarded on `AWAITING_INVENTORY`, for `OrderEvent.OrderCancelled` on `CANCELLING` and for `OrderEvent.OrderConfirmed` on `AWAITING_CONFIRMATION`: an event of the order that arrives outside its step cannot push the saga past where it is. The order's customer or an `ADMIN` can cancel or confirm the order over HTTP at any time (Chapter 9); such an event reaches the saga of that order, and outside its step it changes nothing. A customer who confirms their own order while the saga still waits for the payment does not complete the saga: it goes on, its own `ConfirmOrder` is refused by the decider, and it compensates.
+- `evolve` and `handle` both start with `isAboutThisSaga`: an event that is not about this saga's order changes nothing and dispatches nothing. It does not ask `correlate`. It compares the event with what the saga stores: the order id and the payment id recorded from `OrderPlaced`, and for `OrderPlaced` itself the order the saga id is built from. `SagaRunner` only hands a saga the events `correlate` routed to it, so in the running app this is a second, independent lock on the same door; it is what keeps the rule true for a caller that feeds the saga by another path, a dead-letter replay under an explicit saga id (Chapter 14) for one, and for a `correlate` that answers wrongly.
+- `compensate` is called by `SagaRunner` when a dispatched `SagaCommand` throws. The compensation strategy is step-appropriate, not a blanket cancel: `AWAITING_PAYMENT` cancels only (nothing was ever captured); `AWAITING_INVENTORY` refunds the payment and cancels (captured but not reserved); `AWAITING_CONFIRMATION` releases the stock reservation *before* refunding and cancelling (captured **and** reserved — releasing first avoids stranding held stock). Every other state — including terminal ones — returns an empty list; the framework classifies an empty compensation list as `FAILED`, which is correct because there is nothing left to undo. `SagaCommand` pairs each command with an `AggregateId`, not a bare string — the type carries the routing target through `SagaRunner`'s dispatch. The saga builds it with `new AggregateId(...)`, not the `AggregateId.of(...)` your id extractors use. `of` is the factory for ids a client sends, and it refuses control characters and ids longer than 255 characters (chapter 2). Every id here comes from the saga's stored state instead: the order, payment and product ids it recorded from `OrderPlaced`. Inside `handle()` or `compensate()`, `of` would throw on such a value, and the framework would quarantine the event as poison, with the payment captured and never refunded. The order endpoints never record a product id that `of` would refuse here: the `OrderCommand.OrderLine` constructor (chapter 8) refuses one that carries a control character, or is longer than 255 characters, when the order is placed. The client gets a `400`, and no payment is taken. With the constructor, the command still reaches the bus, and the id extractor applies `AggregateId.of` there. A product id that reached the log without crossing the order-line check, such as one in an `OrderPlaced` event an application appended itself, is refused at that point with an `IllegalArgumentException`. The saga treats that like a business rejection: it compensates the step with a refund and a cancel.
+
+**Why the saga routes by the event's own data.** A correlation id looks like the obvious key: `SagaRunner` stamps the saga id on every command the saga dispatches, so the events of those commands come back carrying it. But a correlation id is request metadata, and for an HTTP request it is whatever the client put in `X-Correlation-Id`; the request filter generates one only when the header is missing. A saga that routes by it lets any customer address any saga: confirm your own order with `X-Correlation-Id: fulfillment-<somebody else's order>`, and the `OrderConfirmed` of *your* order is handed to *their* saga. A saga that takes it for the confirmation it asked for completes at once, while it still waits for its payment. The payment is captured all the same a moment later, because the payment process manager reacts to `PaymentInitiated` on its own subscription, but the `PaymentCaptured` finds a finished saga and is dropped: the customer is charged, nothing reserves the stock, the order stays `CREATED` and nothing refunds the payment. Nothing in an event's metadata tells a correlation id the saga set from one a client sent. The event's payload is different: the access rule of Chapter 9 decides who may write an event about an order, and the `orderId` in it is the id of the stream the decider wrote to. So `correlate` asks the event which order it is about and answers with that order's saga, and a caller can only ever reach the saga of an order they may act on. `FulfillmentSagaRoutingIT` in each of the three apps places two orders of two customers whose sagas wait for their payment, sends exactly that request and finds the other saga's row as it was stored: still `AWAITING_PAYMENT`, at its first version, with no event applied to it, while the last event the caller's own saga applied is that `OrderConfirmed`. The correlation id keeps its real job: it ties the commands and events of one fulfillment together for whoever reads the log.
 
 ### Step 4 — Saga tests
 
@@ -697,6 +791,8 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
@@ -838,17 +934,246 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
+  // ---- An event is routed to the saga of the order it is about, read from the event's own data.
+  // The correlation id of an event is whatever the request that caused it carried: a client sets
+  // X-Correlation-Id, so it says nothing about whose saga an event belongs to. ----
+
   @Test
-  void correlate_matchesSagaId() {
-    var evt =
+  void correlate_routesEveryEventOfTheProcessToTheSagaOfTheOrderItNames() {
+    var money = new Money(BigDecimal.TEN, "USD");
+    List<EventEnvelope> eventsOfOrderOne =
+        List.of(
+            envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "corr-1"),
+            envelope(new OrderEvent.OrderCancelled("o-1", "why"), OrderState.TYPE, "o-1", "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new PaymentEvent.PaymentRefunded("pay-o-1", "why"),
+                PaymentState.TYPE,
+                "pay-o-1",
+                "corr-1"),
+            envelope(
+                new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
+                InventoryState.TYPE,
+                "prod-1",
+                "corr-1"),
+            envelope(
+                new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10),
+                InventoryState.TYPE,
+                "prod-1",
+                "corr-1"));
+
+    for (EventEnvelope event : eventsOfOrderOne) {
+      assertThat(saga.correlate(event))
+          .as("the saga of %s", event.eventType().name())
+          .contains(new SagaId("fulfillment-o-1"));
+    }
+  }
+
+  @Test
+  void correlate_ignoresACorrelationIdThatNamesAnotherOrdersSaga() {
+    // The caller confirmed their own order o-1 and sent X-Correlation-Id: fulfillment-o-2.
+    var confirmed =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+    var cancelled =
+        envelope(
+            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            OrderState.TYPE,
+            "o-1",
+            "fulfillment-o-2");
+
+    assertThat(saga.correlate(confirmed)).contains(new SagaId("fulfillment-o-1"));
+    assertThat(saga.correlate(cancelled)).contains(new SagaId("fulfillment-o-1"));
+  }
+
+  @Test
+  void correlate_anEventOutsideTheProcessBelongsToNoSaga_whateverItsCorrelationId() {
+    List<EventEnvelope> outside =
+        List.of(
+            envelope(new OrderEvent.OrderShipped("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
+            envelope(
+                new OrderEvent.OrderDelivered("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
+            envelope(
+                new InventoryEvent.ShipmentReceived("prod-1", 5, 5),
+                InventoryState.TYPE,
+                "prod-1",
+                "fulfillment-o-1"),
+            envelope(
+                new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2),
+                InventoryState.TYPE,
+                "prod-1",
+                "fulfillment-o-1"));
+
+    for (EventEnvelope event : outside) {
+      assertThat(saga.correlate(event)).as(event.eventType().name()).isEmpty();
+    }
+  }
+
+  @Test
+  void correlate_aPaymentEventWithoutAnOrderId_isRoutedByThePaymentIdTheSagaDerived() {
+    var failed =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    var notAFulfillmentPayment =
+        envelope(
+            new PaymentEvent.PaymentFailed("invoice-7", "declined"),
+            PaymentState.TYPE,
+            "invoice-7",
+            "fulfillment-o-2");
+
+    assertThat(saga.correlate(failed)).contains(new SagaId("fulfillment-o-1"));
+    assertThat(saga.correlate(notAFulfillmentPayment)).isEmpty();
+  }
+
+  @Test
+  void correlate_anOrderIdNoSagaIdCanHold_belongsToNoSaga() {
+    // PlaceOrder refuses such an id, so no saga exists for it; correlate answers "not mine"
+    // rather than throwing, which the framework would quarantine as a poison event.
+    var orderId = "o".repeat(OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH + 1);
+    var cancelled =
+        envelope(new OrderEvent.OrderCancelled(orderId, "why"), OrderState.TYPE, orderId, "c-1");
+
+    assertThat(saga.correlate(cancelled)).isEmpty();
+  }
+
+  // ---- A saga that is handed an event of another order neither evolves nor dispatches. ----
+
+  @Test
+  void evolve_anotherOrdersConfirmation_leavesTheSagaWhereItIs() {
+    // AWAITING_CONFIRMATION is the one state in which a confirmation completes the saga.
+    var state = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    var foreign =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+
+    assertThat(saga.evolve(state, foreign)).isEqualTo(state);
+    assertThat(saga.handle(state, foreign)).isEmpty();
+  }
+
+  @Test
+  void evolve_anotherOrdersEvent_isIgnoredWhateverRoutedItHere() {
+    // A router that sends every event to the saga of order o-2: evolve and handle compare the
+    // event with the ids the saga stores, so they do not depend on correlate being right.
+    var misrouting =
+        new OrderFulfillmentSaga() {
+          @Override
+          public Optional<SagaId> correlate(EventEnvelope event) {
+            return Optional.of(new SagaId("fulfillment-o-2"));
+          }
+        };
+    var awaitingConfirmation = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    var foreignConfirmation =
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingConfirmation, foreignConfirmation))
+        .isEqualTo(awaitingConfirmation);
+
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    var foreignFailure =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
+    assertThat(misrouting.handle(awaitingPayment, foreignFailure)).isEmpty();
+  }
+
+  @Test
+  void evolve_anotherOrdersPaymentAndStock_leaveTheSagaWhereItIs() {
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    var foreignCapture =
         envelope(
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
             "pay-o-1",
-            "fulfillment-o-1");
-    Optional<SagaId> result = saga.correlate(evt);
-    assertThat(result).isPresent();
-    assertThat(result.get()).isEqualTo(new SagaId("fulfillment-o-1"));
+            "fulfillment-o-2");
+    var foreignFailure =
+        envelope(
+            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(awaitingPayment, foreignCapture)).isEqualTo(awaitingPayment);
+    assertThat(saga.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
+
+    // A capture of another order must not reserve this order's stock either.
+    var awaitingInventory = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_INVENTORY);
+    assertThat(saga.handle(awaitingInventory, foreignCapture)).isEmpty();
+
+    var foreignReservation =
+        envelope(
+            new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
+            InventoryState.TYPE,
+            "prod-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(awaitingInventory, foreignReservation)).isEqualTo(awaitingInventory);
+
+    var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
+    var foreignCancel =
+        envelope(
+            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            OrderState.TYPE,
+            "o-1",
+            "fulfillment-o-2");
+    assertThat(saga.evolve(cancelling, foreignCancel)).isEqualTo(cancelling);
+  }
+
+  @Test
+  void evolve_anotherOrdersStartEvent_leavesTheSagaWhereItIs() {
+    var state = saga.initialState(new SagaId("fulfillment-o-2"));
+    var foreign =
+        envelope(
+            new OrderEvent.OrderPlaced("o-1", "c-1", List.of(), new Money(BigDecimal.TEN, "USD")),
+            OrderState.TYPE,
+            "o-1",
+            "corr-1");
+
+    assertThat(saga.evolve(state, foreign)).isEqualTo(state);
+    assertThat(saga.handle(state, foreign)).isEmpty();
+  }
+
+  // ---- The order's own confirmation completes the saga only where the saga asked for it. A
+  // caller who confirms their own order by hand while the saga still waits for the payment does
+  // not complete the saga: it goes on, and its ConfirmOrder is refused later. ----
+
+  @Test
+  void evolve_theOrdersOwnConfirmation_completesTheSagaOnlyWhileItAwaitsConfirmation() {
+    var confirmed =
+        envelope(new OrderEvent.OrderConfirmed("o-2"), OrderState.TYPE, "o-2", "corr-by-hand");
+
+    var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+    assertThat(saga.evolve(awaitingPayment, confirmed)).isEqualTo(awaitingPayment);
+
+    var awaitingConfirmation = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    assertThat(saga.evolve(awaitingConfirmation, confirmed).fulfillmentStatus())
+        .isEqualTo(OrderFulfillmentStatus.COMPLETED);
+  }
+
+  private static OrderFulfillmentState stateOfOrderTwo(OrderFulfillmentStatus status) {
+    var line = new OrderEvent.OrderLine("prod-2", 1, new Money(BigDecimal.TEN, "USD"));
+    return new OrderFulfillmentState(
+        new SagaId("fulfillment-o-2"),
+        "o-2",
+        "c-2",
+        "pay-o-2",
+        new Money(BigDecimal.TEN, "USD"),
+        List.of(line),
+        status);
   }
 
   // ---- AWAITING_INVENTORY must gate on PaymentCaptured, like its sibling branches ----
@@ -903,11 +1228,11 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
-  // ---- PaymentFailed must actually cancel the order. A direct evolve-to-FAILED made the
-  // handle() FAILED branch unreachable, because SagaRunner.persistStatusFor returns before
-  // calling handle() once evolve() lands on a terminal SagaStatus. Fixed via a non-terminal
-  // CANCELLING intermediate: evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches
-  // CancelOrder, then evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
+  // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
+  // the CancelOrder dispatch unreachable, because SagaRunner skips handle() once evolve() lands
+  // on a terminal SagaStatus. Hence the non-terminal CANCELLING intermediate:
+  // evolve(PaymentFailed) -> CANCELLING (RUNNING), handle() dispatches CancelOrder, then
+  // evolve(OrderCancelled) while CANCELLING -> FAILED (terminal, saga ends). ----
 
   @Test
   void paymentFailed_evolvesToCancelling_andHandleEmitsCancelOrder() {
@@ -1306,8 +1631,9 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * </ul>
  *
  * <p>Each command runs with the incoming event's correlation id bound, so the resulting {@code
- * PaymentCaptured}/{@code PaymentFailed} carries the saga's correlation id and the saga correlates
- * it back.
+ * PaymentCaptured}/{@code PaymentFailed} carries the correlation id of the fulfillment it belongs
+ * to: one id for the whole process in the log and in the audit trail. The saga does not route by
+ * it. It finds the event by the order the payment names.
  */
 public class PaymentProcessManager implements EventListener {
 
@@ -1420,7 +1746,7 @@ public class PaymentProcessManager implements EventListener {
 
 Four details earn their keep:
 
-- **Correlation preservation.** `dispatch()` rebinds the incoming `PaymentInitiated` correlation id onto the `CapturePayment`/`FailPayment` it sends. Without this the resulting event would lose the `fulfillment-...` correlation and the saga would never see the capture outcome.
+- **Correlation preservation.** `dispatch()` rebinds the incoming `PaymentInitiated` correlation id onto the `CapturePayment`/`FailPayment` it sends. The capture and its event stay under the `fulfillment-...` correlation id of the process they belong to, which is how the audit trail and a log search show one fulfillment end to end. The saga itself finds `PaymentCaptured` by its `orderId` and `PaymentFailed` by its payment id.
 - **Only the gateway decides the payment.** The `try` block holds the gateway call and nothing else. A gateway failure is counted by the breaker and becomes `FailPayment`. A failure to *dispatch* a command — the event store unreachable, the command bus's own circuit breaker open (Chapter 12), the bus shutting down during a restart — says nothing about the payment, so `settle()` lets it propagate out of `onEvents`. The polling subscription then keeps its checkpoint before the event and delivers it again after a backoff. Catching it as a gateway failure would dispatch `FailPayment` for money the gateway had already taken, and the saga would cancel an order the customer paid for. Swallowing it would leave the payment `PENDING` forever, with the event already consumed and no dead-letter entry or timeout to bring it back.
 - **Safe to deliver twice.** The subscription delivers at least once, and after a failure it delivers the whole batch again. `alreadySettled()` reads the payment's own stream from the event store: a later event there means an earlier delivery captured or failed the payment, so the manager does nothing — in particular it never calls the gateway for a payment that already failed. A payment that is still `PENDING` may have been charged by an attempt whose capture could not be recorded; calling the gateway again is safe because the payment id is the gateway's idempotency key (Step 5). Each command goes out under a key derived from the payment id — `payment-capture:<paymentId>`, `payment-fail:<paymentId>` — which the command inbox wired in Step 6 records with the resulting event. When the bus has also dead-lettered a capture that failed on the store, replaying that copy later is an inbox hit, not a second capture.
 - **A rejection means "already settled" only when it is true.** The decider rejects `CapturePayment`/`FailPayment` with a `DomainException` once the payment is no longer `PENDING`. `settle()` swallows that rejection only after re-reading the stream and finding the payment settled; any other rejection propagates.
@@ -1523,7 +1849,7 @@ public VirtualThreadCommandBus commandBus(
 }
 ```
 
-The stream id extractor returns `paymentId` for every command variant, wrapped in `AggregateId.of(...)` (the strict-typed form the bus builder now expects). This means all events for a given payment are appended to the stream `payment:<paymentId>` (for example `payment:pay-o-100`): the stream is the registered type, `PaymentState.TYPE`, paired with the id the extractor returns, unchanged.
+The stream id extractor returns `paymentId` for every command variant, wrapped in `AggregateId.of(...)` (the strict-typed form the bus builder expects). This means all events for a given payment are appended to the stream `payment:<paymentId>` (for example `payment:pay-o-100`): the stream is the registered type, `PaymentState.TYPE`, paired with the id the extractor returns, unchanged.
 
 **SagaRunner bean** — the runner drives the saga when fed events. Make it a bean, not a local variable inside the subscription bean: the Spring integration looks for `SagaRunner` beans. For each one it starts a compensation retry sweeper (a compensation that failed transiently is re-driven, see [What We Learned](#what-we-learned)), and it applies `streamrune.inbox.retention-max-age` to the runner's key-age guard, which stops a live event from resuming a compensation so old that its deduplication keys may already be pruned. A runner the integration cannot see gets neither.
 
@@ -1544,7 +1870,7 @@ public SagaRunner<?> orderFulfillmentSagaRunner(
 }
 ```
 
-`SagaRunner` processes events fed to it. For each event it receives, it calls `isStartEvent()` on the orchestrator. If true, it creates a new saga instance via `sagaStore.create(...)` (an atomic insert — a concurrent duplicate `create` throws `OptimisticLockException`, which the runner treats as a harmless dedup no-op) and calls `handle()` to get the first commands. For subsequent events, it calls `correlate()` to find the matching saga, loads the state and its `version` via `sagaStore.load(...)`, calls `evolve()` then `handle()`, dispatches the resulting commands, and persists the updated state with `sagaStore.update(..., expectedVersion)` — a compare-and-swap write that only succeeds if the stored version still matches what was loaded. This cycle is not wrapped in a single atomic transaction — but it no longer needs to be: a concurrent writer that raced ahead (another subscription batch, or the saga's own timeout sweep) is caught by the version CAS, which throws `OptimisticLockException` on conflict; the subscription retries the batch against fresh state, and any command already dispatched by the losing attempt is deduplicated by the command inbox above rather than re-applied.
+`SagaRunner` processes events fed to it. For each event it receives, it calls `isStartEvent()` on the orchestrator. If true, it evolves the event from `initialState()` and writes the saga's row with `sagaStore.createGenesisPending(...)` before it dispatches anything (an atomic insert — a concurrent duplicate throws `OptimisticLockException`, and the runner then goes by the row it finds), dispatches the commands `handle()` returns, and records the start with `sagaStore.applyEvent(...)`. For subsequent events, it calls `correlate()` to find the matching saga, loads the state and its `version` via `sagaStore.load(...)`, calls `evolve()` then `handle()`, dispatches the resulting commands, and persists the updated state with `sagaStore.applyEvent(..., expectedVersion, ...)` — a compare-and-swap write that only succeeds if the stored version still matches what was loaded, and that records the event's global offset as the last one the row applied, so a redelivery of the event is skipped. This cycle is not wrapped in a single atomic transaction, and it does not need to be: a concurrent writer that raced ahead (another subscription batch, or the saga's own timeout sweep) is caught by the version CAS, which throws `OptimisticLockException` on conflict; the subscription retries the batch against fresh state, and any command already dispatched by the losing attempt is deduplicated by the command inbox above rather than re-applied.
 
 **PollingEventSubscription bean** — the subscription feeds events from the store to the runner:
 
@@ -1605,7 +1931,7 @@ public PollingEventSubscription paymentProcessSubscription(
 }
 ```
 
-These two beans, plus the `SagaRunner` binding the saga id as the correlation id, are what let an order run all the way to `COMPLETED` end-to-end: `OrderPlaced` → (saga) `InitiatePayment` → `PaymentInitiated` → (manager) `CapturePayment` → `PaymentCaptured` → (saga) `ReserveStock` → `StockReserved` → (saga) `ConfirmOrder` → `OrderConfirmed` → `COMPLETED`.
+These two beans are what let an order run all the way to `COMPLETED` end-to-end: `OrderPlaced` → (saga) `InitiatePayment` → `PaymentInitiated` → (manager) `CapturePayment` → `PaymentCaptured` → (saga) `ReserveStock` → `StockReserved` → (saga) `ConfirmOrder` → `OrderConfirmed` → `COMPLETED`.
 
 Add the import:
 
@@ -1782,7 +2108,7 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 **Poison events don't wedge the subscription.** If an orchestrator method throws — a decider bug, a payload that fails to deserialize — `SagaRunner` quarantines the offending event in `saga_dead_letters` (via the `sagaDeadLetterStore` bean) and marks that one saga `FAULTED`, then keeps processing the rest of the batch. Every other order behind the poisoned one keeps moving. The quarantine row stores metadata only — event offset, event type, error — never the event payload: `event_stream` remains the framework's single crypto-governed, shreddable source of truth for payloads, so a GDPR erasure never has to chase a plaintext copy left behind in `saga_dead_letters`. To inspect what was quarantined, read `event_stream` at the recorded offset.
 
-**A `FAULTED` saga is no longer undiagnosable via the reference app.** Earlier, the only way to find a `FAULTED` saga or its quarantine reason was a direct `psql` query against `saga_state`/`saga_dead_letters`. `AdminController` (Chapter 14) now exposes both as HTTP endpoints — `GET /api/admin/sagas/faulted` enumerates `FAULTED` saga ids, and `GET /api/admin/saga-dead-letters` lists quarantine entries with their error details — and once the poison cause is fixed and redeployed, `POST /api/admin/saga-dead-letters/replay-all` drives the framework's `SagaDeadLetterReplayer` to feed the saga's quarantined events back through the saga runner, oldest first, and reports one outcome per event. The replayer never un-faults a saga itself: the fault is cleared by the fed step's own successful write, so `REPLAYED` means the saga moved on and `STILL_POISON` means the fix did not resolve the failure. A compensation the retry sweeper gave up on is `FAULTED` without a quarantined event; `POST /api/admin/sagas/faulted/resume` runs it again. `DELETE /api/admin/saga-dead-letters` discards an entry without replaying it. See Chapter 14's dead-letter section for the endpoints, all of their outcomes, and the refusals that keep a late replay from charging a customer twice.
+**A `FAULTED` saga can be diagnosed through the reference app.** Looking up a `FAULTED` saga or its quarantine reason takes no `psql` query against `saga_state`/`saga_dead_letters`: `AdminController` (Chapter 14) exposes both as HTTP endpoints — `GET /api/admin/sagas/faulted` enumerates `FAULTED` saga ids, and `GET /api/admin/saga-dead-letters` lists quarantine entries with their error details — and once the cause of the poison is corrected and redeployed, `POST /api/admin/saga-dead-letters/replay-all` drives the framework's `SagaDeadLetterReplayer` to feed the saga's quarantined events back through the saga runner, oldest first, and reports one outcome per event. The replayer never un-faults a saga itself: the fault is cleared by the fed step's own successful write, so `REPLAYED` means the saga moved on and `STILL_POISON` means the fix did not resolve the failure. A compensation the retry sweeper gave up on is `FAULTED` without a quarantined event; `POST /api/admin/sagas/faulted/resume` runs it again. `DELETE /api/admin/saga-dead-letters` discards an entry without replaying it. See Chapter 14's dead-letter section for the endpoints, all of their outcomes, and the refusals that keep a late replay from charging a customer twice.
 
 **Saga command dispatch is effectively-once.** Every command `SagaRunner` dispatches carries a deterministic `IdempotencyKey`. The `commandInbox` bean records each key in `command_inbox` inside the same transaction as the command's resulting events, so if the `order-fulfillment-saga` subscription redelivers an event — a batch retry after a transient failure — the saga re-evaluates `handle()`/`compensate()` but the bus recognizes the repeated key and returns the prior result instead of re-dispatching. A redelivered correlated event cannot double-reserve stock or double-refund a payment. The inbox check happens inside the interceptor chain, not ahead of it, so authorization and audit interceptors still run on every replay — only the decider/event-append step is skipped.
 
