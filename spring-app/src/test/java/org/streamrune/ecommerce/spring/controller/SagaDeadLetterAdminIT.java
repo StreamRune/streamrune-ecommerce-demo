@@ -51,6 +51,11 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * throws on a real domain event, so "poison" here is a fabricated dead-letter entry pointing at a
  * real, already-appended event, and a give-up fault is a row moved to {@code COMPENSATING} and
  * faulted through the store, as the compensation retry sweeper would.
+ *
+ * <p>The application's saga subscription runs during these tests. An event appended for a FAULTED
+ * saga reaches it within one poll (500 ms) and is held: the runner records it in the dead-letter
+ * store under the key a seeded entry has, {@code (saga, offset)}. A test that seeds an entry
+ * therefore waits for that hold first: see {@link #seedDeadLetter}.
  */
 class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
 
@@ -121,7 +126,17 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
         .orElseThrow();
   }
 
+  /**
+   * Gives the dead-letter entry of the event at {@code eventOffset} the error fields of a simulated
+   * poison, once the live saga subscription has held that event.
+   *
+   * <p>The hold and the seed write the same row, and a publish is an upsert, so the later of the
+   * two decides the entry's error fields. A hold that arrives after the seed replaces them, and one
+   * that arrives after a test has discarded the entry records the event again. Waiting for the hold
+   * makes the seed the last write: the subscription has moved past the event.
+   */
   private void seedDeadLetter(SagaId sagaId, GlobalOffset eventOffset) {
+    awaitHeldByTheLiveSubscription(sagaId, eventOffset);
     sagaDeadLetterStore.publish(
         new SagaDeadLetterStore.SagaDeadLetterEntry(
             sagaId,
@@ -131,6 +146,17 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
             "java.lang.RuntimeException",
             "simulated poison for admin IT",
             Instant.now()));
+  }
+
+  /** Waits until the saga's dead-letter entries are exactly the events the subscription holds. */
+  private void awaitHeldByTheLiveSubscription(SagaId sagaId, GlobalOffset... eventOffsets) {
+    await()
+        .atMost(Duration.ofSeconds(15))
+        .untilAsserted(
+            () ->
+                assertThat(sagaDeadLetterStore.findBySaga(sagaId))
+                    .extracting(SagaDeadLetterStore.SagaDeadLetterEntry::eventOffset)
+                    .containsExactlyInAnyOrder(eventOffsets));
   }
 
   @Test
@@ -306,13 +332,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
     GlobalOffset offset = appendStockReservedEvent(sagaId, orderId);
 
     // The live saga subscription holds the event (the saga is FAULTED): entry and shield together.
-    await()
-        .atMost(Duration.ofSeconds(15))
-        .untilAsserted(
-            () ->
-                assertThat(sagaDeadLetterStore.findBySaga(sagaId))
-                    .extracting(SagaDeadLetterStore.SagaDeadLetterEntry::eventOffset)
-                    .containsExactly(offset));
+    awaitHeldByTheLiveSubscription(sagaId, offset);
     assertThat(loadSaga(sagaId).deadLetterPending()).isTrue();
 
     @SuppressWarnings("unchecked")
@@ -401,13 +421,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
     GlobalOffset older = appendStockReservedEvent(sagaId, orderId);
     GlobalOffset newer = appendStockReservedEvent(sagaId, orderId);
     // The live saga subscription holds both events behind the fault.
-    await()
-        .atMost(Duration.ofSeconds(15))
-        .untilAsserted(
-            () ->
-                assertThat(sagaDeadLetterStore.findBySaga(sagaId))
-                    .extracting(SagaDeadLetterStore.SagaDeadLetterEntry::eventOffset)
-                    .containsExactlyInAnyOrder(older, newer));
+    awaitHeldByTheLiveSubscription(sagaId, older, newer);
 
     assertThat(postForOutcome(replayUri(sagaId, newer, false))).isEqualTo("OLDER_ENTRY_PENDING");
 
