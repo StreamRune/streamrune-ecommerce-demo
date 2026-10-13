@@ -34,6 +34,7 @@ import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
+import org.streamrune.runtime.SagaRunner;
 import org.streamrune.runtime.SagaTimeoutRunner;
 import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
 
@@ -44,7 +45,9 @@ import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
  * <p>The demo's {@link OrderFulfillmentSaga} is a {@code SagaOrchestrator} with no timeout, and the
  * app does not wire a {@link SagaTimeoutRunner}. This test drives the framework runner directly
  * against the demo's persisted saga state, using a {@link SagaDecider} that reuses the demo saga's
- * {@code evolve}/{@code handle}/{@code compensate} logic and adds a {@code timeout()}.
+ * {@code evolve}/{@code handle}/{@code compensate} logic and adds a {@code timeout()}. The runner
+ * is bound to the app's saga runner, as an application binds it: a timeout runner names the {@link
+ * SagaRunner} whose step lock it shares, and the framework refuses one that names nothing.
  *
  * <p>Time is made deterministic by injecting a fixed {@link Clock} into the runner and exercising
  * its package-private {@code pollOnce()} (the framework feature mirrored from {@code
@@ -63,6 +66,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
 
   @Autowired private SagaStore sagaStore;
   @Autowired private DataSource dataSource;
+  @Autowired private SagaRunner<?> orderFulfillmentSagaRunner;
 
   /** Records every command dispatched, so the test can assert the exact compensation set. */
   private static final class RecordingCommandBus implements CommandBus {
@@ -147,10 +151,14 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     return SagaTimeoutRunner.<OrderFulfillmentState>builder()
         .decider(new TimeoutDecider())
         .sagaStore(sagaStore)
-        // SagaRunner persists under the state class simple name; the sweep must query the same.
+        // The saga type is the state class: the saga runner stores its rows under it, and the
+        // sweep selects by it.
         .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
         .commandBus(commandBus)
         .clock(clock)
+        // Shares the saga runner's step lock: in this process the claim at a saga's deadline
+        // waits for a delivery that is dispatching that saga's forward commands.
+        .sagaRunner(orderFulfillmentSagaRunner)
         .build();
   }
 
