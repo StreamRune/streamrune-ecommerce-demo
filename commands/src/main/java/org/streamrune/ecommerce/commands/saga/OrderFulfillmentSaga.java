@@ -3,11 +3,13 @@ package org.streamrune.ecommerce.commands.saga;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.saga.SagaCommand;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaOrchestrator;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
@@ -28,24 +30,41 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * CancelOrder; a post-reservation failure → ReleaseStock + RefundPayment + CancelOrder (see {@link
  * #compensate}).
  *
- * <p>Correlation: an event belongs to the saga of the order it is about, and {@link #correlate}
- * reads that order from the event's own data: the {@code orderId} of an order, payment or inventory
- * event, or the payment id of a payment event that carries no order id ({@code "pay-<orderId>"},
- * the id {@link #evolve} derives from {@code OrderPlaced}). The event's correlation id decides
- * nothing. {@code SagaRunner} binds the saga id as the correlation id of every command the saga
- * dispatches, which is useful for tracing one fulfillment through the log, but a correlation id is
- * request metadata: an HTTP request's is whatever the client put in {@code X-Correlation-Id}, and a
- * client that could address a saga with it would have its own order's {@code OrderConfirmed}
- * evolved by another order's saga. {@link #evolve} and {@link #handle} check the same thing from
- * the other side, against the order id and the payment id the saga stores in its own state: an
- * event that is not about this saga's order changes nothing and dispatches nothing, whoever hands
- * it over and whatever routed it.
+ * <p>Correlation: an event reaches this saga in one of two ways, and neither reads the event's
+ * correlation id.
+ *
+ * <ul>
+ *   <li><b>An event this saga caused.</b> The command bus stores, with every event of a command a
+ *       saga dispatched, the saga's origin: the saga type, the saga id and a hop count ({@code
+ *       EventMetadata.sagaOrigin()}). {@code SagaRunner} hands such an event to the saga its origin
+ *       names and asks this class nothing. {@code PaymentInitiated}, {@code PaymentRefunded},
+ *       {@code StockReserved}, {@code StockReleased} and the saga's own {@code OrderConfirmed} and
+ *       {@code OrderCancelled} arrive this way; so do {@code PaymentCaptured} and {@code
+ *       PaymentFailed}, which the payment process manager causes by continuing {@code
+ *       PaymentInitiated} (one hop further from the saga, the same origin).
+ *   <li><b>An event somebody else caused.</b> A request of the order's customer or an {@code ADMIN}
+ *       confirms or cancels an order too. Its event carries no origin, so the runner asks {@link
+ *       #correlateByEventData}, which answers from the order id in the event.
+ * </ul>
+ *
+ * <p>A correlation id is tracing data. An HTTP request's is whatever the client put in {@code
+ * X-Correlation-Id}; if it addressed a saga, a caller confirming their own order could have that
+ * {@code OrderConfirmed} evolved by another order's saga. An origin has one writer, the command
+ * bus, and no request header reaches it; {@link #correlateByEventData} receives the stream id and
+ * the payload and nothing of the metadata. Saga dispatch binds a correlation id of its own, {@code
+ * streamrune:saga:<sagaId>}, so one fulfillment reads as one flow in the log and in the audit
+ * trail; a request that sends an id with the {@code streamrune:} prefix is answered {@code 400}.
+ *
+ * <p>{@link #evolve} and {@link #handle} check from the other side, against the order id and the
+ * payment id the saga stores in its own state: an event that is not about this saga's order changes
+ * nothing and dispatches nothing, whichever way it arrived.
  *
  * <p>A {@code SagaId} holds 255 characters at most, so {@code OrderCommand.PlaceOrder} refuses an
  * order id longer than 255 minus the prefix ({@code SAGA_ID_PREFIX}, which this class uses to build
  * the id) when the order is placed; an order id that got past it would make {@link #extractSagaId}
- * throw on {@code OrderPlaced}, and the order would stay {@code CREATED} with no saga. For every
- * other event of such an order {@link #correlate} answers "no saga", which is the truth.
+ * throw on {@code OrderPlaced}, and the order would stay {@code CREATED} with no saga. For a
+ * confirmation or a cancellation of such an order {@link #correlateByEventData} answers "no saga",
+ * which is the truth.
  *
  * <p>The capture leg is driven by a payment process manager (in the runtime app), which reacts to
  * {@code PaymentInitiated} by calling the payment gateway and dispatching {@code CapturePayment}
@@ -100,27 +119,20 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
   }
 
   /**
-   * The saga an event belongs to: the saga of the order the event is about. Only the events of the
-   * fulfillment process are routed, each by the field that names its order; every other event, and
-   * an event whose order no saga id can hold, belongs to no saga.
+   * The saga of an event no fulfillment caused. A request can write two of the events this saga
+   * reacts to: {@code OrderConfirmed} and {@code OrderCancelled}, by the order's customer or an
+   * {@code ADMIN}. Each belongs to the saga of the order it names, and {@link #evolve} decides what
+   * it means there. Every other event, and one whose order no saga id can hold, belongs to no saga.
    *
-   * <p>The order, payment and inventory events below are written by commands this saga dispatched
-   * (and, for the capture leg, by the payment process manager), with ids taken from the saga's own
-   * state. {@code OrderConfirmed} and {@code OrderCancelled} are also written by a request of the
-   * order's customer or an {@code ADMIN}: such an event reaches the saga of that order and no
-   * other, and {@link #evolve} decides what it means there.
+   * <p>The payment and inventory events are not listed: only this saga's commands and the payment
+   * process manager's write them, and those events carry the saga's origin, by which {@code
+   * SagaRunner} routes them without calling this method.
    */
   @Override
-  public Optional<SagaId> correlate(EventEnvelope event) {
-    return switch (event.event()) {
+  public Optional<SagaId> correlateByEventData(StreamId streamId, DomainEvent event) {
+    return switch (event) {
       case OrderEvent.OrderConfirmed e -> sagaOfOrder(e.orderId());
       case OrderEvent.OrderCancelled e -> sagaOfOrder(e.orderId());
-      case PaymentEvent.PaymentInitiated e -> sagaOfOrder(e.orderId());
-      case PaymentEvent.PaymentCaptured e -> sagaOfOrder(e.orderId());
-      case PaymentEvent.PaymentFailed e -> sagaOfPayment(e.paymentId());
-      case PaymentEvent.PaymentRefunded e -> sagaOfPayment(e.paymentId());
-      case InventoryEvent.StockReserved e -> sagaOfOrder(e.orderId());
-      case InventoryEvent.StockReleased e -> sagaOfOrder(e.orderId());
       default -> Optional.empty();
     };
   }
@@ -136,21 +148,10 @@ public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentSt
   }
 
   /**
-   * The saga behind a payment id. A fulfillment's payment id is {@code "pay-" + orderId}, set by
-   * {@link #evolve} on {@code OrderPlaced}; a payment under any other id is not a fulfillment's.
-   */
-  private static Optional<SagaId> sagaOfPayment(String paymentId) {
-    if (paymentId == null || !paymentId.startsWith(PAYMENT_ID_PREFIX)) {
-      return Optional.empty();
-    }
-    return sagaOfOrder(paymentId.substring(PAYMENT_ID_PREFIX.length()));
-  }
-
-  /**
-   * Whether the event is about this saga's order, answered from what the saga itself stores and
-   * without asking {@link #correlate}: the {@code OrderPlaced} that starts this saga names the
-   * order the saga id is built from, and every later event names the order id or the payment id the
-   * saga recorded from that {@code OrderPlaced}. The answer holds whoever routed the event here.
+   * Whether the event is about this saga's order, answered from what the saga itself stores and not
+   * from how the event was routed: the {@code OrderPlaced} that starts this saga names the order
+   * the saga id is built from, and every later event names the order id or the payment id the saga
+   * recorded from that {@code OrderPlaced}. The answer holds whichever way the event arrived.
    */
   private static boolean isAboutThisSaga(OrderFulfillmentState state, EventEnvelope event) {
     return switch (event.event()) {

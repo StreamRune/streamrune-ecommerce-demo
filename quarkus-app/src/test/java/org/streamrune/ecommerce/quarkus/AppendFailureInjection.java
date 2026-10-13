@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.quarkus;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import javax.sql.DataSource;
@@ -14,8 +15,9 @@ import org.streamrune.core.types.AggregateType;
  * event_stream} insert, so the append rolls back with a store error, the kind of failure the
  * command bus records in its dead-letter queue.
  *
- * <p>A flag holds until {@link #allowAppend} removes it. {@link #close()} drops the trigger, its
- * function and the flag table.
+ * <p>A flag holds until {@link #allowAppend} removes it. Every refused insert is counted in a
+ * sequence, which keeps its value when the refused transaction rolls back ({@link #refusals()}).
+ * {@link #close()} drops the trigger, its function, the flag table and the sequence.
  */
 final class AppendFailureInjection implements AutoCloseable {
 
@@ -28,6 +30,8 @@ final class AppendFailureInjection implements AutoCloseable {
         CREATE TABLE IF NOT EXISTS append_test_failures (
           aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, event_type TEXT NOT NULL,
           PRIMARY KEY (aggregate_type, aggregate_id, event_type));
+        DROP SEQUENCE IF EXISTS append_test_refusals;
+        CREATE SEQUENCE append_test_refusals;
         CREATE OR REPLACE FUNCTION append_test_fail_event() RETURNS trigger
           LANGUAGE plpgsql AS $$
         BEGIN
@@ -35,6 +39,7 @@ final class AppendFailureInjection implements AutoCloseable {
                      WHERE aggregate_type = NEW.aggregate_type
                        AND aggregate_id = NEW.aggregate_id
                        AND event_type = NEW.event_type) THEN
+            PERFORM nextval('append_test_refusals');
             RAISE EXCEPTION 'injected failure: event insert refused';
           END IF;
           RETURN NEW;
@@ -64,6 +69,20 @@ final class AppendFailureInjection implements AutoCloseable {
         eventType);
   }
 
+  /** How many inserts the trigger refused since this injection was created. */
+  long refusals() throws SQLException {
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM append_test_refusals")) {
+      rs.next();
+      long refusals = rs.getLong(1);
+      commitUnlessAutoCommit(conn);
+      return refusals;
+    }
+  }
+
   @Override
   public void close() throws SQLException {
     execute(
@@ -71,6 +90,7 @@ final class AppendFailureInjection implements AutoCloseable {
         DROP TRIGGER IF EXISTS append_test_fail_event ON event_stream;
         DROP FUNCTION IF EXISTS append_test_fail_event();
         DROP TABLE IF EXISTS append_test_failures;
+        DROP SEQUENCE IF EXISTS append_test_refusals;
         """);
   }
 

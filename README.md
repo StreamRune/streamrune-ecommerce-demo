@@ -90,7 +90,7 @@ docker compose up -d postgres rabbitmq
 
 ## API
 
-All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing). Both are tracing metadata a client chooses freely: a correlation id addresses nothing, and the fulfillment saga routes an event by the order the event names, never by its correlation id.
+All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing). Both are tracing metadata a client chooses: a correlation id addresses nothing. The reply to a fulfillment saga's own command reaches that saga through the origin the command bus stores with the event, and a confirmation or cancellation a request causes reaches the saga of the order the event names. One form of correlation id is reserved: a request whose `X-Correlation-Id` starts with `streamrune:` (the framework binds `streamrune:saga:<sagaId>` around a saga's commands) is answered `400` with a plain-text body.
 
 > **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md). The price of an order line is a shortcut of the same kind: `POST /api/orders` takes `unitPrice` from the request and checks only that it is positive, where a real shop reads the price from its own catalogue.
 
@@ -251,11 +251,14 @@ It starts PostgreSQL (port 5433, an empty database) and RabbitMQ (port 5672) in 
 binary, and checks health, that the binary created the schema at startup (the framework registers
 its migration scripts as native-image resources), a command-to-read-model round trip, the replay of a
 dead-lettered `InventoryCommand$ReceiveShipment` through `POST /api/admin/dead-letters/{id}/retry`,
-and a product with a 1.5 MiB description written and read back. The replay check proves that the
+a product with a 1.5 MiB description written and read back, and an order its fulfillment saga takes
+to `COMPLETED`. The replay check proves that the
 dead-letter runner's `registerCommand(InventoryCommand.class)` expanded the sealed root in the
 native image: GraalVM lists a sealed type's permitted subclasses only when the sealed type itself
 is registered for reflection, which `EcommerceNativeHints` does through
-`StreamRuneRuntimeHints.registerDomainPackages`. After the checks the script stops the binary with
+`StreamRuneRuntimeHints.registerDomainPackages`. The saga check proves that the binary writes and
+reads the saga origin in an event's metadata: without it the replies to the saga's commands would
+reach no saga. After the checks the script stops the binary with
 SIGTERM, waits for it to exit and prints its output (kept in
 `build/native-smoke-<framework>-app.log`). The run fails if that output holds a GraalVM
 `UnsupportedFeatureError`, shutdown included.

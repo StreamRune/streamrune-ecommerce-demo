@@ -10,11 +10,19 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
+import org.streamrune.core.saga.SagaId;
+import org.streamrune.core.saga.SagaOrigin;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
+import org.streamrune.core.types.CausationId;
+import org.streamrune.core.types.CorrelationId;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
@@ -22,7 +30,6 @@ import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
-import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
@@ -32,6 +39,12 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * not turn that into {@code FailPayment} — the saga would cancel an order the customer paid for —
  * but leave {@code PaymentInitiated} to be delivered again. Once the store accepts the event, the
  * capture is recorded and the saga confirms the order.
+ *
+ * <p>That redelivery is the capture's only second attempt. The command continues {@code
+ * PaymentInitiated}, an event the fulfillment saga caused, so it carries the saga's origin, and the
+ * command bus publishes a failed command with an origin to no dead letter queue. The recorded
+ * {@code PaymentCaptured} names the saga as its origin, one hop from the saga's own command, and
+ * {@code PaymentInitiated} as its cause; that origin is what brings it to the saga.
  */
 class PaymentCaptureRetryIT extends AbstractIntegrationTest {
 
@@ -39,7 +52,6 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
   @Autowired private VirtualThreadCommandBus commandBus;
   @Autowired private EventStore eventStore;
   @Autowired private DeadLetterQueue deadLetterQueue;
-  @Autowired private DeadLetterRetryRunner deadLetterRetryRunner;
   @Autowired private PaymentGatewaySimulator paymentGateway;
   @Autowired private PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker;
 
@@ -56,7 +68,11 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
 
       await()
           .atMost(Duration.ofSeconds(30))
-          .untilAsserted(() -> assertThat(captureDeadLetters(paymentId)).isNotEmpty());
+          .untilAsserted(
+              () ->
+                  assertThat(failures.refusals())
+                      .as("appends of PaymentCaptured the store refused")
+                      .isPositive());
       assertThat(paymentGateway.hasCaptured(paymentId)).as("the gateway took the money").isTrue();
       assertThat(eventTypes(PaymentState.TYPE, paymentId))
           .as("a capture the store refused is not turned into a failed payment")
@@ -64,6 +80,9 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
       assertThat(paymentGatewayCircuitBreaker.state())
           .as("the gateway answered; its breaker counts no failure")
           .isEqualTo(PaymentGatewayCircuitBreaker.State.CLOSED);
+      assertThat(captureDeadLetters(paymentId))
+          .as("a command that carries a saga origin is not dead-lettered")
+          .isEmpty();
       failures.allowAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
     }
 
@@ -75,14 +94,25 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
         .containsExactly("PaymentInitiated", "PaymentCaptured");
     assertThat(eventTypes(OrderState.TYPE, orderId)).doesNotContain("OrderCancelled");
 
-    // The bus dead-lettered the refused captures too. They carry the capture's idempotency key, so
-    // replaying them now is an inbox hit: the entries go away and nothing is captured twice.
-    for (var entry : captureDeadLetters(paymentId)) {
-      deadLetterRetryRunner.retry(entry.commandId());
-    }
+    // Nothing but the subscription's redelivery ran the capture again: the dead letter queue never
+    // held it.
     assertThat(captureDeadLetters(paymentId)).isEmpty();
-    assertThat(eventTypes(PaymentState.TYPE, paymentId))
-        .containsExactly("PaymentInitiated", "PaymentCaptured");
+
+    // What brings the capture to the saga: the origin the bus stored with it.
+    EventEnvelope initiated = events(PaymentState.TYPE, paymentId).get(0);
+    EventMetadata captured = events(PaymentState.TYPE, paymentId).get(1).metadata();
+    SagaId sagaId = new SagaId("fulfillment-" + orderId);
+    assertThat(initiated.metadata().sagaOrigin())
+        .isEqualTo(
+            SagaOrigin.dispatchedBy(SagaType.fromClass(OrderFulfillmentState.class), sagaId));
+    assertThat(captured.sagaOrigin())
+        .isEqualTo(new SagaOrigin(SagaType.fromClass(OrderFulfillmentState.class), sagaId, 1));
+    assertThat(captured.causationId())
+        .isEqualTo(CausationId.of(initiated.metadata().eventId().value()));
+    assertThat(captured.correlationId())
+        .isEqualTo(initiated.metadata().correlationId())
+        .isEqualTo(CorrelationId.of("streamrune:saga:" + sagaId.value()));
+    assertThat(captured.userId()).as("no user issued the capture").isNull();
   }
 
   private List<DeadLetterQueue.DeadLetterEntry> captureDeadLetters(String paymentId) {
@@ -93,11 +123,11 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
   }
 
   private List<String> eventTypes(AggregateType type, String id) {
-    return eventStore
-        .readStream(StreamId.of(type, AggregateId.of(id)), Version.initial(), 100)
-        .stream()
-        .map(e -> e.eventType().name())
-        .toList();
+    return events(type, id).stream().map(e -> e.eventType().name()).toList();
+  }
+
+  private List<EventEnvelope> events(AggregateType type, String id) {
+    return eventStore.readStream(StreamId.of(type, AggregateId.of(id)), Version.initial(), 100);
   }
 
   private void placeOrder(String orderId, String customerId, String productId) {

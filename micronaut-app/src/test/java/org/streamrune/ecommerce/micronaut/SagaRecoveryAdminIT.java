@@ -23,7 +23,6 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventEnvelope;
-import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.saga.LoadedSaga;
 import org.streamrune.core.saga.SagaDeadLetterStore;
@@ -31,9 +30,6 @@ import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.AggregateId;
-import org.streamrune.core.types.CommandId;
-import org.streamrune.core.types.CorrelationId;
-import org.streamrune.core.types.EventId;
 import org.streamrune.core.types.EventType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.SagaType;
@@ -47,6 +43,7 @@ import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.runtime.SagaEventPathRetention;
 import org.streamrune.runtime.SagaRunner;
+import org.streamrune.test.SagaEnvelopes;
 
 /**
  * Saga recovery in the Micronaut app: the order-fulfillment saga runner is a bean, so the framework
@@ -297,7 +294,11 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
     return sagaId;
   }
 
-  /** Appends a real {@code StockReserved} correlated to the saga; returns its global offset. */
+  /**
+   * Appends a real {@code StockReserved} as the reply to the saga's own {@code ReserveStock}: its
+   * metadata carries the saga's origin, by which the saga runner routes it. Returns its global
+   * offset.
+   */
   private GlobalOffset appendStockReservedEvent(SagaId sagaId, String orderId) {
     var event = new InventoryEvent.StockReserved("prod-" + orderId, orderId, 1, 9);
     StreamId streamId =
@@ -312,16 +313,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
                     Version.initial().next(),
                     EventType.fromClass(InventoryEvent.StockReserved.class),
                     event,
-                    new EventMetadata(
-                        EventId.of("evt-" + UUID.randomUUID()),
-                        CommandId.of("cmd-" + UUID.randomUUID()),
-                        null,
-                        null,
-                        CorrelationId.of(sagaId.value()),
-                        null,
-                        null,
-                        Instant.now(),
-                        Map.of()))),
+                    SagaEnvelopes.metadataCausedBy(OrderFulfillmentState.class, sagaId))),
             Version.initial());
     return result.globalOffsets().get(0);
   }

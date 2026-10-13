@@ -171,10 +171,11 @@ public class AdminController {
 
   /**
    * Lists quarantined saga dead-letter entries (poison events that could not be processed by the
-   * order-fulfillment saga — routing failure, extract/correlate errors, decider exceptions). Mapped
-   * to a JSON-friendly shape since {@code SagaDeadLetterEntry} carries value-object fields; the
-   * offending event's payload is never included here — see {@code eventOffset} and read {@code
-   * event_stream} directly if inspection is needed (see {@link SagaDeadLetterStore} javadoc).
+   * order-fulfillment saga — a routing method that throws ({@code extractSagaId}, {@code
+   * correlateByEventData}) or an exception in the saga's own logic). Mapped to a JSON-friendly
+   * shape since {@code SagaDeadLetterEntry} carries value-object fields; the offending event's
+   * payload is never included here — see {@code eventOffset} and read {@code event_stream} directly
+   * if inspection is needed (see {@link SagaDeadLetterStore} javadoc).
    */
   @GetMapping("/saga-dead-letters")
   public List<Map<String, Object>> listSagaDeadLetters(
@@ -287,8 +288,8 @@ public class AdminController {
    * manually resolved it out-of-band) via {@link SagaDeadLetterReplayer#discard}: the removal is
    * scoped to the order-fulfillment saga type, and once the saga's backlog is empty the replayer
    * releases its dead-letter shield, so the saga's live events are no longer held. Omit {@code
-   * sagaId} for a correlate-poison entry (the saga could never be identified); a {@code null} saga
-   * id matches only such entries.
+   * sagaId} for an entry whose saga could never be identified (a routing method threw); a {@code
+   * null} saga id matches only such entries.
    */
   @DeleteMapping("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(

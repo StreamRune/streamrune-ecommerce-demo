@@ -71,7 +71,7 @@ public VirtualThreadCommandBus commandBus(
 }
 ```
 
-From now on a command that fails on infrastructure — a database or network error — is recorded in `dead_letter_queue` before the error reaches the caller. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. A command a saga sends is not recorded either; the saga handles its own failures (chapter 11).
+From now on a command that fails on infrastructure — a database or network error — is recorded in `dead_letter_queue` before the error reaches the caller. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. A command a saga sends is not recorded either; the saga handles its own failures (chapter 11). Nor is a command a listener dispatches as the continuation of a saga's event, like the payment process manager's `CapturePayment`: an entry has no place for the saga origin the command carries, so its replay would store the reply where the saga never receives it. Such a command is run again by the redelivery of the event it reacts to (chapter 11, Step 5b).
 
 The bus stores the command as JSON, written by the mapper you pass to `.objectMapper(...)`. `DeadLetterRetryRunner.createObjectMapper(cryptoEngine)` registers the `CryptoShreddingModule`, so the `@Encrypted` fields of `RegisterCustomer` and `UpdateProfile` (chapter 6) are stored as ciphertext under the customer's key, and the forget flow (chapter 7) erases them with the events. Do not pass the application's `ObjectMapper` bean here: it has no crypto module, and the queue would hold the customer's name, email, address and phone in plaintext.
 
@@ -349,10 +349,11 @@ public class AdminController {
 
   /**
    * Lists quarantined saga dead-letter entries (poison events that could not be processed by the
-   * order-fulfillment saga — routing failure, extract/correlate errors, decider exceptions). Mapped
-   * to a JSON-friendly shape since {@code SagaDeadLetterEntry} carries value-object fields; the
-   * offending event's payload is never included here — see {@code eventOffset} and read {@code
-   * event_stream} directly if inspection is needed (see {@link SagaDeadLetterStore} javadoc).
+   * order-fulfillment saga — a routing method that throws ({@code extractSagaId}, {@code
+   * correlateByEventData}) or an exception in the saga's own logic). Mapped to a JSON-friendly
+   * shape since {@code SagaDeadLetterEntry} carries value-object fields; the offending event's
+   * payload is never included here — see {@code eventOffset} and read {@code event_stream} directly
+   * if inspection is needed (see {@link SagaDeadLetterStore} javadoc).
    */
   @GetMapping("/saga-dead-letters")
   public List<Map<String, Object>> listSagaDeadLetters(
@@ -465,8 +466,8 @@ public class AdminController {
    * manually resolved it out-of-band) via {@link SagaDeadLetterReplayer#discard}: the removal is
    * scoped to the order-fulfillment saga type, and once the saga's backlog is empty the replayer
    * releases its dead-letter shield, so the saga's live events are no longer held. Omit {@code
-   * sagaId} for a correlate-poison entry (the saga could never be identified); a {@code null} saga
-   * id matches only such entries.
+   * sagaId} for an entry whose saga could never be identified (a routing method threw); a {@code
+   * null} saga id matches only such entries.
    */
   @DeleteMapping("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
@@ -606,7 +607,7 @@ A resume answers `RESUMED` (the compensation ran to its end: `COMPENSATED`, or `
 
 **`force=true` lifts only the two `STALE_*` refusals.** It never overrides ordering. It is your acknowledgement that a command whose key was already pruned may run a second time, so send it only after you have checked what executed; the framework logs a `WARNING` naming the saga, and counts `streamrune.saga.forced_stale_resume` when a forced compensation passes the runner's own key-age guard. The full outcome tables are in the framework's saga guide (`docs/guide/advanced/saga.md` in the StreamRune repository, sections "Replaying quarantined events" and "Resuming a give-up fault").
 
-`discardSagaDeadLetter` goes through the same `SagaDeadLetterReplayer` bean rather than the store, for two reasons. The removal is scoped to the replayer's saga type (the state class's fully-qualified name), so an id that another saga type happens to share can never lose its quarantine record through this endpoint. And a saga with quarantined entries carries a dead-letter shield (`saga_state.dead_letter_pending`) that makes the live `SagaRunner` hold every later correlated event of that saga in the quarantine instead of applying it out of order; `discard` releases the shield once the saga has no entry left (for an entry whose saga could not be identified, the shield of the saga the replayer resolved it to). Deleting the row with a bare `sagaDeadLetterStore` call would leave that shield set, and the saga's live events would keep being held behind a backlog that no longer exists.
+`discardSagaDeadLetter` goes through the same `SagaDeadLetterReplayer` bean rather than the store, for two reasons. The removal is scoped to the replayer's saga type (the state class's fully-qualified name), so an id that another saga type happens to share can never lose its quarantine record through this endpoint. And a saga with quarantined entries carries a dead-letter shield (`saga_state.dead_letter_pending`) that makes the live `SagaRunner` hold every later event of that saga in the quarantine instead of applying it out of order; `discard` releases the shield once the saga has no entry left (for an entry whose saga could not be identified, the shield of the saga the replayer resolved it to). Deleting the row with a bare `sagaDeadLetterStore` call would leave that shield set, and the saga's live events would keep being held behind a backlog that no longer exists.
 
 The demo's Quarkus and Micronaut apps are wired the same way. Their `orderFulfillmentSagaRunner` is a bean (`StreamRuneProducer`, `StreamRuneFactory`) that `EcommerceSubscriptionLifecycle` subscribes to the event stream, so their integrations start its sweeper and arm its key-age guard too; their replayer reads the window from `StreamRuneQuarkusProperties.inbox().retentionMaxAge()` and `StreamRuneMicronautProperties.inboxRetentionMaxAge()`; and their `AdminController` exposes the same six saga endpoints. Their `SagaRecoveryAdminIT` also checks that the framework armed the runner's guard with the 7-day window and that the sweeper finishes a compensation left `COMPENSATING`.
 
