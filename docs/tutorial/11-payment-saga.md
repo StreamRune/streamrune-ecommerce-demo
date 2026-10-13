@@ -2325,6 +2325,28 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 **Timeout-driven compensation is claim-first, so it can't double-compensate.** The demo does not wire a timeout runner itself, but the framework ships one (`SagaTimeoutRunner`) that sweeps sagas stuck past a configured duration and compensates them. Before dispatching anything, the timeout runner first claims the saga with a CAS write to `COMPENSATING`; only the writer that wins that claim goes on to compute and dispatch compensation commands. A saga that completes normally right as the timeout sweep fires cannot be double-compensated — but not merely because "whichever writer is second loses the CAS on the terminal write": the claim happens *before* any compensation is computed, so losing it means no compensation commands were ever dispatched by that attempt in the first place, not that a second wave of commands was silently discarded after being sent.
 
+**A timeout runner is bound to its saga runner.** `SagaTimeoutRunner.Builder.build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)`. `SagaTimeoutE2EIT` (in `spring-app/src/test`) builds the framework's runner against the demo's saga store and binds it to the app's `orderFulfillmentSagaRunner` bean:
+
+```java
+  private SagaTimeoutRunner<OrderFulfillmentState> runnerWithClock(
+      CommandBus commandBus, Clock clock) {
+    return SagaTimeoutRunner.<OrderFulfillmentState>builder()
+        .decider(new TimeoutDecider())
+        .sagaStore(sagaStore)
+        // The saga type is the state class: the saga runner stores its rows under it, and the
+        // sweep selects by it.
+        .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+        .commandBus(commandBus)
+        .clock(clock)
+        // Shares the saga runner's step lock: in this process the claim at a saga's deadline
+        // waits for a delivery that is dispatching that saga's forward commands.
+        .sagaRunner(orderFulfillmentSagaRunner)
+        .build();
+  }
+```
+
+The binding shares the saga runner's in-memory step lock. Within one process a claim at a saga's deadline is not made while a delivery is dispatching that saga's forward commands: the poll comes back to the saga, so the forward command is stored before its compensation and not after it. The lock reaches no other process — a timeout runner on another replica claims underneath a step in flight on this one — so across replicas the protection remains the aggregate's own refusal of a forward command that arrives after its cancel.
+
 ---
 
 ## Next Up
