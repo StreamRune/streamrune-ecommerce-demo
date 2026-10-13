@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.saga.LoadedSaga;
 import org.streamrune.core.saga.SagaId;
@@ -36,15 +37,20 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
  * Whose saga an event reaches, against the running Micronaut app. The correlation id of a request
- * is whatever the client sends in {@code X-Correlation-Id}; the fulfillment saga routes an event by
- * the order the event is about, so a caller who names another order's saga in that header does not
- * reach it.
+ * is whatever the client sends in {@code X-Correlation-Id}, and nothing routes by it: the reply to
+ * a saga's own command reaches that saga through the origin the command bus stores with the event,
+ * and a confirmation or a cancellation a request causes reaches the saga of the order the event
+ * names. A caller who names another order's saga in that header does not reach it.
  *
  * <p>Two customers place an order each, and the saga of each order waits for its payment. The first
  * customer then confirms their own order with the second customer's saga id as the correlation id.
  * The second saga must still be waiting for its payment afterwards, and its row must be the row
  * that was stored: a row records every event the runner hands its saga, so an untouched row is what
  * shows that the event was never routed there, whatever the saga would have made of it.
+ *
+ * <p>Saga dispatch binds a correlation id of its own, {@code streamrune:saga:<sagaId>}. A request
+ * that sends an id with the {@code streamrune:} prefix is answered {@code 400} before any command
+ * runs, so the second case finds no event stored and both rows untouched.
  *
  * <p><b>How the two sagas are kept waiting.</b> A fulfillment passes {@code AWAITING_PAYMENT} in
  * well under a second, so the test stores each saga's row in that state before the order is placed
@@ -101,9 +107,11 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
               bobSaga.value(),
               "");
       assertThat(confirmed.statusCode()).isEqualTo(200);
-      assertThat(correlationIdOf(OrderState.TYPE, aliceOrder, "OrderConfirmed"))
+      EventMetadata stored = metadataOf(OrderState.TYPE, aliceOrder, "OrderConfirmed");
+      assertThat(stored.correlationId().value())
           .as("the correlation id the stored event carries is the one the client sent")
           .isEqualTo(bobSaga.value());
+      assertThat(stored.sagaOrigin()).as("an event a request caused names no saga").isNull();
 
       // The saga subscription reads the global stream in order: once the saga of an order
       // placed afterwards exists, the subscription is past Alice's OrderConfirmed.
@@ -116,8 +124,8 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
       assertThat(fulfillmentStatus(bobSaga.value()))
           .as("Bob's saga after Alice's OrderConfirmed named it in its correlation id")
           .isEqualTo("AWAITING_PAYMENT");
-      // The event went to the saga of the order it is about, and that saga did not ask for a
-      // confirmation yet: it stays where it is too.
+      // The event carries no origin, so the runner asked the saga, which named the saga of the
+      // order in the event. That saga did not ask for a confirmation yet: it stays where it is too.
       assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("AWAITING_PAYMENT");
       assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
 
@@ -139,6 +147,73 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
 
     // The order placed last has a saga of its own, which runs to its end: nothing is left
     // running.
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .untilAsserted(
+            () ->
+                assertThat(fulfillmentStatus("fulfillment-" + laterOrder)).isEqualTo("COMPLETED"));
+  }
+
+  @Test
+  void theReservedFormOfAnotherOrdersSagaId_isAnswered400() throws Exception {
+    String product = uniqueId("p");
+    commandBus.execute(new InventoryCommand.ReceiveShipment(product, 5));
+    String alice = uniqueId("alice");
+    String bob = uniqueId("bob");
+    String aliceOrder = uniqueId("o-alice");
+    String bobOrder = uniqueId("o-bob");
+    String laterOrder = uniqueId("o-later");
+
+    SagaId aliceSaga = sagaAwaitingItsPayment(aliceOrder, alice, product);
+    SagaId bobSaga = sagaAwaitingItsPayment(bobOrder, bob, product);
+    try {
+      placeOrder(bobOrder, bob, product);
+      placeOrder(aliceOrder, alice, product);
+      awaitOrderReadableBy(aliceOrder, alice);
+
+      // Alice confirms her own order under the correlation id Bob's saga dispatches with.
+      HttpResponse<String> refused =
+          send(
+              "POST",
+              "/api/orders/" + aliceOrder + "/confirm",
+              alice,
+              "CUSTOMER",
+              "streamrune:saga:" + bobSaga.value(),
+              "");
+
+      assertThat(refused.statusCode()).isEqualTo(400);
+      assertThat(refused.headers().firstValue("Content-Type")).contains("text/plain;charset=UTF-8");
+      assertThat(refused.body())
+          .isEqualTo("The request's correlation id, trace id or user id is not acceptable");
+      assertThat(eventTypes(OrderState.TYPE, aliceOrder))
+          .as("the request was refused before its command ran")
+          .containsExactly("OrderPlaced");
+
+      // Once the saga of an order placed afterwards exists, the saga subscription is past
+      // everything the refused request could have written.
+      placeOrder(laterOrder, alice, product);
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> assertThat(fulfillmentStatus("fulfillment-" + laterOrder)).isNotNull());
+
+      assertThat(eventTypes(OrderState.TYPE, aliceOrder)).containsExactly("OrderPlaced");
+      assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
+      for (SagaId saga : List.of(bobSaga, aliceSaga)) {
+        LoadedSaga<OrderFulfillmentState> row = sagaRow(saga);
+        assertThat(row.state().fulfillmentStatus())
+            .as("the status of %s", saga.value())
+            .isEqualTo(OrderFulfillmentStatus.AWAITING_PAYMENT);
+        assertThat(row.version()).as("the version of the row of %s", saga.value()).isEqualTo(1);
+        assertThat(row.lastAppliedOffset())
+            .as("the offset of the last event applied to %s", saga.value())
+            .isNull();
+      }
+    } finally {
+      sagaStore.delete(aliceSaga, FULFILLMENT);
+      sagaStore.delete(bobSaga, FULFILLMENT);
+    }
+
     await()
         .atMost(Duration.ofSeconds(60))
         .untilAsserted(
@@ -209,14 +284,12 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
     return events(type, id).stream().map(e -> e.eventType().name()).toList();
   }
 
-  private String correlationIdOf(AggregateType type, String id, String eventType) {
+  private EventMetadata metadataOf(AggregateType type, String id, String eventType) {
     return events(type, id).stream()
         .filter(e -> e.eventType().name().equals(eventType))
         .findFirst()
         .orElseThrow()
-        .metadata()
-        .correlationId()
-        .value();
+        .metadata();
   }
 
   private List<EventEnvelope> events(AggregateType type, String id) {

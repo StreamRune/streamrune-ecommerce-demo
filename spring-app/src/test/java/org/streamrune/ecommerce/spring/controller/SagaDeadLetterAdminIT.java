@@ -16,7 +16,6 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.streamrune.core.EventEnvelope;
-import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.saga.LoadedSaga;
 import org.streamrune.core.saga.SagaDeadLetterStore;
@@ -25,9 +24,6 @@ import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
-import org.streamrune.core.types.CommandId;
-import org.streamrune.core.types.CorrelationId;
-import org.streamrune.core.types.EventId;
 import org.streamrune.core.types.EventType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.SagaType;
@@ -40,6 +36,7 @@ import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
+import org.streamrune.test.SagaEnvelopes;
 
 /**
  * Verifies the saga recovery endpoints of {@link AdminController}: dead-letter listing, faulted
@@ -85,10 +82,12 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
   }
 
   /**
-   * Appends a real {@code StockReserved} event correlated to {@code sagaId}, so a replay can feed
-   * it back through the real {@link org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga}
-   * without throwing (evolve() handles it, moving AWAITING_INVENTORY -> AWAITING_CONFIRMATION).
-   * Returns the appended event's global offset — the dead-letter idempotency key.
+   * Appends a real {@code StockReserved} event as the reply to the saga's own {@code ReserveStock}:
+   * its metadata carries the saga's origin, by which the saga runner routes it to {@code sagaId}. A
+   * replay can feed it back through the real {@link
+   * org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga} without throwing (evolve() handles
+   * it, moving AWAITING_INVENTORY -> AWAITING_CONFIRMATION). Returns the appended event's global
+   * offset — the dead-letter idempotency key.
    */
   private GlobalOffset appendStockReservedEvent(SagaId sagaId, String orderId) {
     InventoryEvent.StockReserved event =
@@ -105,16 +104,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                     Version.initial().next(),
                     EventType.fromClass(InventoryEvent.StockReserved.class),
                     event,
-                    new EventMetadata(
-                        EventId.of("evt-" + UUID.randomUUID()),
-                        CommandId.of("cmd-" + UUID.randomUUID()),
-                        null,
-                        null,
-                        CorrelationId.of(sagaId.value()),
-                        null,
-                        null,
-                        Instant.now(),
-                        Map.of()))),
+                    SagaEnvelopes.metadataCausedBy(OrderFulfillmentState.class, sagaId))),
             Version.initial());
     return result.globalOffsets().get(0);
   }
@@ -320,10 +310,10 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
   }
 
   /**
-   * A correlated event that reaches a FAULTED saga is held by the live saga runner: the entry and
-   * the saga's dead-letter shield ({@code dead_letter_pending}) are written together. Discarding
-   * the saga's last entry through the admin endpoint must release that shield, or every later live
-   * event of the saga stays held behind a backlog that no longer exists.
+   * An event that reaches a FAULTED saga is held by the live saga runner: the entry and the saga's
+   * dead-letter shield ({@code dead_letter_pending}) are written together. Discarding the saga's
+   * last entry through the admin endpoint must release that shield, or every later live event of
+   * the saga stays held behind a backlog that no longer exists.
    */
   @Test
   void discardOfTheLastEntryReleasesTheSagaDeadLetterShield() {

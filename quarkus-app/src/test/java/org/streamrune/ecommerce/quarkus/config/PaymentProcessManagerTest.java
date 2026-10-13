@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.quarkus.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
@@ -24,36 +25,56 @@ import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.EventStoreException;
+import org.streamrune.core.RetryPolicy;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.core.saga.SagaId;
+import org.streamrune.core.saga.SagaOrigin;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.CausationId;
 import org.streamrune.core.types.CommandId;
 import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.EventId;
 import org.streamrune.core.types.EventType;
 import org.streamrune.core.types.GlobalOffset;
 import org.streamrune.core.types.IdempotencyKey;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.runtime.LocalStripedLocker;
+import org.streamrune.runtime.VirtualThreadCommandBus;
+import org.streamrune.test.InMemoryCommandInbox;
+import org.streamrune.test.InMemoryDeadLetterQueue;
+import org.streamrune.test.InMemoryEventStore;
+import org.streamrune.test.SagaEnvelopes;
 
 /**
  * The payment process manager turns only a gateway outcome into a payment decision. A command it
  * cannot dispatch makes {@code onEvents} throw, so the subscription delivers the event again; a
  * second delivery of a settled payment calls neither the gateway nor the bus.
  *
+ * <p>Every {@code PaymentInitiated} here is one the fulfillment saga caused: it carries the saga's
+ * origin and the correlation id saga dispatch binds, as the command bus stores it. The manager
+ * dispatches inside {@code StreamRuneContext.continuing(event)}, so its command carries that origin
+ * one hop further and the event's id as causation id, and runs with no user.
+ *
  * <p>The bus is a fake that runs the real {@link PaymentDecider} against an in-memory payment
- * stream and throws the failures a test scripts for it. The gateway breaker opens after a single
- * failure, so a failure it should not have counted shows as an open breaker.
+ * stream and throws the failures a test scripts for it. Like the shipped buses it first refuses a
+ * reserved correlation id that is bound without its saga origin. The gateway breaker opens after a
+ * single failure, so a failure it should not have counted shows as an open breaker. Two cases run
+ * the framework's own bus, which is what decides whether a failed command is dead-lettered.
  */
 class PaymentProcessManagerTest {
 
   private static final String PAYMENT = "pay-o-1";
   private static final StreamId STREAM = StreamId.of(PaymentState.TYPE, AggregateId.of(PAYMENT));
-  private static final CorrelationId SAGA = CorrelationId.of("fulfillment-o-1");
+  private static final SagaId SAGA = SagaId.of("fulfillment-o-1");
+  private static final SagaType SAGA_TYPE = SagaType.fromClass(OrderFulfillmentState.class);
 
   private final PaymentStreams store = new PaymentStreams();
   private final ScriptedBus bus = new ScriptedBus(store);
@@ -198,7 +219,7 @@ class PaymentProcessManagerTest {
   }
 
   @Test
-  void theCommandsCarryTheSagaCorrelationAndAKeyThatIsTheSameOnEveryDelivery() {
+  void theCommandsCarryAKeyThatIsTheSameOnEveryDelivery() {
     EventEnvelope initiated = store.initiate(PAYMENT);
     bus.failNext(PaymentCommand.CapturePayment.class, new EventStoreException("connection reset"));
     assertThatThrownBy(() -> manager.onEvents(List.of(initiated)))
@@ -209,7 +230,276 @@ class PaymentProcessManagerTest {
         .containsExactly(
             new IdempotencyKey("payment-capture:" + PAYMENT),
             new IdempotencyKey("payment-capture:" + PAYMENT));
-    assertThat(bus.correlations()).containsOnly(SAGA);
+  }
+
+  @Test
+  void theCommandContinuesThePaymentInitiatedEvent() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    assertThat(initiated.metadata().sagaOrigin())
+        .as("the event the saga's InitiatePayment produced")
+        .isEqualTo(SagaOrigin.dispatchedBy(SAGA_TYPE, SAGA));
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted())
+        .hasSize(1)
+        .first()
+        .isInstanceOf(PaymentCommand.CapturePayment.class);
+    StreamRuneContext.DispatchCause cause = bus.causes().getFirst();
+    assertThat(cause.causationId())
+        .as("the command reacts to this PaymentInitiated")
+        .isEqualTo(CausationId.of(initiated.metadata().eventId().value()));
+    assertThat(cause.sagaOrigin())
+        .as("the saga that caused PaymentInitiated, one hop further")
+        .isEqualTo(new SagaOrigin(SAGA_TYPE, SAGA, 1));
+    StreamRuneContext.RequestContext context = bus.contexts().getFirst();
+    assertThat(context.correlationId())
+        .as("one fulfillment, one correlation id")
+        .isEqualTo(initiated.metadata().correlationId())
+        .isEqualTo(CorrelationId.of("streamrune:saga:fulfillment-o-1"));
+    assertThat(context.userId()).as("no user issued this command").isNull();
+    assertThat(context.authority()).isNull();
+    assertThat(context.baggage()).isEmpty();
+    assertThat(bus.sagaDispatches())
+        .as("a continuation is not a saga's own dispatch: it runs with no system principal")
+        .containsExactly(false);
+
+    // The reply the saga waits for carries the same origin, by which SagaRunner routes it.
+    EventEnvelope captured = store.readStream(STREAM, initiated.version(), 1).getFirst();
+    assertThat(captured.metadata().sagaOrigin()).isEqualTo(new SagaOrigin(SAGA_TYPE, SAGA, 1));
+  }
+
+  @Test
+  void aFailedGatewayCallContinuesThePaymentInitiatedEventToo() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.setFailureInjected(true);
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted()).hasSize(1).first().isInstanceOf(PaymentCommand.FailPayment.class);
+    assertThat(bus.causes().getFirst().sagaOrigin()).isEqualTo(new SagaOrigin(SAGA_TYPE, SAGA, 1));
+    assertThat(bus.contexts().getFirst().userId()).isNull();
+  }
+
+  // ---- The framework's own bus: a failed command that carries a saga origin is published to no
+  // dead letter queue, because an entry has no place for the origin and its replay would store the
+  // reply without one. The subscription's redelivery is the command's only second attempt. ----
+
+  @Test
+  void aFailedDispatchPropagatesAndLeavesNoDeadLetter() {
+    var real = new RealBus();
+    try (real) {
+      var realManager = new PaymentProcessManager(gateway, breaker, real.bus(), real.store());
+      EventEnvelope initiated =
+          real.stored(
+              SagaEnvelopes.causedBy(
+                  OrderFulfillmentState.class, SAGA, STREAM, paymentInitiated(PAYMENT)));
+      real.store().refuseNextAppend();
+
+      assertThatThrownBy(() -> realManager.onEvents(List.of(initiated)))
+          .as("the store's failure reaches the subscription, which delivers the event again")
+          .isInstanceOf(EventStoreException.class);
+      assertThat(real.deadLetters().all())
+          .as("a command that carries a saga origin is not dead-lettered")
+          .isEmpty();
+      assertThat(real.types(STREAM)).containsExactly("PaymentInitiated");
+
+      realManager.onEvents(List.of(initiated));
+
+      assertThat(real.types(STREAM)).containsExactly("PaymentInitiated", "PaymentCaptured");
+      EventMetadata captured =
+          real.store().readStream(STREAM, initiated.version(), 1).getFirst().metadata();
+      assertThat(captured.sagaOrigin()).isEqualTo(new SagaOrigin(SAGA_TYPE, SAGA, 1));
+      assertThat(captured.causationId())
+          .isEqualTo(CausationId.of(initiated.metadata().eventId().value()));
+      assertThat(captured.correlationId())
+          .isEqualTo(CorrelationId.of("streamrune:saga:fulfillment-o-1"));
+      assertThat(captured.userId()).isNull();
+      assertThat(real.deadLetters().all()).isEmpty();
+      assertThat(gateway.charges()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void aFailedDispatchForAnEventNoSagaCausedIsDeadLetteredLikeAnyOtherCommand() {
+    // The contrast that shows what the origin changes: the same failure, for a PaymentInitiated
+    // that carries no origin. The demo writes no such event; only the saga initiates a payment.
+    var real = new RealBus();
+    try (real) {
+      var realManager = new PaymentProcessManager(gateway, breaker, real.bus(), real.store());
+      EventEnvelope initiated =
+          real.stored(
+              new EventEnvelope(
+                  GlobalOffset.initial(),
+                  STREAM,
+                  Version.initial(),
+                  EventType.fromClass(PaymentEvent.PaymentInitiated.class),
+                  paymentInitiated(PAYMENT),
+                  new EventMetadata(
+                      EventId.of("evt-" + UUID.randomUUID()),
+                      CommandId.of("cmd-" + UUID.randomUUID()),
+                      null,
+                      null,
+                      CorrelationId.of("corr-of-a-request"),
+                      null,
+                      null,
+                      Instant.now(),
+                      Map.of())));
+      real.store().refuseNextAppend();
+
+      assertThatThrownBy(() -> realManager.onEvents(List.of(initiated)))
+          .isInstanceOf(EventStoreException.class);
+
+      assertThat(real.deadLetters().all())
+          .singleElement()
+          .satisfies(
+              entry -> {
+                assertThat(entry.commandType())
+                    .isEqualTo(PaymentCommand.CapturePayment.class.getName());
+                assertThat(entry.correlationId()).isEqualTo(CorrelationId.of("corr-of-a-request"));
+              });
+    }
+  }
+
+  private static PaymentEvent.PaymentInitiated paymentInitiated(String paymentId) {
+    return new PaymentEvent.PaymentInitiated(
+        paymentId, paymentId.substring("pay-".length()), new Money(new BigDecimal("10.00"), "USD"));
+  }
+
+  /**
+   * The framework's {@code VirtualThreadCommandBus} with the payment decider registered as the
+   * application registers it, over an in-memory event store that can refuse one append, with a
+   * command inbox and a dead letter queue.
+   */
+  private static final class RealBus implements AutoCloseable {
+    private final InMemoryCommandInbox inbox = new InMemoryCommandInbox();
+    private final RefusingStore store =
+        new RefusingStore(new InMemoryEventStore().withCommandInbox(inbox));
+    private final InMemoryDeadLetterQueue deadLetters = new InMemoryDeadLetterQueue();
+    private final VirtualThreadCommandBus bus =
+        VirtualThreadCommandBus.builder()
+            .eventStore(store)
+            .locker(new LocalStripedLocker(16))
+            .retryPolicy(new RetryPolicy(1, Duration.ofMillis(1), 1.0))
+            .objectMapper(new ObjectMapper())
+            .commandInbox(inbox)
+            .deadLetterQueue(deadLetters)
+            .register(
+                PaymentState.TYPE,
+                PaymentCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case PaymentCommand.InitiatePayment c -> c.paymentId();
+                          case PaymentCommand.CapturePayment c -> c.paymentId();
+                          case PaymentCommand.RefundPayment c -> c.paymentId();
+                          case PaymentCommand.FailPayment c -> c.paymentId();
+                        }),
+                new PaymentDecider())
+            .build();
+
+    VirtualThreadCommandBus bus() {
+      return bus;
+    }
+
+    RefusingStore store() {
+      return store;
+    }
+
+    InMemoryDeadLetterQueue deadLetters() {
+      return deadLetters;
+    }
+
+    /** Appends the envelope and returns it as the store hands it to a subscription. */
+    EventEnvelope stored(EventEnvelope envelope) {
+      store.append(envelope.streamId(), List.of(envelope), Version.initial());
+      return store.readStream(envelope.streamId(), Version.initial(), 1).getFirst();
+    }
+
+    List<String> types(StreamId streamId) {
+      return store.readStream(streamId, Version.initial(), 100).stream()
+          .map(e -> e.eventType().name())
+          .toList();
+    }
+
+    @Override
+    public void close() {
+      bus.close();
+    }
+  }
+
+  /** An event store that fails one append with a store error and delegates everything else. */
+  private static final class RefusingStore implements EventStore {
+    private final InMemoryEventStore delegate;
+    private boolean refuseNext;
+
+    RefusingStore(InMemoryEventStore delegate) {
+      this.delegate = delegate;
+    }
+
+    void refuseNextAppend() {
+      refuseNext = true;
+    }
+
+    private void refuseOnce() {
+      if (refuseNext) {
+        refuseNext = false;
+        throw new EventStoreException("connection reset");
+      }
+    }
+
+    @Override
+    public AggregateHistory load(StreamId streamId) {
+      return delegate.load(streamId);
+    }
+
+    @Override
+    public AggregateHistory load(StreamId streamId, int expectedSnapshotVersion) {
+      return delegate.load(streamId, expectedSnapshotVersion);
+    }
+
+    @Override
+    public AppendResult append(StreamId streamId, List<EventEnvelope> events, Version expected) {
+      refuseOnce();
+      return delegate.append(streamId, events, expected);
+    }
+
+    @Override
+    public IdempotentAppendResult appendWithKey(
+        StreamId streamId,
+        List<EventEnvelope> events,
+        Version expected,
+        IdempotencyKey idempotencyKey,
+        String commandType) {
+      refuseOnce();
+      return delegate.appendWithKey(streamId, events, expected, idempotencyKey, commandType);
+    }
+
+    @Override
+    public void saveSnapshot(StreamId streamId, Version version, AggregateState state) {
+      delegate.saveSnapshot(streamId, version, state);
+    }
+
+    @Override
+    public void saveSnapshot(
+        StreamId streamId, Version version, AggregateState state, int snapshotVersion) {
+      delegate.saveSnapshot(streamId, version, state, snapshotVersion);
+    }
+
+    @Override
+    public GlobalOffset lastGlobalOffset() {
+      return delegate.lastGlobalOffset();
+    }
+
+    @Override
+    public List<EventEnvelope> readGlobalStream(GlobalOffset afterOffset, int maxCount) {
+      return delegate.readGlobalStream(afterOffset, maxCount);
+    }
+
+    @Override
+    public List<EventEnvelope> readStream(StreamId streamId, Version afterVersion, int maxCount) {
+      return delegate.readStream(streamId, afterVersion, maxCount);
+    }
   }
 
   /** Counts every gateway call and every real charge (a call for a new payment that succeeded). */
@@ -241,17 +531,23 @@ class PaymentProcessManagerTest {
     private final Map<StreamId, List<EventEnvelope>> streams = new HashMap<>();
     private long offset;
 
+    /**
+     * Stores the {@code PaymentInitiated} of the payment as the saga's {@code InitiatePayment}
+     * leaves it: with the origin of the saga of the payment's order.
+     */
     EventEnvelope initiate(String paymentId) {
-      append(
-          StreamId.of(PaymentState.TYPE, AggregateId.of(paymentId)),
-          new PaymentEvent.PaymentInitiated(
-              paymentId,
-              paymentId.substring("pay-".length()),
-              new Money(new BigDecimal("10.00"), "USD")));
-      return streams.get(StreamId.of(PaymentState.TYPE, AggregateId.of(paymentId))).getFirst();
+      StreamId streamId = StreamId.of(PaymentState.TYPE, AggregateId.of(paymentId));
+      append(streamId, paymentInitiated(paymentId), causedBySagaOf(paymentId));
+      return streams.get(streamId).getFirst();
     }
 
-    void append(StreamId streamId, PaymentEvent event) {
+    static EventMetadata causedBySagaOf(String paymentId) {
+      return SagaEnvelopes.metadataCausedBy(
+          OrderFulfillmentState.class,
+          SagaId.of("fulfillment-" + paymentId.substring("pay-".length())));
+    }
+
+    void append(StreamId streamId, PaymentEvent event, EventMetadata metadata) {
       List<EventEnvelope> stream = streams.computeIfAbsent(streamId, id -> new ArrayList<>());
       stream.add(
           new EventEnvelope(
@@ -260,16 +556,7 @@ class PaymentProcessManagerTest {
               new Version(stream.size() + 1L),
               EventType.fromClass(event.getClass()),
               event,
-              new EventMetadata(
-                  EventId.of("evt-" + UUID.randomUUID()),
-                  CommandId.of("cmd-" + UUID.randomUUID()),
-                  null,
-                  null,
-                  SAGA,
-                  null,
-                  null,
-                  Instant.now(),
-                  Map.of())));
+              metadata));
     }
 
     PaymentState state(StreamId streamId, PaymentDecider decider) {
@@ -317,7 +604,9 @@ class PaymentProcessManagerTest {
 
   /**
    * Runs the real decider against {@link PaymentStreams}, after throwing whatever a test scripted
-   * for the command type (a scripted {@code null} lets that attempt through).
+   * for the command type (a scripted {@code null} lets that attempt through). It records the
+   * request context and the dispatch cause each command ran under, and stores the command's events
+   * with the metadata a command bus derives from the two.
    */
   private static final class ScriptedBus implements CommandBus {
     private final PaymentStreams store;
@@ -326,7 +615,9 @@ class PaymentProcessManagerTest {
         new HashMap<>();
     private final List<Command> attempted = new ArrayList<>();
     private final List<IdempotencyKey> keys = new ArrayList<>();
-    private final List<CorrelationId> correlations = new ArrayList<>();
+    private final List<StreamRuneContext.RequestContext> contexts = new ArrayList<>();
+    private final List<StreamRuneContext.DispatchCause> causes = new ArrayList<>();
+    private final List<Boolean> sagaDispatches = new ArrayList<>();
     private String settleFirst;
 
     ScriptedBus(PaymentStreams store) {
@@ -352,8 +643,16 @@ class PaymentProcessManagerTest {
       return keys;
     }
 
-    List<CorrelationId> correlations() {
-      return correlations;
+    List<StreamRuneContext.RequestContext> contexts() {
+      return contexts;
+    }
+
+    List<StreamRuneContext.DispatchCause> causes() {
+      return causes;
+    }
+
+    List<Boolean> sagaDispatches() {
+      return sagaDispatches;
     }
 
     @Override
@@ -372,12 +671,14 @@ class PaymentProcessManagerTest {
     }
 
     private CommandResult run(Command command, IdempotencyKey key) {
+      StreamRuneContext.requireNoForeignReservedCorrelationId();
+      StreamRuneContext.RequestContext context = StreamRuneContext.capture();
+      StreamRuneContext.DispatchCause cause = StreamRuneContext.cause();
       attempted.add(command);
       keys.add(key);
-      correlations.add(
-          StreamRuneContext.CURRENT.isBound()
-              ? StreamRuneContext.CURRENT.get().correlationId()
-              : null);
+      contexts.add(context);
+      causes.add(cause);
+      sagaDispatches.add(StreamRuneContext.isSagaDispatch());
       var scripted = failures.getOrDefault(command.getClass(), new ArrayDeque<>()).poll();
       if (scripted != null && scripted.isPresent()) {
         throw scripted.get();
@@ -393,11 +694,30 @@ class PaymentProcessManagerTest {
       StreamId streamId = StreamId.of(PaymentState.TYPE, AggregateId.of(paymentId));
       if (paymentId.equals(settleFirst)) {
         settleFirst = null;
-        store.append(streamId, new PaymentEvent.PaymentFailed(paymentId, "settled elsewhere"));
+        store.append(
+            streamId,
+            new PaymentEvent.PaymentFailed(paymentId, "settled elsewhere"),
+            PaymentStreams.causedBySagaOf(paymentId));
       }
       List<PaymentEvent> events = decider.decide(payment, store.state(streamId, decider));
-      events.forEach(e -> store.append(streamId, e));
+      events.forEach(e -> store.append(streamId, e, metadataOf(context, cause)));
       return new CommandResult(List.copyOf(events), streamId, Version.initial(), List.of());
+    }
+
+    /** What a command bus writes: the bound context's ids and the bound cause, nothing else. */
+    private static EventMetadata metadataOf(
+        StreamRuneContext.RequestContext context, StreamRuneContext.DispatchCause cause) {
+      return new EventMetadata(
+          EventId.of("evt-" + UUID.randomUUID()),
+          CommandId.of("cmd-" + UUID.randomUUID()),
+          context == null ? null : context.traceId(),
+          null,
+          context == null ? CorrelationId.of("corr-" + UUID.randomUUID()) : context.correlationId(),
+          cause == null ? null : cause.causationId(),
+          context == null ? null : context.userId(),
+          Instant.now(),
+          Map.of(),
+          cause == null ? null : cause.sagaOrigin());
     }
   }
 }

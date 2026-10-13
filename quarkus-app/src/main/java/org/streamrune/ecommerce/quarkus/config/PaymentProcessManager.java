@@ -1,9 +1,7 @@
 package org.streamrune.ecommerce.quarkus.config;
 
 import jakarta.inject.Singleton;
-import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.streamrune.core.CommandBus;
@@ -12,7 +10,6 @@ import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.subscription.EventListener;
-import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.LogSanitizer;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
@@ -32,13 +29,24 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * gateway failures the breaker opens and the manager fails the payment (dispatches {@code
  * FailPayment} without calling the gateway) until the cooldown lets a probe through.
  *
+ * <p><b>The command continues the event.</b> Each command is dispatched inside {@link
+ * StreamRuneContext#continuing(EventEnvelope) StreamRuneContext.continuing(initiated)}. The command
+ * bus then stores {@code PaymentCaptured}/{@code PaymentFailed} with what the helper takes from
+ * {@code PaymentInitiated}: its correlation id and trace id, its id as the causation id, and its
+ * saga origin one hop further. The fulfillment saga caused {@code PaymentInitiated}, so the reply
+ * names that saga as its origin and {@code SagaRunner} hands it to that saga; neither this class
+ * nor the saga routes it. The command runs with no user and no authority: the customer who placed
+ * the order did not issue it.
+ *
  * <p><b>Only the gateway decides the payment.</b> A gateway failure is counted by the breaker and
  * becomes {@code FailPayment}. A failure to dispatch either command — the event store unreachable,
  * the command bus's own circuit breaker open, the bus shutting down — says nothing about the
  * payment, so it propagates out of {@link #onEvents}: the subscription keeps its checkpoint before
  * the event and delivers it again after a backoff. Treating it as a gateway failure would cancel an
  * order whose money the gateway had already taken; swallowing it would leave the payment {@code
- * PENDING} with the event already consumed.
+ * PENDING} with the event already consumed. That redelivery is the command's only second attempt:
+ * the bus publishes a failed command that carries a saga origin to no dead letter queue, because an
+ * entry has no place for the origin and its replay would store the reply without one.
  *
  * <p><b>Safe to deliver twice.</b> The subscription delivers at least once, and after a dispatch
  * failure it delivers the whole batch again:
@@ -49,17 +57,12 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  *   <li>The gateway call carries the payment id as its idempotency key: calling it again for a
  *       payment it already captured — the capture could not be recorded — charges nothing.
  *   <li>Each command is dispatched under a key derived from the payment id, the same on every
- *       delivery. When the bus also dead-letters a command that failed on the store, the replay of
- *       that copy and a later delivery deduplicate in the command inbox.
+ *       delivery: a delivery after the command committed is answered from the command inbox and
+ *       stores no second event.
  *   <li>A command the payment rejects because an earlier delivery settled it ({@code
  *       DomainException}, payment no longer {@code PENDING}) is logged and skipped. Any other
  *       rejection propagates.
  * </ul>
- *
- * <p>Each command runs with the incoming event's correlation id bound, so the resulting {@code
- * PaymentCaptured}/{@code PaymentFailed} carries the correlation id of the fulfillment it belongs
- * to: one id for the whole process in the log and in the audit trail. The saga does not route by
- * it. It finds the event by the order the payment names.
  */
 @Singleton
 public class PaymentProcessManager implements EventListener {
@@ -128,7 +131,7 @@ public class PaymentProcessManager implements EventListener {
    */
   private void settle(PaymentCommand command, IdempotencyKey key, EventEnvelope initiated) {
     try {
-      dispatch(command, key, initiated.metadata().correlationId());
+      dispatch(command, key, initiated);
     } catch (DomainException rejected) {
       if (!alreadySettled(initiated)) {
         throw rejected;
@@ -159,13 +162,11 @@ public class PaymentProcessManager implements EventListener {
     return new IdempotencyKey("payment-fail:" + paymentId);
   }
 
-  private void dispatch(PaymentCommand command, IdempotencyKey key, CorrelationId correlationId) {
-    if (correlationId == null) {
-      commandBus.execute(command, key);
-      return;
-    }
-    StreamRuneContext.RequestContext ctx =
-        new StreamRuneContext.RequestContext(null, null, correlationId, Instant.now(), Map.of());
-    ScopedValue.where(StreamRuneContext.CURRENT, ctx).run(() -> commandBus.execute(command, key));
+  /**
+   * Dispatches the command as a continuation of {@code PaymentInitiated}: the events it produces
+   * carry that event's correlation id, its id as their causation id, and its saga origin.
+   */
+  private void dispatch(PaymentCommand command, IdempotencyKey key, EventEnvelope initiated) {
+    StreamRuneContext.continuing(initiated).run(() -> commandBus.execute(command, key));
   }
 }

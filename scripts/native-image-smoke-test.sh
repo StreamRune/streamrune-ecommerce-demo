@@ -2,8 +2,8 @@
 # Native image smoke test for StreamRune e-commerce demo.
 # Builds a native binary for the chosen framework, starts it against an empty Postgres database and
 # RabbitMQ, and probes it: health, the schema the binary created at startup, a command-to-read-model
-# round trip, a dead-lettered command replayed through its sealed root, and a read model larger than
-# 1 MiB written and read back.
+# round trip, a dead-lettered command replayed through its sealed root, a read model larger than
+# 1 MiB written and read back, and an order fulfilled by its saga from OrderPlaced to COMPLETED.
 # It then stops the binary with SIGTERM, waits for it to exit, prints its output, and fails the run
 # when that output (startup, requests and shutdown) holds a GraalVM UnsupportedFeatureError.
 #
@@ -309,6 +309,76 @@ large_read_model_smoke() {
   return 1
 }
 
+saga_origin_smoke() {
+  # A fulfillment from the placed order to its confirmation. The command bus stores a saga origin
+  # (saga type, saga id, hop) in the metadata of every event a saga's command produced; the saga
+  # subscription reads it back and routes the event by it; the payment process manager carries it
+  # onto its capture command with StreamRuneContext.continuing. In a native image the origin is a
+  # record Jackson writes and reads by reflection (the framework registers it): if it were not
+  # written or not read, the replies would reach no saga and the saga would stay where its first
+  # command left it. COMPLETED proves the whole chain, and the stored PaymentCaptured shows the
+  # origin one hop from the saga. The last check sends a correlation id in the form saga dispatch
+  # binds, which the request filter answers with 400.
+  local base="$1"
+  local pid="saga-smoke-$$-$(date +%s)"
+  local oid="$pid-order"
+  echo "  Running fulfillment saga probe (order $oid) …"
+
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/inventory/$pid/receive" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
+    -d '{"quantity":5}')
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/inventory/$pid/receive returned $code"
+    return 1
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+    -d "{\"orderId\":\"$oid\",\"customerId\":\"smoke-customer\",\"lines\":[{\"productId\":\"$pid\",\"quantity\":1,\"unitPrice\":9.99}]}")
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/orders returned $code"
+    return 1
+  fi
+
+  local saga=""
+  for i in $(seq 1 30); do
+    saga=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' \
+      "$base/api/saga/fulfillments/fulfillment-$oid")
+    if printf '%s' "$saga" | grep -q '"fulfillmentStatus":"COMPLETED"'; then
+      break
+    fi
+    saga=""
+    sleep 1
+  done
+  if [ -z "$saga" ]; then
+    echo "  ✗ The saga fulfillment-$oid did not reach COMPLETED within 30s."
+    pg_sql "SELECT aggregate_type || ':' || event_type || ' origin=' || coalesce(metadata->>'sagaOrigin', 'none')
+        FROM event_stream WHERE aggregate_id IN ('$oid', 'pay-$oid', '$pid') ORDER BY global_offset" || true
+    return 1
+  fi
+
+  local origin
+  origin=$(pg_sql "SELECT (metadata->'sagaOrigin'->>'sagaId') || ' hop ' || (metadata->'sagaOrigin'->>'hop')
+      || ' ' || (metadata->>'correlationId')
+      FROM event_stream WHERE aggregate_type = 'payment' AND aggregate_id = 'pay-$oid'
+        AND event_type = 'PaymentCaptured'")
+  if [ "$origin" != "fulfillment-$oid hop 1 streamrune:saga:fulfillment-$oid" ]; then
+    echo "  ✗ PaymentCaptured does not carry the saga's origin one hop on (got: ${origin:-none})."
+    return 1
+  fi
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Correlation-Id: streamrune:saga:fulfillment-$oid" \
+    "$base/api/products")
+  if [ "$code" != "400" ]; then
+    echo "  ✗ A request with a reserved X-Correlation-Id was answered $code, not 400."
+    return 1
+  fi
+  echo "  ✓ Saga fulfillment-$oid completed (${i}s); PaymentCaptured carries its origin; a reserved correlation id is refused."
+  return 0
+}
+
 stop_binary() {
   # SIGTERM, then wait for the process to exit, so its shutdown runs and logs before the output is
   # scanned (the Micronaut binary's Netty event loops free their pooled direct buffers there); after
@@ -335,7 +405,7 @@ probe_and_stop() {
   # records the framework's result.
   local fw="$1" health_url="$2" base="$3" app_log="$4"
   local outcome="PASS"
-  local detail="health + schema created at startup + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + clean output"
+  local detail="health + schema created at startup + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + fulfillment saga + clean output"
   if ! wait_for_health "$health_url"; then
     outcome="FAIL"; detail="health check timeout"
   elif ! schema_smoke; then
@@ -346,6 +416,8 @@ probe_and_stop() {
     outcome="FAIL"; detail="sealed-root DLQ replay failed"
   elif ! large_read_model_smoke "$base"; then
     outcome="FAIL"; detail="large read-model probe failed"
+  elif ! saga_origin_smoke "$base"; then
+    outcome="FAIL"; detail="fulfillment saga probe failed"
   fi
 
   stop_binary

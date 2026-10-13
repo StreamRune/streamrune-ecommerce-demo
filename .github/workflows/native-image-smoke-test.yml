@@ -117,10 +117,12 @@ jobs:
       # trip, the replay of a dead-lettered command through its sealed root (DLQ registerCommand
       # of a sealed root needs the root registered for reflection in the image; on Quarkus and
       # Micronaut that is the app's reachability-metadata.json, since @RegisterForReflection and
-      # @TypeHint do not list permitted subclasses), and a 1.5 MiB read model written and read
-      # back. It then stops the binary with SIGTERM, waits for it to exit, and fails on any
-      # UnsupportedFeatureError in the binary's output, shutdown included (the Micronaut binary's
-      # Netty 4.2 needs -H:+SharedArenaSupport for that, see micronaut-app/build.gradle.kts).
+      # @TypeHint do not list permitted subclasses), a 1.5 MiB read model written and read
+      # back, and an order its fulfillment saga takes to COMPLETED (the saga origin in an event's
+      # metadata written and read by the binary). It then stops the binary with SIGTERM, waits
+      # for it to exit, and fails on any UnsupportedFeatureError in the binary's output, shutdown
+      # included (the Micronaut binary's Netty 4.2 needs -H:+SharedArenaSupport for that, see
+      # micronaut-app/build.gradle.kts).
       - name: Smoke test (Spring)
         if: matrix.framework == 'spring'
         working-directory: streamrune-ecommerce-demo

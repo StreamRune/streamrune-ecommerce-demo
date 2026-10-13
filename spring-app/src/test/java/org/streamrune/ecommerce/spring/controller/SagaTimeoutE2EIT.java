@@ -103,8 +103,9 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
   /**
    * Adapts the demo's {@link OrderFulfillmentSaga} to the {@link SagaDecider} contract the {@link
    * SagaTimeoutRunner} consumes, reusing its real {@code evolve}/{@code handle}/{@code compensate}
-   * and adding a {@link #timeout()}. Routing methods (start/correlate) are irrelevant to the
-   * timeout sweep, so they are not part of the decider contract.
+   * and adding a {@link #timeout()}. The routing methods ({@code isStartEvent}, {@code
+   * extractSagaId}, {@code correlateByEventData}) are irrelevant to the timeout sweep, so they are
+   * not part of the decider contract.
    */
   private static final class TimeoutDecider implements SagaDecider<OrderFulfillmentState> {
     private final OrderFulfillmentSaga delegate = new OrderFulfillmentSaga();

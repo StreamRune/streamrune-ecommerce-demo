@@ -206,9 +206,10 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Quarantine store for poison saga events (routing failure, extract/correlate errors, decider
-   * exceptions). Required by {@link SagaRunner.Builder#sagaDeadLetterStore} below — without it the
-   * saga runner cannot be built. Mirrors {@link #sagaStore}.
+   * Quarantine store for poison saga events (a routing method that throws — {@code extractSagaId},
+   * {@code correlateByEventData} — or an exception in the saga's own logic). Required by {@link
+   * SagaRunner.Builder#sagaDeadLetterStore} below — without it the saga runner cannot be built.
+   * Mirrors {@link #sagaStore}.
    */
   @Bean
   public PostgresSagaDeadLetterStore sagaDeadLetterStore(DataSource ds) {

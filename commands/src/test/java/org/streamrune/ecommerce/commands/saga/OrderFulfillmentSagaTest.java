@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -34,11 +36,16 @@ import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
+import org.streamrune.test.SagaEnvelopes;
 
 class OrderFulfillmentSagaTest {
 
   private final OrderFulfillmentSaga saga = new OrderFulfillmentSaga();
 
+  /**
+   * An event a request caused: its metadata carries no saga origin, and its correlation id is
+   * whatever the request carried.
+   */
   private EventEnvelope envelope(
       DomainEvent event, AggregateType type, String id, String correlationId) {
     var metadata =
@@ -58,6 +65,19 @@ class OrderFulfillmentSagaTest {
         new EventType(event.getClass().getSimpleName()),
         event,
         metadata);
+  }
+
+  /**
+   * An event a command of the given order's saga caused: the command bus stores it with that saga's
+   * origin, and {@code SagaRunner} hands it to that saga without asking the orchestrator.
+   */
+  private EventEnvelope causedBySagaOf(
+      String orderId, DomainEvent event, AggregateType type, String id) {
+    return SagaEnvelopes.causedBy(
+        OrderFulfillmentState.class,
+        new SagaId("fulfillment-" + orderId),
+        StreamId.of(type, new AggregateId(id)),
+        event);
   }
 
   @Test
@@ -151,11 +171,11 @@ class OrderFulfillmentSagaTest {
             List.of(line),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     var captured =
-        envelope(
+        causedBySagaOf(
+            "o-1",
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-1");
+            "pay-o-1");
 
     state = saga.evolve(state, captured);
     var commands = saga.handle(state, captured);
@@ -168,125 +188,74 @@ class OrderFulfillmentSagaTest {
     assertThat(reserve.quantity()).isEqualTo(2);
   }
 
-  // ---- An event is routed to the saga of the order it is about, read from the event's own data.
-  // The correlation id of an event is whatever the request that caused it carried: a client sets
-  // X-Correlation-Id, so it says nothing about whose saga an event belongs to. ----
+  // ---- SagaRunner routes the reply to a saga's own command by the origin the command bus stores
+  // with the event, and asks the saga only about an event no fulfillment caused. A request can
+  // write two of the events this saga reacts to, OrderConfirmed and OrderCancelled; each belongs
+  // to the saga of the order it names. The method receives the stream id and the payload, so
+  // nothing a request header carries can take part in the answer. ----
 
   @Test
-  void correlate_routesEveryEventOfTheProcessToTheSagaOfTheOrderItNames() {
-    var money = new Money(BigDecimal.TEN, "USD");
-    List<EventEnvelope> eventsOfOrderOne =
-        List.of(
-            envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "corr-1"),
-            envelope(new OrderEvent.OrderCancelled("o-1", "why"), OrderState.TYPE, "o-1", "corr-1"),
-            envelope(
-                new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money),
-                PaymentState.TYPE,
-                "pay-o-1",
-                "corr-1"),
-            envelope(
-                new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
-                PaymentState.TYPE,
-                "pay-o-1",
-                "corr-1"),
-            envelope(
-                new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
-                PaymentState.TYPE,
-                "pay-o-1",
-                "corr-1"),
-            envelope(
-                new PaymentEvent.PaymentRefunded("pay-o-1", "why"),
-                PaymentState.TYPE,
-                "pay-o-1",
-                "corr-1"),
-            envelope(
-                new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
-                InventoryState.TYPE,
-                "prod-1",
-                "corr-1"),
-            envelope(
-                new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10),
-                InventoryState.TYPE,
-                "prod-1",
-                "corr-1"));
+  void correlateByEventData_routesAConfirmationAndACancellationToTheSagaOfTheirOrder() {
+    var orderStream = StreamId.of(OrderState.TYPE, new AggregateId("o-1"));
 
-    for (EventEnvelope event : eventsOfOrderOne) {
-      assertThat(saga.correlate(event))
-          .as("the saga of %s", event.eventType().name())
-          .contains(new SagaId("fulfillment-o-1"));
-    }
+    assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed("o-1")))
+        .contains(new SagaId("fulfillment-o-1"));
+    assertThat(
+            saga.correlateByEventData(
+                orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind")))
+        .contains(new SagaId("fulfillment-o-1"));
   }
 
   @Test
-  void correlate_ignoresACorrelationIdThatNamesAnotherOrdersSaga() {
-    // The caller confirmed their own order o-1 and sent X-Correlation-Id: fulfillment-o-2.
-    var confirmed =
-        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-2");
-    var cancelled =
-        envelope(
-            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
-            OrderState.TYPE,
-            "o-1",
-            "fulfillment-o-2");
-
-    assertThat(saga.correlate(confirmed)).contains(new SagaId("fulfillment-o-1"));
-    assertThat(saga.correlate(cancelled)).contains(new SagaId("fulfillment-o-1"));
-  }
-
-  @Test
-  void correlate_anEventOutsideTheProcessBelongsToNoSaga_whateverItsCorrelationId() {
-    List<EventEnvelope> outside =
-        List.of(
-            envelope(new OrderEvent.OrderShipped("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
-            envelope(
-                new OrderEvent.OrderDelivered("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1"),
-            envelope(
-                new InventoryEvent.ShipmentReceived("prod-1", 5, 5),
-                InventoryState.TYPE,
-                "prod-1",
-                "fulfillment-o-1"),
-            envelope(
-                new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2),
-                InventoryState.TYPE,
-                "prod-1",
-                "fulfillment-o-1"));
-
-    for (EventEnvelope event : outside) {
-      assertThat(saga.correlate(event)).as(event.eventType().name()).isEmpty();
-    }
-  }
-
-  @Test
-  void correlate_aPaymentEventWithoutAnOrderId_isRoutedByThePaymentIdTheSagaDerived() {
-    var failed =
-        envelope(
-            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
-            PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-2");
-    var notAFulfillmentPayment =
-        envelope(
-            new PaymentEvent.PaymentFailed("invoice-7", "declined"),
-            PaymentState.TYPE,
-            "invoice-7",
-            "fulfillment-o-2");
-
-    assertThat(saga.correlate(failed)).contains(new SagaId("fulfillment-o-1"));
-    assertThat(saga.correlate(notAFulfillmentPayment)).isEmpty();
-  }
-
-  @Test
-  void correlate_anOrderIdNoSagaIdCanHold_belongsToNoSaga() {
-    // PlaceOrder refuses such an id, so no saga exists for it; correlate answers "not mine"
-    // rather than throwing, which the framework would quarantine as a poison event.
+  void correlateByEventData_anOrderIdNoSagaIdCanHold_belongsToNoSaga() {
+    // PlaceOrder refuses such an id, so no saga exists for it; the answer is "no saga", not a
+    // throw, which the framework would quarantine as a poison event.
     var orderId = "o".repeat(OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH + 1);
-    var cancelled =
-        envelope(new OrderEvent.OrderCancelled(orderId, "why"), OrderState.TYPE, orderId, "c-1");
+    var orderStream = StreamId.of(OrderState.TYPE, new AggregateId(orderId));
 
-    assertThat(saga.correlate(cancelled)).isEmpty();
+    assertThat(
+            saga.correlateByEventData(orderStream, new OrderEvent.OrderCancelled(orderId, "why")))
+        .isEmpty();
+    assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed(orderId)))
+        .isEmpty();
+    assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed(""))).isEmpty();
+    assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed(null)))
+        .isEmpty();
   }
 
-  // ---- A saga that is handed an event of another order neither evolves nor dispatches. ----
+  @Test
+  void correlateByEventData_everyOtherEvent_belongsToNoSaga() {
+    // The payment and inventory events of a fulfillment are written by the saga's commands and by
+    // the payment process manager's, and reach the saga through their origin. One that carries no
+    // origin was caused by no fulfillment. The rest are events the saga does not react to.
+    var money = new Money(BigDecimal.TEN, "USD");
+    var order = StreamId.of(OrderState.TYPE, new AggregateId("o-1"));
+    var payment = StreamId.of(PaymentState.TYPE, new AggregateId("pay-o-1"));
+    var stock = StreamId.of(InventoryState.TYPE, new AggregateId("prod-1"));
+    Map<DomainEvent, StreamId> others = new LinkedHashMap<>();
+    others.put(new OrderEvent.OrderPlaced("o-1", "c-1", List.of(), money), order);
+    others.put(new OrderEvent.OrderShipped("o-1"), order);
+    others.put(new OrderEvent.OrderDelivered("o-1"), order);
+    others.put(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money), payment);
+    others.put(new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"), payment);
+    others.put(new PaymentEvent.PaymentFailed("pay-o-1", "declined"), payment);
+    others.put(new PaymentEvent.PaymentRefunded("pay-o-1", "why"), payment);
+    others.put(new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8), stock);
+    others.put(new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10), stock);
+    others.put(new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2), stock);
+    others.put(new InventoryEvent.ShipmentReceived("prod-1", 5, 5), stock);
+
+    others.forEach(
+        (event, stream) ->
+            assertThat(saga.correlateByEventData(stream, event))
+                .as(event.getClass().getSimpleName())
+                .isEmpty());
+  }
+
+  // ---- A saga that is handed an event of another order neither evolves nor dispatches. Routing
+  // says which saga's command caused an event (its origin) or which saga an outside event names;
+  // evolve and handle compare the event with the order id and the payment id in the saga's own
+  // state, so the answer holds whichever of the two ways handed the event over. ----
 
   @Test
   void evolve_anotherOrdersConfirmation_leavesTheSagaWhereItIs() {
@@ -301,12 +270,12 @@ class OrderFulfillmentSagaTest {
 
   @Test
   void evolve_anotherOrdersEvent_isIgnoredWhateverRoutedItHere() {
-    // A router that sends every event to the saga of order o-2: evolve and handle compare the
-    // event with the ids the saga stores, so they do not depend on correlate being right.
+    // A saga that names the saga of order o-2 for every outside event: evolve and handle compare
+    // the event with the ids the saga stores, so they do not depend on the routing being right.
     var misrouting =
         new OrderFulfillmentSaga() {
           @Override
-          public Optional<SagaId> correlate(EventEnvelope event) {
+          public Optional<SagaId> correlateByEventData(StreamId streamId, DomainEvent event) {
             return Optional.of(new SagaId("fulfillment-o-2"));
           }
         };
@@ -316,32 +285,35 @@ class OrderFulfillmentSagaTest {
     assertThat(misrouting.evolve(awaitingConfirmation, foreignConfirmation))
         .isEqualTo(awaitingConfirmation);
 
+    // An event that carries the origin of order o-2's saga is handed to that saga by the runner,
+    // whatever order it names.
     var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
     var foreignFailure =
-        envelope(
+        causedBySagaOf(
+            "o-2",
             new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-2");
+            "pay-o-1");
     assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
     assertThat(misrouting.handle(awaitingPayment, foreignFailure)).isEmpty();
   }
 
   @Test
   void evolve_anotherOrdersPaymentAndStock_leaveTheSagaWhereItIs() {
+    // Each event below carries the origin of order o-2's saga and names order o-1.
     var awaitingPayment = stateOfOrderTwo(OrderFulfillmentStatus.AWAITING_PAYMENT);
     var foreignCapture =
-        envelope(
+        causedBySagaOf(
+            "o-2",
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-2");
+            "pay-o-1");
     var foreignFailure =
-        envelope(
+        causedBySagaOf(
+            "o-2",
             new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-2");
+            "pay-o-1");
     assertThat(saga.evolve(awaitingPayment, foreignCapture)).isEqualTo(awaitingPayment);
     assertThat(saga.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
 
@@ -350,11 +322,11 @@ class OrderFulfillmentSagaTest {
     assertThat(saga.handle(awaitingInventory, foreignCapture)).isEmpty();
 
     var foreignReservation =
-        envelope(
+        causedBySagaOf(
+            "o-2",
             new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8),
             InventoryState.TYPE,
-            "prod-1",
-            "fulfillment-o-2");
+            "prod-1");
     assertThat(saga.evolve(awaitingInventory, foreignReservation)).isEqualTo(awaitingInventory);
 
     var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
@@ -427,7 +399,7 @@ class OrderFulfillmentSagaTest {
     // A redelivered/unrelated event arrives while the saga sits in AWAITING_INVENTORY — must not
     // re-issue ReserveStock for anything other than the PaymentCaptured that drives this step.
     var unrelated =
-        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "fulfillment-o-1");
+        envelope(new OrderEvent.OrderConfirmed("o-1"), OrderState.TYPE, "o-1", "corr-by-hand");
 
     var commands = saga.handle(state, unrelated);
 
@@ -447,11 +419,11 @@ class OrderFulfillmentSagaTest {
             List.of(line),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     var captured =
-        envelope(
+        causedBySagaOf(
+            "o-1",
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-1");
+            "pay-o-1");
 
     var commands = saga.handle(state, captured);
 
@@ -480,11 +452,11 @@ class OrderFulfillmentSagaTest {
             List.of(),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     var failed =
-        envelope(
+        causedBySagaOf(
+            "o-1",
             new PaymentEvent.PaymentFailed("pay-o-1", "insufficient funds"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-1");
+            "pay-o-1");
 
     state = saga.evolve(state, failed);
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
@@ -509,11 +481,8 @@ class OrderFulfillmentSagaTest {
             List.of(),
             OrderFulfillmentStatus.CANCELLING);
     var cancelled =
-        envelope(
-            new OrderEvent.OrderCancelled("o-1", "Payment failed"),
-            OrderState.TYPE,
-            "o-1",
-            "fulfillment-o-1");
+        causedBySagaOf(
+            "o-1", new OrderEvent.OrderCancelled("o-1", "Payment failed"), OrderState.TYPE, "o-1");
 
     state = saga.evolve(state, cancelled);
 
@@ -657,11 +626,11 @@ class OrderFulfillmentSagaTest {
             List.of(line),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     var captured =
-        envelope(
+        causedBySagaOf(
+            "o-1",
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-1");
+            "pay-o-1");
 
     var commands = saga.handle(state, captured);
 
@@ -684,11 +653,11 @@ class OrderFulfillmentSagaTest {
             List.of(line),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     var captured =
-        envelope(
+        causedBySagaOf(
+            "o-1",
             new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
             PaymentState.TYPE,
-            "pay-o-1",
-            "fulfillment-o-1");
+            "pay-o-1");
 
     var commands = saga.handle(state, captured);
 
