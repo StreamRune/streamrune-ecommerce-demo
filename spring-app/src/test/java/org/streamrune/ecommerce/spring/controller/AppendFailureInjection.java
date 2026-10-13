@@ -12,8 +12,11 @@ import org.streamrune.core.types.AggregateType;
  * Makes the event store refuse one event for one stream, in the database rather than in the
  * application: the integration tests share one application context, so no bean is replaced. While a
  * flag for a stream (aggregate type and id) and an event type is set, a trigger raises on the
- * {@code event_stream} insert, so the append rolls back with a store error, the kind of failure the
- * command bus records in its dead-letter queue.
+ * {@code event_stream} insert, so the append rolls back with a store error. What the command bus
+ * does with it depends on who dispatched the command: a request's command is recorded in the
+ * dead-letter queue ({@code CustomerCommandDeadLetterIT}); a command a listener dispatches inside
+ * {@code StreamRuneContext.continuing} is not, and the redelivery of its event runs it again
+ * ({@code PaymentCaptureRetryIT}).
  *
  * <p>A flag holds until {@link #allowAppend} removes it. Every refused insert is counted in a
  * sequence, which keeps its value when the refused transaction rolls back ({@link #refusals()}).

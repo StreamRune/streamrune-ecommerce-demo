@@ -40,11 +40,12 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * but leave {@code PaymentInitiated} to be delivered again. Once the store accepts the event, the
  * capture is recorded and the saga confirms the order.
  *
- * <p>That redelivery is the capture's only second attempt. The command continues {@code
- * PaymentInitiated}, an event the fulfillment saga caused, so it carries the saga's origin, and the
- * command bus publishes a failed command with an origin to no dead letter queue. The recorded
- * {@code PaymentCaptured} names the saga as its origin, one hop from the saga's own command, and
- * {@code PaymentInitiated} as its cause; that origin is what brings it to the saga.
+ * <p>That redelivery is the capture's only second attempt. The command is dispatched inside {@code
+ * StreamRuneContext.continuing(PaymentInitiated)}, and the command bus publishes a failed command
+ * of a continuation to no dead letter queue. {@code PaymentInitiated} is an event the fulfillment
+ * saga caused, so the recorded {@code PaymentCaptured} names the saga as its origin, one hop from
+ * the saga's own command, and {@code PaymentInitiated} as its cause; that origin is what brings it
+ * to the saga.
  */
 class PaymentCaptureRetryIT extends AbstractIntegrationTest {
 
@@ -81,7 +82,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
           .as("the gateway answered; its breaker counts no failure")
           .isEqualTo(PaymentGatewayCircuitBreaker.State.CLOSED);
       assertThat(captureDeadLetters(paymentId))
-          .as("a command that carries a saga origin is not dead-lettered")
+          .as("a command dispatched in continuation of an event is not dead-lettered")
           .isEmpty();
       failures.allowAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
     }
