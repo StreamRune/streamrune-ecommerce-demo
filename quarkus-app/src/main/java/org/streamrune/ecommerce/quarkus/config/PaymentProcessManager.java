@@ -45,8 +45,11 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * the event and delivers it again after a backoff. Treating it as a gateway failure would cancel an
  * order whose money the gateway had already taken; swallowing it would leave the payment {@code
  * PENDING} with the event already consumed. That redelivery is the command's only second attempt:
- * the bus publishes a failed command that carries a saga origin to no dead letter queue, because an
- * entry has no place for the origin and its replay would store the reply without one.
+ * the bus publishes a failed command that was dispatched inside {@code continuing} to no dead
+ * letter queue, whether or not a saga caused the event. An entry has no place for the causing event
+ * or for a saga origin, so its replay would store the reply without them. A capture that keeps
+ * failing therefore shows on the subscription and nowhere else: its poll loop logs every failed
+ * attempt at {@code ERROR}.
  *
  * <p><b>Safe to deliver twice.</b> The subscription delivers at least once, and after a dispatch
  * failure it delivers the whole batch again:

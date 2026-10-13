@@ -66,7 +66,7 @@ import org.streamrune.test.SagaEnvelopes;
  * <p>The bus is a fake that runs the real {@link PaymentDecider} against an in-memory payment
  * stream and throws the failures a test scripts for it. Like the shipped buses it first refuses a
  * reserved correlation id that is bound without its saga origin. The gateway breaker opens after a
- * single failure, so a failure it should not have counted shows as an open breaker. Two cases run
+ * single failure, so a failure it should not have counted shows as an open breaker. Three cases run
  * the framework's own bus, which is what decides whether a failed command is dead-lettered.
  */
 class PaymentProcessManagerTest {
@@ -281,9 +281,11 @@ class PaymentProcessManagerTest {
     assertThat(bus.contexts().getFirst().userId()).isNull();
   }
 
-  // ---- The framework's own bus: a failed command that carries a saga origin is published to no
-  // dead letter queue, because an entry has no place for the origin and its replay would store the
-  // reply without one. The subscription's redelivery is the command's only second attempt. ----
+  // ---- The framework's own bus: a failed command dispatched inside
+  // StreamRuneContext.continuing(event) is published to no dead letter queue, whether or not a
+  // saga caused the event. An entry has no place for the causing event or for a saga origin, so
+  // its replay would store the reply without them. The subscription's redelivery is the
+  // command's only second attempt. ----
 
   @Test
   void aFailedDispatchPropagatesAndLeavesNoDeadLetter() {
@@ -300,7 +302,7 @@ class PaymentProcessManagerTest {
           .as("the store's failure reaches the subscription, which delivers the event again")
           .isInstanceOf(EventStoreException.class);
       assertThat(real.deadLetters().all())
-          .as("a command that carries a saga origin is not dead-lettered")
+          .as("a command dispatched in continuation of an event is not dead-lettered")
           .isEmpty();
       assertThat(real.types(STREAM)).containsExactly("PaymentInitiated");
 
@@ -321,44 +323,86 @@ class PaymentProcessManagerTest {
   }
 
   @Test
-  void aFailedDispatchForAnEventNoSagaCausedIsDeadLetteredLikeAnyOtherCommand() {
-    // The contrast that shows what the origin changes: the same failure, for a PaymentInitiated
-    // that carries no origin. The demo writes no such event; only the saga initiates a payment.
+  void aFailedDispatchForAnEventNoSagaCausedLeavesNoDeadLetterEither() {
+    // The rule does not depend on a saga: the manager continues a PaymentInitiated that carries no
+    // origin (the demo writes no such event; only the saga initiates a payment), and the failed
+    // capture is in no dead letter queue. A later delivery stores it once, as the event's effect.
     var real = new RealBus();
     try (real) {
       var realManager = new PaymentProcessManager(gateway, breaker, real.bus(), real.store());
-      EventEnvelope initiated =
-          real.stored(
-              new EventEnvelope(
-                  GlobalOffset.initial(),
-                  STREAM,
-                  Version.initial(),
-                  EventType.fromClass(PaymentEvent.PaymentInitiated.class),
-                  paymentInitiated(PAYMENT),
-                  new EventMetadata(
-                      EventId.of("evt-" + UUID.randomUUID()),
-                      CommandId.of("cmd-" + UUID.randomUUID()),
-                      null,
-                      null,
-                      CorrelationId.of("corr-of-a-request"),
-                      null,
-                      null,
-                      Instant.now(),
-                      Map.of())));
+      EventEnvelope initiated = real.stored(initiatedByARequest());
       real.store().refuseNextAppend();
 
       assertThatThrownBy(() -> realManager.onEvents(List.of(initiated)))
+          .as("the store's failure reaches the subscription, which delivers the event again")
+          .isInstanceOf(EventStoreException.class);
+      assertThat(real.deadLetters().all())
+          .as("a command dispatched in continuation of an event is not dead-lettered")
+          .isEmpty();
+      assertThat(real.types(STREAM)).containsExactly("PaymentInitiated");
+
+      realManager.onEvents(List.of(initiated));
+      realManager.onEvents(List.of(initiated));
+
+      assertThat(real.types(STREAM))
+          .as("the delivery that succeeds stores the capture once; one after it stores nothing")
+          .containsExactly("PaymentInitiated", "PaymentCaptured");
+      EventMetadata captured =
+          real.store().readStream(STREAM, initiated.version(), 1).getFirst().metadata();
+      assertThat(captured.causationId())
+          .isEqualTo(CausationId.of(initiated.metadata().eventId().value()));
+      assertThat(captured.sagaOrigin()).as("no saga caused PaymentInitiated").isNull();
+      assertThat(captured.correlationId()).isEqualTo(CorrelationId.of("corr-of-a-request"));
+      assertThat(captured.userId()).isNull();
+      assertThat(real.deadLetters().all()).isEmpty();
+      assertThat(gateway.charges()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void theSameFailureOutsideAContinuationIsDeadLettered() {
+    // What the two cases above rest on: the store's refusal is a failure the bus dead-letters. The
+    // same capture, dispatched with no continuation around it, leaves an entry.
+    var real = new RealBus();
+    try (real) {
+      real.stored(initiatedByARequest());
+      real.store().refuseNextAppend();
+
+      assertThatThrownBy(
+              () ->
+                  real.bus()
+                      .execute(
+                          new PaymentCommand.CapturePayment(PAYMENT),
+                          new IdempotencyKey("payment-capture:" + PAYMENT)))
           .isInstanceOf(EventStoreException.class);
 
       assertThat(real.deadLetters().all())
           .singleElement()
           .satisfies(
-              entry -> {
-                assertThat(entry.commandType())
-                    .isEqualTo(PaymentCommand.CapturePayment.class.getName());
-                assertThat(entry.correlationId()).isEqualTo(CorrelationId.of("corr-of-a-request"));
-              });
+              entry ->
+                  assertThat(entry.commandType())
+                      .isEqualTo(PaymentCommand.CapturePayment.class.getName()));
     }
+  }
+
+  /** A {@code PaymentInitiated} as a request's command leaves it: no saga origin. */
+  private static EventEnvelope initiatedByARequest() {
+    return new EventEnvelope(
+        GlobalOffset.initial(),
+        STREAM,
+        Version.initial(),
+        EventType.fromClass(PaymentEvent.PaymentInitiated.class),
+        paymentInitiated(PAYMENT),
+        new EventMetadata(
+            EventId.of("evt-" + UUID.randomUUID()),
+            CommandId.of("cmd-" + UUID.randomUUID()),
+            null,
+            null,
+            CorrelationId.of("corr-of-a-request"),
+            null,
+            null,
+            Instant.now(),
+            Map.of()));
   }
 
   private static PaymentEvent.PaymentInitiated paymentInitiated(String paymentId) {
