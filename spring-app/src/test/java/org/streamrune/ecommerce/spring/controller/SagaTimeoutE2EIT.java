@@ -11,16 +11,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.streamrune.core.Command;
 import org.streamrune.core.CommandBus;
-import org.streamrune.core.EventEnvelope;
-import org.streamrune.core.saga.SagaCommand;
-import org.streamrune.core.saga.SagaDecider;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.saga.SagaStore;
@@ -42,12 +38,13 @@ import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
  * End-to-end proof of the saga-timeout sweep against the demo's real {@link
  * org.streamrune.postgres.PostgresSagaStore} (Testcontainers PostgreSQL).
  *
- * <p>The demo's {@link OrderFulfillmentSaga} is a {@code SagaOrchestrator} with no timeout, and the
- * app does not wire a {@link SagaTimeoutRunner}. This test drives the framework runner directly
- * against the demo's persisted saga state, using a {@link SagaDecider} that reuses the demo saga's
- * {@code evolve}/{@code handle}/{@code compensate} logic and adds a {@code timeout()}. The runner
- * is bound to the app's saga runner, as an application binds it: a timeout runner names the {@link
- * SagaRunner} whose step lock it shares, and the framework refuses one that names nothing.
+ * <p>The demo's {@link OrderFulfillmentSaga} is a {@code SagaDecider} too, with a deadline, and the
+ * app wires a {@link SagaTimeoutRunner} for it ({@code orderFulfillmentTimeoutRunner}, polling
+ * every 10 seconds against a 15-minute deadline, which no saga of this test reaches). This test
+ * drives a second runner of its own against the demo's persisted saga state, built from the app's
+ * saga class with a deadline of {@link #TIMEOUT} and a fixed clock. The runner is bound to the
+ * app's saga runner, as the app binds its own: a timeout runner names the {@link SagaRunner} whose
+ * step lock it shares, and the framework refuses one that names nothing.
  *
  * <p>Time is made deterministic by injecting a fixed {@link Clock} into the runner and exercising
  * its package-private {@code pollOnce()} (the framework feature mirrored from {@code
@@ -104,52 +101,10 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     }
   }
 
-  /**
-   * Adapts the demo's {@link OrderFulfillmentSaga} to the {@link SagaDecider} contract the {@link
-   * SagaTimeoutRunner} consumes, reusing its real {@code evolve}/{@code handle}/{@code compensate}
-   * and adding a {@link #timeout()}. The routing methods ({@code isStartEvent}, {@code
-   * extractSagaId}, {@code correlateByEventData}) are irrelevant to the timeout sweep, so they are
-   * not part of the decider contract.
-   */
-  private static final class TimeoutDecider implements SagaDecider<OrderFulfillmentState> {
-    private final OrderFulfillmentSaga delegate = new OrderFulfillmentSaga();
-
-    @Override
-    public Class<OrderFulfillmentState> stateType() {
-      return delegate.stateType();
-    }
-
-    @Override
-    public OrderFulfillmentState initialState(SagaId sagaId) {
-      return delegate.initialState(sagaId);
-    }
-
-    @Override
-    public OrderFulfillmentState evolve(OrderFulfillmentState state, EventEnvelope event) {
-      return delegate.evolve(state, event);
-    }
-
-    @Override
-    public List<SagaCommand> handle(OrderFulfillmentState state, EventEnvelope event) {
-      return delegate.handle(state, event);
-    }
-
-    @Override
-    public List<SagaCommand> compensate(
-        OrderFulfillmentState state, Throwable failure, SagaCommand failedCommand) {
-      return delegate.compensate(state, failure, failedCommand);
-    }
-
-    @Override
-    public Optional<Duration> timeout() {
-      return Optional.of(TIMEOUT);
-    }
-  }
-
   private SagaTimeoutRunner<OrderFulfillmentState> runnerWithClock(
       CommandBus commandBus, Clock clock) {
     return SagaTimeoutRunner.<OrderFulfillmentState>builder()
-        .decider(new TimeoutDecider())
+        .decider(new OrderFulfillmentSaga(TIMEOUT))
         .sagaStore(sagaStore)
         // The saga type is the state class: the saga runner stores its rows under it, and the
         // sweep selects by it.

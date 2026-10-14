@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import org.eclipse.microprofile.config.ConfigProvider;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.streamrune.core.CommandBus;
 import org.streamrune.core.DeadLetterQueue;
@@ -29,6 +30,7 @@ import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -72,6 +74,7 @@ import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.DeciderRegistration;
 import org.streamrune.runtime.SagaDeadLetterReplayer;
 import org.streamrune.runtime.SagaRunner;
+import org.streamrune.runtime.SagaTimeoutRunner;
 import org.streamrune.runtime.gdpr.ForgetSubjectService;
 
 /**
@@ -597,14 +600,31 @@ public class StreamRuneProducer {
   }
 
   /**
+   * The order-fulfillment saga, with its deadline: {@code app.saga.fulfillment-timeout} ({@code
+   * PT15M} unless configured). The saga runner and the timeout runner below share this one
+   * instance.
+   */
+  @Produces
+  @Singleton
+  public OrderFulfillmentSaga orderFulfillmentSaga(
+      @ConfigProperty(name = "app.saga.fulfillment-timeout", defaultValue = "PT15M")
+          Duration fulfillmentTimeout) {
+    return new OrderFulfillmentSaga(fulfillmentTimeout);
+  }
+
+  /**
    * The order-fulfillment saga runner, produced as a bean so that the framework finds it. For every
    * {@code SagaRunner} bean the Quarkus integration starts a compensation retry sweeper, which
    * re-drives a compensation that failed transiently and faults it once {@code
    * streamrune.saga.compensation-retry-give-up-after} (1 hour by default) has passed — {@code POST
-   * /api/admin/sagas/faulted/resume} resumes such a saga — and it applies {@code
+   * /api/admin/sagas/faulted/resume} resumes such a saga — it applies {@code
    * streamrune.inbox.retention-max-age} to the runner's key-age guard for compensations resumed by
-   * a live event. {@link EcommerceSubscriptionLifecycle} feeds this runner from the event stream,
-   * and the {@link #orderFulfillmentSagaDeadLetterReplayer replayer} feeds it quarantined events.
+   * a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto} unless
+   * configured, which is on while single-active-consumer leadership is on) to the runner's forward
+   * fence. {@link EcommerceSubscriptionLifecycle} feeds this runner from the event stream, and the
+   * {@link #orderFulfillmentSagaDeadLetterReplayer replayer} feeds it quarantined events. {@code
+   * metrics} counts, among the saga meters, the forward commands the fence refuses ({@code
+   * streamrune.saga.forward_commands_fenced}) when Micrometer is on the classpath.
    *
    * <p>The framework's saga stores are {@code null} when {@code streamrune.saga.enabled=false}; the
    * demo's orders are confirmed only by this saga, so it refuses to start without them.
@@ -612,18 +632,62 @@ public class StreamRuneProducer {
   @Produces
   @Singleton
   public SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner(
-      SagaStore sagaStore, SagaDeadLetterStore sagaDeadLetterStore, CommandBus commandBus) {
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      SagaStore sagaStore,
+      SagaDeadLetterStore sagaDeadLetterStore,
+      CommandBus commandBus,
+      Instance<StreamRuneMetrics> metrics) {
     if (sagaStore == null || sagaDeadLetterStore == null) {
       throw new IllegalStateException(
           "The order-fulfillment saga needs the saga stores: keep streamrune.saga.enabled=true");
     }
     return SagaRunner.<OrderFulfillmentState>builder()
-        .orchestrator(new OrderFulfillmentSaga())
+        .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
         .commandBus(commandBus)
         // Poison events (routing/decider failures) are quarantined here instead of blocking the
         // subscription.
         .sagaDeadLetterStore(sagaDeadLetterStore)
+        .metrics(metrics.isResolvable() ? metrics.get() : null)
+        .build();
+  }
+
+  /**
+   * Compensates a fulfillment that has not ended by its deadline ({@link
+   * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} ({@code PT10S}
+   * unless configured) it claims each saga past its deadline and dispatches the compensation its
+   * state dictates — cancel the order, or refund and cancel.
+   *
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, and shares that runner's step lock: in
+   * this process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. A backend on another process shares no lock with this one; there the saga
+   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
+   * compensation covers it, or it is refused at its commit. {@code inboxRetentionMaxAge} is the
+   * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * after its keys may have been pruned is faulted instead of dispatched again. {@link
+   * EcommerceSubscriptionLifecycle} starts it with the saga subscription and stops it on shutdown.
+   */
+  @Produces
+  @Singleton
+  public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      SagaStore sagaStore,
+      CommandBus commandBus,
+      SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
+      StreamRuneQuarkusProperties properties,
+      Instance<StreamRuneMetrics> metrics,
+      @ConfigProperty(name = "app.saga.timeout-poll-interval", defaultValue = "PT10S")
+          Duration pollInterval) {
+    return SagaTimeoutRunner.<OrderFulfillmentState>builder()
+        .decider(orderFulfillmentSaga)
+        .sagaStore(sagaStore)
+        .commandBus(commandBus)
+        // The saga runner stores its rows under the state class; the sweep selects by it.
+        .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+        .sagaRunner(orderFulfillmentSagaRunner)
+        .pollInterval(pollInterval)
+        .metrics(metrics.isResolvable() ? metrics.get() : null)
+        .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
         .build();
   }
 

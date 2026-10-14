@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -78,6 +79,30 @@ class OrderFulfillmentSagaTest {
         new SagaId("fulfillment-" + orderId),
         StreamId.of(type, new AggregateId(id)),
         event);
+  }
+
+  // ---- Deadline: the saga is a SagaDecider too, and its timeout is the deadline a timeout runner
+  // compensates it at. ----
+
+  @Test
+  void timeout_isTheConfiguredDeadline() {
+    assertThat(saga.timeout()).contains(OrderFulfillmentSaga.DEFAULT_TIMEOUT);
+    assertThat(OrderFulfillmentSaga.DEFAULT_TIMEOUT).isEqualTo(Duration.ofMinutes(15));
+    assertThat(new OrderFulfillmentSaga(Duration.ofSeconds(2)).timeout())
+        .contains(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void aNonPositiveTimeoutIsRefused() {
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("timeout is required");
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(Duration.ZERO))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("positive");
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(Duration.ofSeconds(-1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("positive");
   }
 
   @Test

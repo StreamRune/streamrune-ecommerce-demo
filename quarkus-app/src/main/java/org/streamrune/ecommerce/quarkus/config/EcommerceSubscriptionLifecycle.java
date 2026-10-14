@@ -14,10 +14,11 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.PollingEventSubscription;
 import org.streamrune.runtime.SagaRunner;
+import org.streamrune.runtime.SagaTimeoutRunner;
 
 /**
  * Quarkus lifecycle bean that wires and starts the e-commerce-specific polling subscriptions: the
- * order-fulfillment saga and the payment process manager.
+ * order-fulfillment saga and the payment process manager, and the saga's timeout runner.
  *
  * <p>Both subscriptions are app-specific (the framework has no knowledge of {@link
  * OrderFulfillmentSaga} or {@link PaymentProcessManager}), so they cannot be auto-started by {@link
@@ -27,7 +28,9 @@ import org.streamrune.runtime.SagaRunner;
  *
  * <p>The saga runner itself is a bean ({@code StreamRuneProducer#orderFulfillmentSagaRunner}), so
  * that the framework starts its compensation retry sweeper and arms its key-age guard; this bean
- * only subscribes it to the event stream.
+ * only subscribes it to the event stream. The timeout runner ({@code
+ * StreamRuneProducer#orderFulfillmentTimeoutRunner}) is started after the saga subscription and
+ * stopped before it.
  *
  * <p>It also starts and closes the demo's own {@link DeadLetterRetryRunner} (see {@code
  * StreamRuneProducer#deadLetterRetryRunner}): an application-supplied runner replaces the
@@ -48,6 +51,7 @@ public class EcommerceSubscriptionLifecycle {
   private final EventStore eventStore;
   private final OffsetStore offsetStore;
   private final SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner;
+  private final SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner;
   private final PaymentProcessManager paymentProcessManager;
   private final DeadLetterRetryRunner deadLetterRetryRunner;
 
@@ -58,11 +62,13 @@ public class EcommerceSubscriptionLifecycle {
       EventStore eventStore,
       OffsetStore offsetStore,
       SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
+      SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner,
       PaymentProcessManager paymentProcessManager,
       DeadLetterRetryRunner deadLetterRetryRunner) {
     this.eventStore = eventStore;
     this.offsetStore = offsetStore;
     this.orderFulfillmentSagaRunner = orderFulfillmentSagaRunner;
+    this.orderFulfillmentTimeoutRunner = orderFulfillmentTimeoutRunner;
     this.paymentProcessManager = paymentProcessManager;
     this.deadLetterRetryRunner = deadLetterRetryRunner;
   }
@@ -79,6 +85,10 @@ public class EcommerceSubscriptionLifecycle {
             .build();
     orderFulfillmentSagaSubscription.start();
     LOG.info("StreamRune: started order-fulfillment-saga subscription");
+
+    // The saga's deadline: compensates a fulfillment that has not ended in time.
+    orderFulfillmentTimeoutRunner.start();
+    LOG.info("StreamRune: started the order-fulfillment saga's timeout runner");
 
     // Payment process manager subscription — mirrors Spring's paymentProcessSubscription bean.
     paymentProcessSubscription =
@@ -101,6 +111,7 @@ public class EcommerceSubscriptionLifecycle {
     closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
     closeQuietly(paymentProcessSubscription, "payment-process-manager subscription");
     paymentProcessSubscription = null;
+    closeQuietly(orderFulfillmentTimeoutRunner::stop, "order-fulfillment saga's timeout runner");
     closeQuietly(orderFulfillmentSagaSubscription, "order-fulfillment-saga subscription");
     orderFulfillmentSagaSubscription = null;
   }

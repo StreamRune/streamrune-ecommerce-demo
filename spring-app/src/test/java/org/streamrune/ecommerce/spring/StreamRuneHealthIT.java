@@ -41,6 +41,7 @@ class StreamRuneHealthIT extends AbstractIntegrationTest {
             "relay.saga-compensation-retry:"
                 + "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState",
             "relay.saga-dead-letter-retention-sweeper",
+            "relay.saga-timeout:" + "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState",
             "relay.sse-event-feed");
     for (String relay : relays) {
       assertThat(block(health, relay)).as(relay).containsEntry("status", "UP");

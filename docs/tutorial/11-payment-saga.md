@@ -376,12 +376,15 @@ Create `commands/src/main/java/org/streamrune/ecommerce/commands/saga/OrderFulfi
 ```java
 package org.streamrune.ecommerce.commands.saga;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.saga.SagaCommand;
+import org.streamrune.core.saga.SagaDecider;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaOrchestrator;
 import org.streamrune.core.types.AggregateId;
@@ -464,11 +467,55 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * registration. {@code ReserveStock} and {@code ReleaseStock} are registered under {@code
  * inventory}, so the stock streams are {@code inventory:<productId>} — the product id is the
  * inventory id, with no hand-made prefix.
+ *
+ * <p><b>Deadline.</b> The saga is a {@link SagaDecider} as well as a {@link SagaOrchestrator}: the
+ * two interfaces share {@code stateType}, {@code initialState}, {@code evolve}, {@code handle} and
+ * {@code compensate}, and {@link #timeout()} exists only on the decider. A fulfillment that has not
+ * reached {@code COMPLETED}, {@code COMPENSATED} or {@code FAILED} within its timeout, measured
+ * from the saga's start, is compensated by the application's {@code SagaTimeoutRunner} with the
+ * same {@link #compensate} the event path uses: a payment that never arrives cancels the order, a
+ * reservation that never arrives refunds and cancels. The runner is built from the saga's {@code
+ * SagaRunner}, whose forward fence is on: a forward command of a step still in flight when the
+ * deadline claims the saga is stored before the claim, and the compensation covers it, or is
+ * refused at its commit. The timeout is {@link #DEFAULT_TIMEOUT} unless the application passes one
+ * ({@code app.saga.fulfillment-timeout} in the three apps).
  */
-public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentState> {
+public class OrderFulfillmentSaga
+    implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {
+
+  /** The deadline of a fulfillment when the application names none: fifteen minutes. */
+  public static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
 
   /** A fulfillment's payment id is this prefix and the order id. */
   private static final String PAYMENT_ID_PREFIX = "pay-";
+
+  private final Duration timeout;
+
+  /** A saga whose deadline is {@link #DEFAULT_TIMEOUT}. */
+  public OrderFulfillmentSaga() {
+    this(DEFAULT_TIMEOUT);
+  }
+
+  /**
+   * A saga whose deadline is the given duration.
+   *
+   * @param timeout how long a fulfillment may stay non-terminal, measured from its start; positive
+   * @throws NullPointerException when {@code timeout} is {@code null}
+   * @throws IllegalArgumentException when {@code timeout} is zero or negative
+   */
+  public OrderFulfillmentSaga(Duration timeout) {
+    Objects.requireNonNull(timeout, "timeout is required");
+    if (timeout.isZero() || timeout.isNegative()) {
+      throw new IllegalArgumentException("timeout must be positive, got " + timeout);
+    }
+    this.timeout = timeout;
+  }
+
+  /** The fulfillment's deadline, measured from the saga's start. */
+  @Override
+  public Optional<Duration> timeout() {
+    return Optional.of(timeout);
+  }
 
   @Override
   public Class<OrderFulfillmentState> stateType() {
@@ -757,6 +804,7 @@ The methods that carry the weight here:
 - `evolve` for `StockReserved` is guarded on `AWAITING_INVENTORY`, for `OrderEvent.OrderCancelled` on `CANCELLING` and for `OrderEvent.OrderConfirmed` on `AWAITING_CONFIRMATION`: an event of the order that arrives outside its step cannot push the saga past where it is. The order's customer or an `ADMIN` can cancel or confirm the order over HTTP at any time (Chapter 9); such an event reaches the saga of that order, and outside its step it changes nothing. A customer who confirms their own order while the saga still waits for the payment does not complete the saga: it goes on, its own `ConfirmOrder` is refused by the decider, and it compensates.
 - `evolve` and `handle` both start with `isAboutThisSaga`: an event that is not about this saga's order changes nothing and dispatches nothing. It does not depend on how the event was routed. It compares the event with what the saga stores: the order id and the payment id recorded from `OrderPlaced`, and for `OrderPlaced` itself the order the saga id is built from. Routing answers another question. An origin says which saga's command caused an event, and that is not by itself a statement about which order the event names; `correlateByEventData` could answer wrongly. The check keeps the rule true in both cases, and for a caller that feeds the saga by another path, a dead-letter replay under an explicit saga id (Chapter 14) for one.
 - `compensate` is called by `SagaRunner` when a dispatched `SagaCommand` throws. The compensation strategy is step-appropriate, not a blanket cancel: `AWAITING_PAYMENT` cancels only (nothing was ever captured); `AWAITING_INVENTORY` refunds the payment and cancels (captured but not reserved); `AWAITING_CONFIRMATION` releases the stock reservation *before* refunding and cancelling (captured **and** reserved — releasing first avoids stranding held stock). Every other state — including terminal ones — returns an empty list; the framework classifies an empty compensation list as `FAILED`, which is correct because there is nothing left to undo. `SagaCommand` pairs each command with an `AggregateId`, not a bare string — the type carries the routing target through `SagaRunner`'s dispatch. The saga builds it with `new AggregateId(...)`, not the `AggregateId.of(...)` your id extractors use. `of` is the factory for ids a client sends, and it refuses control characters and ids longer than 255 characters (chapter 2). Every id here comes from the saga's stored state instead: the order, payment and product ids it recorded from `OrderPlaced`. Inside `handle()` or `compensate()`, `of` would throw on such a value, and the framework would quarantine the event as poison, with the payment captured and never refunded. The order endpoints never record a product id that `of` would refuse here: the `OrderCommand.OrderLine` constructor (chapter 8) refuses one that carries a control character, or is longer than 255 characters, when the order is placed. The client gets a `400`, and no payment is taken. With the constructor, the command still reaches the bus, and the id extractor applies `AggregateId.of` there. A product id that reached the log without crossing the order-line check, such as one in an `OrderPlaced` event an application appended itself, is refused at that point with an `IllegalArgumentException`. The saga treats that like a business rejection: it compensates the step with a refund and a cancel.
+- `timeout` is the saga's deadline. The class implements `SagaDecider` as well as `SagaOrchestrator`: the two interfaces share `stateType`, `initialState`, `evolve`, `handle` and `compensate`, and `timeout()` exists only on the decider, which is what a `SagaTimeoutRunner` takes (Step 6). A fulfillment that has not reached `COMPLETED`, `COMPENSATED` or `FAILED` within the timeout, measured from the saga's start and not reset by its later events, is compensated with the same `compensate()`: a payment that never arrives cancels the order, a reservation that never arrives refunds and cancels. `new OrderFulfillmentSaga()` takes `DEFAULT_TIMEOUT`, fifteen minutes; `new OrderFulfillmentSaga(Duration)` takes another, and refuses `null` and a zero or negative duration. The three apps pass `app.saga.fulfillment-timeout`.
 
 **Who routes what.** An event that is not a start event reaches a saga in one of two ways.
 
@@ -782,6 +830,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -856,6 +905,30 @@ class OrderFulfillmentSagaTest {
         new SagaId("fulfillment-" + orderId),
         StreamId.of(type, new AggregateId(id)),
         event);
+  }
+
+  // ---- Deadline: the saga is a SagaDecider too, and its timeout is the deadline a timeout runner
+  // compensates it at. ----
+
+  @Test
+  void timeout_isTheConfiguredDeadline() {
+    assertThat(saga.timeout()).contains(OrderFulfillmentSaga.DEFAULT_TIMEOUT);
+    assertThat(OrderFulfillmentSaga.DEFAULT_TIMEOUT).isEqualTo(Duration.ofMinutes(15));
+    assertThat(new OrderFulfillmentSaga(Duration.ofSeconds(2)).timeout())
+        .contains(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void aNonPositiveTimeoutIsRefused() {
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("timeout is required");
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(Duration.ZERO))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("positive");
+    assertThatThrownBy(() -> new OrderFulfillmentSaga(Duration.ofSeconds(-1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("positive");
   }
 
   @Test
@@ -1488,6 +1561,8 @@ Two test scenarios are worth highlighting, plus three regression tests for the c
 
 **Targets from stored state use the constructor:** `awaitingInventory_storedProductIdWithAControlCharacter_stillYieldsReserveStock` and `compensate_storedProductIdWithAControlCharacter_stillBuildsTheUndo` seed the saga with an order line whose product id carries a control character, a value already in the log, and assert that `handle()` and `compensate()` still return their commands, targeting that id verbatim. With `AggregateId.of` both methods threw `IllegalArgumentException`, and the framework would have quarantined the event as poison. The refusal belongs to the bus's id extractor, which turns it into an ordinary failed dispatch that the saga compensates. `awaitingInventory_storedProductIdTooLongForTheIngressBound_stillYieldsReserveStock` does the same for a stored product id of 256 characters, one over the 255-character bound: `handle()` still returns `ReserveStock` for that target, built with the constructor, and the refusal is again left to the bus's extractor.
 
+**Deadline:** `timeout_isTheConfiguredDeadline` reads the timeout of a saga built without one (`DEFAULT_TIMEOUT`, fifteen minutes) and of one built with two seconds; `aNonPositiveTimeoutIsRefused` shows that `null`, zero and a negative duration are refused when the saga is built, so an app with a mistyped `app.saga.fulfillment-timeout` fails at startup instead of compensating every order on the first poll.
+
 ### Step 5 — PaymentGatewaySimulator
 
 The demo uses a simple simulator rather than a real payment gateway. It has an injectable failure flag so you can demonstrate the failure/compensation path via a REST call. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`:
@@ -1839,21 +1914,43 @@ public VirtualThreadCommandBus commandBus(
 
 The stream id extractor returns `paymentId` for every command variant, wrapped in `AggregateId.of(...)` (the strict-typed form the bus builder expects). This means all events for a given payment are appended to the stream `payment:<paymentId>` (for example `payment:pay-o-100`): the stream is the registered type, `PaymentState.TYPE`, paired with the id the extractor returns, unchanged.
 
-**SagaRunner bean** — the runner drives the saga when fed events. Make it a bean, not a local variable inside the subscription bean: the Spring integration looks for `SagaRunner` beans. For each one it starts a compensation retry sweeper (a compensation that failed transiently is re-driven, see [What We Learned](#what-we-learned)), and it applies `streamrune.inbox.retention-max-age` to the runner's key-age guard, which stops a live event from resuming a compensation so old that its deduplication keys may already be pruned. A runner the integration cannot see gets neither.
+**OrderFulfillmentSaga bean** — the saga with its deadline. It is a bean because two runners use it, the saga runner below and the timeout runner after the subscription:
+
+```java
+@Bean
+public OrderFulfillmentSaga orderFulfillmentSaga(
+    @Value("${app.saga.fulfillment-timeout:15m}") Duration fulfillmentTimeout) {
+  return new OrderFulfillmentSaga(fulfillmentTimeout);
+}
+```
+
+Add the deadline to `spring-app/src/main/resources/application.yml`, with the poll interval of the timeout runner below:
+
+```yaml
+app:
+  saga:
+    fulfillment-timeout: 15m
+    timeout-poll-interval: 10s
+```
+
+**SagaRunner bean** — the runner drives the saga when fed events. Make it a bean, not a local variable inside the subscription bean: the Spring integration looks for `SagaRunner` beans. For each one it starts a compensation retry sweeper (a compensation that failed transiently is re-driven, see [What We Learned](#what-we-learned)), it applies `streamrune.inbox.retention-max-age` to the runner's key-age guard, which stops a live event from resuming a compensation so old that its deduplication keys may already be pruned, and it applies `streamrune.saga.forward-fence` to the runner's forward fence (see [Reliability under failure](#reliability-under-failure)). A runner the integration cannot see gets none of them. `metrics` is the `StreamRuneMetrics` bean the integration registers when Micrometer is on the classpath (Chapter 15); the runner counts its saga meters there, `streamrune.saga.forward_commands_fenced` among them.
 
 ```java
 @Bean
 public SagaRunner<?> orderFulfillmentSagaRunner(
+    OrderFulfillmentSaga orderFulfillmentSaga,
     PostgresSagaStore sagaStore,
     VirtualThreadCommandBus commandBus,
-    PostgresSagaDeadLetterStore sagaDeadLetterStore) {
-  return SagaRunner.<org.streamrune.ecommerce.commands.saga.OrderFulfillmentState>builder()
-      .orchestrator(new OrderFulfillmentSaga())
+    PostgresSagaDeadLetterStore sagaDeadLetterStore,
+    ObjectProvider<StreamRuneMetrics> metrics) {
+  return SagaRunner.<OrderFulfillmentState>builder()
+      .orchestrator(orderFulfillmentSaga)
       .sagaStore(sagaStore)
       .commandBus(commandBus)
       // Required: poison events (routing/decider failures) are quarantined here instead of
       // blocking the subscription.
       .sagaDeadLetterStore(sagaDeadLetterStore)
+      .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
       .build();
 }
 ```
@@ -1880,6 +1977,37 @@ public PollingEventSubscription orderFulfillmentSagaSubscription(
 ```
 
 > **This bean is required.** `SagaRunner` does not subscribe to the event store itself — it only processes events when explicitly called. Without `PollingEventSubscription`, the saga is never triggered: `OrderPlaced` events land in the event store but the runner never sees them. The subscription polls the event store on its own virtual thread every 500 ms, passes new events to the runner's `asEventListener()`, and persists the offset to `PostgresOffsetStore` under the name `"order-fulfillment-saga"`.
+
+**SagaTimeoutRunner bean** — compensates a fulfillment that has not ended by its deadline. It polls the saga store on a virtual thread of its own, independent of the event stream:
+
+```java
+@Bean(destroyMethod = "stop")
+public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+    OrderFulfillmentSaga orderFulfillmentSaga,
+    PostgresSagaStore sagaStore,
+    VirtualThreadCommandBus commandBus,
+    SagaRunner<?> orderFulfillmentSagaRunner,
+    StreamRuneProperties properties,
+    ObjectProvider<StreamRuneMetrics> metrics,
+    @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
+  var runner =
+      SagaTimeoutRunner.<OrderFulfillmentState>builder()
+          .decider(orderFulfillmentSaga)
+          .sagaStore(sagaStore)
+          .commandBus(commandBus)
+          // The saga runner stores its rows under the state class; the sweep selects by it.
+          .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+          .sagaRunner(orderFulfillmentSagaRunner)
+          .pollInterval(pollInterval)
+          .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+          .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+          .build();
+  runner.start();
+  return runner;
+}
+```
+
+Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
 
 **PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (you build the class itself in Chapter 12). Three consecutive gateway failures open it; a 30-second cooldown then admits one probe:
 
@@ -1931,8 +2059,12 @@ Add the necessary imports:
 
 ```java
 import java.time.Duration;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -1941,6 +2073,8 @@ import org.streamrune.postgres.PostgresCommandInbox;
 import org.streamrune.postgres.PostgresSagaDeadLetterStore;
 import org.streamrune.postgres.PostgresSagaStore;
 import org.streamrune.runtime.SagaRunner;
+import org.streamrune.runtime.SagaTimeoutRunner;
+import org.streamrune.spring.StreamRuneProperties;
 ```
 
 (`PaymentProcessManager`, `PaymentGatewaySimulator`, and `PaymentGatewayCircuitBreaker` live in the same `config` package as `StreamRuneConfig`, so they need no import. The shipped `StreamRuneConfig.java` uses wildcard imports — `org.streamrune.core.*`, `org.streamrune.postgres.*`, `org.streamrune.runtime.*` — so in the real file these individual imports collapse into the wildcards already present from earlier chapters.)
@@ -2301,7 +2435,7 @@ This chapter introduced six collaborating types from the saga subsystem:
 
 **`SagaState`** is the interface your state record implements. The single required method is `status()`, which maps your domain-specific status enum to the framework's `SagaStatus`: `STARTED`, `RUNNING`, `COMPENSATING`, `COMPLETED`, `COMPENSATED`, `FAILED`, or `FAULTED`. `OrderFulfillmentState.status()` only ever returns a subset of these (it has no domain concept of `FAULTED`) — but `SagaRunner` does not rely on `state.status()` alone. See `LoadedSaga` below.
 
-**`SagaStore`** is the persistence interface for saga state. `PostgresSagaStore` implements it using a single `saga_state` table, with an explicit **create / CAS-update split** rather than a single save method: `create(sagaId, sagaType, state, status)` atomically inserts a new saga at `version = 1` and throws `OptimisticLockException` if one already exists; `update(sagaId, sagaType, state, status, expectedVersion)` is a compare-and-swap write that only succeeds when the stored version matches `expectedVersion` **and** the stored status is not terminal (`COMPLETED`, `COMPENSATED`, `FAILED`) — any other condition throws `OptimisticLockException`. Both `create` and `update` persist an explicit `SagaStatus` argument; the store does not derive it from `state.status()`. This is what protects against the lost-update race where one writer (the event path) and another (the saga's own timeout sweep, wired in a later slice) race on the same saga: whichever writes second with a stale `expectedVersion` gets a CAS failure and retries on fresh state instead of silently overwriting.
+**`SagaStore`** is the persistence interface for saga state. `PostgresSagaStore` implements it using a single `saga_state` table, with an explicit **create / CAS-update split** rather than a single save method: `create(sagaId, sagaType, state, status)` atomically inserts a new saga at `version = 1` and throws `OptimisticLockException` if one already exists; `update(sagaId, sagaType, state, status, expectedVersion)` is a compare-and-swap write that only succeeds when the stored version matches `expectedVersion` **and** the stored status is not terminal (`COMPLETED`, `COMPENSATED`, `FAILED`) — any other condition throws `OptimisticLockException`. Both `create` and `update` persist an explicit `SagaStatus` argument; the store does not derive it from `state.status()`. This is what protects against the lost-update race where one writer (the event path) and another (the saga's own timeout runner, Step 6) race on the same saga: whichever writes second with a stale `expectedVersion` gets a CAS failure and retries on fresh state instead of silently overwriting.
 
 **`LoadedSaga`** is what `sagaStore.load(sagaId, sagaType, stateType)` returns, wrapped in `Optional`: a record of `(state, status, version)`. `status` is the framework-owned, authoritative lifecycle value from the store row — not derived from `state.status()` — because the framework can persist a status the domain state never reflects (for example `FAULTED` after a poison event the orchestrator's own `evolve` never saw, or `COMPENSATED`/`FAILED` set by `SagaRunner` itself after classifying a compensation outcome). `version` is the CAS token to pass back into `update`.
 
@@ -2323,29 +2457,46 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 **Saga writes are optimistic-concurrency safe.** `sagaStore.create`/`update` are CAS-protected on the `version` column, so two writers racing on the same saga (for example the event path and a timeout sweep) cannot silently lose an update — the loser gets `OptimisticLockException` and retries on fresh state. Start-event dedup is atomic too: two listeners racing on the same `OrderPlaced` resolve to one `create` winner and one no-op.
 
-**Timeout-driven compensation is claim-first, so it can't double-compensate.** The demo does not wire a timeout runner itself, but the framework ships one (`SagaTimeoutRunner`) that sweeps sagas stuck past a configured duration and compensates them. Before dispatching anything, the timeout runner first claims the saga with a CAS write to `COMPENSATING`; only the writer that wins that claim goes on to compute and dispatch compensation commands. A saga that completes normally right as the timeout sweep fires cannot be double-compensated — but not merely because "whichever writer is second loses the CAS on the terminal write": the claim happens *before* any compensation is computed, so losing it means no compensation commands were ever dispatched by that attempt in the first place, not that a second wave of commands was silently discarded after being sent.
+**Timeout-driven compensation is claim-first, so it can't double-compensate.** Each app runs a timeout runner for the fulfillment saga (`SagaTimeoutRunner`, Step 6). It sweeps the sagas past their deadline — `OrderFulfillmentSaga.timeout()`, which the apps set from `app.saga.fulfillment-timeout`, fifteen minutes unless configured — and compensates them. Before dispatching anything, the timeout runner first claims the saga with a CAS write to `COMPENSATING`; only the writer that wins that claim goes on to compute and dispatch compensation commands. A saga that completes normally right as the timeout sweep fires cannot be double-compensated — but not merely because "whichever writer is second loses the CAS on the terminal write": the claim happens *before* any compensation is computed, so losing it means no compensation commands were ever dispatched by that attempt in the first place, not that a second wave of commands was silently discarded after being sent.
 
-**A timeout runner is bound to its saga runner.** `SagaTimeoutRunner.Builder.build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)`. `SagaTimeoutE2EIT` (in `spring-app/src/test`) builds the framework's runner against the demo's saga store and binds it to the app's `orderFulfillmentSagaRunner` bean:
+**The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it before that subscription on shutdown, since neither integration starts a timeout runner an application declares. The Quarkus producer:
 
 ```java
-  private SagaTimeoutRunner<OrderFulfillmentState> runnerWithClock(
-      CommandBus commandBus, Clock clock) {
-    return SagaTimeoutRunner.<OrderFulfillmentState>builder()
-        .decider(new TimeoutDecider())
-        .sagaStore(sagaStore)
-        // The saga type is the state class: the saga runner stores its rows under it, and the
-        // sweep selects by it.
-        .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
-        .commandBus(commandBus)
-        .clock(clock)
-        // Shares the saga runner's step lock: in this process the claim at a saga's deadline
-        // waits for a delivery that is dispatching that saga's forward commands.
-        .sagaRunner(orderFulfillmentSagaRunner)
-        .build();
-  }
+@Produces
+@Singleton
+public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+    OrderFulfillmentSaga orderFulfillmentSaga,
+    SagaStore sagaStore,
+    CommandBus commandBus,
+    SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
+    StreamRuneQuarkusProperties properties,
+    Instance<StreamRuneMetrics> metrics,
+    @ConfigProperty(name = "app.saga.timeout-poll-interval", defaultValue = "PT10S")
+        Duration pollInterval) {
+  return SagaTimeoutRunner.<OrderFulfillmentState>builder()
+      .decider(orderFulfillmentSaga)
+      .sagaStore(sagaStore)
+      .commandBus(commandBus)
+      // The saga runner stores its rows under the state class; the sweep selects by it.
+      .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+      .sagaRunner(orderFulfillmentSagaRunner)
+      .pollInterval(pollInterval)
+      .metrics(metrics.isResolvable() ? metrics.get() : null)
+      .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+      .build();
+}
 ```
 
-The binding shares the saga runner's in-memory step lock. Within one process a claim at a saga's deadline is not made while a delivery is dispatching that saga's forward commands: the poll comes back to the saga, so the forward command is stored before its compensation and not after it. The lock reaches no other process — a timeout runner on another replica claims underneath a step in flight on this one — so across replicas the protection remains the aggregate's own refusal of a forward command that arrives after its cancel.
+Each app reads the two keys from its own configuration file: Quarkus in ISO-8601 form (`app.saga.fulfillment-timeout=PT15M`, `app.saga.timeout-poll-interval=PT10S` in `application.properties`), Spring and Micronaut as `15m` and `10s` in `application.yml`. Each app's saga runner shares the same `OrderFulfillmentSaga` bean with its timeout runner. `SagaTimeoutE2EIT` (in `spring-app/src/test`) drives a second runner of its own against the app's saga store, built from `new OrderFulfillmentSaga(TIMEOUT)` with a fixed clock, and asserts the exact compensation a timed-out `AWAITING_INVENTORY` saga gets.
+
+**A deadline that passes during a step.** A saga's deadline can pass while a delivery is dispatching that saga's forward commands — the `StockReserved` that arrives at the deadline, say, whose step dispatches `ConfirmOrder`. A claim made at that moment compensates from the state the row holds, which does not include that step. Two mechanisms keep the step's forward commands on the right side of the compensation:
+
+- *In one process, the step lock.* `sagaRunner(orderFulfillmentSagaRunner)` binds the timeout runner to the saga runner's in-memory step lock; `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)`. While a delivery is dispatching a saga's forward commands, the claim at that saga's deadline is not made: the next poll comes back to the saga and claims a row that includes the step. After three polls that passed the saga over, the claim waits for the step, at most 5 seconds; a claim that waited that long is made underneath a step still in flight, and the forward fence takes over.
+- *Across processes, the forward fence.* The lock is memory and reaches no other process: with two backends on one database (Chapter 17), the timeout runner of one claims underneath a step in flight on the other. What keeps the order there is the saga runner's forward fence. Every forward command the runner dispatches names its saga, and the event store reads the saga row inside the transaction that would store the command's events. That read first takes a lock that every write which stamps a compensation episode, ends the saga or deletes its row also takes, and the command's transaction holds it until it commits. Each forward command is therefore stored wholly before the claim, or it reads the claimed row and is refused at its commit with `SagaForwardFencedException`: nothing of it is stored, no event and no inbox key. The step then resumes the compensation episode instead of going on, or stops at a saga its compensation has already ended. The refusal is a fact about the saga, not a failure of the command, so it is not retried, not dead-lettered and not counted by the circuit breaker. Each one logs an `INFO` line naming the saga and counts one `streamrune.saga.forward_commands_fenced` sample (Chapter 15).
+
+So no forward command of a fulfillment is stored after its compensation, on any number of backends, and the demo's deciders carry no rule whose only job is to refuse a forward command that arrives after its order was cancelled. A forward command stored *before* the claim is one the compensation has to cover: the claim compensates from the row, and the step that stored the command had not written the row yet. The fence covers the saga's own forward commands only. The payment process manager's `CapturePayment` is a continuation of `PaymentInitiated` (Step 5b), not a command of the saga: a capture that commits after a claim made while the saga still waited for its payment is not refused, and that order is cancelled with its payment captured.
+
+**`streamrune.saga.forward-fence`** sets the fence of every `SagaRunner` bean that does not name it itself (`SagaRunner.Builder.forwardFence`), on all three frameworks: `auto` (the default), `on` or `off`. `auto` is on while `streamrune.subscription.single-active-consumer.enabled` is `true`, its default, and off when it is `false`. The demo keeps `auto` and leadership on, so the fence is on in all three apps; the startup log says so (`saga forward fence on on 1 SagaRunner bean(s) that name none themselves`). Leadership is on because more than one backend can run against the demo's database — the Compose profile of Chapter 17, or two versions side by side during a rolling restart — and the fence then follows the same switch: a deployment that turns leadership off declares that one backend runs, and with it the fence. It costs one lock and one read of the saga row per forward command, inside the command's transaction, and no write. The fence needs the event store and the saga store over the same `DataSource`, which the three integrations provide; `SagaRunner.Builder.build()` refuses a runner whose command bus cannot fence against its saga rows unless the runner says `forwardFence(false)` itself.
 
 ---
 
