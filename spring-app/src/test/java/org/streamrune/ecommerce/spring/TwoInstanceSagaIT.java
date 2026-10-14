@@ -57,6 +57,11 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
  * is in flight. Eight client threads place 100 orders, alternating the two backends; after 50
  * orders the second backend is closed and a new one is started on the same database.
  *
+ * <p>A forward command refused at its commit is counted and logged, not asserted: whether a claim
+ * catches a command in flight depends on timing, and most runs see one or two. The framework's own
+ * two-node tests hold a command at its commit on purpose and prove the refusal deterministically;
+ * this test checks the outcome under load.
+ *
  * <p>Then every fulfillment saga ends ({@code COMPLETED}, {@code COMPENSATED} or {@code FAILED};
  * none {@code FAULTED}), and the command inbox holds no forward command of a saga stored after the
  * first compensation command of that saga. The run must have exercised both outcomes: at least one
@@ -138,56 +143,62 @@ class TwoInstanceSagaIT {
     var restarted = new AtomicInteger();
     long[] fencedOnClosedB = {0};
     ExecutorService clients = Executors.newFixedThreadPool(CLIENTS);
-    List<Future<?>> work = new ArrayList<>();
-    for (int c = 0; c < CLIENTS; c++) {
-      work.add(
-          clients.submit(
-              () -> {
-                for (int i = next.getAndIncrement(); i < ORDERS; i = next.getAndIncrement()) {
-                  String customer = "two-cust-" + (i % 10);
-                  String body =
-                      """
-                      {"orderId":"two-order-%d","customerId":"%s",
-                       "lines":[{"productId":"two-prod-%d","quantity":1,"unitPrice":10.00}]}
-                      """
-                          .formatted(i, customer, i % PRODUCTS);
-                  if (i % 2 == 0) {
-                    post(portA, "/api/orders", "CUSTOMER", customer, body);
-                  } else {
-                    backendB.readLock().lock();
-                    try {
-                      post(portB[0], "/api/orders", "CUSTOMER", customer, body);
-                    } finally {
-                      backendB.readLock().unlock();
+    // A client that fails stops the others, so that none posts to a context being closed.
+    try {
+      List<Future<?>> work = new ArrayList<>();
+      for (int c = 0; c < CLIENTS; c++) {
+        work.add(
+            clients.submit(
+                () -> {
+                  for (int i = next.getAndIncrement(); i < ORDERS; i = next.getAndIncrement()) {
+                    String customer = "two-cust-" + (i % 10);
+                    String body =
+                        """
+                        {"orderId":"two-order-%d","customerId":"%s",
+                         "lines":[{"productId":"two-prod-%d","quantity":1,"unitPrice":10.00}]}
+                        """
+                            .formatted(i, customer, i % PRODUCTS);
+                    if (i % 2 == 0) {
+                      post(portA, "/api/orders", "CUSTOMER", customer, body);
+                    } else {
+                      backendB.readLock().lock();
+                      try {
+                        post(portB[0], "/api/orders", "CUSTOMER", customer, body);
+                      } finally {
+                        backendB.readLock().unlock();
+                      }
+                    }
+                    // Each client pauses 4 to 12 seconds between two orders, about one order a
+                    // second
+                    // over the eight. A backend's saga subscription runs one step at a time, and
+                    // each
+                    // order's three forward commands wait 450 ms on average there: at this pace the
+                    // subscription keeps up, so a fulfillment takes about as long as its deadline
+                    // instead of waiting behind a backlog of every order placed at once.
+                    Thread.sleep(ThreadLocalRandom.current().nextLong(4_000, 12_000));
+                    if (placed.incrementAndGet() == RESTART_AFTER) {
+                      backendB.writeLock().lock();
+                      try {
+                        fencedOnClosedB[0] = fenced(b[0]);
+                        b[0].close();
+                        contexts.remove(b[0]);
+                        b[0] = start();
+                        portB[0] = port(b[0]);
+                        restarted.incrementAndGet();
+                      } finally {
+                        backendB.writeLock().unlock();
+                      }
                     }
                   }
-                  // Each client pauses 4 to 12 seconds between two orders, about one order a second
-                  // over the eight. A backend's saga subscription runs one step at a time, and each
-                  // order's three forward commands wait 450 ms on average there: at this pace the
-                  // subscription keeps up, so a fulfillment takes about as long as its deadline
-                  // instead of waiting behind a backlog of every order placed at once.
-                  Thread.sleep(ThreadLocalRandom.current().nextLong(4_000, 12_000));
-                  if (placed.incrementAndGet() == RESTART_AFTER) {
-                    backendB.writeLock().lock();
-                    try {
-                      fencedOnClosedB[0] = fenced(b[0]);
-                      b[0].close();
-                      contexts.remove(b[0]);
-                      b[0] = start();
-                      portB[0] = port(b[0]);
-                      restarted.incrementAndGet();
-                    } finally {
-                      backendB.writeLock().unlock();
-                    }
-                  }
-                }
-                return null;
-              }));
+                  return null;
+                }));
+      }
+      for (Future<?> f : work) {
+        f.get(5, TimeUnit.MINUTES);
+      }
+    } finally {
+      clients.shutdownNow();
     }
-    for (Future<?> f : work) {
-      f.get(5, TimeUnit.MINUTES);
-    }
-    clients.shutdown();
     assertThat(placed).hasValue(ORDERS);
     assertThat(restarted).hasValue(1);
 

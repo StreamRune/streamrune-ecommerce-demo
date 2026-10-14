@@ -689,15 +689,41 @@ Forward commands refused at their commit on http://localhost:8091 since it start
 
 The counts differ from run to run — how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
 
-**What the invariant query checks.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id holds no `:`. The query joins the two kinds on the saga id and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
+**Orders the run leaves to put right.** The check says that no forward command came after a compensation; it does not say that every compensation undid everything. The demo's `compensate()` works from the saga row, and Chapter 11 ("Reliability under failure") names the two cases that leaves open, which a deadline this short produces: a reservation stored just before the claim is not released, and a capture by the payment process manager that commits after the claim is not refunded. Such an order is cancelled while its stock stays reserved or its payment stays captured; the demo's planned refund and stock-release flow closes both. These two queries list them:
+
+```sql
+-- Orders cancelled with their payment captured and not refunded
+SELECT c.payload->>'orderId' AS order_id
+  FROM event_stream c
+ WHERE c.aggregate_type = 'payment' AND c.event_type = 'PaymentCaptured'
+   AND NOT EXISTS (SELECT 1 FROM event_stream r
+                    WHERE r.aggregate_type = 'payment' AND r.aggregate_id = c.aggregate_id
+                      AND r.event_type = 'PaymentRefunded')
+   AND EXISTS (SELECT 1 FROM event_stream o
+                WHERE o.aggregate_type = 'order' AND o.aggregate_id = c.payload->>'orderId'
+                  AND o.event_type = 'OrderCancelled');
+
+-- Orders cancelled with their stock reserved and not released
+SELECT s.payload->>'orderId' AS order_id
+  FROM event_stream s
+ WHERE s.aggregate_type = 'inventory' AND s.event_type = 'StockReserved'
+   AND NOT EXISTS (SELECT 1 FROM event_stream r
+                    WHERE r.aggregate_type = 'inventory' AND r.event_type = 'StockReleased'
+                      AND r.payload->>'orderId' = s.payload->>'orderId')
+   AND EXISTS (SELECT 1 FROM event_stream o
+                WHERE o.aggregate_type = 'order' AND o.aggregate_id = s.payload->>'orderId'
+                  AND o.event_type = 'OrderCancelled');
+```
+
+**What the invariant query checks.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The query joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
 
 ```sql
 SELECT f.idempotency_key, c.idempotency_key
   FROM command_inbox f
   JOIN command_inbox c
     ON split_part(c.idempotency_key, ':', 2) = split_part(f.idempotency_key, ':', 2)
- WHERE c.idempotency_key LIKE 'saga:%:episode:%:comp:%'
-   AND f.idempotency_key LIKE 'saga:%'
+ WHERE c.idempotency_key LIKE 'saga:fulfillment-%:episode:%:comp:%'
+   AND f.idempotency_key LIKE 'saga:fulfillment-%'
    AND f.idempotency_key NOT LIKE 'saga:%:episode:%'
    AND (SELECT max(o) FROM unnest(f.global_offsets) o)
      > (SELECT min(o) FROM unnest(c.global_offsets) o);
@@ -712,7 +738,9 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.forward_commands_
 curl -s http://localhost:8091/actuator/metrics/streamrune.saga.forward_commands_fenced | jq '.measurements[0].value'
 ```
 
-A backend that has refused none answers `404`: the counter is registered on its first sample. The count of the second backend starts again at its restart. Each refusal also logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
+A backend that has refused none answers `404`: the counter is registered on its first sample. The count of the second backend starts again at its restart.
+
+The logs of the two backends also hold a stream of `ERROR` lines such as `Poll loop 'subscription 'order-fulfillment-saga'' failed (2 consecutive failure(s)); retrying in 633 ms`, each followed by `OptimisticLockException: Stale view of saga fulfillment-…` and a stack trace. The demo's saga subscription takes no lease (Chapter 11), so both backends deliver every event; when one of them loses the write of a saga row to the other, its poll loop logs the conflict as a failure and delivers the batch again after a back-off that grows with each consecutive failure, and the redelivery skips what the other backend already applied. That is the framework's handling of the race: it changes no outcome, but it delays that backend's other sagas for the length of the back-off, which is one reason fewer sagas meet so short a deadline with two backends than with one. Each refusal also logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
 
 `TwoInstanceSagaIT` in `spring-app/src/test` runs the same check in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, the second context closed and a new one started after 50 orders, a deadline of two seconds, timeout runners polling every 200 ms and the same delay. It asserts that every saga ends, that the invariant query returns nothing, and that the run compensated at least one saga at its deadline and completed at least one.
 

@@ -544,7 +544,8 @@ public class StreamRuneFactory {
    * this process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
    * forward commands. A backend on another process shares no lock with this one; there the saga
    * runner's forward fence keeps the order: a forward command is stored before the claim, and its
-   * compensation covers it, or it is refused at its commit. {@code inboxRetentionMaxAge} is the
+   * compensation has to cover it, or it is refused at its commit ({@link OrderFulfillmentSaga}
+   * names the two cases the demo's compensation leaves open). {@code inboxRetentionMaxAge} is the
    * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
    * after its keys may have been pruned is faulted instead of dispatched again. {@link
    * EcommerceSubscriptionLifecycle} starts it with the saga subscription and stops it on shutdown.

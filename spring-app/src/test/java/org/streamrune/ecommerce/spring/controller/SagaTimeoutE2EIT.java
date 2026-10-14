@@ -83,7 +83,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
 
     @Override
     public <C extends Command> CommandResult execute(C command, IdempotencyKey key) {
-      // SagaCommandDispatch now dispatches under an idempotency key; the interface default
+      // SagaCommandDispatch dispatches under an idempotency key; the interface default
       // throws UnsupportedOperationException, which would fault the sweep. Same recording +
       // result logic as the 1-arg version — this fake has no real inbox to key against.
       return execute(command);
@@ -91,7 +91,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
 
     @Override
     public boolean supportsIdempotentExecution() {
-      // SagaTimeoutRunner.Builder.build() now fails fast with IllegalStateException
+      // SagaTimeoutRunner.Builder.build() fails fast with IllegalStateException
       // unless the CommandBus reports idempotent-execution support, since timeout compensation
       // dispatches exclusively through the keyed execute(command, key) overload with no unkeyed
       // fallback. This fake has no real CommandInbox but DOES implement the keyed overload above

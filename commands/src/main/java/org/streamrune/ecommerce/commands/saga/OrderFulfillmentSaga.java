@@ -100,9 +100,24 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * same {@link #compensate} the event path uses: a payment that never arrives cancels the order, a
  * reservation that never arrives refunds and cancels. The runner is built from the saga's {@code
  * SagaRunner}, whose forward fence is on: a forward command of a step still in flight when the
- * deadline claims the saga is stored before the claim, and the compensation covers it, or is
- * refused at its commit. The timeout is {@link #DEFAULT_TIMEOUT} unless the application passes one
- * ({@code app.saga.fulfillment-timeout} in the three apps).
+ * deadline claims the saga is stored before the claim, or is refused at its commit. A command
+ * stored before the claim is one the compensation has to cover, and {@link #compensate} works from
+ * the state the row holds, which does not include that step yet. Two cases stay open:
+ *
+ * <ul>
+ *   <li>a {@code ReserveStock} stored before a claim made while the saga awaits its inventory gets
+ *       a refund and a cancel and no {@code ReleaseStock}: the reservation is not released;
+ *   <li>a {@code CapturePayment} of the payment process manager — a continuation of {@code
+ *       PaymentInitiated}, not a command of this saga, so the fence does not refuse it — that
+ *       commits after a claim made while the saga awaits its payment gets no refund: the order ends
+ *       cancelled with its payment captured.
+ * </ul>
+ *
+ * <p>The demo's planned refund and stock-release flow closes both. With the default deadline of
+ * fifteen minutes neither occurs in normal use; a deadline of a second or two with saga commands
+ * delayed on purpose (the two-backend run of the tutorial's chapter 17) produces them. The timeout
+ * is {@link #DEFAULT_TIMEOUT} unless the application passes one ({@code
+ * app.saga.fulfillment-timeout} in the three apps).
  */
 public class OrderFulfillmentSaga
     implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {

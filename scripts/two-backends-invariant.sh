@@ -11,7 +11,10 @@
 #
 # With the defaults (a 15-minute deadline, no delay) no saga reaches its deadline and the check
 # holds trivially; the three variables above make some deadlines pass while a forward command is in
-# flight. ORDERS (default 60) sets the number of orders, PAUSE_SECONDS (default 1) the pause
+# flight. Such a run can leave cancelled orders whose stock stays reserved or whose payment stays
+# captured: the demo's compensation works from the saga row (tutorial chapter 17 lists them with
+# two queries); this script checks the order of commands, not that every compensation undid it all.
+# ORDERS (default 60) sets the number of orders, PAUSE_SECONDS (default 1) the pause
 # between two of them. Exit status: 0 when the check holds, 1 when it does not or a saga did not end
 # within five minutes.
 
@@ -27,8 +30,12 @@ SAGA_TYPE=org.streamrune.ecommerce.commands.saga.OrderFulfillmentState
 RUN="$(date +%s)"
 ADMIN=(-H "X-User-Id: admin-1" -H "X-User-Role: ADMIN")
 
+# Runs one statement; a failing psql ends the script with status 1, like a failed check.
 sql() {
-  docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce -v ON_ERROR_STOP=1 -tA -c "$1"
+  if ! docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce -v ON_ERROR_STOP=1 -tA -c "$1"; then
+    echo "✗ psql failed: $1" >&2
+    exit 1
+  fi
 }
 
 post() {
@@ -86,19 +93,20 @@ sql "SELECT count(*) FROM saga_state WHERE saga_type = '$SAGA_TYPE' AND status =
 for backend in "$FIRST" "$SECOND"; do
   # The meter exists once the first forward command was refused; until then the endpoint is 404.
   fenced=$(curl -sf -m 5 "$backend/actuator/metrics/streamrune.saga.forward_commands_fenced" \
-    | sed -n 's/.*"value":\([0-9.]*\).*/\1/p' || true)
+    | sed -n 's/.*"value":\([0-9]*\).*/\1/p' || true)
   echo "Forward commands refused at their commit on $backend since it started: ${fenced:-0}"
 done
 
 # A forward command (key saga:<sagaId>:<offset>:<index>) stored after the first compensation command
-# (key saga:<sagaId>:episode:<version>:comp:<index>) of the same saga. Saga ids hold no ':'.
+# (key saga:<sagaId>:episode:<version>:comp:<index>) of the same order-fulfillment saga (its ids
+# start with fulfillment- and hold no ':').
 violations=$(sql "
 SELECT f.idempotency_key || ' after ' || c.idempotency_key
   FROM command_inbox f
   JOIN command_inbox c
     ON split_part(c.idempotency_key, ':', 2) = split_part(f.idempotency_key, ':', 2)
- WHERE c.idempotency_key LIKE 'saga:%:episode:%:comp:%'
-   AND f.idempotency_key LIKE 'saga:%'
+ WHERE c.idempotency_key LIKE 'saga:fulfillment-%:episode:%:comp:%'
+   AND f.idempotency_key LIKE 'saga:fulfillment-%'
    AND f.idempotency_key NOT LIKE 'saga:%:episode:%'
    AND (SELECT max(o) FROM unnest(f.global_offsets) o)
      > (SELECT min(o) FROM unnest(c.global_offsets) o)")
