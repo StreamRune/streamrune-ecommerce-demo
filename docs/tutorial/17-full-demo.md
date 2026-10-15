@@ -6,9 +6,9 @@
 
 ## What We're Building
 
-There is no new code in this chapter. You already built it. This chapter is a guided end-to-end walkthrough of the complete ecommerce demo — from the Next.js frontend through the Spring Boot backend, across all five aggregates, through the saga, and back to the read model.
+There is almost no new code in this chapter: a seed runner, and one demo-only interceptor for the two-backend run at its end. You already built the rest. This chapter is a guided end-to-end walkthrough of the complete ecommerce demo — from the Next.js frontend through the Spring Boot backend, across all five aggregates, through the saga, and back to the read model.
 
-The goal is to see every feature work together at the same time, understand where each piece lives, and confirm that the system behaves correctly: encrypted PII at rest, an order-fulfillment saga that runs end-to-end (payment captured by the process manager, stock reserved, order confirmed), a payment-gateway circuit breaker that trips when you inject failures, the dead letter queue wired into the command bus, and a GDPR forget request that crypto-shreds the key and purges the read model.
+The goal is to see every feature work together at the same time, understand where each piece lives, and confirm that the system behaves correctly: encrypted PII at rest, an order-fulfillment saga that runs end-to-end (payment captured by the process manager, stock reserved, order confirmed), a payment-gateway circuit breaker that trips when you inject failures, the dead letter queue wired into the command bus, and a GDPR forget request that crypto-shreds the key and purges the read model. The last section runs two backends on one database and checks that the saga's forward fence (Chapter 11) keeps every forward command of a fulfillment ahead of its compensation, with one backend killed halfway.
 
 By the end of this chapter you will have run the entire application, exercised every major feature, and have a checklist to verify that nothing was missed.
 
@@ -536,6 +536,220 @@ curl -N http://localhost:8080/api/events/sse
 
 The terminal prints `: connected` within a second and nothing of the events above: the feed starts at the head of the store. Every command you dispatch from this point forward produces SSE frames here within one second. The feed needs no header and is what the frontend's live feed shows to every role: each frame holds the event's global offset, the aggregate type, the event type and the timestamp. It names no stream and carries no payload, so the terminal shows that an order was placed, not which one.
 
+### Two Backends on One Database
+
+Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). The step lock that keeps a deadline claim from compensating underneath a step in flight is memory, so it holds within one backend only; across backends the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
+
+**The profile.** `docker-compose.yml` defines a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take three settings from the environment, with defaults that change nothing:
+
+| Variable | Property | Default | Effect |
+|---|---|---|---|
+| `APP_SAGA_FULFILLMENT_TIMEOUT` | `app.saga.fulfillment-timeout` | `15m` | The fulfillment saga's deadline |
+| `APP_SAGA_TIMEOUT_POLL_INTERVAL` | `app.saga.timeout-poll-interval` | `10s` | How often each backend's timeout runner looks for sagas past their deadline |
+| `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
+
+A deadline of one and a half seconds, timeout runners that look every 200 ms and saga commands delayed by up to 300 ms make a fulfillment take about as long as its deadline: some complete, some are compensated at their deadline, and some deadlines pass while a forward command is on its way to the event store — on either backend, claimed by either backend's timeout runner. Start both backends that way (build the JARs first, as in Step 1):
+
+```bash
+./gradlew :spring-app:bootJar :notifications-service:bootJar
+APP_SAGA_FULFILLMENT_TIMEOUT=1500ms APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms \
+  APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms docker compose --profile two-backends up -d --build
+```
+
+The delay is a demo-only knob, `SagaCommandDelayInterceptor` in `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/`:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import java.time.Duration;
+import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
+import org.streamrune.core.CommandInterceptor;
+import org.streamrune.core.StreamRuneContext;
+
+/**
+ * A demo-only knob that widens the window between a saga's deadline and its forward commands: it
+ * sleeps a random time between zero and {@code max} before every command a saga dispatches ({@link
+ * StreamRuneContext#isSagaDispatch()}), and lets every other command through at once.
+ *
+ * <p>With it, a saga's deadline can pass while one of its forward commands is on the way to the
+ * event store, which is the moment the saga runner's forward fence is for: the command is stored
+ * before the compensation claim, or refused at its commit. {@link StreamRuneConfig#commandBus}
+ * registers it only when {@code app.chaos.saga-command-delay-max} is above zero (the default is
+ * {@code 0ms}); the two-backend Compose profile and {@code TwoInstanceSagaIT} turn it on. Do not
+ * copy it into an application: it slows every saga down on purpose.
+ */
+public final class SagaCommandDelayInterceptor implements CommandInterceptor {
+
+  private final long maxNanos;
+
+  /**
+   * An interceptor that delays each saga command by up to {@code max}.
+   *
+   * @param max the longest delay; positive
+   */
+  public SagaCommandDelayInterceptor(Duration max) {
+    Objects.requireNonNull(max, "max is required");
+    if (max.isZero() || max.isNegative()) {
+      throw new IllegalArgumentException("max must be positive, got " + max);
+    }
+    this.maxNanos = max.toNanos();
+  }
+
+  /** Sleeps a random 0..{@code max} when a saga dispatched the command; never refuses one. */
+  @Override
+  public boolean before(CommandContext ctx) {
+    if (StreamRuneContext.isSagaDispatch()) {
+      try {
+        Thread.sleep(Duration.ofNanos(ThreadLocalRandom.current().nextLong(maxNanos + 1)));
+      } catch (InterruptedException e) {
+        // Shutting down: keep the interrupt for the code after this interceptor and go on.
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
+  }
+}
+```
+
+`StreamRuneConfig#commandBus` adds it as the innermost interceptor, and only when the property is above zero. Add a parameter for the property and keep the builder in a variable, so the interceptor can be added before `build()`:
+
+```java
+@Bean
+public VirtualThreadCommandBus commandBus(
+    EventStore store,
+    BeanValidationInterceptor validation,
+    AnnotationAuthorizationInterceptor auth,
+    AuditCommandInterceptor audit,
+    CircuitBreakerCommandInterceptor circuitBreaker,
+    PostgresCommandInbox commandInbox,
+    PostgresDeadLetterQueue deadLetterQueue,
+    PostgresCryptoEngine cryptoEngine,
+    @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
+  var bus =
+      VirtualThreadCommandBus.builder()
+          .eventStore(store)
+          .commandInbox(commandInbox)
+          .interceptors(audit, auth, validation, circuitBreaker)
+          .deadLetterQueue(deadLetterQueue)
+          .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+          .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+          .register(/* ... keep all five register(...) calls ... */);
+  if (sagaCommandDelayMax.isPositive()) {
+    var sagaCommandDelay = new SagaCommandDelayInterceptor(sagaCommandDelayMax);
+    bus.interceptors(sagaCommandDelay);
+  }
+  return bus.build();
+}
+```
+
+The interceptor sleeps on the thread that dispatches the saga's command, after the step read the saga row and before the command's transaction opens: exactly the window in which another backend's timeout runner can claim the saga. Keep the property at `0ms` anywhere but in such a run; it slows every saga down on purpose.
+
+**The script.** `scripts/two-backends-invariant.sh` drives the run against the two backends:
+
+1. It waits until both answer `/actuator/health`, then creates two products of its own with stock for every order.
+2. It places `ORDERS` orders (60 by default), one a second, alternating `http://localhost:8080` and `http://localhost:8091` — the `POST /api/orders` of Step 5.
+3. Halfway it kills the second backend with `docker compose kill -s SIGKILL backend-2`, starts the same container again with `docker compose start backend-2` (so it keeps the settings above) and waits until it answers. Whatever that backend had in flight — a saga step between two forward commands, a claim, a compensation — stops without a shutdown.
+4. It waits until no `saga_state` row of the fulfillment saga is outside `COMPLETED`, `COMPENSATED` and `FAILED` (at most five minutes; a `FAULTED` saga counts as not ended).
+5. It prints the sagas by status, the number compensated at their deadline (an episode with no cause event) and each backend's count of fenced forward commands, then runs the invariant query below and exits `1` if it returns a row.
+
+```bash
+scripts/two-backends-invariant.sh
+```
+
+A run printed:
+
+```text
+Waiting for http://localhost:8080/actuator/health (180s) …
+  ✓ answered after 5s.
+Waiting for http://localhost:8091/actuator/health (180s) …
+  ✓ answered after 2s.
+Placing 60 orders, alternating http://localhost:8080 and http://localhost:8091 …
+Killing backend-2 with SIGKILL after 30 orders …
+ Container saga-fence-demo-backend-2-1 Killing 
+ Container saga-fence-demo-backend-2-1 Killed 
+ Container saga-fence-demo-rabbitmq-1 Waiting 
+ Container saga-fence-demo-postgres-1 Waiting 
+ Container saga-fence-demo-postgres-1 Healthy 
+ Container saga-fence-demo-rabbitmq-1 Healthy 
+ Container saga-fence-demo-backend-2-1 Starting 
+ Container saga-fence-demo-backend-2-1 Started 
+Waiting for http://localhost:8091/actuator/health (180s) …
+  ✓ answered after 5s.
+Waiting until every order-fulfillment saga has ended (at most 5 minutes) …
+Order-fulfillment sagas by status:
+COMPENSATED|1
+COMPLETED|60
+Compensated at their deadline (an episode with no cause event):
+1
+Forward commands refused at their commit on http://localhost:8080 since it started: 1.0
+Forward commands refused at their commit on http://localhost:8091 since it started: 0
+✓ No forward command was stored after its saga's compensation.
+```
+
+The counts differ from run to run — how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
+
+**Orders the run leaves to put right.** The check says that no forward command came after a compensation; it does not say that every compensation undid everything. The demo's `compensate()` works from the saga row, and Chapter 11 ("Reliability under failure") names the two cases that leaves open, which a deadline this short produces: a reservation stored just before the claim is not released, and a capture by the payment process manager that commits after the claim is not refunded. Such an order is cancelled while its stock stays reserved or its payment stays captured; the demo's planned refund and stock-release flow closes both. These two queries list them:
+
+```sql
+-- Orders cancelled with their payment captured and not refunded
+SELECT c.payload->>'orderId' AS order_id
+  FROM event_stream c
+ WHERE c.aggregate_type = 'payment' AND c.event_type = 'PaymentCaptured'
+   AND NOT EXISTS (SELECT 1 FROM event_stream r
+                    WHERE r.aggregate_type = 'payment' AND r.aggregate_id = c.aggregate_id
+                      AND r.event_type = 'PaymentRefunded')
+   AND EXISTS (SELECT 1 FROM event_stream o
+                WHERE o.aggregate_type = 'order' AND o.aggregate_id = c.payload->>'orderId'
+                  AND o.event_type = 'OrderCancelled');
+
+-- Orders cancelled with their stock reserved and not released
+SELECT s.payload->>'orderId' AS order_id
+  FROM event_stream s
+ WHERE s.aggregate_type = 'inventory' AND s.event_type = 'StockReserved'
+   AND NOT EXISTS (SELECT 1 FROM event_stream r
+                    WHERE r.aggregate_type = 'inventory' AND r.event_type = 'StockReleased'
+                      AND r.payload->>'orderId' = s.payload->>'orderId')
+   AND EXISTS (SELECT 1 FROM event_stream o
+                WHERE o.aggregate_type = 'order' AND o.aggregate_id = s.payload->>'orderId'
+                  AND o.event_type = 'OrderCancelled');
+```
+
+**What the invariant query checks.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The query joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
+
+```sql
+SELECT f.idempotency_key, c.idempotency_key
+  FROM command_inbox f
+  JOIN command_inbox c
+    ON split_part(c.idempotency_key, ':', 2) = split_part(f.idempotency_key, ':', 2)
+ WHERE c.idempotency_key LIKE 'saga:fulfillment-%:episode:%:comp:%'
+   AND f.idempotency_key LIKE 'saga:fulfillment-%'
+   AND f.idempotency_key NOT LIKE 'saga:%:episode:%'
+   AND (SELECT max(o) FROM unnest(f.global_offsets) o)
+     > (SELECT min(o) FROM unnest(c.global_offsets) o);
+```
+
+Such a row is a forward command — `InitiatePayment`, `ReserveStock` or `ConfirmOrder` — stored after the saga began to undo the order: a payment initiated, stock reserved or an order confirmed after the compensation that was to cancel it. The fence makes the query return nothing: a forward command that reaches its commit after the claim is refused there, and stores no event and no inbox row. A command that stored no event has no offset, and the query cannot place it; every command of the fulfillment saga stores one.
+
+**The meter.** Each refused forward command counts one `streamrune.saga.forward_commands_fenced` sample on the backend whose step dispatched it (Chapter 15):
+
+```bash
+curl -s http://localhost:8080/actuator/metrics/streamrune.saga.forward_commands_fenced | jq '.measurements[0].value'
+curl -s http://localhost:8091/actuator/metrics/streamrune.saga.forward_commands_fenced | jq '.measurements[0].value'
+```
+
+A backend that has refused none answers `404`: the counter is registered on its first sample. The count of the second backend starts again at its restart.
+
+The logs of the two backends also hold a stream of `ERROR` lines such as `Poll loop 'subscription 'order-fulfillment-saga'' failed (2 consecutive failure(s)); retrying in 633 ms`, each followed by `OptimisticLockException: Stale view of saga fulfillment-…` and a stack trace. The demo's saga subscription takes no lease (Chapter 11), so both backends deliver every event; when one of them loses the write of a saga row to the other, its poll loop logs the conflict as a failure and delivers the batch again after a back-off that grows with each consecutive failure, and the redelivery skips what the other backend already applied. That is the framework's handling of the race: it changes no outcome, but it delays that backend's other sagas for the length of the back-off, which is one reason fewer sagas meet so short a deadline with two backends than with one. Each refusal also logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
+
+`TwoInstanceSagaIT` in `spring-app/src/test` runs the same check in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, the second context closed and a new one started after 50 orders, a deadline of two seconds, timeout runners polling every 200 ms and the same delay. It asserts that every saga ends, that the invariant query returns nothing, and that the run compensated at least one saga at its deadline and completed at least one.
+
+Stop the stack and remove its volume when you are done:
+
+```bash
+docker compose --profile two-backends down -v
+```
+
 ---
 
 ## Feature Checklist
@@ -554,6 +768,7 @@ The terminal prints `: connected` within a second and nothing of the events abov
 | Authorization | 9 | ✅ |
 | Audit logging | 10 | ✅ |
 | Saga orchestration | 11 | ✅ |
+| Saga deadline (timeout runner) and forward fence across two backends | 11, 17 | ✅ |
 | Circuit breaker | 12 | ✅ |
 | Transactional outbox | 13 | ✅ |
 | Outbox ordering modes (strict default, audited skip) | 13, 14 | ✅ |
@@ -570,7 +785,7 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 You have built a production-grade event-sourced application from scratch. Here are directions to take it further.
 
-**Explore Quarkus and Micronaut variants.** The same domain model, deciders, and projections work with StreamRune's Quarkus and Micronaut starters. The `streamrune-integration` module contains `streamrune-quarkus` and `streamrune-micronaut` starters with auto-configuration equivalent to the Spring Boot starter. Swap the starter dependency and the `StreamRuneConfig` equivalent, and the application runs on a different runtime with no domain code changes. A runner you define yourself (the demo's `quarkus-app` and `micronaut-app` each define their own dead-letter retry runner) replaces the framework's, and you start it yourself — the demo does it in `EcommerceSubscriptionLifecycle` (Chapter 14). Carry the request-identity setting over too: on Quarkus, `streamrune.security.trust-user-id-header=true` goes in `application.properties` (as in the demo's `quarkus-app`), and on Micronaut `streamrune.security.trust-user-id-header: true` goes in `application.yml` (as in the demo's `micronaut-app`) — without it `X-User-Id` is ignored and, with annotation authorization configured, the application refuses to start (see Chapter 9). For a Quarkus native image, register your records with `@RegisterForReflection` (the demo's `EcommerceDomainReflectionConfig`), but list every sealed command and event interface as a `{"type": "…"}` entry in `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reachability-metadata.json`: `@RegisterForReflection` on a sealed interface does not make the image list its permitted subclasses, and the framework then refuses to start with *"Sealed type … reports no permitted subclasses"* rather than letting the dead-letter runner and the startup checks see only the root. The Quarkus starter ships the HikariCP metadata for the framework's own connection pools. `scripts/native-image-smoke-test.sh quarkus` builds the Quarkus binary and runs the same checks as for Spring. For a Micronaut native image, list your records in your own `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reflect-config.json` (the demo's `micronaut-app` has one; include the outbox mapper's DTO records, which Jackson serialises when an event is appended) and the sealed interfaces in a `reachability-metadata.json` beside it, exactly as for Quarkus: a Micronaut `@TypeHint` or `@ReflectiveAccess` on a sealed interface registers the type without its permitted subclasses, and the application refuses to start. Keep a `logback.xml` at INFO (the demo ships one): without it Logback logs at DEBUG, and at DEBUG HikariCP reads its pool settings reflectively, which fails in the image. Build the Micronaut image with `-H:+SharedArenaSupport`. The option is experimental, so wrap it in `-H:+UnlockExperimentalVMOptions` / `-H:-UnlockExperimentalVMOptions`, as `micronaut-app/build.gradle.kts` does in `graalvmNative.binaries.main.buildArgs`. Micronaut's HTTP server runs on Netty 4.2, which on Java 25 frees each direct buffer above 1 MiB, and every pooled chunk when an event loop exits, through `Arena.ofShared().close()`, and a GraalVM 25 image supports that only with this option. Without it the demo's binary answered a request with a 1.5 MiB body with 500, threw `UnsupportedFeatureError: Support for Arena.ofShared is not active` from six event-loop threads at shutdown, and never freed those buffers. `scripts/native-image-smoke-test.sh micronaut` builds the Micronaut binary and runs the same checks on port 8081.
+**Explore Quarkus and Micronaut variants.** The same domain model, deciders, and projections work with StreamRune's Quarkus and Micronaut starters. The `streamrune-integration` module contains `streamrune-quarkus` and `streamrune-micronaut` starters with auto-configuration equivalent to the Spring Boot starter. Swap the starter dependency and the `StreamRuneConfig` equivalent, and the application runs on a different runtime with no domain code changes. A runner you define yourself (the demo's `quarkus-app` and `micronaut-app` each define their own dead-letter retry runner) replaces the framework's, and you start it yourself — the demo does it in `EcommerceSubscriptionLifecycle` (Chapter 14). The same goes for the saga's timeout runner, which the framework never builds: the same `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it on shutdown (Chapter 11). Carry the request-identity setting over too: on Quarkus, `streamrune.security.trust-user-id-header=true` goes in `application.properties` (as in the demo's `quarkus-app`), and on Micronaut `streamrune.security.trust-user-id-header: true` goes in `application.yml` (as in the demo's `micronaut-app`) — without it `X-User-Id` is ignored and, with annotation authorization configured, the application refuses to start (see Chapter 9). For a Quarkus native image, register your records with `@RegisterForReflection` (the demo's `EcommerceDomainReflectionConfig`), but list every sealed command and event interface as a `{"type": "…"}` entry in `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reachability-metadata.json`: `@RegisterForReflection` on a sealed interface does not make the image list its permitted subclasses, and the framework then refuses to start with *"Sealed type … reports no permitted subclasses"* rather than letting the dead-letter runner and the startup checks see only the root. The Quarkus starter ships the HikariCP metadata for the framework's own connection pools. `scripts/native-image-smoke-test.sh quarkus` builds the Quarkus binary and runs the same checks as for Spring. For a Micronaut native image, list your records in your own `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reflect-config.json` (the demo's `micronaut-app` has one; include the outbox mapper's DTO records, which Jackson serialises when an event is appended) and the sealed interfaces in a `reachability-metadata.json` beside it, exactly as for Quarkus: a Micronaut `@TypeHint` or `@ReflectiveAccess` on a sealed interface registers the type without its permitted subclasses, and the application refuses to start. Keep a `logback.xml` at INFO (the demo ships one): without it Logback logs at DEBUG, and at DEBUG HikariCP reads its pool settings reflectively, which fails in the image. Build the Micronaut image with `-H:+SharedArenaSupport`. The option is experimental, so wrap it in `-H:+UnlockExperimentalVMOptions` / `-H:-UnlockExperimentalVMOptions`, as `micronaut-app/build.gradle.kts` does in `graalvmNative.binaries.main.buildArgs`. Micronaut's HTTP server runs on Netty 4.2, which on Java 25 frees each direct buffer above 1 MiB, and every pooled chunk when an event loop exits, through `Arena.ofShared().close()`, and a GraalVM 25 image supports that only with this option. Without it the demo's binary answered a request with a 1.5 MiB body with 500, threw `UnsupportedFeatureError: Support for Arena.ofShared is not active` from six event-loop threads at shutdown, and never freed those buffers. `scripts/native-image-smoke-test.sh micronaut` builds the Micronaut binary and runs the same checks on port 8081.
 
 **Add your own aggregate.** Pick a domain concept not in this demo — a `Review`, a `Voucher`, a `Supplier` — and build it from scratch following the pattern in Chapters 2–5. Define the sealed command and event interfaces, write a `DeciderFixture` test, implement the decider, add a projection, and wire it into the command bus. The process is the same every time.
 

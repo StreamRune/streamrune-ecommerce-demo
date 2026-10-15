@@ -42,6 +42,41 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: guest
       RABBITMQ_PASSWORD: guest
+      # The order-fulfillment saga's deadline (app.saga.fulfillment-timeout), how often the timeout
+      # runner looks for sagas past it (app.saga.timeout-poll-interval) and the demo-only delay
+      # before each saga command (app.chaos.saga-command-delay-max). Defaults: 15m, 10s and 0ms.
+      APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
+      APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+      APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # A second backend on the same database, started only with the two-backends profile:
+  #   docker compose --profile two-backends up -d --build
+  # Same image, same environment, port 8091 (8090 is the notifications service). The two run every
+  # saga step, every timeout runner and every request side by side; scripts/two-backends-invariant.sh
+  # places orders on both, kills this one with SIGKILL halfway and checks that no forward command of
+  # a saga was stored after that saga's compensation.
+  backend-2:
+    profiles: ["two-backends"]
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8091:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/streamrune_ecommerce
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
+      APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+      APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
     depends_on:
       postgres:
         condition: service_healthy

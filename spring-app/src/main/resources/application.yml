@@ -66,6 +66,21 @@ streamrune:
     # The framework default is 1s; the smallest value it accepts is 1ms.
     polling-interval: 100ms
 
+app:
+  saga:
+    # The order-fulfillment saga's deadline, measured from the saga's start: a fulfillment that has
+    # not completed, been compensated or failed by then is compensated by the timeout runner
+    # (StreamRuneConfig#orderFulfillmentTimeoutRunner), which looks for such sagas every
+    # timeout-poll-interval. The same keys and defaults hold in the Quarkus and Micronaut apps.
+    fulfillment-timeout: 15m
+    timeout-poll-interval: 10s
+  chaos:
+    # Demo-only: when above zero, every command a saga dispatches waits a random 0..max first
+    # (SagaCommandDelayInterceptor), so a saga's deadline can pass while its forward command is in
+    # flight. docker-compose.yml passes APP_CHAOS_SAGA_COMMAND_DELAY_MAX, APP_SAGA_FULFILLMENT_TIMEOUT
+    # and APP_SAGA_TIMEOUT_POLL_INTERVAL to the backends, which Spring reads as these keys.
+    saga-command-delay-max: 0ms
+
 management:
   endpoints:
     web:

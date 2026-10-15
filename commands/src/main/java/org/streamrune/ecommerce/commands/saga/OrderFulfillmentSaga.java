@@ -1,11 +1,14 @@
 package org.streamrune.ecommerce.commands.saga;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.saga.SagaCommand;
+import org.streamrune.core.saga.SagaDecider;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaOrchestrator;
 import org.streamrune.core.types.AggregateId;
@@ -88,11 +91,70 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * registration. {@code ReserveStock} and {@code ReleaseStock} are registered under {@code
  * inventory}, so the stock streams are {@code inventory:<productId>} — the product id is the
  * inventory id, with no hand-made prefix.
+ *
+ * <p><b>Deadline.</b> The saga is a {@link SagaDecider} as well as a {@link SagaOrchestrator}: the
+ * two interfaces share {@code stateType}, {@code initialState}, {@code evolve}, {@code handle} and
+ * {@code compensate}, and {@link #timeout()} exists only on the decider. A fulfillment that has not
+ * reached {@code COMPLETED}, {@code COMPENSATED} or {@code FAILED} within its timeout, measured
+ * from the saga's start, is compensated by the application's {@code SagaTimeoutRunner} with the
+ * same {@link #compensate} the event path uses: a payment that never arrives cancels the order, a
+ * reservation that never arrives refunds and cancels. The runner is built from the saga's {@code
+ * SagaRunner}, whose forward fence is on: a forward command of a step still in flight when the
+ * deadline claims the saga is stored before the claim, or is refused at its commit. A command
+ * stored before the claim is one the compensation has to cover, and {@link #compensate} works from
+ * the state the row holds, which does not include that step yet. Two cases stay open:
+ *
+ * <ul>
+ *   <li>a {@code ReserveStock} stored before a claim made while the saga awaits its inventory gets
+ *       a refund and a cancel and no {@code ReleaseStock}: the reservation is not released;
+ *   <li>a {@code CapturePayment} of the payment process manager — a continuation of {@code
+ *       PaymentInitiated}, not a command of this saga, so the fence does not refuse it — that
+ *       commits after a claim made while the saga awaits its payment gets no refund: the order ends
+ *       cancelled with its payment captured.
+ * </ul>
+ *
+ * <p>The demo's planned refund and stock-release flow closes both. With the default deadline of
+ * fifteen minutes neither occurs in normal use; a deadline of a second or two with saga commands
+ * delayed on purpose (the two-backend run of the tutorial's chapter 17) produces them. The timeout
+ * is {@link #DEFAULT_TIMEOUT} unless the application passes one ({@code
+ * app.saga.fulfillment-timeout} in the three apps).
  */
-public class OrderFulfillmentSaga implements SagaOrchestrator<OrderFulfillmentState> {
+public class OrderFulfillmentSaga
+    implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {
+
+  /** The deadline of a fulfillment when the application names none: fifteen minutes. */
+  public static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
 
   /** A fulfillment's payment id is this prefix and the order id. */
   private static final String PAYMENT_ID_PREFIX = "pay-";
+
+  private final Duration timeout;
+
+  /** A saga whose deadline is {@link #DEFAULT_TIMEOUT}. */
+  public OrderFulfillmentSaga() {
+    this(DEFAULT_TIMEOUT);
+  }
+
+  /**
+   * A saga whose deadline is the given duration.
+   *
+   * @param timeout how long a fulfillment may stay non-terminal, measured from its start; positive
+   * @throws NullPointerException when {@code timeout} is {@code null}
+   * @throws IllegalArgumentException when {@code timeout} is zero or negative
+   */
+  public OrderFulfillmentSaga(Duration timeout) {
+    Objects.requireNonNull(timeout, "timeout is required");
+    if (timeout.isZero() || timeout.isNegative()) {
+      throw new IllegalArgumentException("timeout must be positive, got " + timeout);
+    }
+    this.timeout = timeout;
+  }
+
+  /** The fulfillment's deadline, measured from the saga's start. */
+  @Override
+  public Optional<Duration> timeout() {
+    return Optional.of(timeout);
+  }
 
   @Override
   public Class<OrderFulfillmentState> stateType() {

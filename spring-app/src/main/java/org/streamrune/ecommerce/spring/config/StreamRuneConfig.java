@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportRuntimeHints;
@@ -17,6 +18,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -26,6 +28,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
 import org.streamrune.ecommerce.domain.customer.CustomerCommand;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
@@ -288,6 +291,11 @@ public class StreamRuneConfig {
    * under the customer's key: the queued copy of the customer's personal data is ciphertext and is
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
    * in plaintext.
+   *
+   * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
+   * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays
+   * every command a saga dispatches, so that a saga's deadline can pass while its forward command
+   * is in flight. The two-backend Compose profile and {@code TwoInstanceSagaIT} turn it on.
    */
   @Bean
   public VirtualThreadCommandBus commandBus(
@@ -298,79 +306,85 @@ public class StreamRuneConfig {
       CircuitBreakerCommandInterceptor circuitBreaker,
       PostgresCommandInbox commandInbox,
       PostgresDeadLetterQueue deadLetterQueue,
-      PostgresCryptoEngine cryptoEngine) {
-    return VirtualThreadCommandBus.builder()
-        .eventStore(store)
-        // Required for saga command dispatch: SagaCommandDispatch calls
-        // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException unless
-        // the bus has a commandInbox wired in.
-        .commandInbox(commandInbox)
-        .interceptors(audit, auth, validation, circuitBreaker)
-        .deadLetterQueue(deadLetterQueue)
-        .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
-        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-        .register(
-            ProductState.TYPE,
-            ProductCommand.class,
-            cmd ->
-                AggregateId.of(
-                    switch (cmd) {
-                      case ProductCommand.CreateProduct c -> c.productId();
-                      case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
-                      case ProductCommand.DiscontinueProduct c -> c.productId();
-                    }),
-            new ProductDecider())
-        .register(
-            OrderState.TYPE,
-            OrderCommand.class,
-            cmd ->
-                AggregateId.of(
-                    switch (cmd) {
-                      case OrderCommand.PlaceOrder c -> c.orderId();
-                      case OrderCommand.ConfirmOrder c -> c.orderId();
-                      case OrderCommand.ShipOrder c -> c.orderId();
-                      case OrderCommand.DeliverOrder c -> c.orderId();
-                      case OrderCommand.CancelOrder c -> c.orderId();
-                    }),
-            new OrderDecider())
-        .register(
-            CustomerState.TYPE,
-            CustomerCommand.class,
-            cmd ->
-                AggregateId.of(
-                    switch (cmd) {
-                      case CustomerCommand.RegisterCustomer c -> c.customerId();
-                      case CustomerCommand.UpdateProfile c -> c.customerId();
-                      case CustomerCommand.RequestDataExport c -> c.customerId();
-                      case CustomerCommand.ForgetCustomer c -> c.customerId();
-                    }),
-            new CustomerDecider())
-        .register(
-            PaymentState.TYPE,
-            PaymentCommand.class,
-            cmd ->
-                AggregateId.of(
-                    switch (cmd) {
-                      case PaymentCommand.InitiatePayment c -> c.paymentId();
-                      case PaymentCommand.CapturePayment c -> c.paymentId();
-                      case PaymentCommand.RefundPayment c -> c.paymentId();
-                      case PaymentCommand.FailPayment c -> c.paymentId();
-                    }),
-            new PaymentDecider())
-        .register(
-            InventoryState.TYPE,
-            InventoryCommand.class,
-            cmd ->
-                AggregateId.of(
-                    switch (cmd) {
-                      case InventoryCommand.ReserveStock c -> c.productId();
-                      case InventoryCommand.ReleaseStock c -> c.productId();
-                      case InventoryCommand.ConfirmReservation c -> c.productId();
-                      case InventoryCommand.ReceiveShipment c -> c.productId();
-                    }),
-            new InventoryDecider())
-        .build();
+      PostgresCryptoEngine cryptoEngine,
+      @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
+    var bus =
+        VirtualThreadCommandBus.builder()
+            .eventStore(store)
+            // Required for saga command dispatch: SagaCommandDispatch calls
+            // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+            // unless the bus has a commandInbox wired in.
+            .commandInbox(commandInbox)
+            .interceptors(audit, auth, validation, circuitBreaker)
+            .deadLetterQueue(deadLetterQueue)
+            .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+            .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+            .register(
+                ProductState.TYPE,
+                ProductCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case ProductCommand.CreateProduct c -> c.productId();
+                          case ProductCommand.UpdatePrice c -> c.productId();
+                          case ProductCommand.AdjustStock c -> c.productId();
+                          case ProductCommand.DiscontinueProduct c -> c.productId();
+                        }),
+                new ProductDecider())
+            .register(
+                OrderState.TYPE,
+                OrderCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case OrderCommand.PlaceOrder c -> c.orderId();
+                          case OrderCommand.ConfirmOrder c -> c.orderId();
+                          case OrderCommand.ShipOrder c -> c.orderId();
+                          case OrderCommand.DeliverOrder c -> c.orderId();
+                          case OrderCommand.CancelOrder c -> c.orderId();
+                        }),
+                new OrderDecider())
+            .register(
+                CustomerState.TYPE,
+                CustomerCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case CustomerCommand.RegisterCustomer c -> c.customerId();
+                          case CustomerCommand.UpdateProfile c -> c.customerId();
+                          case CustomerCommand.RequestDataExport c -> c.customerId();
+                          case CustomerCommand.ForgetCustomer c -> c.customerId();
+                        }),
+                new CustomerDecider())
+            .register(
+                PaymentState.TYPE,
+                PaymentCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case PaymentCommand.InitiatePayment c -> c.paymentId();
+                          case PaymentCommand.CapturePayment c -> c.paymentId();
+                          case PaymentCommand.RefundPayment c -> c.paymentId();
+                          case PaymentCommand.FailPayment c -> c.paymentId();
+                        }),
+                new PaymentDecider())
+            .register(
+                InventoryState.TYPE,
+                InventoryCommand.class,
+                cmd ->
+                    AggregateId.of(
+                        switch (cmd) {
+                          case InventoryCommand.ReserveStock c -> c.productId();
+                          case InventoryCommand.ReleaseStock c -> c.productId();
+                          case InventoryCommand.ConfirmReservation c -> c.productId();
+                          case InventoryCommand.ReceiveShipment c -> c.productId();
+                        }),
+                new InventoryDecider());
+    if (sagaCommandDelayMax.isPositive()) {
+      var sagaCommandDelay = new SagaCommandDelayInterceptor(sagaCommandDelayMax);
+      bus.interceptors(sagaCommandDelay);
+    }
+    return bus.build();
   }
 
   // Projections
@@ -583,27 +597,84 @@ public class StreamRuneConfig {
   }
 
   /**
+   * The order-fulfillment saga, with its deadline: {@code app.saga.fulfillment-timeout} (15 minutes
+   * unless configured). The saga runner and the timeout runner below share this one instance.
+   */
+  @Bean
+  public OrderFulfillmentSaga orderFulfillmentSaga(
+      @Value("${app.saga.fulfillment-timeout:15m}") Duration fulfillmentTimeout) {
+    return new OrderFulfillmentSaga(fulfillmentTimeout);
+  }
+
+  /**
    * The order-fulfillment saga runner. It is a bean so that the Spring integration finds it: for
    * every {@code SagaRunner} bean it starts a compensation retry sweeper, which re-drives a
    * compensation that failed transiently and faults it once {@code
    * streamrune.saga.compensation-retry-give-up-after} (1 hour by default) has passed — {@code POST
-   * /api/admin/sagas/faulted/resume} resumes such a saga — and it applies {@code
+   * /api/admin/sagas/faulted/resume} resumes such a saga — it applies {@code
    * streamrune.inbox.retention-max-age} to the runner's key-age guard for compensations resumed by
-   * a live event.
+   * a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto} unless
+   * configured, which is on while single-active-consumer leadership is on) to the runner's forward
+   * fence. {@code metrics} counts, among the saga meters, the forward commands the fence refuses
+   * ({@code streamrune.saga.forward_commands_fenced}).
    */
   @Bean
   public SagaRunner<?> orderFulfillmentSagaRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
       PostgresSagaStore sagaStore,
       VirtualThreadCommandBus commandBus,
-      PostgresSagaDeadLetterStore sagaDeadLetterStore) {
-    return SagaRunner.<org.streamrune.ecommerce.commands.saga.OrderFulfillmentState>builder()
-        .orchestrator(new OrderFulfillmentSaga())
+      PostgresSagaDeadLetterStore sagaDeadLetterStore,
+      ObjectProvider<StreamRuneMetrics> metrics) {
+    return SagaRunner.<OrderFulfillmentState>builder()
+        .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
         .commandBus(commandBus)
         // Required: poison events (routing/decider failures) are quarantined here instead of
         // blocking the subscription.
         .sagaDeadLetterStore(sagaDeadLetterStore)
+        .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
         .build();
+  }
+
+  /**
+   * Compensates a fulfillment that has not ended by its deadline ({@link
+   * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
+   * unless configured) it claims each saga past its deadline and dispatches the compensation its
+   * state dictates — cancel the order, or refund and cancel.
+   *
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, and shares that runner's step lock: in
+   * this process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. A backend on another process shares no lock with this one; there the saga
+   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
+   * compensation has to cover it, or it is refused at its commit ({@link OrderFulfillmentSaga}
+   * names the two cases the demo's compensation leaves open). {@code inboxRetentionMaxAge} is the
+   * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
+   * the subscriptions below are, and stopped with the context.
+   */
+  @Bean(destroyMethod = "stop")
+  public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      StreamRuneProperties properties,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
+    var runner =
+        SagaTimeoutRunner.<OrderFulfillmentState>builder()
+            .decider(orderFulfillmentSaga)
+            .sagaStore(sagaStore)
+            .commandBus(commandBus)
+            // The saga runner stores its rows under the state class; the sweep selects by it.
+            .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .pollInterval(pollInterval)
+            .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .build();
+    runner.start();
+    return runner;
   }
 
   /**

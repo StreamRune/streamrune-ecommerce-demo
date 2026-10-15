@@ -39,7 +39,8 @@ class TutorialInterceptorOrderTest {
           "audit", CommandInterceptorOrdering.ORDER_AUDIT,
           "auth", CommandInterceptorOrdering.ORDER_ANNOTATION_AUTHORIZATION,
           "validation", CommandInterceptorOrdering.ORDER_VALIDATION,
-          "circuitBreaker", CommandInterceptorOrdering.ORDER_CIRCUIT_BREAKER);
+          "circuitBreaker", CommandInterceptorOrdering.ORDER_CIRCUIT_BREAKER,
+          "sagaCommandDelay", CommandInterceptorOrdering.ORDER_USER_DEFAULT);
 
   private static final Pattern CHAIN = Pattern.compile("\\.interceptors\\(([^)]*)\\)");
 

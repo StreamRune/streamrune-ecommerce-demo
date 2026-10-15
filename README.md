@@ -59,6 +59,8 @@ The two images copy the JARs the first command builds, so run it again before `d
 
 Open http://localhost:3000 in your browser.
 
+The profile `two-backends` (`docker compose --profile two-backends up -d --build`) adds `backend-2`, a second backend on the same database on port 8091; `scripts/two-backends-invariant.sh` kills it halfway through a run of orders and checks that no saga's forward command was stored after its compensation ([Chapter 17](docs/tutorial/17-full-demo.md#two-backends-on-one-database)).
+
 The database needs no schema script. The backend creates the framework's tables itself when it starts: `streamrune.event-store.schema.auto-initialize=true` has StreamRune apply the Flyway baselines it ships (event store and crypto), each recorded in its own history table, and the read-model tables are created by the projections on first use. The Micronaut and Quarkus apps do the same.
 
 ## Running Individually
