@@ -9,6 +9,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.ImportRuntimeHints;
 import org.streamrune.core.*;
 import org.streamrune.core.outbox.OutboxEventMapper;
@@ -17,6 +18,7 @@ import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.core.upcasting.EventUpcaster;
@@ -616,7 +618,16 @@ public class StreamRuneConfig {
    * a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto} unless
    * configured, which is on while single-active-consumer leadership is on) to the runner's forward
    * fence. {@code metrics} counts, among the saga meters, the forward commands the fence refuses
-   * ({@code streamrune.saga.forward_commands_fenced}).
+   * ({@code streamrune.saga.forward_commands_fenced}) and the steps run again in place after a lost
+   * write of the saga row ({@code streamrune.saga.delivery_retried}).
+   *
+   * <p>{@code leadership} is the integration's single-active-consumer leadership ({@code
+   * streamrune.subscription.single-active-consumer.enabled}, on unless configured). The runner
+   * carries a lease over it, {@code "saga:" + saga type}: with more than one backend on the
+   * database, one of them delivers the saga's events, claims its deadlines and retries its
+   * compensations, and the others stand by and take over when it stops or dies. The lease is taken
+   * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
+   * SubscriptionLeadership#NOOP}) every backend delivers.
    */
   @Bean
   public SagaRunner<?> orderFulfillmentSagaRunner(
@@ -624,7 +635,8 @@ public class StreamRuneConfig {
       PostgresSagaStore sagaStore,
       VirtualThreadCommandBus commandBus,
       PostgresSagaDeadLetterStore sagaDeadLetterStore,
-      ObjectProvider<StreamRuneMetrics> metrics) {
+      ObjectProvider<StreamRuneMetrics> metrics,
+      ObjectProvider<SubscriptionLeadership> leadership) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -633,6 +645,8 @@ public class StreamRuneConfig {
         // blocking the subscription.
         .sagaDeadLetterStore(sagaDeadLetterStore)
         .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+        // One backend delivers this saga type; the others stand by.
+        .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
         .build();
   }
 
@@ -642,15 +656,18 @@ public class StreamRuneConfig {
    * unless configured) it claims each saga past its deadline and dispatches the compensation its
    * state dictates — cancel the order, or refund and cancel.
    *
-   * <p>It is built from {@link #orderFulfillmentSagaRunner}, and shares that runner's step lock: in
-   * this process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
-   * forward commands. A backend on another process shares no lock with this one; there the saga
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
+   * follows its lease: it claims deadlines only while this backend leads the saga type through
+   * {@link #orderFulfillmentSagaSubscription}, so it claims where the saga's steps run, and in this
+   * process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. Around a handover two backends can overlap for a moment — a backend that dies
+   * keeps its lease until the lease expires, and a deposed one may finish its page; there the saga
    * runner's forward fence keeps the order: a forward command is stored before the claim, and its
    * compensation has to cover it, or it is refused at its commit ({@link OrderFulfillmentSaga}
    * names the two cases the demo's compensation leaves open). {@code inboxRetentionMaxAge} is the
    * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
    * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
-   * the subscriptions below are, and stopped with the context.
+   * the subscriptions below are, and stopped with the context, after the saga subscription.
    */
   @Bean(destroyMethod = "stop")
   public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
@@ -718,20 +735,36 @@ public class StreamRuneConfig {
    * Subscribes the saga runner to the global event stream. Without this bean the saga would persist
    * nothing because no event listener is wired to feed the {@code SagaRunner}.
    *
+   * <p>{@code sagaRunner(...)} delivers to the runner under the runner's lease: this subscription
+   * takes the lease and holds it while it runs. On the backend that holds it, it delivers, and the
+   * timeout runner and the compensation retry sweeper of the runner act; on every other backend it
+   * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
+   * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
+   * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
+   * STANDBY}.
+   *
    * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
    * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
-   * 15-second window that integration tests await for {@code CONFIRMED}.
+   * 15-second window that integration tests await for {@code CONFIRMED}; the interval also spaces a
+   * standby's attempts to take the lease. It depends on {@link #orderFulfillmentTimeoutRunner}, so
+   * it is closed before that runner stops: a runner that stops while this backend leads logs a
+   * warning, and closing the subscription first ends the lead.
    */
   @Bean(destroyMethod = "close")
+  @DependsOn("orderFulfillmentTimeoutRunner")
   public PollingEventSubscription orderFulfillmentSagaSubscription(
-      EventStore eventStore, OffsetStore offsetStore, SagaRunner<?> orderFulfillmentSagaRunner) {
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName("order-fulfillment-saga")
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
-            .listener(orderFulfillmentSagaRunner.asEventListener())
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .healthContributor(health.getIfAvailable())
             .build();
     subscription.start();
     return subscription;
@@ -753,12 +786,21 @@ public class StreamRuneConfig {
    * nothing reacts to {@code PaymentInitiated}, so the saga would stall in {@code
    * AWAITING_PAYMENT}.
    *
+   * <p>{@code leadership(...)} delivers under a lease named after the subscription, {@code
+   * payment-process-manager}: with more than one backend on the database one of them captures the
+   * payments, and the others stand by. {@code healthContributor(...)} lists it in the health
+   * details with its {@code role}.
+   *
    * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the payment
    * capture leg of the saga completes promptly.
    */
   @Bean(destroyMethod = "close")
   public PollingEventSubscription paymentProcessSubscription(
-      EventStore eventStore, OffsetStore offsetStore, PaymentProcessManager paymentProcessManager) {
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      PaymentProcessManager paymentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName("payment-process-manager")
@@ -766,6 +808,8 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(paymentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
             .build();
     subscription.start();
     return subscription;

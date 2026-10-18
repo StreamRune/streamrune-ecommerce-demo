@@ -21,6 +21,7 @@ import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
+import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.core.upcasting.EventUpcaster;
@@ -514,7 +515,17 @@ public class StreamRuneFactory {
    * fence. {@link EcommerceSubscriptionLifecycle} feeds this runner from the event stream, and the
    * {@link #orderFulfillmentSagaDeadLetterReplayer replayer} feeds it quarantined events. {@code
    * metrics} counts, among the saga meters, the forward commands the fence refuses ({@code
-   * streamrune.saga.forward_commands_fenced}) when a {@code StreamRuneMetrics} bean exists.
+   * streamrune.saga.forward_commands_fenced}) and the steps run again in place after a lost write
+   * of the saga row ({@code streamrune.saga.delivery_retried}) when a {@code StreamRuneMetrics}
+   * bean exists.
+   *
+   * <p>{@code leadership} is the integration's single-active-consumer leadership ({@code
+   * streamrune.subscription.single-active-consumer.enabled}, on unless configured; absent when it
+   * is off). The runner carries a lease over it, {@code "saga:" + saga type}: with more than one
+   * backend on the database, one of them delivers the saga's events, claims its deadlines and
+   * retries its compensations, and the others stand by and take over when it stops or dies. The
+   * lease is taken by the saga subscription {@link EcommerceSubscriptionLifecycle} builds with
+   * {@code sagaRunner(...)}; without leadership every backend delivers.
    */
   @Singleton
   public SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner(
@@ -522,7 +533,8 @@ public class StreamRuneFactory {
       SagaStore sagaStore,
       SagaDeadLetterStore sagaDeadLetterStore,
       org.streamrune.core.CommandBus commandBus,
-      @Nullable StreamRuneMetrics metrics) {
+      @Nullable StreamRuneMetrics metrics,
+      @Nullable SubscriptionLeadership leadership) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -531,6 +543,8 @@ public class StreamRuneFactory {
         // subscription.
         .sagaDeadLetterStore(sagaDeadLetterStore)
         .metrics(metrics)
+        // One backend delivers this saga type; the others stand by.
+        .leadership(leadership)
         .build();
   }
 
@@ -540,15 +554,18 @@ public class StreamRuneFactory {
    * unless configured) it claims each saga past its deadline and dispatches the compensation its
    * state dictates — cancel the order, or refund and cancel.
    *
-   * <p>It is built from {@link #orderFulfillmentSagaRunner}, and shares that runner's step lock: in
-   * this process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
-   * forward commands. A backend on another process shares no lock with this one; there the saga
-   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
-   * compensation has to cover it, or it is refused at its commit ({@link OrderFulfillmentSaga}
-   * names the two cases the demo's compensation leaves open). {@code inboxRetentionMaxAge} is the
-   * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
-   * after its keys may have been pruned is faulted instead of dispatched again. {@link
-   * EcommerceSubscriptionLifecycle} starts it with the saga subscription and stops it on shutdown.
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
+   * follows its lease: it claims deadlines only while this backend leads the saga type through the
+   * saga subscription, so it claims where the saga's steps run, and in this process a claim at a
+   * saga's deadline waits for a delivery that is dispatching the saga's forward commands. Around a
+   * handover two backends can overlap for a moment — a backend that dies keeps its lease until the
+   * lease expires, and a deposed one may finish its page; there the saga runner's forward fence
+   * keeps the order: a forward command is stored before the claim, and its compensation has to
+   * cover it, or it is refused at its commit ({@link OrderFulfillmentSaga} names the two cases the
+   * demo's compensation leaves open). {@code inboxRetentionMaxAge} is the deployment's {@code
+   * streamrune.inbox.retention-max-age}: a compensation this runner resumes after its keys may have
+   * been pruned is faulted instead of dispatched again. {@link EcommerceSubscriptionLifecycle}
+   * starts it with the saga subscription and stops it on shutdown.
    */
   @Singleton
   public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(

@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Two backends on one database: places orders on both, kills the second with SIGKILL halfway,
-# restarts it, waits until every order-fulfillment saga has ended and checks that no forward command
-# of a saga was stored after that saga's first compensation command.
+# Two backends on one database: one leads the order-fulfillment saga, the other stands by. Places
+# orders on both, kills the leader with SIGKILL halfway, waits until the other backend leads,
+# restarts the killed one, waits until every order-fulfillment saga has ended and checks that no
+# forward command of a saga was stored after that saga's first compensation command.
 #
 # Usage (from the repository root, with the JARs built as the README's Quick Start shows):
-#   APP_SAGA_FULFILLMENT_TIMEOUT=1500ms APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms \
-#     APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms docker compose --profile two-backends up -d --build
+#   MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always APP_SAGA_FULFILLMENT_TIMEOUT=1500ms \
+#     APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms \
+#     docker compose --profile two-backends up -d --build
 #   scripts/two-backends-invariant.sh
 #   docker compose --profile two-backends down -v
+#
+# The script reads which backend leads from /actuator/health, whose details list the saga
+# subscription with its role (LEADING or STANDBY) only with MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS
+# set to always; without it the script stops at the start and says so.
 #
 # With the defaults (a 15-minute deadline, no delay) no saga reaches its deadline and the check
 # holds trivially; the three variables above make some deadlines pass while a forward command is in
@@ -44,8 +50,26 @@ post() {
   curl -sf -m 30 -X POST "$url" -H "Content-Type: application/json" "$@" -d "$body" > /dev/null
 }
 
+# The order-fulfillment saga subscription's lease role on a backend, from its health details.
+role_of() {
+  curl -s -m 5 "$1/actuator/health" \
+    | sed -n 's/.*"subscription\.order-fulfillment-saga":{[^}]*"role":"\([A-Z_]*\)".*/\1/p' \
+    || true # a backend that does not answer has no role
+}
+
+# The compose service of a backend URL.
+service_of() {
+  if [ "$1" = "$FIRST" ]; then echo backend; else echo backend-2; fi
+}
+
 WAIT_SECONDS=180 scripts/wait-for-http.sh \
   "$FIRST/actuator/health" '"status":"UP"' "$SECOND/actuator/health" '"status":"UP"'
+
+if [ -z "$(role_of "$FIRST")" ] || [ -z "$(role_of "$SECOND")" ]; then
+  echo "✗ The health details do not show the saga subscription's role; start the backends with" \
+    "MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always (see the usage above)." >&2
+  exit 1
+fi
 
 # Two products of this run, each with stock for every order.
 for p in 1 2; do
@@ -64,11 +88,36 @@ for i in $(seq 1 "$ORDERS"); do
     "{\"orderId\":\"two-backends-$RUN-$i\",\"customerId\":\"$customer\",\"lines\":[{\"productId\":\"two-backends-$RUN-$((i % 2 + 1))\",\"quantity\":1,\"unitPrice\":10.00}]}" \
     -H "X-User-Id: $customer" -H "X-User-Role: CUSTOMER"
   if [ "$i" -eq $((ORDERS / 2)) ]; then
-    echo "Killing backend-2 with SIGKILL after $i orders …"
-    docker compose kill -s SIGKILL backend-2
+    first_role=$(role_of "$FIRST")
+    second_role=$(role_of "$SECOND")
+    if [ "$first_role" = LEADING ] && [ "$second_role" != LEADING ]; then
+      leader="$FIRST" survivor="$SECOND"
+    elif [ "$second_role" = LEADING ] && [ "$first_role" != LEADING ]; then
+      leader="$SECOND" survivor="$FIRST"
+    else
+      echo "✗ Expected exactly one backend to lead the saga: $FIRST is ${first_role:-unknown}," \
+        "$SECOND is ${second_role:-unknown}." >&2
+      exit 1
+    fi
+    killed=$(service_of "$leader")
+    echo "Killing the leader, $killed ($leader), with SIGKILL after $i orders …"
+    docker compose kill -s SIGKILL "$killed"
+    killed_at=$SECONDS
+    # A killed backend does not give its lease back: the other takes over once the lease has
+    # expired (15 s) and it asks again (every 500 ms).
+    until [ "$(role_of "$survivor")" = LEADING ]; do
+      if [ $((SECONDS - killed_at)) -ge 60 ]; then
+        echo "✗ $survivor did not take the saga over within 60 s of the kill" \
+          "(its role: $(role_of "$survivor"))." >&2
+        exit 1
+      fi
+      sleep 1
+    done
+    echo "  ✓ $survivor leads the saga $((SECONDS - killed_at)) s after the kill."
     # start, not up: the same container with the environment it was created with.
-    docker compose --profile two-backends start backend-2
-    WAIT_SECONDS=180 scripts/wait-for-http.sh "$SECOND/actuator/health" '"status":"UP"'
+    docker compose --profile two-backends start "$killed"
+    WAIT_SECONDS=180 scripts/wait-for-http.sh "$leader/actuator/health" '"status":"UP"'
+    echo "  ✓ $killed is back, as standby: $(role_of "$leader")."
   fi
   sleep "$PAUSE_SECONDS"
 done

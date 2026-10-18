@@ -48,6 +48,9 @@ services:
       APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
       APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
+      # The details of /actuator/health (never unless set): with always, they list each
+      # subscription with its role under its lease — LEADING or STANDBY.
+      MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,10 +59,12 @@ services:
 
   # A second backend on the same database, started only with the two-backends profile:
   #   docker compose --profile two-backends up -d --build
-  # Same image, same environment, port 8091 (8090 is the notifications service). The two run every
-  # saga step, every timeout runner and every request side by side; scripts/two-backends-invariant.sh
-  # places orders on both, kills this one with SIGKILL halfway and checks that no forward command of
-  # a saga was stored after that saga's compensation.
+  # Same image, same environment, port 8091 (8090 is the notifications service). Both serve every
+  # request; one of them leads the order-fulfillment saga (its events, its deadlines, its
+  # compensation retries) and the payment process manager, and the other stands by and takes over
+  # when the leader stops or dies. scripts/two-backends-invariant.sh places orders on both, kills
+  # the leader with SIGKILL halfway and checks that no forward command of a saga was stored after
+  # that saga's compensation.
   backend-2:
     profiles: ["two-backends"]
     build:
@@ -77,6 +82,7 @@ services:
       APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
       APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
+      MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
     depends_on:
       postgres:
         condition: service_healthy

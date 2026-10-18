@@ -1218,6 +1218,20 @@ Expected response shape:
       "details": {
         "eventStore.lastGlobalOffset": 42,
         "eventStore.lastEventTimestamp": "2026-04-25T09:00:00Z",
+        "subscription.order-fulfillment-saga": {
+          "state": "RUNNING",
+          "lag": 0,
+          "errorCount": 0,
+          "status": "UP",
+          "role": "LEADING"
+        },
+        "subscription.payment-process-manager": {
+          "state": "RUNNING",
+          "lag": 0,
+          "errorCount": 0,
+          "status": "UP",
+          "role": "LEADING"
+        },
         "relay.outbox-relay": {
           "status": "UP",
           "started": true,
@@ -1240,7 +1254,7 @@ Expected response shape:
 
 The `details` also hold one `relay.<name>` block for each retention sweeper, for the saga compensation-retry sweeper and for the saga's timeout runner (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` and `relay.saga-timeout:` each followed by the saga state class), shortened here. The timeout runner is the application's (Chapter 11, Step 6); the integration finds the `SagaTimeoutRunner` bean and registers it like the relays it builds itself, so a timeout runner whose poll thread died turns the component `DOWN`. Once Step 6b has switched the per-stream SSE endpoint on, one more block appears, `relay.sse-event-feed`: the framework reports the feed of that endpoint like its other polling threads, `DOWN` when the thread has died, because the endpoint would go on admitting clients while no event reached them. `StreamRuneHealthIT` checks this list.
 
-The demo's subscriptions (`order-fulfillment-saga`, `payment-process-manager`, and the `MultiProjectionRunner`) are wired as standalone beans and are **not** register(...)-ed with the auto-configured `SubscriptionHealthContributor`, so no `subscription.<name>` detail blocks appear here (the framework's `SseEventFeed` is not a subscription of that contributor either; it is the `relay.sse-event-feed` block above). If you register a subscription with the contributor, each one adds a `subscription.<name>` detail with `state`, `lag`, `errorCount`, and `status` keys. As wired, a listener that keeps failing — the payment process manager on a capture the store refuses, say — shows in the application log only, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b).
+The saga subscription and the payment process manager's subscription (Chapter 11, Step 6) are built with `.healthContributor(...)`, so each registers with the auto-configured `SubscriptionHealthContributor` when it starts and adds a `subscription.<name>` block: `state` (`RUNNING`, `PAUSED`, `STOPPED`), `lag` (the events between its checkpoint and the head of the store), `errorCount`, `status`, and `role`, the subscription's role under its lease. With one backend both read `LEADING`. With two (Chapter 17) one backend reads `LEADING` and the other `STANDBY`; a standby is `RUNNING`, has no delivery errors and shares the leader's lag — the checkpoint is shared — so it reads `UP` while some backend leads and keeps up, and `DEGRADED` on both once the shared lag crosses `streamrune.subscription.health.lag-threshold` (1000 events unless configured). A listener that keeps failing — the payment process manager on a capture the store refuses, say — still shows first in the application log, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b): `errorCount` counts the failures a `HealthTrackingEventListener` around the listener reports, and the demo's two subscriptions hand their listeners over unwrapped, so it stays `0`. The checkpoint does not move past the failing event, though, so the block's `lag` grows with every event stored after it and reads `DEGRADED` at the threshold. The demo's `MultiProjectionRunner` is built by hand without a health contributor, so it has no block here (the framework's `SseEventFeed` is not a subscription of that contributor either; it is the `relay.sse-event-feed` block above). `StreamRuneHealthIT` checks both subscription blocks, and the Quarkus and Micronaut `ObservabilitySmokeSuiteIT` check that both subscriptions are registered and lead. The role is `UNGATED` for a subscription that takes no lease, and `NOT_REPORTED` for a registration that reports none.
 
 **Metrics — command counter:**
 
@@ -1289,6 +1303,14 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.forward_commands_
 ```
 
 `streamrune.saga.forward_commands_fenced`, tagged `saga.type`, counts the forward commands of a saga that were refused at their commit because the saga left its forward phase while the step was in flight: a compensation claimed it at its deadline, or it ended. Nothing of a refused command was stored, so a sample needs no repair. The counter is registered on its first sample: until a forward command has been refused, the endpoint answers `404`. With the default fifteen-minute deadline it stays there; Chapter 17's two-backend run, with a deadline of a second and a half and saga commands delayed on purpose, makes it count. A rate that keeps climbing in production means deadlines shorter than the steps they bound.
+
+**Metrics — saga steps run again in place:**
+
+```bash
+curl -s http://localhost:8080/actuator/metrics/streamrune.saga.delivery_retried | jq .
+```
+
+`streamrune.saga.delivery_retried`, tagged `saga.type`, counts the saga steps the runner ran again in place because its write of the saga row lost the compare-and-swap to another writer — a twin delivery, a deadline claim, another backend. The step reads the row that won and routes the event on it, without a backoff and without the subscription redelivering the page; one sample per run again, at most two per event (`streamrune.saga.cas_conflicts` counts the conflicts themselves). It needs no alert. With the saga subscription leading on one backend the writers rarely meet: a few samples around a handover, when a deposed leader may still finish a step the new one runs, or when a deadline falls inside a step. Like the fence counter, it is registered on its first sample.
 
 **Paginated event list:**
 
