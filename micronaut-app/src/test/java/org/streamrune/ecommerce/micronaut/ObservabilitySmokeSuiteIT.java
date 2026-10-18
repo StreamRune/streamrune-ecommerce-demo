@@ -1,6 +1,7 @@
 package org.streamrune.ecommerce.micronaut;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.micronaut.core.type.Argument;
@@ -19,10 +20,15 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.subscription.LeaseRole;
+import org.streamrune.core.subscription.SubscriptionHealth;
+import org.streamrune.runtime.SubscriptionHealthContributor;
 
 /**
  * Focused smoke suite for the Micronaut observability / admin HTTP surface added in MB3:
@@ -47,7 +53,32 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
 
   @Inject EmbeddedServer server;
 
+  @Inject SubscriptionHealthContributor subscriptionHealth;
+
   // ── Admin endpoints ────────────────────────────────────────────────────────
+
+  /**
+   * The saga subscription and the payment process manager's subscription are registered with the
+   * health contributor, each under its own lease; a single application takes both leases. The
+   * application of the previous test class does not give its leases back, so this one may wait for
+   * them to expire (the test lease lives 5 s).
+   */
+  @Test
+  void theSagaSubscriptionIsRegisteredAndLeads() {
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(250))
+        .untilAsserted(
+            () -> {
+              Map<String, LeaseRole> roles =
+                  subscriptionHealth.health().stream()
+                      .collect(
+                          Collectors.toMap(SubscriptionHealth::name, SubscriptionHealth::role));
+              assertThat(roles)
+                  .containsEntry("order-fulfillment-saga", LeaseRole.LEADING)
+                  .containsEntry("payment-process-manager", LeaseRole.LEADING);
+            });
+  }
 
   @Test
   void adminHealthReturnsUp() {

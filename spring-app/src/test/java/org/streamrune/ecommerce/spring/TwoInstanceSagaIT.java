@@ -15,6 +15,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -25,6 +26,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -32,33 +34,41 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.streamrune.core.metrics.MetricNames;
+import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.runtime.PollingEventSubscription;
 
 /**
- * Two backends on one database: no forward command of a fulfillment saga is stored after that
- * saga's compensation, whichever backend runs the step and whichever claims the deadline.
+ * Two backends on one database: one leads the fulfillment saga, the other stands by and takes over
+ * when the leader stops, and no forward command of a fulfillment saga is stored after that saga's
+ * compensation, whichever backend runs the step and whichever claims the deadline.
  *
  * <p>Two Spring contexts of the app run in this JVM against a database of their own, {@code
  * two_instances}, on the shared PostgreSQL container. They are built with {@link
  * SpringApplicationBuilder}, not {@code @SpringBootTest}, so that neither is the cached test
  * context of the other integration tests. Each has its own connection pool, its own saga runner and
- * its own timeout runner; they share the database and nothing else. A step lock is memory: a
- * timeout runner on one backend does not wait for a step in flight on the other. What keeps a
- * forward command and its saga's compensation in order across the two is the saga runner's forward
- * fence: every forward command takes a lock that every write stamping a compensation episode or
- * ending the saga also takes, held to the command's commit, so the command is stored wholly before
- * the claim or refused at its commit.
+ * its own timeout runner; they share the database and nothing else. The saga runner carries the
+ * lease {@code "saga:" + saga type} over the single-active-consumer leadership, and the saga
+ * subscription built with {@code sagaRunner(...)} takes it: one backend delivers the saga's events
+ * and claims its deadlines, the other reads nothing and reports {@link LeaseRole#STANDBY}. The
+ * lease lives 3 s here ({@code streamrune.subscription.single-active-consumer.lease-ttl}) instead
+ * of 15 s.
  *
  * <p>The deadline is short ({@code app.saga.fulfillment-timeout=2s}), the timeout runners poll
  * every 200 ms, and every saga command waits a random 0 to 300 ms first ({@code
  * app.chaos.saga-command-delay-max}): a fulfillment takes about as long as its deadline, so some
  * complete, some are compensated at their deadline, and some deadlines pass while a forward command
  * is in flight. Eight client threads place 100 orders, alternating the two backends; after 50
- * orders the second backend is closed and a new one is started on the same database.
+ * orders the test closes the backend whose saga subscription leads (read in this process from the
+ * subscription bean's {@code leaseRole()}), waits for the other to lead, and starts a new backend
+ * in its place. Closing a context gives its leases back, so the survivor takes over within one
+ * polling interval. Exactly one backend leads before the restart, the survivor leads after it, and
+ * exactly one leads once the new backend is up.
  *
- * <p>A forward command refused at its commit is counted and logged, not asserted: whether a claim
- * catches a command in flight depends on timing, and most runs see one or two. The framework's own
+ * <p>A forward command refused at its commit is counted and logged, not asserted: the leader runs
+ * every step and claims every deadline, and a refusal needs a claim that lands underneath a step in
+ * flight — a claim after the bounded wait, or the overlap of a handover. The framework's own
  * two-node tests hold a command at its commit on purpose and prove the refusal deterministically;
  * this test checks the outcome under load.
  *
@@ -80,6 +90,14 @@ class TwoInstanceSagaIT {
   private static final int RESTART_AFTER = 50;
 
   private static final int PRODUCTS = 4;
+
+  /** Each client pauses a random time between these two between two orders. */
+  private static final Duration CLIENT_PAUSE_MIN = Duration.ofSeconds(4);
+
+  private static final Duration CLIENT_PAUSE_MAX = Duration.ofSeconds(12);
+
+  /** Every saga command waits a random time up to this first. */
+  private static final String SAGA_COMMAND_DELAY_MAX = "300ms";
 
   private static final String SAGA_TYPE = SagaType.fromClass(OrderFulfillmentState.class).value();
 
@@ -111,14 +129,12 @@ class TwoInstanceSagaIT {
   @Test
   void twoInstancesUnderLoad_storeNoForwardCommandAfterItsSagasCompensation() throws Exception {
     createDatabase();
-    ConfigurableApplicationContext a = start();
-    ConfigurableApplicationContext[] b = {start()};
-    int portA = port(a);
-    int[] portB = {port(b[0])};
+    ConfigurableApplicationContext[] slots = {start(), start()};
+    int[] ports = {port(slots[0]), port(slots[1])};
 
     for (int p = 0; p < PRODUCTS; p++) {
       post(
-          portA,
+          ports[0],
           "/api/products",
           "ADMIN",
           "admin-1",
@@ -128,20 +144,24 @@ class TwoInstanceSagaIT {
           """
               .formatted(p, p));
       post(
-          portA,
+          ports[0],
           "/api/inventory/two-prod-" + p + "/receive",
           "ADMIN",
           "admin-1",
           "{\"quantity\":1000}");
     }
 
-    // Clients that send to the second backend hold the read lock; the restart holds the write
-    // lock, so it waits for the requests in flight and no request reaches a closed context.
-    var backendB = new ReentrantReadWriteLock();
+    // Every client holds the read lock around its request; the restart holds the write lock, so
+    // it waits for the requests in flight and no request reaches a closed context.
+    var backends = new ReentrantReadWriteLock();
     var next = new AtomicInteger();
     var placed = new AtomicInteger();
     var restarted = new AtomicInteger();
-    long[] fencedOnClosedB = {0};
+    int[] closedSlot = {-1};
+    long[] fencedOnClosed = {0};
+    // How long closing the leader took, and how long the survivor took to lead after that.
+    Duration[] closing = {null};
+    Duration[] takeover = {null};
     ExecutorService clients = Executors.newFixedThreadPool(CLIENTS);
     // A client that fails stops the others, so that none posts to a context being closed.
     try {
@@ -158,35 +178,50 @@ class TwoInstanceSagaIT {
                          "lines":[{"productId":"two-prod-%d","quantity":1,"unitPrice":10.00}]}
                         """
                             .formatted(i, customer, i % PRODUCTS);
-                    if (i % 2 == 0) {
-                      post(portA, "/api/orders", "CUSTOMER", customer, body);
-                    } else {
-                      backendB.readLock().lock();
-                      try {
-                        post(portB[0], "/api/orders", "CUSTOMER", customer, body);
-                      } finally {
-                        backendB.readLock().unlock();
-                      }
+                    backends.readLock().lock();
+                    try {
+                      post(ports[i % 2], "/api/orders", "CUSTOMER", customer, body);
+                    } finally {
+                      backends.readLock().unlock();
                     }
-                    // Each client pauses 4 to 12 seconds between two orders, about one order a
-                    // second
-                    // over the eight. A backend's saga subscription runs one step at a time, and
-                    // each
-                    // order's three forward commands wait 450 ms on average there: at this pace the
-                    // subscription keeps up, so a fulfillment takes about as long as its deadline
-                    // instead of waiting behind a backlog of every order placed at once.
-                    Thread.sleep(ThreadLocalRandom.current().nextLong(4_000, 12_000));
+                    // Each client pauses CLIENT_PAUSE_MIN to CLIENT_PAUSE_MAX between two orders,
+                    // about one order a second over the eight. The leading backend's saga
+                    // subscription runs every step of both backends' orders, one at a time, and
+                    // each order's three forward commands wait 450 ms on average there: at this
+                    // pace the subscription keeps up, so a fulfillment takes about as long as its
+                    // deadline instead of waiting behind a backlog of every order placed at once.
+                    Thread.sleep(
+                        ThreadLocalRandom.current()
+                            .nextLong(CLIENT_PAUSE_MIN.toMillis(), CLIENT_PAUSE_MAX.toMillis()));
                     if (placed.incrementAndGet() == RESTART_AFTER) {
-                      backendB.writeLock().lock();
+                      backends.writeLock().lock();
                       try {
-                        fencedOnClosedB[0] = fenced(b[0]);
-                        b[0].close();
-                        contexts.remove(b[0]);
-                        b[0] = start();
-                        portB[0] = port(b[0]);
+                        int leader = awaitOneLeader(slots, "before the restart");
+                        int survivor = 1 - leader;
+                        fencedOnClosed[0] = fenced(slots[leader]);
+                        long closingAt = System.nanoTime();
+                        slots[leader].close();
+                        contexts.remove(slots[leader]);
+                        long closedAt = System.nanoTime();
+                        closing[0] = Duration.ofNanos(closedAt - closingAt);
+                        await()
+                            .atMost(Duration.ofSeconds(30))
+                            .pollInterval(Duration.ofMillis(100))
+                            .untilAsserted(
+                                () ->
+                                    assertThat(role(slots[survivor]))
+                                        .as("the surviving backend's saga subscription")
+                                        .isEqualTo(LeaseRole.LEADING));
+                        takeover[0] = Duration.ofNanos(System.nanoTime() - closedAt);
+                        closedSlot[0] = leader;
+                        slots[leader] = start();
+                        ports[leader] = port(slots[leader]);
+                        assertThat(awaitOneLeader(slots, "after the restart"))
+                            .as("the backend that leads after the restart")
+                            .isEqualTo(survivor);
                         restarted.incrementAndGet();
                       } finally {
-                        backendB.writeLock().unlock();
+                        backends.writeLock().unlock();
                       }
                     }
                   }
@@ -232,19 +267,24 @@ class TwoInstanceSagaIT {
             "SELECT count(*) FROM saga_state WHERE saga_type = '"
                 + SAGA_TYPE
                 + "' AND saga_id LIKE 'fulfillment-two-order-%' AND status = 'COMPLETED'");
-    long fencedA = fenced(a);
-    long fencedB = fenced(b[0]);
+    long fencedSurvivor = fenced(slots[1 - closedSlot[0]]);
+    long fencedRestarted = fenced(slots[closedSlot[0]]);
     LOG.info(
         "Two-instance run: fulfillment sagas by status {}; of the test's orders, completed {} and"
-            + " compensated at their deadline {}; forward commands fenced {} (first backend {},"
-            + " closed second backend {}, restarted second backend {})",
+            + " compensated at their deadline {}; slot {} led and was closed in {} ms, slot {} led"
+            + " {} ms after that; forward commands fenced {} (closed leader {}, survivor {},"
+            + " restarted backend {})",
         byStatus,
         completed,
         timeoutCompensations,
-        fencedA + fencedOnClosedB[0] + fencedB,
-        fencedA,
-        fencedOnClosedB[0],
-        fencedB);
+        closedSlot[0],
+        closing[0].toMillis(),
+        1 - closedSlot[0],
+        takeover[0].toMillis(),
+        fencedOnClosed[0] + fencedSurvivor + fencedRestarted,
+        fencedOnClosed[0],
+        fencedSurvivor,
+        fencedRestarted);
 
     assertThat(invariantViolations())
         .as("forward commands stored after the first compensation command of their saga")
@@ -253,6 +293,32 @@ class TwoInstanceSagaIT {
         .as("sagas compensated by a timeout claim (non-vacuity)")
         .isPositive();
     assertThat(completed).as("sagas completed (non-vacuity)").isPositive();
+  }
+
+  /**
+   * Waits until exactly one of the two backends' saga subscriptions reports {@link
+   * LeaseRole#LEADING} and the other {@link LeaseRole#STANDBY}, and returns the leading slot.
+   */
+  private static int awaitOneLeader(ConfigurableApplicationContext[] slots, String when) {
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .pollInterval(Duration.ofMillis(100))
+        .untilAsserted(
+            () ->
+                assertThat(Arrays.stream(slots).map(TwoInstanceSagaIT::role).toList())
+                    .as("the saga subscriptions' roles %s", when)
+                    .containsExactlyInAnyOrder(LeaseRole.LEADING, LeaseRole.STANDBY));
+    return IntStream.range(0, slots.length)
+        .filter(i -> role(slots[i]) == LeaseRole.LEADING)
+        .findFirst()
+        .orElseThrow();
+  }
+
+  /** The role of the backend's saga subscription under the saga's lease, read in this process. */
+  private static LeaseRole role(ConfigurableApplicationContext context) {
+    return context
+        .getBean("orderFulfillmentSagaSubscription", PollingEventSubscription.class)
+        .leaseRole();
   }
 
   /**
@@ -278,7 +344,8 @@ class TwoInstanceSagaIT {
                 "--streamrune.sse.keep-alive-interval=1h",
                 "--app.saga.fulfillment-timeout=2s",
                 "--app.saga.timeout-poll-interval=200ms",
-                "--app.chaos.saga-command-delay-max=300ms");
+                "--app.chaos.saga-command-delay-max=" + SAGA_COMMAND_DELAY_MAX,
+                "--streamrune.subscription.single-active-consumer.lease-ttl=3s");
     contexts.add(context);
     return context;
   }

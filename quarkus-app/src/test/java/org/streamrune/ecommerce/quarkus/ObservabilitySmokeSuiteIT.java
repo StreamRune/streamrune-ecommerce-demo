@@ -2,13 +2,20 @@ package org.streamrune.ecommerce.quarkus;
 
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.subscription.LeaseRole;
+import org.streamrune.core.subscription.SubscriptionHealth;
+import org.streamrune.runtime.SubscriptionHealthContributor;
 
 /**
  * Focused smoke suite for the Quarkus observability / admin HTTP surface added in QB3:
@@ -25,6 +32,8 @@ import org.junit.jupiter.api.Test;
 @QuarkusTestResource(PostgresTestResource.class)
 class ObservabilitySmokeSuiteIT {
 
+  @Inject SubscriptionHealthContributor subscriptionHealth;
+
   // ── Admin endpoints ────────────────────────────────────────────────────────
 
   @Test
@@ -40,6 +49,27 @@ class ObservabilitySmokeSuiteIT {
             .getString("status");
 
     assertThat(status).isEqualTo("UP");
+  }
+
+  /**
+   * The saga subscription and the payment process manager's subscription are registered with the
+   * health contributor, each under its own lease; a single application takes both leases.
+   */
+  @Test
+  void theSagaSubscriptionIsRegisteredAndLeads() {
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(250))
+        .untilAsserted(
+            () -> {
+              Map<String, LeaseRole> roles =
+                  subscriptionHealth.health().stream()
+                      .collect(
+                          Collectors.toMap(SubscriptionHealth::name, SubscriptionHealth::role));
+              assertThat(roles)
+                  .containsEntry("order-fulfillment-saga", LeaseRole.LEADING)
+                  .containsEntry("payment-process-manager", LeaseRole.LEADING);
+            });
   }
 
   @Test

@@ -538,23 +538,34 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 ### Two Backends on One Database
 
-Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). The step lock that keeps a deadline claim from compensating underneath a step in flight is memory, so it holds within one backend only; across backends the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
+Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The payment process manager's subscription has a lease of its own, `payment-process-manager`. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
 
-**The profile.** `docker-compose.yml` defines a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take three settings from the environment, with defaults that change nothing:
+**The profile.** `docker-compose.yml` defines a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
 
 | Variable | Property | Default | Effect |
 |---|---|---|---|
 | `APP_SAGA_FULFILLMENT_TIMEOUT` | `app.saga.fulfillment-timeout` | `15m` | The fulfillment saga's deadline |
 | `APP_SAGA_TIMEOUT_POLL_INTERVAL` | `app.saga.timeout-poll-interval` | `10s` | How often each backend's timeout runner looks for sagas past their deadline |
 | `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
+| `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | `management.endpoint.health.show-details` | `never` | With `always`, `/actuator/health` lists each subscription with its `role`: `LEADING` or `STANDBY` (Chapter 15) |
 
-A deadline of one and a half seconds, timeout runners that look every 200 ms and saga commands delayed by up to 300 ms make a fulfillment take about as long as its deadline: some complete, some are compensated at their deadline, and some deadlines pass while a forward command is on its way to the event store — on either backend, claimed by either backend's timeout runner. Start both backends that way (build the JARs first, as in Step 1):
+A deadline of one and a half seconds, timeout runners that look every 200 ms and saga commands delayed by up to 300 ms make a fulfillment take about as long as its deadline: some complete, some are compensated at their deadline, and some deadlines pass while a forward command is on its way to the event store. Start both backends that way, with the health details on (build the JARs first, as in Step 1):
 
 ```bash
 ./gradlew :spring-app:bootJar :notifications-service:bootJar
-APP_SAGA_FULFILLMENT_TIMEOUT=1500ms APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms \
-  APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms docker compose --profile two-backends up -d --build
+MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always APP_SAGA_FULFILLMENT_TIMEOUT=1500ms \
+  APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms \
+  docker compose --profile two-backends up -d --build
 ```
+
+Which backend leads shows in each one's health:
+
+```bash
+curl -s http://localhost:8080/actuator/health | jq '.components.streamRune.details["subscription.order-fulfillment-saga"].role'
+curl -s http://localhost:8091/actuator/health | jq '.components.streamRune.details["subscription.order-fulfillment-saga"].role'
+```
+
+One answers `"LEADING"`, the other `"STANDBY"` — usually the backend that started first. Both serve every request: an order placed on the standby is stored by it, and the leader's saga subscription picks up its `OrderPlaced` from the shared event store.
 
 The delay is a demo-only knob, `SagaCommandDelayInterceptor` in `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/`:
 
@@ -643,13 +654,13 @@ public VirtualThreadCommandBus commandBus(
 }
 ```
 
-The interceptor sleeps on the thread that dispatches the saga's command, after the step read the saga row and before the command's transaction opens: exactly the window in which another backend's timeout runner can claim the saga. Keep the property at `0ms` anywhere but in such a run; it slows every saga down on purpose.
+The interceptor sleeps on the thread that dispatches the saga's command, after the step read the saga row and before the command's transaction opens: exactly the window in which a deadline passes during a step — and in which, around a handover, the new leader's timeout runner can claim a saga whose step the old leader still has in flight. Keep the property at `0ms` anywhere but in such a run; it slows every saga down on purpose.
 
 **The script.** `scripts/two-backends-invariant.sh` drives the run against the two backends:
 
-1. It waits until both answer `/actuator/health`, then creates two products of its own with stock for every order.
+1. It waits until both answer `/actuator/health` and checks that both health answers show the saga subscription's role; without `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always` it stops there and says so. Then it creates two products of its own with stock for every order.
 2. It places `ORDERS` orders (60 by default), one a second, alternating `http://localhost:8080` and `http://localhost:8091` — the `POST /api/orders` of Step 5.
-3. Halfway it kills the second backend with `docker compose kill -s SIGKILL backend-2`, starts the same container again with `docker compose start backend-2` (so it keeps the settings above) and waits until it answers. Whatever that backend had in flight — a saga step between two forward commands, a claim, a compensation — stops without a shutdown.
+3. Halfway it reads both roles, exits `1` unless exactly one backend reads `LEADING`, and kills that one with `docker compose kill -s SIGKILL`. Whatever the leader had in flight — a saga step between two forward commands, a claim, a compensation — stops without a shutdown, and it does not give its lease back. The script waits until the other backend reads `LEADING` (at most 60 seconds; the lease expires 15 seconds after its last renewal), prints how long that took, starts the killed container again with `docker compose start` (so it keeps the settings above) and waits until it answers; it comes back as the standby.
 4. It waits until no `saga_state` row of the fulfillment saga is outside `COMPLETED`, `COMPENSATED` and `FAILED` (at most five minutes; a `FAULTED` saga counts as not ended).
 5. It prints the sagas by status, the number compensated at their deadline (an episode with no cause event) and each backend's count of fenced forward commands, then runs the invariant query below and exits `1` if it returns a row.
 
@@ -661,33 +672,35 @@ A run printed:
 
 ```text
 Waiting for http://localhost:8080/actuator/health (180s) …
-  ✓ answered after 5s.
-Waiting for http://localhost:8091/actuator/health (180s) …
   ✓ answered after 2s.
-Placing 60 orders, alternating http://localhost:8080 and http://localhost:8091 …
-Killing backend-2 with SIGKILL after 30 orders …
- Container saga-fence-demo-backend-2-1 Killing 
- Container saga-fence-demo-backend-2-1 Killed 
- Container saga-fence-demo-rabbitmq-1 Waiting 
- Container saga-fence-demo-postgres-1 Waiting 
- Container saga-fence-demo-postgres-1 Healthy 
- Container saga-fence-demo-rabbitmq-1 Healthy 
- Container saga-fence-demo-backend-2-1 Starting 
- Container saga-fence-demo-backend-2-1 Started 
 Waiting for http://localhost:8091/actuator/health (180s) …
-  ✓ answered after 5s.
+  ✓ answered after 1s.
+Placing 60 orders, alternating http://localhost:8080 and http://localhost:8091 …
+Killing the leader, backend-2 (http://localhost:8091), with SIGKILL after 30 orders …
+ Container streamrune-ecommerce-demo-backend-2-1 Killing 
+ Container streamrune-ecommerce-demo-backend-2-1 Killed 
+  ✓ http://localhost:8080 leads the saga 13 s after the kill.
+ Container streamrune-ecommerce-demo-postgres-1 Waiting 
+ Container streamrune-ecommerce-demo-rabbitmq-1 Waiting 
+ Container streamrune-ecommerce-demo-postgres-1 Healthy 
+ Container streamrune-ecommerce-demo-rabbitmq-1 Healthy 
+ Container streamrune-ecommerce-demo-backend-2-1 Starting 
+ Container streamrune-ecommerce-demo-backend-2-1 Started 
+Waiting for http://localhost:8091/actuator/health (180s) …
+  ✓ answered after 4s.
+  ✓ backend-2 is back, as standby: STANDBY.
 Waiting until every order-fulfillment saga has ended (at most 5 minutes) …
 Order-fulfillment sagas by status:
-COMPENSATED|1
-COMPLETED|60
+COMPENSATED|6
+COMPLETED|55
 Compensated at their deadline (an episode with no cause event):
-1
-Forward commands refused at their commit on http://localhost:8080 since it started: 1.0
+6
+Forward commands refused at their commit on http://localhost:8080 since it started: 0
 Forward commands refused at their commit on http://localhost:8091 since it started: 0
 ✓ No forward command was stored after its saga's compensation.
 ```
 
-The counts differ from run to run — how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
+The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
 
 **Orders the run leaves to put right.** The check says that no forward command came after a compensation; it does not say that every compensation undid everything. The demo's `compensate()` works from the saga row, and Chapter 11 ("Reliability under failure") names the two cases that leaves open, which a deadline this short produces: a reservation stored just before the claim is not released, and a capture by the payment process manager that commits after the claim is not refunded. Such an order is cancelled while its stock stays reserved or its payment stays captured; the demo's planned refund and stock-release flow closes both. These two queries list them:
 
@@ -738,11 +751,11 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.forward_commands_
 curl -s http://localhost:8091/actuator/metrics/streamrune.saga.forward_commands_fenced | jq '.measurements[0].value'
 ```
 
-A backend that has refused none answers `404`: the counter is registered on its first sample. The count of the second backend starts again at its restart.
+A backend that has refused none answers `404`: the counter is registered on its first sample. The count of the killed backend starts again at its restart.
 
-The logs of the two backends also hold a stream of `ERROR` lines such as `Poll loop 'subscription 'order-fulfillment-saga'' failed (2 consecutive failure(s)); retrying in 633 ms`, each followed by `OptimisticLockException: Stale view of saga fulfillment-…` and a stack trace. The demo's saga subscription takes no lease (Chapter 11), so both backends deliver every event; when one of them loses the write of a saga row to the other, its poll loop logs the conflict as a failure and delivers the batch again after a back-off that grows with each consecutive failure, and the redelivery skips what the other backend already applied. That is the framework's handling of the race: it changes no outcome, but it delays that backend's other sagas for the length of the back-off, which is one reason fewer sagas meet so short a deadline with two backends than with one. Each refusal also logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
+**What a handover logs.** Little. The saga subscription of the standby asks for the lease every polling interval and gets nothing while the dead leader's lease is live; once it has expired, the next attempt takes it, and the subscription starts to deliver from the shared checkpoint — no line marks the moment, and `role` turns `LEADING` in that backend's health. A leader stopped cleanly gives the lease back first, and the other backend takes over within one polling interval. The restarted backend logs one `INFO` line from its timeout runner at startup, `Saga type …OrderFulfillmentState: no subscription of this saga type is anchored in this process; …`, because on Spring the timeout runner bean starts before the saga subscription bean; after that it stands by without a word. The pages the dead leader had delivered but not yet checkpointed are delivered again by the new leader: whatever the dead leader had already applied is skipped on the row's last applied offset, and whatever it had dispatched is answered from the command inbox. A write of a saga row the new leader loses — to a deadline claim, or to the dead leader's last transaction if the database committed it — is run again in place and logged at `DEBUG` only, counted by `streamrune.saga.delivery_retried` (Chapter 15); only a third conflict in a row would reach the subscription and log a `Poll loop 'subscription 'order-fulfillment-saga'' failed` `ERROR`. A deadline claim on a saga whose forward command the dead leader left open in the database waits for that transaction to end, at most the event store's statement timeout. The `ERROR` lines `Snapshot save failed after commit on stream inventory:…` that both backends log with this profile are the inventory aggregate's snapshot, not the saga: the events are committed, and the next command on the stream snapshots again. Each refusal of a forward command logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
 
-`TwoInstanceSagaIT` in `spring-app/src/test` runs the same check in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, the second context closed and a new one started after 50 orders, a deadline of two seconds, timeout runners polling every 200 ms and the same delay. It asserts that every saga ends, that the invariant query returns nothing, and that the run compensated at least one saga at its deadline and completed at least one.
+`TwoInstanceSagaIT` in `spring-app/src/test` runs the same check in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, a deadline of two seconds, timeout runners polling every 200 ms, the same delay, and a lease of 3 seconds (`streamrune.subscription.single-active-consumer.lease-ttl=3s`). After 50 orders it reads each context's role in-process (`leaseRole()` of the `orderFulfillmentSagaSubscription` bean), closes the context that leads, waits for the other to lead and starts a new context in the closed one's place. A closed context gives its leases back, so the survivor takes over within a polling interval of the close. It asserts that exactly one context leads before the restart, that the survivor leads after it and that exactly one leads once the new context is up; that every saga ends, that the invariant query returns nothing, and that the run compensated at least one saga at its deadline and completed at least one.
 
 Stop the stack and remove its volume when you are done:
 

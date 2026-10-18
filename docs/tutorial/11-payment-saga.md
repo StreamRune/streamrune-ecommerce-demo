@@ -1948,7 +1948,7 @@ app:
     timeout-poll-interval: 10s
 ```
 
-**SagaRunner bean** — the runner drives the saga when fed events. Make it a bean, not a local variable inside the subscription bean: the Spring integration looks for `SagaRunner` beans. For each one it starts a compensation retry sweeper (a compensation that failed transiently is re-driven, see [What We Learned](#what-we-learned)), it applies `streamrune.inbox.retention-max-age` to the runner's key-age guard, which stops a live event from resuming a compensation so old that its deduplication keys may already be pruned, and it applies `streamrune.saga.forward-fence` to the runner's forward fence (see [Reliability under failure](#reliability-under-failure)). A runner the integration cannot see gets none of them. `metrics` is the `StreamRuneMetrics` bean the integration registers when Micrometer is on the classpath (Chapter 15); the runner counts its saga meters there, `streamrune.saga.forward_commands_fenced` among them.
+**SagaRunner bean** — the runner drives the saga when fed events. Make it a bean, not a local variable inside the subscription bean: the Spring integration looks for `SagaRunner` beans. For each one it starts a compensation retry sweeper (a compensation that failed transiently is re-driven, see [What We Learned](#what-we-learned)), it applies `streamrune.inbox.retention-max-age` to the runner's key-age guard, which stops a live event from resuming a compensation so old that its deduplication keys may already be pruned, and it applies `streamrune.saga.forward-fence` to the runner's forward fence (see [Reliability under failure](#reliability-under-failure)). A runner the integration cannot see gets none of them. `metrics` is the `StreamRuneMetrics` bean the integration registers when Micrometer is on the classpath (Chapter 15); the runner counts its saga meters there, `streamrune.saga.forward_commands_fenced` and `streamrune.saga.delivery_retried` among them. `leadership` is the integration's `SubscriptionLeadership` bean, the same single-active-consumer leadership its projection runners use (on unless `streamrune.subscription.single-active-consumer.enabled` is `false`); `.leadership(...)` gives the runner a lease over it, named `"saga:" + saga type` (`SagaRunner.lease()`) — see the saga subscription below. `NOOP`, or no bean, leaves the runner without a lease.
 
 ```java
 @Bean
@@ -1957,7 +1957,8 @@ public SagaRunner<?> orderFulfillmentSagaRunner(
     PostgresSagaStore sagaStore,
     VirtualThreadCommandBus commandBus,
     PostgresSagaDeadLetterStore sagaDeadLetterStore,
-    ObjectProvider<StreamRuneMetrics> metrics) {
+    ObjectProvider<StreamRuneMetrics> metrics,
+    ObjectProvider<SubscriptionLeadership> leadership) {
   return SagaRunner.<OrderFulfillmentState>builder()
       .orchestrator(orderFulfillmentSaga)
       .sagaStore(sagaStore)
@@ -1966,25 +1967,32 @@ public SagaRunner<?> orderFulfillmentSagaRunner(
       // blocking the subscription.
       .sagaDeadLetterStore(sagaDeadLetterStore)
       .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+      // One backend delivers this saga type; the others stand by.
+      .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
       .build();
 }
 ```
 
-`SagaRunner` processes events fed to it. For each event it receives, it calls `isStartEvent()` on the orchestrator. If true, it evolves the event from `initialState()` and writes the saga's row with `sagaStore.createGenesisPending(...)` before it dispatches anything (an atomic insert — a concurrent duplicate throws `OptimisticLockException`, and the runner then goes by the row it finds), dispatches the commands `handle()` returns, and records the start with `sagaStore.applyEvent(...)`. For every other event it finds the saga first: the one the event's origin names when the event carries an origin of this saga type, otherwise the one `correlateByEventData()` answers (no answer means the event belongs to no saga, and nothing is loaded or written for it). It then loads the state and its `version` via `sagaStore.load(...)`, calls `evolve()` then `handle()`, dispatches the resulting commands, and persists the updated state with `sagaStore.applyEvent(..., expectedVersion, ...)` — a compare-and-swap write that only succeeds if the stored version still matches what was loaded, and that records the event's global offset as the last one the row applied, so a redelivery of the event is skipped. This cycle is not wrapped in a single atomic transaction, and it does not need to be: a concurrent writer that raced ahead (another subscription batch, or the saga's own timeout sweep) is caught by the version CAS, which throws `OptimisticLockException` on conflict; the subscription retries the batch against fresh state, and any command already dispatched by the losing attempt is deduplicated by the command inbox above rather than re-applied.
+`SagaRunner` processes events fed to it. For each event it receives, it calls `isStartEvent()` on the orchestrator. If true, it evolves the event from `initialState()` and writes the saga's row with `sagaStore.createGenesisPending(...)` before it dispatches anything (an atomic insert — a concurrent duplicate throws `OptimisticLockException`, and the runner then goes by the row it finds), dispatches the commands `handle()` returns, and records the start with `sagaStore.applyEvent(...)`. For every other event it finds the saga first: the one the event's origin names when the event carries an origin of this saga type, otherwise the one `correlateByEventData()` answers (no answer means the event belongs to no saga, and nothing is loaded or written for it). It then loads the state and its `version` via `sagaStore.load(...)`, calls `evolve()` then `handle()`, dispatches the resulting commands, and persists the updated state with `sagaStore.applyEvent(..., expectedVersion, ...)` — a compare-and-swap write that only succeeds if the stored version still matches what was loaded, and that records the event's global offset as the last one the row applied, so a redelivery of the event is skipped. This cycle is not wrapped in a single atomic transaction, and it does not need to be: a concurrent writer that raced ahead (another subscription batch, or the saga's own timeout sweep) is caught by the version CAS. The runner then runs the step again in place — it reads the row that won and routes the event on it, up to three attempts in all — and any command already dispatched by the losing attempt is deduplicated by the command inbox above rather than re-applied. Only a third conflict in a row reaches the subscription, as an `OptimisticLockException`, and the subscription retries the batch against fresh state.
 
 **PollingEventSubscription bean** — the subscription feeds events from the store to the runner:
 
 ```java
 @Bean(destroyMethod = "close")
+@DependsOn("orderFulfillmentTimeoutRunner")
 public PollingEventSubscription orderFulfillmentSagaSubscription(
-    EventStore eventStore, OffsetStore offsetStore, SagaRunner<?> orderFulfillmentSagaRunner) {
+    EventStore eventStore,
+    OffsetStore offsetStore,
+    SagaRunner<?> orderFulfillmentSagaRunner,
+    ObjectProvider<SubscriptionHealthContributor> health) {
   var subscription =
       PollingEventSubscription.builder()
           .subscriptionName("order-fulfillment-saga")
           .eventStore(eventStore)
           .offsetStore(offsetStore)
           .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
-          .listener(orderFulfillmentSagaRunner.asEventListener())
+          .sagaRunner(orderFulfillmentSagaRunner)
+          .healthContributor(health.getIfAvailable())
           .build();
   subscription.start();
   return subscription;
@@ -1992,6 +2000,8 @@ public PollingEventSubscription orderFulfillmentSagaSubscription(
 ```
 
 > **This bean is required.** `SagaRunner` does not subscribe to the event store itself — it only processes events when explicitly called. Without `PollingEventSubscription`, the saga is never triggered: `OrderPlaced` events land in the event store but the runner never sees them. The subscription polls the event store on its own virtual thread every 500 ms, passes new events to the runner's `asEventListener()`, and persists the offset to `PostgresOffsetStore` under the name `"order-fulfillment-saga"`.
+
+**The saga lease.** `.sagaRunner(orderFulfillmentSagaRunner)` is `.listener(runner.asEventListener())` plus the runner's lease, and it makes this subscription the lease's *anchor*: it asks for the lease at the top of every drain, before it reads its checkpoint, and gives it back when it closes or pauses — after the page in flight is saved. With one backend it always gets it. With several on one database (Chapter 17), one of them holds it and delivers the saga's events; on the others the subscription reads neither the checkpoint nor the stream, saves nothing and asks again every polling interval, so it takes over within one interval after a clean stop and within the lease's time to live (15 s, `streamrune.subscription.single-active-consumer.lease-ttl`) plus one interval after a crash. The timeout runner and the compensation retry sweeper of the runner *follow* the lease: they act only while the subscription of their own backend leads, and never take or give back the lease themselves. Build a saga's subscription with `.sagaRunner(...)`, not `.listener(runner.asEventListener())`: a runner with a lease that no subscription anchors delivers on every backend that runs the listener, its timeout runner and sweeper act on none, and the runner says so with a `WARN` on its first delivery. A runner built without `.leadership(...)` delivers on every backend too; the integration logs a `WARN` at startup for each such saga type while leadership is on. `.healthContributor(...)` registers the subscription with the integration's `SubscriptionHealthContributor`: the health details list it as `subscription.order-fulfillment-saga`, with its `role` — `LEADING` or `STANDBY` (Chapter 15). `@DependsOn("orderFulfillmentTimeoutRunner")` makes Spring close the subscription before it stops the timeout runner: the subscription gives the lease back first, and a timeout runner that stops while its backend leads logs a warning.
 
 **SagaTimeoutRunner bean** — compensates a fulfillment that has not ended by its deadline. It polls the saga store on a virtual thread of its own, independent of the event stream:
 
@@ -2022,7 +2032,7 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
 }
 ```
 
-Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
+Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. A poll it skips before the saga subscription of its process has started logs one `INFO` line — here once at every start, since this bean starts before the subscription bean, which depends on it; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
 
 **PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (you build the class itself in Chapter 12). Three consecutive gateway failures open it; a 30-second cooldown then admits one probe:
 
@@ -2048,7 +2058,11 @@ public PaymentProcessManager paymentProcessManager(
 
 @Bean(destroyMethod = "close")
 public PollingEventSubscription paymentProcessSubscription(
-    EventStore eventStore, OffsetStore offsetStore, PaymentProcessManager paymentProcessManager) {
+    EventStore eventStore,
+    OffsetStore offsetStore,
+    PaymentProcessManager paymentProcessManager,
+    ObjectProvider<SubscriptionLeadership> leadership,
+    ObjectProvider<SubscriptionHealthContributor> health) {
   var subscription =
       PollingEventSubscription.builder()
           .subscriptionName("payment-process-manager")
@@ -2056,11 +2070,15 @@ public PollingEventSubscription paymentProcessSubscription(
           .offsetStore(offsetStore)
           .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
           .listener(paymentProcessManager)
+          .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+          .healthContributor(health.getIfAvailable())
           .build();
   subscription.start();
   return subscription;
 }
 ```
+
+`.leadership(...)` gives the payment process manager's subscription a lease of its own, named after the subscription, `payment-process-manager`: with several backends one captures the payments and the others stand by, as for the saga. `.healthContributor(...)` lists it in the health details with its role.
 
 These two beans are what let an order run all the way to `COMPLETED` end-to-end: `OrderPlaced` → (saga) `InitiatePayment` → `PaymentInitiated` → (manager) `CapturePayment` → `PaymentCaptured` → (saga) `ReserveStock` → `StockReserved` → (saga) `ConfirmOrder` → `OrderConfirmed` → `COMPLETED`.
 
@@ -2076,8 +2094,10 @@ Add the necessary imports:
 import java.time.Duration;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.DependsOn;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
@@ -2089,6 +2109,7 @@ import org.streamrune.postgres.PostgresSagaDeadLetterStore;
 import org.streamrune.postgres.PostgresSagaStore;
 import org.streamrune.runtime.SagaRunner;
 import org.streamrune.runtime.SagaTimeoutRunner;
+import org.streamrune.runtime.SubscriptionHealthContributor;
 import org.streamrune.spring.StreamRuneProperties;
 ```
 
@@ -2454,7 +2475,7 @@ This chapter introduced six collaborating types from the saga subsystem:
 
 **`LoadedSaga`** is what `sagaStore.load(sagaId, sagaType, stateType)` returns, wrapped in `Optional`: a record of `(state, status, version)`. `status` is the framework-owned, authoritative lifecycle value from the store row — not derived from `state.status()` — because the framework can persist a status the domain state never reflects (for example `FAULTED` after a poison event the orchestrator's own `evolve` never saw, or `COMPENSATED`/`FAILED` set by `SagaRunner` itself after classifying a compensation outcome). `version` is the CAS token to pass back into `update`.
 
-**`SagaRunner`** is the runtime that connects all the pieces — but it does not subscribe to anything itself (see Step 6): it is fed events by a `PollingEventSubscription` calling its `asEventListener()`, identifies which sagas are interested in each event, and coordinates the load → evolve → handle → persist → dispatch cycle. `SagaCommand` is the value it dispatches: a pair of `(command, aggregateId)` where `aggregateId` (an `AggregateId`, not a bare string) identifies the target aggregate stream. Each dispatched command carries a deterministic `IdempotencyKey` so a redelivered event does not re-apply it (see the command inbox in Step 6). A `SagaDeadLetterStore` is a required builder field: an orchestrator method that throws is treated as a poison event, quarantined, and the saga marked `FAULTED` instead of wedging the whole subscription.
+**`SagaRunner`** is the runtime that connects all the pieces — but it does not subscribe to anything itself (see Step 6): it is fed events by a `PollingEventSubscription` built with `.sagaRunner(runner)`, which calls its `asEventListener()` under the runner's lease, identifies which sagas are interested in each event, and coordinates the load → evolve → handle → persist → dispatch cycle. `SagaCommand` is the value it dispatches: a pair of `(command, aggregateId)` where `aggregateId` (an `AggregateId`, not a bare string) identifies the target aggregate stream. Each dispatched command carries a deterministic `IdempotencyKey` so a redelivered event does not re-apply it (see the command inbox in Step 6). A `SagaDeadLetterStore` is a required builder field: an orchestrator method that throws is treated as a poison event, quarantined, and the saga marked `FAULTED` instead of wedging the whole subscription.
 
 **Compensation** is where saga logic earns its complexity budget. `compensate()` receives the current state, the failure, and the command that failed, and returns the compensation commands to dispatch. `SagaRunner` then classifies the outcome for you: `COMPENSATED` if every compensation command succeeded, `FAILED` if one of them was rejected for a business reason (a `DomainException`, which no retry can change) **or** the list was empty. A compensation command that fails *transiently* — a store blip, an open circuit breaker — decides nothing: the saga stays `COMPENSATING`, and the compensation retry sweeper the Spring integration starts for the `orderFulfillmentSagaRunner` bean re-drives it under the same idempotency keys, so a refund that already went through is not repeated. If the compensation still has not finished after `streamrune.saga.compensation-retry-give-up-after` (1 hour by default), the sweeper faults the saga for an operator; Chapter 14's `POST /api/admin/sagas/faulted/resume` runs it again. The compensation commands must undo exactly the steps that already succeeded — which means the implementation must be aware of which step failed. `OrderFulfillmentSaga.compensate()` (Step 3) has one branch per step: `AWAITING_PAYMENT` cancels only, `AWAITING_INVENTORY` refunds and cancels, `AWAITING_CONFIRMATION` releases the stock reservation before refunding and cancelling, and every other (terminal) state returns an empty list. A `compensate()` call that itself throws is treated the same as any other poison event: the triggering event is quarantined and the saga is marked `FAULTED`.
 
@@ -2470,11 +2491,26 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 **Saga command dispatch is effectively-once.** Every command `SagaRunner` dispatches carries a deterministic `IdempotencyKey`. The `commandInbox` bean records each key in `command_inbox` inside the same transaction as the command's resulting events, so if the `order-fulfillment-saga` subscription redelivers an event — a batch retry after a transient failure — the saga re-evaluates `handle()`/`compensate()` but the bus recognizes the repeated key and returns the prior result instead of re-dispatching. A redelivered event cannot double-reserve stock or double-refund a payment. The inbox check happens inside the interceptor chain, not ahead of it, so authorization and audit interceptors still run on every replay — only the decider/event-append step is skipped.
 
-**Saga writes are optimistic-concurrency safe.** `sagaStore.create`/`update` are CAS-protected on the `version` column, so two writers racing on the same saga (for example the event path and a timeout sweep) cannot silently lose an update — the loser gets `OptimisticLockException` and retries on fresh state. Start-event dedup is atomic too: two listeners racing on the same `OrderPlaced` resolve to one `create` winner and one no-op.
+**Saga writes are optimistic-concurrency safe.** `sagaStore.create`/`update` are CAS-protected on the `version` column, so two writers racing on the same saga (for example the event path and a timeout sweep) cannot silently lose an update — the loser gets `OptimisticLockException`; on the event path the runner runs the step again in place on the row that won. Start-event dedup is atomic too: two listeners racing on the same `OrderPlaced` resolve to one `create` winner and one no-op.
 
 **Timeout-driven compensation is claim-first, so it can't double-compensate.** Each app runs a timeout runner for the fulfillment saga (`SagaTimeoutRunner`, Step 6). It sweeps the sagas past their deadline — `OrderFulfillmentSaga.timeout()`, which the apps set from `app.saga.fulfillment-timeout`, fifteen minutes unless configured — and compensates them. Before dispatching anything, the timeout runner first claims the saga with a CAS write to `COMPENSATING`; only the writer that wins that claim goes on to compute and dispatch compensation commands. A saga that completes normally right as the timeout sweep fires cannot be double-compensated — but not merely because "whichever writer is second loses the CAS on the terminal write": the claim happens *before* any compensation is computed, so losing it means no compensation commands were ever dispatched by that attempt in the first place, not that a second wave of commands was silently discarded after being sent.
 
-**The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it before that subscription on shutdown, since neither integration starts a timeout runner an application declares. The Quarkus producer:
+**The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it after that subscription on shutdown, since neither integration starts a timeout runner an application declares. Closing the saga subscription first gives the saga's lease back, so the timeout runner stops on a backend that does not lead. The two lifecycle classes build the saga subscription with `.sagaRunner(...)` and `.healthContributor(...)` and the payment process manager's with `.leadership(...)` and `.healthContributor(...)`, as Spring does; their saga runners take the integration's `SubscriptionLeadership` bean in `.leadership(...)` (Micronaut's is `@Nullable`: absent when leadership is off). The Quarkus lifecycle's shutdown:
+
+```java
+void onStop(@Observes ShutdownEvent event) {
+  closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
+  closeQuietly(paymentProcessSubscription, "payment-process-manager subscription");
+  paymentProcessSubscription = null;
+  // The saga subscription first: closing it gives the saga's lease back, and the timeout runner
+  // that follows the lease then stops on a backend that does not lead.
+  closeQuietly(orderFulfillmentSagaSubscription, "order-fulfillment-saga subscription");
+  orderFulfillmentSagaSubscription = null;
+  closeQuietly(orderFulfillmentTimeoutRunner::stop, "order-fulfillment saga's timeout runner");
+}
+```
+
+The Quarkus producer of the timeout runner:
 
 ```java
 @Produces
@@ -2502,12 +2538,12 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
 }
 ```
 
-Each app reads the two keys from its own configuration file: Quarkus in ISO-8601 form (`app.saga.fulfillment-timeout=PT15M`, `app.saga.timeout-poll-interval=PT10S` in `application.properties`), Spring and Micronaut as `15m` and `10s` in `application.yml`. Each app's saga runner shares the same `OrderFulfillmentSaga` bean with its timeout runner. `SagaTimeoutE2EIT` (in `spring-app/src/test`) drives a second runner of its own against the app's saga store, built from `new OrderFulfillmentSaga(TIMEOUT)` with a fixed clock, and asserts the exact compensation a timed-out `AWAITING_INVENTORY` saga gets.
+Each app reads the two keys from its own configuration file: Quarkus in ISO-8601 form (`app.saga.fulfillment-timeout=PT15M`, `app.saga.timeout-poll-interval=PT10S` in `application.properties`), Spring and Micronaut as `15m` and `10s` in `application.yml`. Each app's saga runner shares the same `OrderFulfillmentSaga` bean with its timeout runner. `SagaTimeoutE2EIT` (in `spring-app/src/test`) drives a second runner of its own against the app's saga store, built from `new OrderFulfillmentSaga(TIMEOUT)` with a fixed clock; built with `.sagaRunner(...)`, it follows the app's lease, so the test first waits for the app's saga subscription to report `LEADING`. It asserts the exact compensation a timed-out `AWAITING_INVENTORY` saga gets.
 
 **A deadline that passes during a step.** A saga's deadline can pass while a delivery is dispatching that saga's forward commands — the `StockReserved` that arrives at the deadline, say, whose step dispatches `ConfirmOrder`. A claim made at that moment compensates from the state the row holds, which does not include that step. Two mechanisms keep the step's forward commands on the right side of the compensation:
 
 - *In one process, the step lock.* `sagaRunner(orderFulfillmentSagaRunner)` binds the timeout runner to the saga runner's in-memory step lock; `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)`. While a delivery is dispatching a saga's forward commands, the claim at that saga's deadline is not made: the next poll comes back to the saga and claims a row that includes the step. After three polls that passed the saga over, the claim waits for the step, at most 5 seconds; a claim that waited that long is made underneath a step still in flight, and the forward fence takes over.
-- *Across processes, the forward fence.* The lock is memory and reaches no other process: with two backends on one database (Chapter 17), the timeout runner of one claims underneath a step in flight on the other. What keeps the order there is the saga runner's forward fence. Every forward command the runner dispatches names its saga, and the event store reads the saga row inside the transaction that would store the command's events. That read first takes a lock that every write which stamps a compensation episode, ends the saga or deletes its row also takes, and the command's transaction holds it until it commits. Each forward command is therefore stored wholly before the claim, or it reads the claimed row and is refused at its commit with `SagaForwardFencedException`: nothing of it is stored, no event and no inbox key. The step then resumes the compensation episode instead of going on, or stops at a saga its compensation has already ended. The refusal is a fact about the saga, not a failure of the command, so it is not retried, not dead-lettered and not counted by the circuit breaker. Each one logs an `INFO` line naming the saga and counts one `streamrune.saga.forward_commands_fenced` sample (Chapter 15).
+- *Across processes, the forward fence.* The lock is memory and reaches no other process. With two backends on one database (Chapter 17) the timeout runner follows the saga's lease, so it claims on the backend whose subscription runs the steps, under that backend's lock. Around a handover, though, two backends overlap for a moment: a backend that dies keeps its lease until the lease expires, and a deposed leader learns of the loss only at its next heartbeat and may finish the page in flight, which the new leader delivers again from the shared checkpoint. The timeout runner of the new leader can then claim underneath a step in flight on the old one. What keeps the order there is the saga runner's forward fence. Every forward command the runner dispatches names its saga, and the event store reads the saga row inside the transaction that would store the command's events. That read first takes a lock that every write which stamps a compensation episode, ends the saga or deletes its row also takes, and the command's transaction holds it until it commits. Each forward command is therefore stored wholly before the claim, or it reads the claimed row and is refused at its commit with `SagaForwardFencedException`: nothing of it is stored, no event and no inbox key. The step then resumes the compensation episode instead of going on, or stops at a saga its compensation has already ended. The refusal is a fact about the saga, not a failure of the command, so it is not retried, not dead-lettered and not counted by the circuit breaker. Each one logs an `INFO` line naming the saga and counts one `streamrune.saga.forward_commands_fenced` sample (Chapter 15).
 
 So no forward command of a fulfillment is stored after its compensation, on any number of backends, and the demo's deciders carry no rule whose only job is to refuse a forward command that arrives after its order was cancelled. A forward command stored *before* the claim is one the compensation has to cover: the claim compensates from the row, and the step that stored the command had not written the row yet. The shipped `compensate()` works from the row's state and leaves two cases open:
 
@@ -2516,7 +2552,7 @@ So no forward command of a fulfillment is stored after its compensation, on any 
 
 The demo's planned refund and stock-release flow closes both: a compensation that reads what the streams hold, not only the row. With the fifteen-minute deadline neither case occurs in normal use; the two-backend run of Chapter 17, with a deadline of a second and a half and saga commands delayed on purpose, produces both.
 
-**`streamrune.saga.forward-fence`** sets the fence of every `SagaRunner` bean that does not name it itself (`SagaRunner.Builder.forwardFence`), on all three frameworks: `auto` (the default), `on` or `off`. `auto` is on while `streamrune.subscription.single-active-consumer.enabled` is `true`, its default, and off when it is `false`. The demo keeps `auto` and leadership on, so the fence is on in all three apps; the startup log says so (`saga forward fence on on 1 SagaRunner bean(s) that name none themselves`). The property governs the integration's own subscriptions; the demo's saga subscription is built by hand (`SubscriptionConfig.pollingOnly`, Step 6) and takes no lease. With two backends, both deliver every event to their saga runner and race on each saga row: the fence and the compare-and-swap writes of the saga store keep the outcome correct, and the delivery that loses a write is retried by its poll loop (Chapter 17 shows what that looks like in the log). Leadership is on because more than one backend can run against the demo's database — the Compose profile of Chapter 17, or two versions side by side during a rolling restart — and the fence then follows the same switch: a deployment that turns leadership off declares that one backend runs, and with it the fence. It costs one lock and one read of the saga row per forward command, inside the command's transaction, and no write. The fence needs the event store and the saga store over the same `DataSource`, which the three integrations provide; `SagaRunner.Builder.build()` refuses a runner whose command bus cannot fence against its saga rows unless the runner says `forwardFence(false)` itself.
+**`streamrune.saga.forward-fence`** sets the fence of every `SagaRunner` bean that does not name it itself (`SagaRunner.Builder.forwardFence`), on all three frameworks: `auto` (the default), `on` or `off`. `auto` is on while `streamrune.subscription.single-active-consumer.enabled` is `true`, its default, and off when it is `false`. The demo keeps `auto` and leadership on, so the fence is on in all three apps; the startup log says so (`saga forward fence on on 1 SagaRunner bean(s) that name none themselves`). The same leadership gives the demo's saga runner its lease (Step 6): with two backends one delivers the saga's events and claims its deadlines, and the other stands by. The fence stays on under leadership for the overlap around a handover, when a deposed or dead leader may still finish a step the new leader also runs; a write the new leader loses to it is run again in place (Chapter 17 shows what a handover logs). Leadership is on because more than one backend can run against the demo's database — the Compose profile of Chapter 17, or two versions side by side during a rolling restart — and the fence then follows the same switch: a deployment that turns leadership off declares that one backend runs, and with it the fence. It costs one lock and one read of the saga row per forward command, inside the command's transaction, and no write. The fence needs the event store and the saga store over the same `DataSource`, which the three integrations provide; `SagaRunner.Builder.build()` refuses a runner whose command bus cannot fence against its saga rows unless the runner says `forwardFence(false)` itself.
 
 ---
 

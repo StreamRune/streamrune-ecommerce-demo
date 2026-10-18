@@ -1,7 +1,9 @@
 package org.streamrune.ecommerce.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,10 @@ import org.streamrune.spring.StreamRuneHealthIndicator;
  * registers the relays it builds, and the demo's runner replaces the framework's. The feed of the
  * per-stream Server-Sent Events endpoint is one of the framework's: it exists because the app sets
  * {@code streamrune.sse.enabled=true}.
+ *
+ * <p>The saga subscription and the payment process manager's subscription register themselves with
+ * the subscription health contributor and add one {@code subscription.<name>} block each, with
+ * their role under their lease: a single application leads both.
  */
 class StreamRuneHealthIT extends AbstractIntegrationTest {
 
@@ -54,6 +60,27 @@ class StreamRuneHealthIT extends AbstractIntegrationTest {
           .containsEntry("alive", true)
           .containsEntry("consecutiveFailures", 0);
     }
+  }
+
+  @Test
+  void theSagaAndPaymentSubscriptionsAreListedWithTheirRole() {
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(250))
+        .untilAsserted(
+            () -> {
+              Health health = healthIndicator.health();
+              for (String subscription :
+                  new String[] {
+                    "subscription.order-fulfillment-saga", "subscription.payment-process-manager"
+                  }) {
+                assertThat(block(health, subscription))
+                    .as(subscription)
+                    .containsEntry("state", "RUNNING")
+                    .containsEntry("status", "UP")
+                    .containsEntry("role", "LEADING");
+              }
+            });
   }
 
   @SuppressWarnings("unchecked")

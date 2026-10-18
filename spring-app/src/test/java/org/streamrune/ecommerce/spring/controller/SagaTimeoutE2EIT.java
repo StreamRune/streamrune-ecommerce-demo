@@ -1,6 +1,7 @@
 package org.streamrune.ecommerce.spring.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -15,11 +16,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.streamrune.core.Command;
 import org.streamrune.core.CommandBus;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.saga.SagaStore;
+import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
@@ -30,6 +33,7 @@ import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
+import org.streamrune.runtime.PollingEventSubscription;
 import org.streamrune.runtime.SagaRunner;
 import org.streamrune.runtime.SagaTimeoutRunner;
 import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
@@ -44,7 +48,10 @@ import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
  * drives a second runner of its own against the demo's persisted saga state, built from the app's
  * saga class with a deadline of {@link #TIMEOUT} and a fixed clock. The runner is bound to the
  * app's saga runner, as the app binds its own: a timeout runner names the {@link SagaRunner} whose
- * step lock it shares, and the framework refuses one that names nothing.
+ * step lock it shares, and the framework refuses one that names nothing. It also follows that
+ * runner's lease: it claims only while the app's saga subscription leads the saga type in this
+ * process, so the test waits for the subscription to report {@link LeaseRole#LEADING} before its
+ * first sweep.
  *
  * <p>Time is made deterministic by injecting a fixed {@link Clock} into the runner and exercising
  * its package-private {@code pollOnce()} (the framework feature mirrored from {@code
@@ -64,6 +71,10 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
   @Autowired private SagaStore sagaStore;
   @Autowired private DataSource dataSource;
   @Autowired private SagaRunner<?> orderFulfillmentSagaRunner;
+
+  @Autowired
+  @Qualifier("orderFulfillmentSagaSubscription")
+  private PollingEventSubscription orderFulfillmentSagaSubscription;
 
   /** Records every command dispatched, so the test can assert the exact compensation set. */
   private static final class RecordingCommandBus implements CommandBus {
@@ -171,6 +182,12 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
 
   @Test
   void timedOutSagaFiresCompensationDeterministically() throws Exception {
+    // The test's runner follows the app's saga lease: a sweep on a process that does not lead
+    // claims nothing, and the non-vacuity contrast below would pass for the wrong reason.
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(100))
+        .until(() -> orderFulfillmentSagaSubscription.leaseRole() == LeaseRole.LEADING);
     SagaId sagaId = seedAwaitingInventorySaga();
     OrderFulfillmentState saga =
         sagaStore
