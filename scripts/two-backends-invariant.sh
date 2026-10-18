@@ -116,8 +116,9 @@ for i in $(seq 1 "$ORDERS"); do
     echo "  ✓ $survivor leads the saga $((SECONDS - killed_at)) s after the kill."
     # start, not up: the same container with the environment it was created with.
     docker compose --profile two-backends start "$killed"
-    WAIT_SECONDS=180 scripts/wait-for-http.sh "$leader/actuator/health" '"status":"UP"'
-    echo "  ✓ $killed is back, as standby: $(role_of "$leader")."
+    restarted="$leader"
+    WAIT_SECONDS=180 scripts/wait-for-http.sh "$restarted/actuator/health" '"status":"UP"'
+    echo "  ✓ $killed is back, as standby: $(role_of "$restarted")."
   fi
   sleep "$PAUSE_SECONDS"
 done
