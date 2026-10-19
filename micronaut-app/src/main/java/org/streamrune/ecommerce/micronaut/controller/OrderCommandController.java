@@ -2,51 +2,50 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.*;
-import java.math.BigDecimal;
 import java.util.List;
-import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
- * The order commands. An order is placed, confirmed and cancelled by an authenticated {@code ADMIN}
- * or by the customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else.
- * Shipping and delivering are for the {@code ADMIN} role, which {@code @RequireRole} on the two
- * commands enforces in the command bus.
+ * The order commands. An order is placed and cancelled by an authenticated {@code ADMIN} or by the
+ * customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else. The price
+ * of each line comes from the product catalogue ({@link OrderPricing}). The fulfillment saga
+ * confirms an order; there is no endpoint for it. Shipping and delivering are for the {@code ADMIN}
+ * role, which {@code @RequireRole} on the two commands enforces in the command bus. A shipped or
+ * delivered order is not cancelled ({@code 400}).
  */
 @Controller("/api/orders")
 public class OrderCommandController {
 
   private final VirtualThreadCommandBus commandBus;
   private final OwnerOrAdminQueries queries;
+  private final OrderPricing orderPricing;
 
-  public OrderCommandController(VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries) {
+  public OrderCommandController(
+      VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries, OrderPricing orderPricing) {
     this.commandBus = commandBus;
     this.queries = queries;
+    this.orderPricing = orderPricing;
   }
 
-  /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
+  /**
+   * The order's customer is the caller, unless the caller is an {@code ADMIN}. A product nobody
+   * created, or one that is discontinued, answers {@code 400}.
+   */
   @Post
   public HttpResponse<Void> createOrder(@Body CreateOrderRequest req) {
     requireWellFormed(req);
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
-    List<OrderCommand.OrderLine> lines =
-        req.lines().stream()
-            .map(
-                l ->
-                    new OrderCommand.OrderLine(
-                        l.productId(), l.quantity(), new Money(l.unitPrice(), "USD")))
-            .toList();
-    commandBus.execute(new OrderCommand.PlaceOrder(req.orderId(), req.customerId(), lines));
-    return HttpResponse.ok();
-  }
-
-  @Post("/{id}/confirm")
-  public HttpResponse<Void> confirmOrder(@PathVariable String id) {
-    queries.requireOrderAccess(RequestCaller.current(), id);
-    commandBus.execute(new OrderCommand.ConfirmOrder(id));
+    commandBus.execute(
+        orderPricing.price(
+            req.orderId(),
+            req.customerId(),
+            req.lines().stream()
+                .map(l -> new OrderPricing.RequestedLine(l.productId(), l.quantity()))
+                .toList()));
     return HttpResponse.ok();
   }
 
@@ -80,7 +79,6 @@ public class OrderCommandController {
       }
       RequestChecks.notBlank(line.productId(), "lines.productId");
       RequestChecks.positive(line.quantity(), "lines.quantity");
-      RequestChecks.positive(line.unitPrice(), "lines.unitPrice");
     }
   }
 
@@ -88,8 +86,9 @@ public class OrderCommandController {
   public record CreateOrderRequest(
       String orderId, String customerId, List<OrderLineRequest> lines) {}
 
+  /** One line as a client asks for it: a product and a quantity; the catalogue sets the price. */
   @io.micronaut.serde.annotation.Serdeable
-  public record OrderLineRequest(String productId, int quantity, BigDecimal unitPrice) {}
+  public record OrderLineRequest(String productId, int quantity) {}
 
   @io.micronaut.serde.annotation.Serdeable
   public record CancelOrderRequest(String reason) {}

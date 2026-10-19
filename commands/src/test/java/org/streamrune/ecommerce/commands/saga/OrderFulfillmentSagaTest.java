@@ -388,9 +388,9 @@ class OrderFulfillmentSagaTest {
     assertThat(saga.handle(state, foreign)).isEmpty();
   }
 
-  // ---- The order's own confirmation completes the saga only where the saga asked for it. A
-  // caller who confirms their own order by hand while the saga still waits for the payment does
-  // not complete the saga: it goes on, and its ConfirmOrder is refused later. ----
+  // ---- The order's own confirmation completes the saga only where the saga asked for it. The
+  // saga is the only sender of ConfirmOrder (the order decider's guard refuses it from anybody
+  // else); an OrderConfirmed reaching a saga that waits for its payment changes nothing. ----
 
   @Test
   void evolve_theOrdersOwnConfirmation_completesTheSagaOnlyWhileItAwaitsConfirmation() {

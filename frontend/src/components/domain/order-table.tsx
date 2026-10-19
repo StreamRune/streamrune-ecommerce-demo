@@ -6,12 +6,11 @@ import { Plus, ShoppingCart, ChevronDown, ChevronRight } from "lucide-react";
 import { useOrders, useProducts, useCustomers } from "@/lib/queries";
 import {
   usePlaceOrder,
-  useConfirmOrder,
   useShipOrder,
   useDeliverOrder,
   useCancelOrder,
 } from "@/lib/mutations";
-import type { OrderView, OrderStatus } from "@/lib/types";
+import type { OrderView, OrderStatus, PaymentStatus } from "@/lib/types";
 import { newId } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import { AccessRestricted } from "@/components/domain/access-restricted";
@@ -53,6 +52,14 @@ const STATUS_STYLES: Record<OrderStatus, string> = {
   CANCELLED: "bg-red-500/10 text-red-400 border-red-500/20",
 };
 
+const PAYMENT_STYLES: Record<PaymentStatus, string> = {
+  PENDING: "bg-muted text-muted-foreground",
+  CAPTURED: "bg-green-500/10 text-green-500 border-green-500/20",
+  REFUNDED: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+  VOIDED: "bg-muted text-muted-foreground line-through",
+  FAILED: "bg-red-500/10 text-red-400 border-red-500/20",
+};
+
 // ─── Place Order Dialog ───────────────────────────────────────────────────────
 
 interface OrderLine {
@@ -85,18 +92,16 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    // The backend takes the order id and each line's unit price from the request: the id is
-    // picked here, the price is the one of the product the line names.
-    const orderLines = lines
-      .filter((l) => l.productId && l.quantity > 0)
-      .map((l) => ({
-        productId: l.productId,
-        quantity: l.quantity,
-        unitPrice: products.find((p) => p.productId === l.productId)?.price.amount,
-      }))
-      .filter((l): l is { productId: string; quantity: number; unitPrice: number } =>
-        l.unitPrice !== undefined
-      );
+    // The order id is picked here; the backend prices each line from the product catalogue, so a
+    // line names a product and a quantity only. The backend takes one line per product, so lines
+    // of one product are merged and their quantities summed.
+    const quantities = new Map<string, number>();
+    for (const l of lines) {
+      if (l.productId && l.quantity > 0) {
+        quantities.set(l.productId, (quantities.get(l.productId) ?? 0) + l.quantity);
+      }
+    }
+    const orderLines = [...quantities].map(([productId, quantity]) => ({ productId, quantity }));
     if (orderLines.length === 0) {
       toast.error("Add at least one product line");
       return;
@@ -249,19 +254,17 @@ function CancelOrderDialog({
 
 // ─── Order Row ────────────────────────────────────────────────────────────────
 
-const DONE = { confirm: "confirmed", ship: "shipped", deliver: "delivered" } as const;
+const DONE = { ship: "shipped", deliver: "delivered" } as const;
 
 function OrderRow({ order }: { order: OrderView }) {
   const [expanded, setExpanded] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
-  const { mutateAsync: confirm, isPending: isConfirming } = useConfirmOrder();
   const { mutateAsync: ship, isPending: isShipping } = useShipOrder();
   const { mutateAsync: deliver, isPending: isDelivering } = useDeliverOrder();
 
-  async function handleAction(action: "confirm" | "ship" | "deliver") {
+  async function handleAction(action: "ship" | "deliver") {
     try {
-      if (action === "confirm") await confirm(order.orderId);
-      else if (action === "ship") await ship(order.orderId);
+      if (action === "ship") await ship(order.orderId);
       else await deliver(order.orderId);
       toast.success(`Order ${DONE[action]}`);
     } catch (err) {
@@ -287,16 +290,17 @@ function OrderRow({ order }: { order: OrderView }) {
           <Badge className={cn("text-xs", STATUS_STYLES[order.status])}>
             {order.status}
           </Badge>
+          {order.paymentStatus && (
+            <Badge
+              className={cn("text-xs ml-1", PAYMENT_STYLES[order.paymentStatus])}
+              aria-label="Payment status"
+            >
+              {order.paymentStatus}
+            </Badge>
+          )}
         </TableCell>
         <TableCell>
           <div className="flex gap-1">
-            {order.status === "CREATED" && (
-              <PermissionGate permission="ORDER_CONFIRM_CANCEL">
-                <Button variant="outline" size="xs" onClick={() => handleAction("confirm")} disabled={isConfirming}>
-                  Confirm
-                </Button>
-              </PermissionGate>
-            )}
             {order.status === "CONFIRMED" && (
               <PermissionGate permission="ORDER_SHIP">
                 <Button variant="outline" size="xs" onClick={() => handleAction("ship")} disabled={isShipping}>
@@ -304,14 +308,14 @@ function OrderRow({ order }: { order: OrderView }) {
                 </Button>
               </PermissionGate>
             )}
-            {/* The backend accepts a cancel for any order that is not shipped or delivered, from the
-                order's customer or an ADMIN, and the fulfillment saga confirms a placed order
-                within seconds: the page offers Cancel for an order that is not shipped yet,
-                confirmed or not. Every cancellation releases the order's stock and voids its
-                payment, or refunds it once captured; the dialog says so before the customer
-                decides. */}
+            {/* The fulfillment saga confirms a placed order within seconds; nobody confirms one
+                by hand. The backend accepts a cancel for any order that is not shipped or
+                delivered, from the order's customer or an ADMIN: the page offers Cancel for an
+                order that is not shipped yet, confirmed or not. Cancelling releases the order's
+                stock and voids or refunds its payment in full; the dialog says so before the
+                customer decides. */}
             {(order.status === "CREATED" || order.status === "CONFIRMED") && (
-              <PermissionGate permission="ORDER_CONFIRM_CANCEL">
+              <PermissionGate permission="ORDER_CANCEL">
                 <Button variant="ghost" size="xs" onClick={() => setCancelOpen(true)}>
                   Cancel
                 </Button>

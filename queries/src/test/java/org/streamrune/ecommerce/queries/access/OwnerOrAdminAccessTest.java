@@ -40,6 +40,7 @@ class OwnerOrAdminAccessTest {
           List.of(),
           Money.usd(new BigDecimal("10.00")),
           OrderStatus.CREATED,
+          null,
           Instant.EPOCH,
           Instant.EPOCH);
 

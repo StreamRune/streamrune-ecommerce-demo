@@ -8,6 +8,7 @@ import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
+import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -33,6 +34,8 @@ import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentIds;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.payment.PaymentStatus;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
@@ -51,15 +54,14 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * <p><b>Saga-aware.</b> The Quarkus app runs the global {@code OrderFulfillment} saga (wired in
  * {@code EcommerceSubscriptionLifecycle}): every {@code OrderPlaced} kicks off InitiatePayment →
  * CapturePayment → ReserveStock → <b>ConfirmOrder</b>, i.e. the saga itself drives an order to
- * {@code CONFIRMED}. If the product has no inventory, {@code ReserveStock} fails and the saga
- * <b>compensates by cancelling the order</b>. So these tests must (1) stock the product first via
- * {@code ReceiveShipment} so the reservation succeeds and the order is never cancelled, and (2)
- * treat the saga as the confirmation mechanism — they {@link #awaitOrderStatus await} the
- * saga-driven {@code CONFIRMED} state rather than confirming manually (a manual {@code
- * ConfirmOrder} on an order the saga already confirmed would race and fail with "Can only confirm
- * CREATED orders"). This mirrors how the Spring app's {@code SagaControllerIT} stocks the product
- * and lets the saga drive the order. The ship/deliver steps run after the saga has confirmed, so
- * the ADMIN-role enforcement they assert is exercised exactly as before.
+ * {@code CONFIRMED}; nobody else may confirm an order. If the product has no inventory, {@code
+ * ReserveStock} fails and the saga <b>compensates by cancelling the order</b>. So these tests must
+ * (1) create the product in the catalogue, which prices the order's lines, and stock it via {@code
+ * ReceiveShipment} so the reservation succeeds and the order is never cancelled, and (2) {@link
+ * #awaitOrderStatus await} the saga-driven {@code CONFIRMED} state. This mirrors how the Spring
+ * app's {@code SagaControllerIT} creates the product and lets the saga drive the order. The
+ * ship/deliver steps run after the saga has confirmed, so the ADMIN-role enforcement they assert is
+ * exercised as it is.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
@@ -99,14 +101,27 @@ class OrderCommandQueryE2EIT {
     }
   }
 
+  /** Creates the product in the catalogue at {@code price}; the catalogue prices an order. */
+  private void createProduct(String productId, String price) {
+    commandBus.execute(
+        new ProductCommand.CreateProduct(
+            productId, "Product", null, "General", new Money(new BigDecimal(price), "USD"), 0));
+  }
+
+  /** Creates the product in the catalogue at 9.99. */
+  private void createProduct(String productId) {
+    createProduct(productId, "9.99");
+  }
+
   /**
-   * Stocks the inventory aggregate for {@code productId} so the saga's {@code ReserveStock}
-   * succeeds. Inventory lives in its own {@code inventory:<productId>} stream, fed by {@code
-   * ReceiveShipment} — creating a product does not stock it. Issued directly on the command bus,
-   * mirroring the Spring {@code SeedDataRunner}'s {@code ReceiveShipment} seeding (the app also
-   * serves {@code POST /api/inventory/{productId}/receive}).
+   * Creates the product at 9.99 and stocks the inventory aggregate for {@code productId} so the
+   * saga's {@code ReserveStock} succeeds. Inventory lives in its own {@code inventory:<productId>}
+   * stream, fed by {@code ReceiveShipment} — creating a product does not stock it. Issued directly
+   * on the command bus, mirroring the Spring {@code SeedDataRunner}'s {@code ReceiveShipment}
+   * seeding (the app also serves {@code POST /api/inventory/{productId}/receive}).
    */
   private void stockProduct(String productId, int quantity) {
+    createProduct(productId);
     commandBus.execute(new InventoryCommand.ReceiveShipment(productId, quantity));
   }
 
@@ -117,7 +132,7 @@ class OrderCommandQueryE2EIT {
           "orderId": "%s",
           "customerId": "%s",
           "lines": [
-            {"productId": "%s", "quantity": 1, "unitPrice": 9.99}
+            {"productId": "%s", "quantity": 1}
           ]
         }"""
             .formatted(orderId, customerId, productId);
@@ -154,7 +169,10 @@ class OrderCommandQueryE2EIT {
         .untilAsserted(() -> assertThat(fetchOrder(orderId).status()).isEqualTo(expected));
   }
 
-  /** Places an order of the given products and quantities, in the map's order, at 9.99 each. */
+  /**
+   * Places an order of the given products and quantities, in the map's order; the catalogue prices
+   * each line.
+   */
   private void placeOrder(String orderId, String customerId, Map<String, Integer> lines) {
     given()
         .header("X-User-Role", "CUSTOMER")
@@ -170,7 +188,7 @@ class OrderCommandQueryE2EIT {
                         .map(
                             l ->
                                 """
-                            {"productId": "%s", "quantity": %d, "unitPrice": 9.99}"""
+                            {"productId": "%s", "quantity": %d}"""
                                     .formatted(l.getKey(), l.getValue()))
                         .collect(Collectors.joining(", "))))
         .when()
@@ -296,6 +314,8 @@ class OrderCommandQueryE2EIT {
 
   @Test
   void placeOrderWithAControlCharacterInTheOrderIdReturns400() {
+    String pid = "q-p-ctl-" + System.nanoTime();
+    createProduct(pid);
     // An otherwise valid order whose orderId carries a control character (a JSON
     // \n) is refused by AggregateId.of in the command bus's id extractor, before any interceptor
     // runs or anything is written; mapped to 400 by IllegalArgumentExceptionMapper, and the message
@@ -307,7 +327,8 @@ class OrderCommandQueryE2EIT {
             .contentType(ContentType.JSON)
             .body(
                 """
-                {"orderId": "o-ctl\\nINFO forged-SECRET", "customerId": "c-ctl", "lines": [{"productId": "p-ctl", "quantity": 1, "unitPrice": 10}]}""")
+                {"orderId": "o-ctl\\nINFO forged-SECRET", "customerId": "c-ctl", "lines": [{"productId": "%s", "quantity": 1}]}"""
+                    .formatted(pid))
             .when()
             .post("/api/orders")
             .then()
@@ -320,7 +341,7 @@ class OrderCommandQueryE2EIT {
   }
 
   @Test
-  void confirmOrderWithAnOrderIdLongerThan255CharactersReturns400() {
+  void shipOrderWithAnOrderIdLongerThan255CharactersReturns400() {
     // An order id longer than the 255-character stream-id columns is refused by AggregateId.of
     // before any interceptor runs, so a command on it answers 400 instead of failing the
     // event-store append with an SQL error (a 500). The order id comes from the path here, which no
@@ -332,7 +353,7 @@ class OrderCommandQueryE2EIT {
             .header("X-User-Id", "test-admin")
             .contentType(ContentType.JSON)
             .when()
-            .post("/api/orders/" + orderId + "/confirm")
+            .post("/api/orders/" + orderId + "/ship")
             .then()
             .statusCode(400)
             .extract()
@@ -344,6 +365,8 @@ class OrderCommandQueryE2EIT {
 
   @Test
   void placeOrderWithAnOrderIdTooLongForTheSagaIdReturns400AndWritesNothing() {
+    String pid = "q-p-saga-long-" + System.nanoTime();
+    createProduct(pid);
     // An order id of 244 to 255 characters is a valid order stream id, but the saga that
     // OrderPlaced starts is identified by "fulfillment-" + orderId, which a SagaId refuses above
     // 255 characters. Accepted at PlaceOrder, the order would be placed and its saga could never
@@ -358,8 +381,8 @@ class OrderCommandQueryE2EIT {
               .contentType(ContentType.JSON)
               .body(
                   """
-                  {"orderId": "%s", "customerId": "c-saga-long", "lines": [{"productId": "p-saga-long", "quantity": 1, "unitPrice": 10}]}"""
-                      .formatted(orderId))
+                  {"orderId": "%s", "customerId": "c-saga-long", "lines": [{"productId": "%s", "quantity": 1}]}"""
+                      .formatted(orderId, pid))
               .when()
               .post("/api/orders")
               .then()
@@ -396,13 +419,15 @@ class OrderCommandQueryE2EIT {
 
   @Test
   void placeOrderWithAControlCharacterInAProductIdReturns400AndWritesNothing() {
-    // The request DTO carries no validation; the OrderCommand.OrderLine the controller builds
-    // refuses a productId with a control character. The saga would address the inventory
+    // The request DTO carries no validation; the controller's pricing refuses a productId with a
+    // control character before it reads the catalogue. The saga would address the inventory
     // stream by that productId, which the inventory extractor refuses, but only after the payment
     // was captured. Mapped to 400 by IllegalArgumentExceptionMapper without echoing the id, and
     // nothing
     // is written to the order's stream, so no saga starts and no payment is taken.
     String orderId = "q-o-pctl-" + System.nanoTime();
+    String pid = "q-p-ok-" + System.nanoTime();
+    createProduct(pid);
     String body =
         given()
             .header("X-User-Role", "ADMIN")
@@ -410,8 +435,8 @@ class OrderCommandQueryE2EIT {
             .contentType(ContentType.JSON)
             .body(
                 """
-                {"orderId": "%s", "customerId": "c-pctl", "lines": [{"productId": "p-ok", "quantity": 1, "unitPrice": 10}, {"productId": "p-ctl\\nINFO forged-SECRET", "quantity": 1, "unitPrice": 10}]}"""
-                    .formatted(orderId))
+                {"orderId": "%s", "customerId": "c-pctl", "lines": [{"productId": "%s", "quantity": 1}, {"productId": "p-ctl\\nINFO forged-SECRET", "quantity": 1}]}"""
+                    .formatted(orderId, pid))
             .when()
             .post("/api/orders")
             .then()
@@ -433,7 +458,7 @@ class OrderCommandQueryE2EIT {
   @Test
   void confirmOrderIsDrivenBySagaToConfirmed() {
     // The OrderFulfillment saga is the confirmation mechanism: with the product stocked, placing an
-    // order drives it through payment + reservation to CONFIRMED with no manual /confirm call.
+    // order drives it through payment + reservation to CONFIRMED, and nothing else confirms it.
     String oid = "q-o-confirm-" + System.nanoTime();
     String cid = "q-o-conf-cust-" + System.nanoTime();
     String pid = "q-prod-conf-" + System.nanoTime();
@@ -441,6 +466,138 @@ class OrderCommandQueryE2EIT {
     placeOrder(oid, cid, pid);
 
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+  }
+
+  // ---- Only the saga confirms an order, and the catalogue prices it. ----
+
+  /**
+   * There is no endpoint that confirms an order: the request answers 404 and writes nothing. No
+   * resource method matches the path, so JAX-RS answers 404 rather than 405.
+   */
+  @Test
+  void confirmingByHandAnswers404() {
+    String oid = "q-o-hand-" + System.nanoTime();
+    String cid = "q-o-hand-cust-" + System.nanoTime();
+    String pid = "q-prod-hand-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, pid);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .until(() -> probe.sagaStatus(oid) == SagaStatus.COMPLETED);
+    List<String> before = probe.eventTypes(OrderState.TYPE, oid);
+
+    given()
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", cid)
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/orders/" + oid + "/confirm")
+        .then()
+        .statusCode(404);
+
+    assertThat(probe.eventTypes(OrderState.TYPE, oid)).isEqualTo(before);
+  }
+
+  /** The line's price is the catalogue's; a {@code unitPrice} the client sends is ignored. */
+  @Test
+  void theLinePriceIsTheCataloguePrice() {
+    String oid = "q-o-price-" + System.nanoTime();
+    String cid = "q-o-price-cust-" + System.nanoTime();
+    String pid = "q-prod-price-" + System.nanoTime();
+    createProduct(pid, "24.50");
+    commandBus.execute(new InventoryCommand.ReceiveShipment(pid, 5));
+
+    given()
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", cid)
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"orderId": "%s", "customerId": "%s",
+             "lines": [{"productId": "%s", "quantity": 2, "unitPrice": 0.01}]}"""
+                .formatted(oid, cid, pid))
+        .when()
+        .post("/api/orders")
+        .then()
+        .statusCode(200);
+
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    OrderView view = fetchOrder(oid);
+    assertThat(view.lines().getFirst().unitPrice().amount()).isEqualByComparingTo("24.50");
+    assertThat(view.total().amount()).isEqualByComparingTo("49.00");
+  }
+
+  @Test
+  void orderingAProductNobodyCreatedAnswers400() {
+    String oid = "q-o-noproduct-" + System.nanoTime();
+    String cid = "q-o-noproduct-cust-" + System.nanoTime();
+
+    assertOrderRefused(oid, cid, "q-prod-nobody-" + System.nanoTime(), "Product not found");
+  }
+
+  @Test
+  void orderingADiscontinuedProductAnswers400() {
+    String oid = "q-o-discontinued-" + System.nanoTime();
+    String cid = "q-o-discontinued-cust-" + System.nanoTime();
+    String pid = "q-prod-discontinued-" + System.nanoTime();
+    stockProduct(pid, 5);
+    given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/products/" + pid + "/discontinue")
+        .then()
+        .statusCode(200);
+
+    assertOrderRefused(oid, cid, pid, "Product is discontinued");
+  }
+
+  /** The order's row shows its payment: refunded once a confirmed order is cancelled. */
+  @Test
+  void aCancelledConfirmedOrderShowsItsPaymentRefunded() {
+    String oid = "q-o-badge-" + System.nanoTime();
+    String cid = "q-o-badge-cust-" + System.nanoTime();
+    String pid = "q-prod-badge-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, pid);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    assertThat(fetchOrder(oid).paymentStatus()).isEqualTo(PaymentStatus.CAPTURED);
+
+    assertThat(cancel(oid, "CUSTOMER", cid)).isEqualTo(200);
+
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              OrderView view = fetchOrder(oid);
+              assertThat(view.status()).isEqualTo(OrderStatus.CANCELLED);
+              assertThat(view.paymentStatus()).isEqualTo(PaymentStatus.REFUNDED);
+            });
+  }
+
+  /** An order of the product answers 400 with {@code message}, and no order stream is opened. */
+  private void assertOrderRefused(String oid, String cid, String pid, String message) {
+    String body =
+        given()
+            .header("X-User-Role", "CUSTOMER")
+            .header("X-User-Id", cid)
+            .contentType(ContentType.JSON)
+            .body(
+                """
+                {"orderId": "%s", "customerId": "%s", "lines": [{"productId": "%s", "quantity": 1}]}"""
+                    .formatted(oid, cid, pid))
+            .when()
+            .post("/api/orders")
+            .then()
+            .statusCode(400)
+            .extract()
+            .asString();
+    assertThat(body).isEqualTo(message);
+
+    assertThat(probe.events(OrderState.TYPE, oid)).isEmpty();
   }
 
   // ---- Every cancellation of an order is undone through its OrderCancelled: the order

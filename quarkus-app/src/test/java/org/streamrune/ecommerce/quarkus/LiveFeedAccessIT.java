@@ -221,14 +221,27 @@ class LiveFeedAccessIT {
     return customer;
   }
 
+  /** Creates a product in the catalogue, which prices an order's line, and returns its id. */
+  private String createdProduct() throws Exception {
+    String product = uniqueId("p");
+    String body =
+        """
+        {"productId": "%s", "name": "Feed product", "category": "General", "price": 12.50,
+         "initialStock": 0}"""
+            .formatted(product);
+    assertThat(send("POST", "/api/products", OPERATOR, "ADMIN", body).statusCode())
+        .isBetween(200, 299);
+    return product;
+  }
+
   /** Places an order as the given customer and returns its id. */
   private String placedOrder(String customer) throws Exception {
     String order = uniqueId("o");
     String body =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 12.50}]}"""
-            .formatted(order, customer, uniqueId("p"));
+         "lines": [{"productId": "%s", "quantity": 1}]}"""
+            .formatted(order, customer, createdProduct());
     assertThat(send("POST", "/api/orders", customer, "CUSTOMER", body).statusCode())
         .isBetween(200, 299);
     return order;

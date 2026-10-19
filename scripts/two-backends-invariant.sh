@@ -85,7 +85,7 @@ for i in $(seq 1 "$ORDERS"); do
   if [ $((i % 2)) -eq 1 ]; then backend="$FIRST"; else backend="$SECOND"; fi
   customer="two-backends-cust-$((i % 5))"
   post "$backend/api/orders" \
-    "{\"orderId\":\"two-backends-$RUN-$i\",\"customerId\":\"$customer\",\"lines\":[{\"productId\":\"two-backends-$RUN-$((i % 2 + 1))\",\"quantity\":1,\"unitPrice\":10.00}]}" \
+    "{\"orderId\":\"two-backends-$RUN-$i\",\"customerId\":\"$customer\",\"lines\":[{\"productId\":\"two-backends-$RUN-$((i % 2 + 1))\",\"quantity\":1}]}" \
     -H "X-User-Id: $customer" -H "X-User-Role: CUSTOMER"
   if [ "$i" -eq $((ORDERS / 2)) ]; then
     first_role=$(role_of "$FIRST")

@@ -1,8 +1,10 @@
 package org.streamrune.ecommerce.commands.order;
 
 import java.util.List;
+import org.streamrune.core.AuthorizationException;
 import org.streamrune.core.Decider;
 import org.streamrune.core.DomainException;
+import org.streamrune.core.StreamRuneContext;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.*;
 
@@ -11,6 +13,17 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
   @Override
   public OrderState initialState() {
     return new OrderState();
+  }
+
+  /**
+   * {@code ConfirmOrder} is the fulfillment saga's: it confirms an order once its payment is
+   * captured and every line reserved. Sent by anybody else it is refused, whoever the caller is.
+   */
+  @Override
+  public void guard(OrderCommand command, OrderState state) {
+    if (command instanceof OrderCommand.ConfirmOrder && !StreamRuneContext.isSagaDispatch()) {
+      throw new AuthorizationException("ConfirmOrder is sent by the fulfillment saga only");
+    }
   }
 
   @Override

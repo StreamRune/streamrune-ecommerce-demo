@@ -83,8 +83,11 @@ function invalidationKeysFor(eventType: string): string[][] {
       "PaymentCaptured",
       "PaymentRefunded",
       "PaymentFailed",
+      "PaymentVoided",
     ].includes(eventType)
   ) {
+    // The order's row shows its payment status.
+    keys.push(["orders"]);
     keys.push(["fulfillment"]);
   }
   if (

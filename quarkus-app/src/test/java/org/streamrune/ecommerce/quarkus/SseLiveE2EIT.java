@@ -48,6 +48,23 @@ class SseLiveE2EIT {
     return new SseTestStream(server, "order", orderId, "sse-operator", "ADMIN");
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50,
+             "initialStock": 0}"""
+                .formatted(productId))
+        .when()
+        .post("/api/products")
+        .then()
+        .statusCode(200);
+  }
+
   private void placeOrder(String orderId, String customerId, String productId) {
     String body =
         """
@@ -55,7 +72,7 @@ class SseLiveE2EIT {
           "orderId": "%s",
           "customerId": "%s",
           "lines": [
-            {"productId": "%s", "quantity": 1, "unitPrice": 12.50}
+            {"productId": "%s", "quantity": 1}
           ]
         }"""
             .formatted(orderId, customerId, productId);
@@ -90,6 +107,7 @@ class SseLiveE2EIT {
     String oid = "q-sse-order-" + System.nanoTime();
     String cid = "q-sse-cust-" + System.nanoTime();
     String pid = "q-sse-prod-" + System.nanoTime();
+    createProduct(pid);
 
     try (SseTestStream stream = orderStream(oid)) {
       stream.awaitSubscribed();
@@ -124,6 +142,7 @@ class SseLiveE2EIT {
     String orderB = "q-sse-isoB-" + System.nanoTime();
     String cid = "q-sse-iso-cust-" + System.nanoTime();
     String pid = "q-sse-iso-prod-" + System.nanoTime();
+    createProduct(pid);
 
     try (SseTestStream streamA = orderStream(orderA);
         SseTestStream streamB = orderStream(orderB)) {

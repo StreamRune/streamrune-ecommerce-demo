@@ -29,6 +29,7 @@ import org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMa
 import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
 import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
 import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
@@ -838,6 +839,12 @@ public class StreamRuneConfig {
             .build();
     subscription.start();
     return subscription;
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */

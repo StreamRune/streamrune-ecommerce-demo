@@ -325,6 +325,15 @@ saga_origin_smoke() {
   echo "  Running fulfillment saga probe (order $oid) …"
 
   local code
+  # The catalogue prices the order: the product is created first, then stocked.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
+    -d "{\"productId\":\"$pid\",\"name\":\"SagaWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99,\"initialStock\":0}")
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/products returned $code"
+    return 1
+  fi
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/inventory/$pid/receive" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
@@ -336,7 +345,7 @@ saga_origin_smoke() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
-    -d "{\"orderId\":\"$oid\",\"customerId\":\"smoke-customer\",\"lines\":[{\"productId\":\"$pid\",\"quantity\":1,\"unitPrice\":9.99}]}")
+    -d "{\"orderId\":\"$oid\",\"customerId\":\"smoke-customer\",\"lines\":[{\"productId\":\"$pid\",\"quantity\":1}]}")
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/orders returned $code"
     return 1

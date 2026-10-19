@@ -42,6 +42,19 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
     return eventStore.load(StreamId.of(type, AggregateId.of(id))).events();
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    accepted(
+        post(
+            "/api/products",
+            "ADMIN",
+            "test-admin",
+            """
+            {"productId": "%s", "name": "Product", "category": "General", "price": 9.99,
+             "initialStock": 0}"""
+                .formatted(productId)));
+  }
+
   private HttpRequest<String> post(String uri, String role, String userId, String body) {
     return HttpRequest.POST(uri, body)
         .contentType(MediaType.APPLICATION_JSON)
@@ -125,11 +138,15 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
     String order =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": %d, "unitPrice": 9.99}]}""";
+         "lines": [{"productId": "%s", "quantity": %d}]}""";
+    String first = "m-dup-o-first-" + System.nanoTime();
+    String second = "m-dup-o-second-" + System.nanoTime();
+    createProduct(first);
+    createProduct(second);
 
-    accepted(post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "m-dup-o-first", 1)));
+    accepted(post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, first, 1)));
     refused(
-        post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "m-dup-o-second", 7)),
+        post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, second, 7)),
         "Order already exists: " + oid);
 
     // The fulfillment saga may add its own events to the order; there is still one OrderPlaced.
@@ -141,7 +158,7 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
             .toList();
     assertThat(placed).hasSize(1);
     assertThat(placed.getFirst().lines()).hasSize(1);
-    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo("m-dup-o-first");
+    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo(first);
     assertThat(placed.getFirst().lines().getFirst().quantity()).isEqualTo(1);
   }
 }

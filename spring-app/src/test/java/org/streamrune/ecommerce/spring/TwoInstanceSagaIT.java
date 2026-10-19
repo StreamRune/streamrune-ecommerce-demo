@@ -175,7 +175,7 @@ class TwoInstanceSagaIT {
                     String body =
                         """
                         {"orderId":"two-order-%d","customerId":"%s",
-                         "lines":[{"productId":"two-prod-%d","quantity":1,"unitPrice":10.00}]}
+                         "lines":[{"productId":"two-prod-%d","quantity":1}]}
                         """
                             .formatted(i, customer, i % PRODUCTS);
                     backends.readLock().lock();
