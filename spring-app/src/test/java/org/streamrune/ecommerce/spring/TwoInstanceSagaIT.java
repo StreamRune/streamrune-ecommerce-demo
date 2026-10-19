@@ -78,11 +78,11 @@ import org.streamrune.runtime.PollingEventSubscription;
  * this test checks the outcome under load.
  *
  * <p>Besides placing, the clients' orders get follow-ups, sent by a second set of threads to
- * whichever backend answers: every third order has two lines; every fourth is cancelled by its
- * customer as soon as the read model knows it (a {@code 403} is asked again for up to ten seconds);
- * every fifth is cancelled once it reads {@code CONFIRMED}; every seventh is shipped by an {@code
- * ADMIN} once it reads {@code CONFIRMED}, and its customer's cancellation then answers {@code 400}.
- * Each follow-up request holds the read lock, like a placing request.
+ * whichever backend answers: every third order has two lines, the second of two units; every fourth
+ * is cancelled by its customer as soon as the read model knows it (a {@code 403} is asked again for
+ * up to twenty seconds); every fifth is cancelled once it reads {@code CONFIRMED}; every seventh is
+ * shipped by an {@code ADMIN} once it reads {@code CONFIRMED}, and its customer's cancellation then
+ * answers {@code 400}. Each follow-up request holds the read lock, like a placing request.
  *
  * <p>Then every fulfillment saga ends ({@code COMPLETED}, {@code COMPENSATED} or {@code FAILED};
  * none {@code FAULTED}), the order-flow subscriptions catch up with the event store, and {@code
@@ -114,8 +114,12 @@ class TwoInstanceSagaIT {
   /** How long a follow-up waits for its order to read {@code CONFIRMED}. */
   private static final Duration CONFIRMATION_WAIT = Duration.ofSeconds(60);
 
-  /** How long a customer's request is asked again while the read model has no row for the order. */
-  private static final Duration READ_MODEL_WAIT = Duration.ofSeconds(10);
+  /**
+   * How often a customer's request is asked again, 200 ms apart, while the read model has no row
+   * for the order. Attempts are counted, not timed: a request blocked behind the restart's write
+   * lock does not use up the wait.
+   */
+  private static final int READ_MODEL_ATTEMPTS = 100;
 
   private static final String ORDER_PREFIX = "two-order-";
 
@@ -355,14 +359,15 @@ class TwoInstanceSagaIT {
 
   /**
    * The body of order {@code i}: one line, or two when {@code i} is a multiple of three, at the
-   * products {@code i} and {@code i + 1} modulo the number of products.
+   * products {@code i} and {@code i + 1} modulo the number of products; the second line takes two
+   * units, so that a reservation of the wrong quantity shows.
    */
   private static String orderBody(int i, String customer) {
-    String line = "{\"productId\":\"two-prod-%d\",\"quantity\":1}";
+    String line = "{\"productId\":\"two-prod-%d\",\"quantity\":%d}";
     String lines =
         i % 3 == 0
-            ? line.formatted(i % PRODUCTS) + "," + line.formatted((i + 1) % PRODUCTS)
-            : line.formatted(i % PRODUCTS);
+            ? line.formatted(i % PRODUCTS, 1) + "," + line.formatted((i + 1) % PRODUCTS, 2)
+            : line.formatted(i % PRODUCTS, 1);
     return "{\"orderId\":\"%s%d\",\"customerId\":\"%s\",\"lines\":[%s]}"
         .formatted(ORDER_PREFIX, i, customer, lines);
   }
@@ -414,13 +419,12 @@ class TwoInstanceSagaIT {
   /**
    * The customer's cancellation. Its access check reads the order's read model, which has no row
    * for a moment after the order was placed, so a {@code 403} or {@code 404} is asked again for up
-   * to ten seconds.
+   * to twenty seconds, not counting the time a request waits for the read lock.
    */
   private int cancelAsCustomer(
       String orderId, String customer, ReentrantReadWriteLock backends, int[] ports)
       throws InterruptedException {
-    long until = System.nanoTime() + READ_MODEL_WAIT.toNanos();
-    while (true) {
+    for (int attempt = 1; ; attempt++) {
       int status =
           send(
                   backends,
@@ -431,7 +435,7 @@ class TwoInstanceSagaIT {
                   customer,
                   "{\"reason\":\"changed my mind\"}")
               .statusCode();
-      if ((status != 403 && status != 404) || System.nanoTime() > until) {
+      if ((status != 403 && status != 404) || attempt >= READ_MODEL_ATTEMPTS) {
         return status;
       }
       Thread.sleep(200);

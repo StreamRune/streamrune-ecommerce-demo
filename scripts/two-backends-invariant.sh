@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Two backends on one database: one leads the order-fulfillment saga, the other stands by. Places
-# orders on both — one in three with two lines — cancels one in four right after placing it and one
+# orders on both — one in three with two lines, the second of two units — cancels one in four right after placing it and one
 # in five once it is confirmed, ships one in seven once it is confirmed and checks that its
 # customer's cancellation is then refused, kills the leader with SIGKILL halfway, waits until the
 # other backend leads and restarts the killed one. Then it waits until every order-fulfillment saga
@@ -157,13 +157,14 @@ if [ -z "$(role_of "$FIRST")" ] || [ -z "$(role_of "$SECOND")" ]; then
   exit 1
 fi
 
-# Two products of this run, each with stock for every order (two-line orders take one of each).
+# Two products of this run, each with stock for every order (a two-line order takes one unit of one
+# product and two of the other).
 for p in 1 2; do
   product="two-backends-$RUN-$p"
   post "$FIRST/api/products" \
     "{\"productId\":\"$product\",\"name\":\"Two backends $p\",\"description\":\"Two-backend run\",\"category\":\"General\",\"price\":10.00,\"initialStock\":0}" \
     "${ADMIN[@]}"
-  post "$FIRST/api/inventory/$product/receive" "{\"quantity\":$((2 * ORDERS))}" "${ADMIN[@]}"
+  post "$FIRST/api/inventory/$product/receive" "{\"quantity\":$((3 * ORDERS))}" "${ADMIN[@]}"
 done
 
 echo "Placing $ORDERS orders, alternating $FIRST and $SECOND …"
@@ -173,7 +174,7 @@ for i in $(seq 1 "$ORDERS"); do
   oid="two-backends-$RUN-$i"
   lines="{\"productId\":\"two-backends-$RUN-$((i % 2 + 1))\",\"quantity\":1}"
   if [ $((i % 3)) -eq 0 ]; then
-    lines="$lines,{\"productId\":\"two-backends-$RUN-$(((i + 1) % 2 + 1))\",\"quantity\":1}"
+    lines="$lines,{\"productId\":\"two-backends-$RUN-$(((i + 1) % 2 + 1))\",\"quantity\":2}"
   fi
   post "$backend/api/orders" \
     "{\"orderId\":\"$oid\",\"customerId\":\"$customer\",\"lines\":[$lines]}" \

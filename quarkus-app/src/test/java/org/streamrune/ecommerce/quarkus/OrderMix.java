@@ -123,10 +123,10 @@ final class OrderMix {
   /**
    * The customer's cancellation. The access check reads the order's read model, which has no row
    * for a moment after the order was placed, so a {@code 403} or {@code 404} is asked again for up
-   * to ten seconds.
+   * to twenty seconds.
    */
   private static int cancel(Api api, String orderId, String customer) throws Exception {
-    long until = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+    long until = System.nanoTime() + Duration.ofSeconds(20).toNanos();
     while (true) {
       int status =
           api.post(
@@ -152,7 +152,10 @@ final class OrderMix {
     StringBuilder lines = new StringBuilder();
     for (String productId : productIds) {
       lines.append(lines.isEmpty() ? "" : ",");
-      lines.append("{\"productId\":\"%s\",\"quantity\":1}".formatted(productId));
+      // The second line of a two-line order takes two units, so a reservation of the wrong
+      // quantity shows.
+      int quantity = lines.isEmpty() ? 1 : 2;
+      lines.append("{\"productId\":\"%s\",\"quantity\":%d}".formatted(productId, quantity));
     }
     return "{\"orderId\":\"%s\",\"customerId\":\"%s\",\"lines\":[%s]}"
         .formatted(orderId, customer, lines);

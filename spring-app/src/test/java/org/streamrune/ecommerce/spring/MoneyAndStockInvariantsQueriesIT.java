@@ -26,6 +26,12 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
  * its own, {@code invariant_checks}, whose schema the application creates when one context starts
  * and closes on it; a check that returned nothing for its case would let the integration tests and
  * the two-backend run pass over the inconsistency it exists to catch.
+ *
+ * <p>The check for a forward command stored after its saga's compensation is proven on the row
+ * shape only. A saga whose compensation episode has begun is resumed, never advanced, so a forward
+ * command can reach the log after the compensation only when it was held at its commit while the
+ * claim landed; the framework's own fence tests hold a command there deterministically, and the
+ * demo has no seam that does.
  */
 class MoneyAndStockInvariantsQueriesIT {
 
@@ -111,7 +117,11 @@ class MoneyAndStockInvariantsQueriesIT {
   }
 
   private static String placed(String productId) {
-    return "{\"lines\":[{\"productId\":\"%s\",\"quantity\":1}]}".formatted(productId);
+    return placed(productId, 1);
+  }
+
+  private static String placed(String productId, int quantity) {
+    return "{\"lines\":[{\"productId\":\"%s\",\"quantity\":%d}]}".formatted(productId, quantity);
   }
 
   private static String lines(String productId) {
@@ -174,7 +184,7 @@ class MoneyAndStockInvariantsQueriesIT {
                 List.of()),
             new Case(
                 "a confirmed order whose line was never reserved",
-                "confirmed order with a line never reserved",
+                "confirmed order with a line never reserved in its quantity",
                 List.of(
                     order("q-6", "OrderPlaced", placed("p-6")),
                     order("q-6", "OrderConfirmed", "{}"),
@@ -182,10 +192,28 @@ class MoneyAndStockInvariantsQueriesIT {
                 List.of()),
             new Case(
                 "a shipped order whose line was never committed",
-                "shipped order with a line never committed",
+                "shipped order with a line never committed in its quantity",
                 List.of(
                     order("q-7", "OrderPlaced", placed("p-7")),
                     order("q-7", "OrderShipped", lines("p-7"))),
+                List.of()),
+            new Case(
+                "a confirmed order whose line was reserved short",
+                "confirmed order with a line never reserved in its quantity",
+                List.of(
+                    order("q-6b", "OrderPlaced", placed("p-6b", 2)),
+                    order("q-6b", "OrderConfirmed", "{}"),
+                    payment("q-6b", "PaymentCaptured"),
+                    stock("p-6b", "StockReserved", "q-6b", 1)),
+                List.of()),
+            new Case(
+                "a shipped order whose line was committed short",
+                "shipped order with a line never committed in its quantity",
+                List.of(
+                    order("q-7b", "OrderPlaced", placed("p-7b", 2)),
+                    order("q-7b", "OrderShipped", placed("p-7b", 2)),
+                    stock("p-7b", "StockReserved", "q-7b", 2),
+                    stock("p-7b", "ReservationConfirmed", "q-7b", 1)),
                 List.of()),
             new Case(
                 "a confirmed order without a captured payment",
@@ -252,6 +280,53 @@ class MoneyAndStockInvariantsQueriesIT {
 
     assertThat(MoneyAndStockInvariants.violations(dataSource, "q-")).isEmpty();
     assertThat(MoneyAndStockInvariants.checks()).hasSize(8);
+  }
+
+  /**
+   * Histories that look odd and are right: none of them is reported. A capture recorded after a
+   * void is refunded in the same append; a second cancellation of an order finds nothing left to
+   * undo; a reservation stored after the first cancellation's undo is released by the second; a
+   * payment voided before any stock was reserved; an order shipped and paid for whose saga ended
+   * {@code FAILED} because the compensation's cancellation was refused.
+   */
+  @Test
+  void historiesThatLookOddAndAreRightReportNothing() throws Exception {
+    insert(order("q-n1", "OrderPlaced", placed("p-n1")));
+    insert(payment("q-n1", "PaymentInitiated"));
+    insert(order("q-n1", "OrderCancelled", lines("p-n1")));
+    insert(payment("q-n1", "PaymentVoided"));
+    insert(payment("q-n1", "PaymentCaptured"));
+    insert(payment("q-n1", "PaymentRefunded"));
+
+    insert(order("q-n2", "OrderPlaced", placed("p-n2")));
+    insert(payment("q-n2", "PaymentCaptured"));
+    insert(stock("p-n2", "StockReserved", "q-n2", 1));
+    insert(order("q-n2", "OrderCancelled", lines("p-n2")));
+    insert(order("q-n2", "OrderCancelled", lines("p-n2")));
+    insert(stock("p-n2", "StockReleased", "q-n2", 1));
+    insert(payment("q-n2", "PaymentRefunded"));
+
+    insert(order("q-n3", "OrderPlaced", placed("p-n3")));
+    insert(order("q-n3", "OrderCancelled", lines("p-n3")));
+    insert(stock("p-n3", "StockReserved", "q-n3", 1));
+    insert(order("q-n3", "OrderCancelled", lines("p-n3")));
+    insert(stock("p-n3", "StockReleased", "q-n3", 1));
+
+    insert(order("q-n4", "OrderPlaced", placed("p-n4")));
+    insert(payment("q-n4", "PaymentInitiated"));
+    insert(order("q-n4", "OrderCancelled", lines("p-n4")));
+    insert(payment("q-n4", "PaymentVoided"));
+
+    insert(order("q-n5", "OrderPlaced", placed("p-n5", 3)));
+    insert(payment("q-n5", "PaymentCaptured"));
+    insert(stock("p-n5", "StockReserved", "q-n5", 3));
+    insert(order("q-n5", "OrderConfirmed", "{}"));
+    insert(order("q-n5", "OrderShipped", placed("p-n5", 3)));
+    insert(stock("p-n5", "ReservationConfirmed", "q-n5", 3));
+    insert(new Command("saga:fulfillment-q-n5:2:0", 3));
+    insert(new Command("saga:fulfillment-q-n5:episode:1:comp:0", 20));
+
+    assertThat(MoneyAndStockInvariants.violations(dataSource, "q-")).isEmpty();
   }
 
   private void insert(Event e) throws Exception {

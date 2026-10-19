@@ -57,9 +57,9 @@ SELECT 'order shipped and cancelled' AS violation, aggregate_id AS order_id, '' 
  GROUP BY aggregate_id
 HAVING bool_or(event_type = 'OrderShipped') AND bool_or(event_type = 'OrderCancelled');
 
--- A confirmed order with a line that was never reserved, or a shipped order with a line whose
--- reservation was never committed.
-SELECT 'confirmed order with a line never reserved' AS violation,
+-- A confirmed order with a line that was never reserved in the line's quantity, or a shipped order
+-- with a line whose reservation was never committed in the line's quantity.
+SELECT 'confirmed order with a line never reserved in its quantity' AS violation,
        o.aggregate_id AS order_id, 'product ' || (l->>'productId') AS detail
   FROM event_stream o, jsonb_array_elements(o.payload->'lines') l
  WHERE o.aggregate_type = 'order' AND o.event_type = 'OrderPlaced'
@@ -69,16 +69,18 @@ SELECT 'confirmed order with a line never reserved' AS violation,
    AND NOT EXISTS (SELECT 1 FROM event_stream s
                     WHERE s.aggregate_type = 'inventory' AND s.aggregate_id = l->>'productId'
                       AND s.event_type = 'StockReserved'
-                      AND s.payload->>'orderId' = o.aggregate_id)
+                      AND s.payload->>'orderId' = o.aggregate_id
+                      AND (s.payload->>'quantity')::int = (l->>'quantity')::int)
 UNION ALL
-SELECT 'shipped order with a line never committed',
+SELECT 'shipped order with a line never committed in its quantity',
        o.aggregate_id, 'product ' || (l->>'productId')
   FROM event_stream o, jsonb_array_elements(o.payload->'lines') l
  WHERE o.aggregate_type = 'order' AND o.event_type = 'OrderShipped'
    AND NOT EXISTS (SELECT 1 FROM event_stream s
                     WHERE s.aggregate_type = 'inventory' AND s.aggregate_id = l->>'productId'
                       AND s.event_type = 'ReservationConfirmed'
-                      AND s.payload->>'orderId' = o.aggregate_id);
+                      AND s.payload->>'orderId' = o.aggregate_id
+                      AND (s.payload->>'quantity')::int = (l->>'quantity')::int);
 
 -- A confirmed order that is not cancelled and whose payment is not captured, or is refunded or
 -- voided.
