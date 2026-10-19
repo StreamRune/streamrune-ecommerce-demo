@@ -291,10 +291,8 @@ function OrderRow({ order }: { order: OrderView }) {
             {order.status}
           </Badge>
           {order.paymentStatus && (
-            <Badge
-              className={cn("text-xs ml-1", PAYMENT_STYLES[order.paymentStatus])}
-              aria-label="Payment status"
-            >
+            <Badge className={cn("text-xs ml-1", PAYMENT_STYLES[order.paymentStatus])}>
+              <span className="sr-only">Payment </span>
               {order.paymentStatus}
             </Badge>
           )}

@@ -243,7 +243,7 @@ test.describe("Writes against a running backend", () => {
     await expect(placed).toContainText("CANCELLED", SETTLED);
     await expect(placed.getByRole("button", { name: "Cancel" })).toHaveCount(0);
     // The row's payment badge follows the refund.
-    await expect(placed.getByLabel("Payment status")).toHaveText("REFUNDED", SETTLED);
+    await expect(placed.getByText("Payment REFUNDED")).toBeVisible(SETTLED);
 
     // The order's saga was complete before the cancel and stays so. The cancellation's undo
     // refunds the payment in full and releases the reserved unit.

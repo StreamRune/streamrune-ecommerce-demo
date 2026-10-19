@@ -111,8 +111,27 @@ class OrderPricingTest {
   }
 
   @Test
+  void anOrderIdTooLongForItsSagaIdIsRefusedBeforeAnyRead() {
+    AtomicInteger reads = new AtomicInteger();
+    OrderPricing counted = new OrderPricing(counting(eventStore, reads));
+    String orderId = "o".repeat(OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH + 1);
+
+    assertThatThrownBy(
+            () -> counted.price(orderId, "c-1", List.of(new OrderPricing.RequestedLine("p-1", 1))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage(
+            "orderId must be at most "
+                + OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH
+                + " characters, got "
+                + orderId.length());
+    assertThat(reads).as("the event store is not read").hasValue(0);
+  }
+
+  @Test
   void twoLinesOfOneProductAreRefused() {
     createProduct("p-widget", "9.99");
+    AtomicInteger reads = new AtomicInteger();
+    OrderPricing pricing = new OrderPricing(counting(eventStore, reads));
 
     assertThatThrownBy(
             () ->
@@ -124,6 +143,7 @@ class OrderPricingTest {
                         new OrderPricing.RequestedLine("p-widget", 2))))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("lines must name each product once");
+    assertThat(reads).as("the event store is not read").hasValue(0);
   }
 
   @Test

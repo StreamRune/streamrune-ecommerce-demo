@@ -146,12 +146,13 @@ test.describe("Orders page — the payment of an order (no backend required)", (
     await page.goto("/orders");
 
     const refunded = page.getByRole("row").filter({ hasText: "order-a1" });
-    await expect(refunded.getByLabel("Payment status")).toHaveText("REFUNDED");
+    // The badge reads "REFUNDED"; its name for a screen reader is "Payment REFUNDED".
+    await expect(refunded.getByText("Payment REFUNDED")).toBeVisible();
     await expect(refunded).toContainText("CANCELLED");
     // An order whose payment is not initiated yet shows no payment status.
     const unpaid = page.getByRole("row").filter({ hasText: "order-a2" });
     await expect(unpaid).toBeVisible();
-    await expect(unpaid.getByLabel("Payment status")).toHaveCount(0);
+    await expect(unpaid.getByText(/^Payment /)).toHaveCount(0);
   });
 });
 
