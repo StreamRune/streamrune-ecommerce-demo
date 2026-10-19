@@ -5,7 +5,6 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.streamrune.core.CommandBus;
-import org.streamrune.core.DomainException;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.StreamRuneContext;
@@ -24,6 +23,8 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  *   <li>gateway succeeds → {@code CapturePayment} → {@code PaymentCaptured} → saga reserves stock;
  *   <li>gateway fails → {@code FailPayment} → {@code PaymentFailed} → saga cancels the order.
  * </ul>
+ *
+ * <p>It also reacts to {@code PaymentRefunded}, by refunding the payment at the gateway.
  *
  * <p>The gateway call is guarded by a {@link PaymentGatewayCircuitBreaker}: after a few consecutive
  * gateway failures the breaker opens and the manager fails the payment (dispatches {@code
@@ -56,21 +57,35 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  *
  * <ul>
  *   <li>A payment whose stream already holds a later event (an earlier delivery captured or failed
- *       it) is skipped before the gateway is called, so a failed payment is never charged later.
+ *       it, or the order's cancellation voided it) is not sent to the gateway again, so a failed or
+ *       voided payment is never charged later.
  *   <li>The gateway call carries the payment id as its idempotency key: calling it again for a
  *       payment it already captured — the capture could not be recorded — charges nothing.
  *   <li>Each command is dispatched under a key derived from the payment id, the same on every
  *       delivery: a delivery after the command committed is answered from the command inbox and
  *       stores no second event.
- *   <li>A command the payment rejects because an earlier delivery settled it ({@code
- *       DomainException}, payment no longer {@code PENDING}) is logged and skipped. Any other
- *       rejection propagates.
+ *   <li>The deciders store nothing for a redelivered capture or failure, so no rejection is
+ *       expected; one that occurs is a fault and propagates.
  * </ul>
+ *
+ * <p><b>A payment cancelled while the gateway charged it.</b> A delivery of {@code
+ * PaymentInitiated} reads what the payment's stream holds after it. A void or a failure without a
+ * capture, while the gateway holds a capture of the payment — the money was taken and the capture
+ * was not recorded before the payment was cancelled — is answered with {@code CapturePayment}; the
+ * payment records the capture and refunds it in one append.
+ *
+ * <p><b>Refunds reach the gateway.</b> On {@code PaymentRefunded} it refunds the payment at the
+ * gateway; the payment id is the refund's idempotency key, so a redelivery refunds nothing twice.
  */
 @Singleton
 public class PaymentProcessManager implements EventListener {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaymentProcessManager.class);
+
+  /**
+   * A payment's stream holds four events at most: initiated, voided or failed, captured, refunded.
+   */
+  static final int PAYMENT_STREAM_READ_LIMIT = 16;
 
   private final PaymentGatewaySimulator gateway;
   private final PaymentGatewayCircuitBreaker breaker;
@@ -91,10 +106,36 @@ public class PaymentProcessManager implements EventListener {
   @Override
   public void onEvents(List<EventEnvelope> events) {
     for (EventEnvelope envelope : events) {
-      if (envelope.event() instanceof PaymentEvent.PaymentInitiated initiated
-          && !alreadySettled(envelope)) {
-        capture(initiated.paymentId(), envelope);
+      switch (envelope.event()) {
+        case PaymentEvent.PaymentInitiated initiated -> settle(initiated.paymentId(), envelope);
+        case PaymentEvent.PaymentRefunded refunded -> gateway.refund(refunded.paymentId());
+        default -> {}
       }
+    }
+  }
+
+  /**
+   * Decides what this delivery of {@code PaymentInitiated} does from what the payment's stream
+   * holds after it, read from the event store: nothing yet — the gateway is asked; a capture — an
+   * earlier delivery recorded it; a void or a failure and no capture — the capture is recorded only
+   * when the gateway took the money, and the payment refunds it.
+   */
+  private void settle(String paymentId, EventEnvelope initiated) {
+    List<EventEnvelope> later =
+        eventStore.readStream(initiated.streamId(), initiated.version(), PAYMENT_STREAM_READ_LIMIT);
+    if (later.isEmpty()) {
+      capture(paymentId, initiated);
+      return;
+    }
+    if (later.stream().anyMatch(e -> e.event() instanceof PaymentEvent.PaymentCaptured)) {
+      return;
+    }
+    if (gateway.hasCaptured(paymentId)) {
+      LOG.info(
+          "Payment {} was cancelled or failed after the gateway took the money; recording the"
+              + " capture, which refunds it",
+          LogSanitizer.sanitizeForLog(paymentId));
+      dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
     }
   }
 
@@ -103,7 +144,7 @@ public class PaymentProcessManager implements EventListener {
       LOG.warn(
           "Payment gateway circuit OPEN — failing payment {}",
           LogSanitizer.sanitizeForLog(paymentId));
-      settle(
+      dispatch(
           new PaymentCommand.FailPayment(paymentId, "payment gateway circuit open"),
           failKey(paymentId),
           initiated);
@@ -117,42 +158,14 @@ public class PaymentProcessManager implements EventListener {
           "Payment gateway failed for {}: {}",
           LogSanitizer.sanitizeForLog(paymentId),
           LogSanitizer.sanitizeForLog(gatewayFailure.getMessage()));
-      settle(
+      dispatch(
           new PaymentCommand.FailPayment(paymentId, gatewayFailure.getMessage()),
           failKey(paymentId),
           initiated);
       return;
     }
     breaker.recordSuccess();
-    settle(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
-  }
-
-  /**
-   * Dispatches the payment's settling command. Only a rejection of a payment that is in fact no
-   * longer {@code PENDING} is swallowed; every other failure propagates, so the subscription
-   * delivers the event again.
-   */
-  private void settle(PaymentCommand command, IdempotencyKey key, EventEnvelope initiated) {
-    try {
-      dispatch(command, key, initiated);
-    } catch (DomainException rejected) {
-      if (!alreadySettled(initiated)) {
-        throw rejected;
-      }
-      LOG.info(
-          "{} skipped: payment {} was settled by an earlier delivery",
-          command.getClass().getSimpleName(),
-          LogSanitizer.sanitizeForLog(initiated.streamId().value()));
-    }
-  }
-
-  /**
-   * Whether the payment was settled by an earlier delivery: its stream holds an event after this
-   * {@code PaymentInitiated}. Read from the event store, which every committed command reaches, not
-   * from a read model that may lag.
-   */
-  private boolean alreadySettled(EventEnvelope initiated) {
-    return !eventStore.readStream(initiated.streamId(), initiated.version(), 1).isEmpty();
+    dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
   }
 
   /** The capture's idempotency key: one per payment, the same on every delivery. */

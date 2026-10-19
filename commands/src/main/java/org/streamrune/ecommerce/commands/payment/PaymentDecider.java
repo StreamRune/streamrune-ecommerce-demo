@@ -61,14 +61,6 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
           case REFUNDED, VOIDED, FAILED -> List.of();
         };
       }
-
-      case PaymentCommand.RefundPayment c -> {
-        if (state.status() != PaymentStatus.CAPTURED)
-          throw new DomainException("Can only refund CAPTURED payments");
-        yield List.of(
-            new PaymentEvent.PaymentRefunded(
-                c.paymentId(), state.orderId(), state.amount(), c.reason()));
-      }
     };
   }
 

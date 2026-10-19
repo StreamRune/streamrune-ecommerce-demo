@@ -80,7 +80,7 @@ Unlike the early scaffolding, this method is now genuinely on the hot path: the 
 
 **Why not just let the command-bus breaker handle it?** The `processPayment` failure does not, on its own, reach the command-bus breaker — the manager catches it and turns it into a *successful* `FailPayment` command, and the saga then runs a *successful* `CancelOrder`. From the command bus's point of view, those are normal successful dispatches. Worse, the command-bus breaker resets its consecutive-failure count on **any** successful command (`after()` closes the circuit), so the saga's own compensation traffic would keep clearing the counter. A breaker on the command bus can never "see" a run of gateway failures here.
 
-The textbook fix is to put the breaker around the flaky dependency itself. `PaymentGatewayCircuitBreaker` counts only gateway-call outcomes, so consecutive gateway failures open it regardless of what the saga does on the command bus. While it is open the `PaymentProcessManager` fast-fails the payment (dispatches `FailPayment` without calling the gateway) until the cooldown admits a probe.
+The textbook fix is to put the breaker around the flaky dependency itself. `PaymentGatewayCircuitBreaker` counts only gateway-call outcomes, so consecutive gateway failures open it regardless of what the saga does on the command bus. While it is open the `PaymentProcessManager` fast-fails the payment (dispatches `FailPayment` without calling the gateway) until the cooldown admits a probe. A payment that the order's cancellation voided before the manager reached it is neither failed nor sent to the gateway: the manager reads the payment's stream first (Chapter 11, Step 5b).
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`:
 
@@ -162,7 +162,7 @@ public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
 }
 ```
 
-The `PaymentProcessManager` bean (Chapter 11, Step 6) already takes this breaker as a constructor argument, so once the bean exists the wiring is complete — the manager consults `allowRequest()` before each gateway call and reports the outcome.
+The `PaymentProcessManager` bean (Chapter 11, Step 6) already takes this breaker as a constructor argument, so once the bean exists the wiring is complete — the manager consults `allowRequest()` before each gateway call and reports the outcome. A breaker-open `FailPayment` of a payment that was voided in the meantime stores nothing: the payment decider fails a pending payment only, so the cancellation's void stands.
 
 ### Step 4: Add Admin Endpoints
 

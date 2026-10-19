@@ -376,6 +376,43 @@ saga_origin_smoke() {
     return 1
   fi
   echo "  ✓ Saga fulfillment-$oid completed (${i}s); PaymentCaptured carries its origin; a reserved correlation id is refused."
+
+  # The cancellation of the completed order is undone by the order cancellation process manager:
+  # its stock is released and its payment refunded. In a native image the process manager's
+  # commands and the events they store are records Jackson writes and reads by reflection. The
+  # customer's access is checked against the order's read-model row, which may follow the saga by
+  # a poll: until it is there, the cancellation is answered 403.
+  for i in $(seq 1 20); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders/$oid/cancel" \
+      -H 'Content-Type: application/json' \
+      -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+      -d '{"reason":"smoke cancel"}')
+    if [ "$code" != "403" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/orders/$oid/cancel returned $code"
+    return 1
+  fi
+  local undone=""
+  for i in $(seq 1 30); do
+    undone=$(pg_sql "SELECT count(*) FROM event_stream
+        WHERE (aggregate_type = 'payment' AND aggregate_id = 'pay-$oid' AND event_type = 'PaymentRefunded')
+           OR (aggregate_type = 'inventory' AND aggregate_id = '$pid' AND event_type = 'StockReleased')")
+    if [ "$undone" = "2" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$undone" != "2" ]; then
+    echo "  ✗ The cancellation of $oid was not undone within 30s (PaymentRefunded and StockReleased)."
+    pg_sql "SELECT aggregate_type || ':' || event_type FROM event_stream
+        WHERE aggregate_id IN ('$oid', 'pay-$oid', '$pid') ORDER BY global_offset" || true
+    return 1
+  fi
+  echo "  ✓ The cancellation of $oid refunded its payment and released its stock (${i}s)."
   return 0
 }
 

@@ -77,8 +77,8 @@ public sealed interface OrderCommand extends Command {
    * inventory id. The saga reserves stock on the inventory aggregate whose id is the product id,
    * and the inventory extractor builds that id with {@code AggregateId.of}, which refuses a control
    * character or an id longer than 255 characters. Refused only there, the order would already be
-   * placed and paid for, and the saga would refund and cancel it. Refused here, the order endpoint
-   * answers {@code 400} and nothing is written. The message never echoes the id.
+   * placed and paid for, and the saga would cancel it and the cancellation refund it. Refused here,
+   * the order endpoint answers {@code 400} and nothing is written. The message never echoes the id.
    *
    * <p>{@link OrderEvent.OrderLine}, the line an {@code OrderPlaced} event records, has no such
    * rule: it is rebuilt from the event log and from saga state, where a rule would make a stored

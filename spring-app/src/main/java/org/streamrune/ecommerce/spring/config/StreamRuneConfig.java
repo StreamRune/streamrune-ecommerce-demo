@@ -27,7 +27,9 @@ import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
 import org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper;
 import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
 import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
@@ -377,7 +379,6 @@ public class StreamRuneConfig {
                         switch (cmd) {
                           case PaymentCommand.InitiatePayment c -> c.paymentId();
                           case PaymentCommand.CapturePayment c -> c.paymentId();
-                          case PaymentCommand.RefundPayment c -> c.paymentId();
                           case PaymentCommand.FailPayment c -> c.paymentId();
                           case PaymentCommand.CancelPayment c -> c.paymentId();
                         }),
@@ -678,8 +679,8 @@ public class StreamRuneConfig {
   /**
    * Compensates a fulfillment that has not ended by its deadline ({@link
    * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
-   * unless configured) it claims each saga past its deadline and dispatches the compensation its
-   * state dictates — cancel the order, or refund and cancel.
+   * unless configured) it claims each saga past its deadline and dispatches its compensation, which
+   * is the order's cancellation whatever the state.
    *
    * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
    * follows its lease: it claims deadlines only while this backend leads the saga type through
@@ -688,9 +689,8 @@ public class StreamRuneConfig {
    * forward commands. Around a handover two backends can overlap for a moment — a backend that dies
    * keeps its lease until the lease expires, and a deposed one may finish its page; there the saga
    * runner's forward fence keeps the order: a forward command is stored before the claim, and its
-   * compensation has to cover it, or it is refused at its commit ({@link OrderFulfillmentSaga}
-   * names the two cases the demo's compensation leaves open). {@code inboxRetentionMaxAge} is the
-   * deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
+   * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
    * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
    * the subscriptions below are, and stopped with the context, after the saga subscription.
    */
@@ -833,6 +833,72 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(paymentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
+  @Bean
+  public OrderCancellationProcessManager orderCancellationProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderCancellationProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderCancellationProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-cancellation} delivers.
+   * Listed in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderCancellationSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderCancellationProcessManager orderCancellationProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderCancellationProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderCancellationProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Commits the stock of every shipped order (OrderShipmentProcessManager). */
+  @Bean
+  public OrderShipmentProcessManager orderShipmentProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderShipmentProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderShipmentProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-shipment} delivers. Listed
+   * in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderShipmentSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderShipmentProcessManager orderShipmentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderShipmentProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable())
             .build();

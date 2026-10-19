@@ -52,8 +52,9 @@ class ObservabilitySmokeSuiteIT {
   }
 
   /**
-   * The saga subscription and the payment process manager's subscription are registered with the
-   * health contributor, each under its own lease; a single application takes both leases.
+   * The saga subscription and the subscriptions of the payment, order cancellation and order
+   * shipment process managers are registered with the health contributor, each under its own lease;
+   * a single application takes every lease.
    */
   @Test
   void theSagaSubscriptionIsRegisteredAndLeads() {
@@ -68,7 +69,9 @@ class ObservabilitySmokeSuiteIT {
                           Collectors.toMap(SubscriptionHealth::name, SubscriptionHealth::role));
               assertThat(roles)
                   .containsEntry("order-fulfillment-saga", LeaseRole.LEADING)
-                  .containsEntry("payment-process-manager", LeaseRole.LEADING);
+                  .containsEntry("payment-process-manager", LeaseRole.LEADING)
+                  .containsEntry("order-cancellation", LeaseRole.LEADING)
+                  .containsEntry("order-shipment", LeaseRole.LEADING);
             });
   }
 

@@ -702,7 +702,7 @@ Forward commands refused at their commit on http://localhost:8091 since it start
 
 The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
 
-**Orders the run leaves to put right.** The check says that no forward command came after a compensation; it does not say that every compensation undid everything. The demo's `compensate()` works from the saga row, and Chapter 11 ("Reliability under failure") names the two cases that leaves open, which a deadline this short produces: a reservation stored just before the claim is not released, and a capture by the payment process manager that commits after the claim is not refunded. Such an order is cancelled while its stock stays reserved or its payment stays captured; the demo's planned refund and stock-release flow closes both. These two queries list them:
+**Orders the run leaves to put right.** The check says that no forward command came after a compensation; the undo is the cancellation's: every compensation cancels the order, and the order cancellation process manager (Chapter 11, Step 5c) releases the stock and voids or refunds the payment of every cancelled order, whatever the saga row recorded, so once every saga has ended and the process managers have caught up, these two queries return no row:
 
 ```sql
 -- Orders cancelled with their payment captured and not refunded

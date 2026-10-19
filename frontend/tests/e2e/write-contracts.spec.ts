@@ -138,7 +138,7 @@ test.describe("Orders — the commands the page sends", () => {
     expect(sent[0].body?.reason).toBeTruthy();
   });
 
-  test("Cancel says what it leaves behind for a confirmed order, and only for one", async ({
+  test("Cancel says that the order's stock is released and its payment voided or refunded", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
@@ -153,18 +153,16 @@ test.describe("Orders — the commands the page sends", () => {
     const dialog = page.getByRole("dialog");
     const note = dialog.getByRole("note");
 
-    await row("order-a1").getByRole("button", { name: "Cancel" }).click();
-    await expect(note).toContainText("its payment is captured and its stock is reserved");
-    await expect(note).toContainText(
-      "The demo does not refund the payment and does not release the reservation."
-    );
-    await dialog.getByRole("button", { name: "Close" }).first().click();
-    await expect(dialog).toHaveCount(0);
-
-    // An order the saga has not confirmed holds no payment and no stock yet: nothing to say.
-    await row("order-a0").getByRole("button", { name: "Cancel" }).click();
-    await expect(dialog.getByText("Are you sure you want to cancel order")).toBeVisible();
-    await expect(note).toHaveCount(0);
+    // Every cancellation is undone, whether the saga has confirmed the order or not.
+    for (const orderId of ["order-a1", "order-a0"]) {
+      await row(orderId).getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog.getByText("Are you sure you want to cancel order")).toBeVisible();
+      await expect(note).toHaveText(
+        "Cancelling releases the order's stock and voids or refunds its payment in full."
+      );
+      await dialog.getByRole("button", { name: "Close" }).first().click();
+      await expect(dialog).toHaveCount(0);
+    }
   });
 
   test("an id is sent as one path segment, whatever characters it holds", async ({ page }) => {

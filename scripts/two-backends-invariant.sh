@@ -17,9 +17,9 @@
 #
 # With the defaults (a 15-minute deadline, no delay) no saga reaches its deadline and the check
 # holds trivially; the three variables above make some deadlines pass while a forward command is in
-# flight. Such a run can leave cancelled orders whose stock stays reserved or whose payment stays
-# captured: the demo's compensation works from the saga row (tutorial chapter 17 lists them with
-# two queries); this script checks the order of commands, not that every compensation undid it all.
+# flight. Every compensation cancels the order, and the cancellation's undo releases the order's
+# stock and voids or refunds its payment whatever the saga row recorded; this script checks the
+# order of commands.
 # ORDERS (default 60) sets the number of orders, PAUSE_SECONDS (default 1) the pause
 # between two of them. Exit status: 0 when the check holds, 1 when it does not or a saga did not end
 # within five minutes.

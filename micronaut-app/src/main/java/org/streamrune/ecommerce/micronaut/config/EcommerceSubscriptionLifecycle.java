@@ -10,8 +10,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.subscription.EventListener;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.runtime.DeadLetterRetryRunner;
@@ -22,9 +25,10 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
 
 /**
  * Micronaut lifecycle bean that wires and starts the e-commerce-specific polling subscriptions: the
- * order-fulfillment saga and the payment process manager, and the saga's timeout runner.
+ * order-fulfillment saga, the payment process manager, the order cancellation and order shipment
+ * process managers, and the saga's timeout runner.
  *
- * <p>Both subscriptions are app-specific (the framework has no knowledge of {@link
+ * <p>The subscriptions are app-specific (the framework has no knowledge of {@link
  * OrderFulfillmentSaga} or {@link PaymentProcessManager}), so they cannot be auto-started by {@link
  * org.streamrune.micronaut.StreamRuneLifecycle}. This bean mirrors the Spring wiring in {@code
  * StreamRuneConfig}: build a {@link PollingEventSubscription}, call {@code start()}, and stop it on
@@ -40,11 +44,12 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  * timeout runner is started after the saga subscription and stopped after it: closing the
  * subscription first gives the lease back, so the runner does not stop while this backend leads.
  *
- * <p>The payment process manager's subscription delivers under a lease named after it, {@code
- * payment-process-manager}, over the same leadership ({@code null} when single-active-consumer
- * leadership is off: every backend then delivers). Both subscriptions register with the {@link
- * SubscriptionHealthContributor}, so the health check lists them with their {@code role}: {@code
- * LEADING} or {@code STANDBY}.
+ * <p>The subscriptions of the payment, order cancellation and order shipment process managers each
+ * deliver under a lease named after them, {@code payment-process-manager}, {@code
+ * order-cancellation} and {@code order-shipment}, over the same leadership ({@code null} when
+ * single-active-consumer leadership is off: every backend then delivers). Every subscription
+ * registers with the {@link SubscriptionHealthContributor}, so the health check lists it with its
+ * {@code role}: {@code LEADING} or {@code STANDBY}.
  *
  * <p>It also starts and closes the demo's own {@link DeadLetterRetryRunner} (see {@code
  * StreamRuneFactory#deadLetterRetryRunner}): an application-supplied runner replaces the
@@ -69,12 +74,16 @@ public class EcommerceSubscriptionLifecycle
   private final SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner;
   private final SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner;
   private final PaymentProcessManager paymentProcessManager;
+  private final OrderCancellationProcessManager orderCancellationProcessManager;
+  private final OrderShipmentProcessManager orderShipmentProcessManager;
   private final DeadLetterRetryRunner deadLetterRetryRunner;
   private final SubscriptionLeadership leadership;
   private final SubscriptionHealthContributor health;
 
   private PollingEventSubscription orderFulfillmentSagaSubscription;
   private PollingEventSubscription paymentProcessSubscription;
+  private PollingEventSubscription orderCancellationSubscription;
+  private PollingEventSubscription orderShipmentSubscription;
 
   public EcommerceSubscriptionLifecycle(
       EventStore eventStore,
@@ -82,6 +91,8 @@ public class EcommerceSubscriptionLifecycle
       SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
       SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner,
       PaymentProcessManager paymentProcessManager,
+      OrderCancellationProcessManager orderCancellationProcessManager,
+      OrderShipmentProcessManager orderShipmentProcessManager,
       DeadLetterRetryRunner deadLetterRetryRunner,
       @Nullable SubscriptionLeadership leadership,
       SubscriptionHealthContributor health) {
@@ -90,6 +101,8 @@ public class EcommerceSubscriptionLifecycle
     this.orderFulfillmentSagaRunner = orderFulfillmentSagaRunner;
     this.orderFulfillmentTimeoutRunner = orderFulfillmentTimeoutRunner;
     this.paymentProcessManager = paymentProcessManager;
+    this.orderCancellationProcessManager = orderCancellationProcessManager;
+    this.orderShipmentProcessManager = orderShipmentProcessManager;
     this.deadLetterRetryRunner = deadLetterRetryRunner;
     this.leadership = leadership;
     this.health = health;
@@ -139,6 +152,15 @@ public class EcommerceSubscriptionLifecycle
     paymentProcessSubscription.start();
     LOG.info("StreamRune: started payment-process-manager subscription");
 
+    // The undo of every cancelled order and the commit of every shipped one — mirror Spring's
+    // orderCancellationSubscription and orderShipmentSubscription beans.
+    orderCancellationSubscription =
+        processManagerSubscription(
+            OrderCancellationProcessManager.SUBSCRIPTION_NAME, orderCancellationProcessManager);
+    orderShipmentSubscription =
+        processManagerSubscription(
+            OrderShipmentProcessManager.SUBSCRIPTION_NAME, orderShipmentProcessManager);
+
     // The demo's own dead-letter retry runner: the framework does not start an application's.
     deadLetterRetryRunner.start();
     LOG.info("StreamRune: started the demo's DeadLetterRetryRunner");
@@ -147,6 +169,10 @@ public class EcommerceSubscriptionLifecycle
   @PreDestroy
   public void close() {
     closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
+    closeQuietly(orderShipmentSubscription, "order-shipment subscription");
+    orderShipmentSubscription = null;
+    closeQuietly(orderCancellationSubscription, "order-cancellation subscription");
+    orderCancellationSubscription = null;
     closeQuietly(paymentProcessSubscription, "payment-process-manager subscription");
     paymentProcessSubscription = null;
     // The saga subscription first: closing it gives the saga's lease back, and the timeout runner
@@ -154,6 +180,23 @@ public class EcommerceSubscriptionLifecycle
     closeQuietly(orderFulfillmentSagaSubscription, "order-fulfillment-saga subscription");
     orderFulfillmentSagaSubscription = null;
     closeQuietly(orderFulfillmentTimeoutRunner::stop, "order-fulfillment saga's timeout runner");
+  }
+
+  /** A started subscription that feeds the listener under a lease named after the subscription. */
+  private PollingEventSubscription processManagerSubscription(String name, EventListener listener) {
+    PollingEventSubscription subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(name)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(java.time.Duration.ofMillis(500)))
+            .listener(listener)
+            .leadership(leadership)
+            .healthContributor(health)
+            .build();
+    subscription.start();
+    LOG.info("StreamRune: started {} subscription", name);
+    return subscription;
   }
 
   private static void closeQuietly(AutoCloseable closeable, String name) {

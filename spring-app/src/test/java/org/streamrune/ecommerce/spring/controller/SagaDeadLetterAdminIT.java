@@ -75,6 +75,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
             "pay-" + orderId,
             new Money(new BigDecimal("19.99"), "USD"),
             List.of(),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     sagaStore.create(
         sagaId, SagaType.fromClass(OrderFulfillmentState.class), state, SagaStatus.FAULTED);
@@ -524,6 +525,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
             "cust-" + orderId,
             "pay-" + orderId,
             new Money(new BigDecimal("19.99"), "USD"),
+            List.of(),
             List.of(),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     sagaStore.create(sagaId, type, state, SagaStatus.RUNNING);

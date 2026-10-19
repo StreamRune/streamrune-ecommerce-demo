@@ -120,7 +120,6 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
       PaymentStatus.class,
       PaymentCommand.InitiatePayment.class,
       PaymentCommand.CapturePayment.class,
-      PaymentCommand.RefundPayment.class,
       PaymentCommand.FailPayment.class,
       PaymentCommand.CancelPayment.class,
 

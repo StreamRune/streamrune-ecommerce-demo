@@ -180,16 +180,4 @@ class PaymentDeciderTest {
         .when(new PaymentCommand.CancelPayment("pay-1", "why"))
         .expectNoEvents();
   }
-
-  // RefundPayment
-
-  @Test
-  void refundPayment_fromCaptured() {
-    fixture
-        .given(historyOf(PaymentStatus.CAPTURED))
-        .when(new PaymentCommand.RefundPayment("pay-1", "Saga compensation"))
-        .expectEvents(
-            new PaymentEvent.PaymentRefunded("pay-1", "o-1", HUNDRED, "Saga compensation"))
-        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.REFUNDED));
-  }
 }

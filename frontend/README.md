@@ -79,9 +79,8 @@ A write action sends the request the backend's controller reads, field for field
   action shows it.
 - **An order line carries its unit price**: the price of the product picked, as the catalogue
   lists it. The backend accepts the price it is sent (a demo shortcut, see the repository README).
-- **Cancel is offered for a confirmed order too**, and says what it does there: the order becomes
-  `CANCELLED`, the payment stays captured and the stock stays reserved. The demo has no refund
-  flow for an order whose fulfillment is complete.
+- **Cancel is offered for a confirmed order too**, and says what it does: the order becomes
+  `CANCELLED`, its stock is released and its payment voided, or refunded in full once captured.
 - **A command is answered before the lists show it.** The backend answers `200` with an empty
   body once the events are stored; the read models follow by up to the projections' polling
   interval (five seconds and up to one of jitter by default). The page therefore reads a list

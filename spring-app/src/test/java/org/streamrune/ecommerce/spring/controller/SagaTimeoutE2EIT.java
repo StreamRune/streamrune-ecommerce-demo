@@ -28,6 +28,7 @@ import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
@@ -61,8 +62,8 @@ import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
  * Thread.sleep} on wall-clock time.
  *
  * <p>Non-vacuity contrast: a saga that has NOT yet timed out (cutoff before its {@code updated_at})
- * yields no compensation; the same saga once past the cutoff yields exactly the compensation
- * commands its state dictates.
+ * yields no compensation; the same saga once past the cutoff yields exactly its compensation, the
+ * order's cancellation. What the cancellation undoes is {@code SagaDeadlineUndoE2EIT}'s subject.
  */
 class SagaTimeoutE2EIT extends AbstractIntegrationTest {
 
@@ -143,6 +144,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
             paymentId,
             new Money(new BigDecimal("42.00"), "USD"),
             List.of(),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     // RUNNING: the saga is mid-fulfilment (awaiting inventory), not yet in a terminal status.
     sagaStore.create(
@@ -173,10 +175,12 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     return bus.dispatched.stream()
         .filter(
             c ->
-                (c instanceof PaymentCommand.RefundPayment r
-                        && r.paymentId().equals(saga.paymentId()))
-                    || (c instanceof OrderCommand.CancelOrder o
-                        && o.orderId().equals(saga.orderId())))
+                switch (c) {
+                  case OrderCommand.CancelOrder o -> o.orderId().equals(saga.orderId());
+                  case PaymentCommand.CancelPayment p -> p.paymentId().equals(saga.paymentId());
+                  case InventoryCommand.ReleaseStock r -> r.orderId().equals(saga.orderId());
+                  default -> false;
+                })
         .toList();
   }
 
@@ -214,17 +218,11 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     Clock pastTimeout = Clock.fixed(updatedAt.plus(TIMEOUT).plusSeconds(60), ZoneOffset.UTC);
     SagaTimeoutRunnerTestAccess.pollOnce(runnerWithClock(bus2, pastTimeout));
 
-    // AWAITING_INVENTORY compensation = RefundPayment + CancelOrder (see OrderFulfillmentSaga).
-    List<Command> mine = compensationsFor(bus2, saga);
-    assertThat(mine)
-        .as("timed-out AWAITING_INVENTORY saga must dispatch exactly refund + cancel")
-        .hasSize(2);
-    assertThat(mine.get(0)).isInstanceOf(PaymentCommand.RefundPayment.class);
-    assertThat(mine.get(1)).isInstanceOf(OrderCommand.CancelOrder.class);
-
-    PaymentCommand.RefundPayment refund = (PaymentCommand.RefundPayment) mine.get(0);
-    OrderCommand.CancelOrder cancel = (OrderCommand.CancelOrder) mine.get(1);
-    assertThat(refund.paymentId()).isEqualTo(saga.paymentId());
-    assertThat(cancel.orderId()).isEqualTo(saga.orderId());
+    // The compensation in every state is the order's cancellation (see OrderFulfillmentSaga); its
+    // OrderCancelled starts the undo of the stock and the payment.
+    assertThat(compensationsFor(bus2, saga))
+        .as("a timed-out saga dispatches exactly the order's cancellation")
+        .containsExactly(
+            new OrderCommand.CancelOrder(saga.orderId(), OrderFulfillmentSaga.COMPENSATION_REASON));
   }
 }

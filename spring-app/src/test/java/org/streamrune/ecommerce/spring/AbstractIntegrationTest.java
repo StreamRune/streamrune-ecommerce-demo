@@ -90,7 +90,7 @@ public abstract class AbstractIntegrationTest {
    * tells Testcontainers not to stop the container between test classes, keeping the Spring context
    * key (datasource URL) stable so Spring can cache and reuse a single application context.
    */
-  static final PostgreSQLContainer<?> POSTGRES;
+  public static final PostgreSQLContainer<?> POSTGRES;
 
   /**
    * Singleton RabbitMQ container. Required because {@code RabbitMqConfig.outboxRabbitConnection}
@@ -98,7 +98,7 @@ public abstract class AbstractIntegrationTest {
    * load. Shared across all subclasses so the Spring context key remains stable (the broker URL is
    * part of the key).
    */
-  static final RabbitMQContainer RABBIT;
+  public static final RabbitMQContainer RABBIT;
 
   static {
     POSTGRES =

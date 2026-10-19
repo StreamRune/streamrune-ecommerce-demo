@@ -47,7 +47,6 @@
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentStatus", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$InitiatePayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$CapturePayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
-  {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$RefundPayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$FailPayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$CancelPayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
 
