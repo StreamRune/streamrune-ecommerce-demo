@@ -54,7 +54,13 @@ class ObservabilitySmokeSuiteIT {
   /**
    * The saga subscription and the subscriptions of the payment, order cancellation and order
    * shipment process managers are registered with the health contributor, each under its own lease;
-   * a single application takes every lease.
+   * a single application takes every lease. Each subscription takes its lease on its own poll
+   * thread, which starts inside the application's startup observer, so the roles are not {@code
+   * LEADING} the instant the application answers: the test waits for them. The test classes
+   * of this module run on one application, so there is no earlier application's lease to wait
+   * out, as its Micronaut twin must (a stopping application does not give its leases back, and the
+   * test lease there lives 5 s); the 30 s bound covers the default lease time to live (15 s) were
+   * one still held.
    */
   @Test
   void theSagaSubscriptionIsRegisteredAndLeads() {

@@ -72,7 +72,13 @@ public final class OrderPricing {
     return new OrderCommand.PlaceOrder(orderId, customerId, priced);
   }
 
-  /** The product as its stream holds it, folded from its first event. */
+  /**
+   * The product as its stream holds it, folded from its first event. This reads and folds the whole
+   * stream for each line of each order, so its cost grows with the product's history, not with the
+   * order. A product's stream is small in the demo (its creation, a few price changes and stock
+   * adjustments), so the read is cheap here; a catalogue whose products have long histories would
+   * price from a snapshot or a read model instead, and accept the lag of the read model.
+   */
   private ProductState current(String productId) {
     StreamId stream = StreamId.of(ProductState.TYPE, AggregateId.of(productId));
     ProductState state = products.initialState();
