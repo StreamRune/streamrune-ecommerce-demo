@@ -73,6 +73,23 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
   void listEventsContainsExpectedFieldsAfterProductCreation() {
     String pid = "evt-prod-" + System.nanoTime();
     createProduct(pid);
+    // The page of the global stream starts just before the product's event: the shared test
+    // database holds the events of every other test class, more than one page of them.
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> productStream =
+        client
+            .get()
+            .uri("/api/events/product/" + pid)
+            .header("X-User-Id", "admin-1")
+            .header("X-User-Role", "ADMIN")
+            .exchange()
+            .expectStatus()
+            .isOk()
+            .expectBody(List.class)
+            .returnResult()
+            .getResponseBody();
+    assertThat(productStream).isNotEmpty();
+    long before = ((Number) productStream.getFirst().get("globalOffset")).longValue() - 1;
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -83,7 +100,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
               List<Map<String, Object>> events =
                   client
                       .get()
-                      .uri("/api/events?offset=0&limit=200")
+                      .uri("/api/events?offset=" + before + "&limit=200")
                       .header("X-User-Id", "admin-1")
                       .header("X-User-Role", "ADMIN")
                       .exchange()

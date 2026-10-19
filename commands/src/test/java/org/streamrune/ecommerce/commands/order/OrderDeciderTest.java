@@ -1,11 +1,15 @@
 package org.streamrune.ecommerce.commands.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.AuthorizationException;
 import org.streamrune.core.DomainException;
+import org.streamrune.core.StreamRuneContext;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.test.DeciderFixture;
@@ -206,5 +210,57 @@ class OrderDeciderTest {
             new OrderCommand.PlaceOrder(
                 "o-1", "c-1", List.of(new OrderCommand.OrderLine("p-1", 2, TEN_USD))))
         .expectFailedWith(DomainException.class, "Order already exists: o-1");
+  }
+
+  // ConfirmOrder is the fulfillment saga's: it confirms an order once its payment is captured and
+  // every line reserved. The guard refuses it from anybody else, whoever the caller is.
+
+  private final OrderDecider decider = new OrderDecider();
+
+  private OrderState placedState() {
+    return decider.evolve(decider.initialState(), placed());
+  }
+
+  @Test
+  void confirmOrder_outsideASagaDispatch_isRefused() {
+    assertThatThrownBy(() -> decider.guard(new OrderCommand.ConfirmOrder("o-1"), placedState()))
+        .isInstanceOf(AuthorizationException.class)
+        .hasMessage("ConfirmOrder is sent by the fulfillment saga only");
+  }
+
+  @Test
+  void confirmOrder_insideASagaDispatch_isAdmitted() {
+    assertThatCode(
+            () ->
+                ScopedValue.where(StreamRuneContext.SAGA_OWNED, Boolean.TRUE)
+                    .run(() -> decider.guard(new OrderCommand.ConfirmOrder("o-1"), placedState())))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void confirmOrder_whereADispatchIsMarkedNotTheSagas_isRefused() {
+    // A process manager's command runs with SAGA_OWNED bound to FALSE.
+    assertThatThrownBy(
+            () ->
+                ScopedValue.where(StreamRuneContext.SAGA_OWNED, Boolean.FALSE)
+                    .run(() -> decider.guard(new OrderCommand.ConfirmOrder("o-1"), placedState())))
+        .isInstanceOf(AuthorizationException.class);
+  }
+
+  @Test
+  void everyOtherCommand_passesTheGuard() {
+    OrderState state = placedState();
+    List<OrderCommand> others =
+        List.of(
+            new OrderCommand.PlaceOrder(
+                "o-2", "c-1", List.of(new OrderCommand.OrderLine("p-1", 1, TEN_USD))),
+            new OrderCommand.ShipOrder("o-1"),
+            new OrderCommand.DeliverOrder("o-1"),
+            new OrderCommand.CancelOrder("o-1", "changed my mind"));
+    for (OrderCommand command : others) {
+      assertThatCode(() -> decider.guard(command, state))
+          .as("%s", command)
+          .doesNotThrowAnyException();
+    }
   }
 }

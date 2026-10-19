@@ -22,7 +22,7 @@ import {
   BACKEND_URL,
 } from "./helpers";
 
-function order(orderId: string, customerId: string) {
+function order(orderId: string, customerId: string, paymentStatus: string | null = "CAPTURED") {
   return {
     orderId,
     customerId,
@@ -31,6 +31,7 @@ function order(orderId: string, customerId: string) {
     ],
     total: { amount: 9.99, currency: "USD" },
     status: "CONFIRMED",
+    paymentStatus,
     createdAt: "2026-10-04T00:00:00Z",
     updatedAt: "2026-10-04T00:00:00Z",
   };
@@ -124,6 +125,34 @@ test.describe("Orders page — surface (no backend required)", () => {
       expect(request.role).toBe("CUSTOMER");
       expect(request.userId).toBe("cust-alice");
     }
+  });
+});
+
+test.describe("Orders page — the payment of an order (no backend required)", () => {
+  test("an order row shows its payment status", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { ...order("order-a1", "cust-alice", "REFUNDED"), status: "CANCELLED" },
+          order("order-a2", "cust-alice", null),
+        ]),
+      })
+    );
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+
+    const refunded = page.getByRole("row").filter({ hasText: "order-a1" });
+    // The badge reads "REFUNDED"; its name for a screen reader is "Payment REFUNDED".
+    await expect(refunded.getByText("Payment REFUNDED")).toBeVisible();
+    await expect(refunded).toContainText("CANCELLED");
+    // An order whose payment is not initiated yet shows no payment status.
+    const unpaid = page.getByRole("row").filter({ hasText: "order-a2" });
+    await expect(unpaid).toBeVisible();
+    await expect(unpaid.getByText(/^Payment /)).toHaveCount(0);
   });
 });
 

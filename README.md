@@ -94,7 +94,7 @@ docker compose up -d postgres rabbitmq
 
 All three apps expose the same REST API. The `X-User-Id` and `X-User-Role` headers control identity and authorization: `X-User-Id` says who is calling, `X-User-Role` which role they hold (`ADMIN`, `CUSTOMER`; anything else is a guest). `X-Trace-Id` and `X-Correlation-Id` are optional (auto-generated if missing). Both are tracing metadata a client chooses: a correlation id addresses nothing. The reply to a fulfillment saga's own command reaches that saga through the origin the command bus stores with the event, and a confirmation or cancellation a request causes reaches the saga of the order the event names. One form of correlation id is reserved: a request whose `X-Correlation-Id` starts with `streamrune:` (the framework binds `streamrune:saga:<sagaId>` around a saga's commands) is answered `400` with a plain-text body.
 
-> **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md). The price of an order line is a shortcut of the same kind: `POST /api/orders` takes `unitPrice` from the request and checks only that it is positive, where a real shop reads the price from its own catalogue.
+> **Demo shortcuts, not a pattern.** The apps run in StreamRune's trusted-gateway mode (`streamrune.security.trust-user-id-header=true`): `X-User-Id` is the identity because the demo stands in for a gateway that would authenticate every caller, set the header itself and strip any value a client sent. Without the flag the framework ignores the header. The role comes straight from `X-User-Role` through the demo's `HeaderUserRoleResolver`, which anyone can set to `ADMIN`; a real deployment derives roles from the authenticated identity. See [Chapter 9 of the tutorial](docs/tutorial/09-authorization.md).
 
 ### Who may call what
 
@@ -112,7 +112,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 - **Operations are for an `ADMIN`**: the audit log, the event history, the payment-failure switch and everything under `/api/admin` except `/api/admin/health`, reads and writes alike.
 - **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price or stock, discontinuing it and receiving a shipment into the inventory are for an `ADMIN`.
 - **A request is read before the caller is decided.** A request without a body, with malformed JSON or without a required field is `400` for every caller, in all three apps, and so is a query parameter that cannot be read: a `limit`, `offset` or `eventOffset` that is not a whole number, or a required `sagaId` or `eventOffset` that is missing. A well-formed request from a caller the rule refuses is `403`.
-- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a confirm, ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not shipped or delivered. Every cancellation releases the order's stock and voids or refunds its payment.
+- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not shipped or delivered. Every cancellation releases the order's stock and voids or refunds its payment.
 
 ### Products
 
@@ -130,12 +130,11 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
-| `POST` | `/api/orders` | Place order | `ADMIN`, or the customer the order names in `customerId` |
-| `POST` | `/api/orders/{id}/confirm` | Confirm order (the fulfillment saga does this itself) | `ADMIN` or the order's customer |
+| `POST` | `/api/orders` | Place order. Each line names a product and a quantity; the price is the product's in the catalogue (its event stream), and a product nobody created or one that is discontinued answers `400`. One line per product. The fulfillment saga confirms the order: there is no endpoint for it, and a `ConfirmOrder` sent by anybody but the saga is refused | `ADMIN`, or the customer the order names in `customerId` |
 | `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); every cancellation releases the order's stock and voids its payment, or refunds it in full once captured | `ADMIN` or the order's customer |
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
-| `GET` | `/api/orders/{id}` | Get order | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
+| `GET` | `/api/orders/{id}` | Get order, with its payment status (`paymentStatus`: `PENDING`, `CAPTURED`, `REFUNDED`, `VOIDED` or `FAILED`; `null` until the payment is initiated) | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
 | `GET` | `/api/orders` | List orders; `?customerId=` narrows the list | `ADMIN`: every order. Any other authenticated caller: their own orders. `403` without an identity |
 | `GET` | `/api/saga/fulfillments/{id}` | The fulfillment saga of an order, id `fulfillment-<orderId>`: order, customer, payment id, lines, total and fulfillment status | `ADMIN` or the order's customer; `403` otherwise, also for an order without a row |
 | `GET` | `/api/saga/fulfillments?limit=50` | List the fulfillment sagas with the framework's saga status | `ADMIN`: every fulfillment saga. Any other authenticated caller: the sagas of their own orders. `403` without an identity |
@@ -191,7 +190,7 @@ curl -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: cust-1" \
   -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId":"o1","customerId":"cust-1","lines":[{"productId":"p1","quantity":2,"unitPrice":9.99}]}'
+  -d '{"orderId":"o1","customerId":"cust-1","lines":[{"productId":"p1","quantity":2}]}'
 
 # Read it as that customer; without the two headers, or as another customer, the answer is 403
 curl http://localhost:8080/api/orders/o1 -H "X-User-Id: cust-1" -H "X-User-Role: CUSTOMER"

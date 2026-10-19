@@ -71,14 +71,17 @@ seeded customers and needs no customer list from the backend.
 ## Writing to the backend
 
 A write action sends the request the backend's controller reads, field for field
-(`src/lib/api.ts`). Three things follow from the backend's contracts:
+(`src/lib/api.ts`). Five things follow from the backend's contracts:
 
 - **The page picks the id.** `POST /api/orders`, `POST /api/customers` and `POST /api/products`
   take the id from the request body, so the page generates one in the form of the seed data:
   `order-`, `cust-` or `prod-` and eight hex digits (`src/lib/ids.ts`). The toast of a successful
   action shows it.
-- **An order line carries its unit price**: the price of the product picked, as the catalogue
-  lists it. The backend accepts the price it is sent (a demo shortcut, see the repository README).
+- **An order line names a product and a quantity.** The backend prices each line from the product
+  catalogue, and takes one line per product: the Place Order dialog merges the lines of one
+  product, their quantities summed, before it sends the order.
+- **Nobody confirms an order by hand**: the fulfillment saga confirms it once its payment is
+  captured and its stock reserved. Each order row shows its payment status beside the order's.
 - **Cancel is offered for a confirmed order too**, and says what it does: the order becomes
   `CANCELLED`, its stock is released and its payment voided, or refunded in full once captured.
 - **A command is answered before the lists show it.** The backend answers `200` with an empty

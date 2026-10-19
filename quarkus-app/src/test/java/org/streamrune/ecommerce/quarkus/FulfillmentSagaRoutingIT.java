@@ -33,6 +33,7 @@ import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
@@ -40,15 +41,15 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * Whose saga an event reaches, against the running Quarkus app. The correlation id of a request is
  * whatever the client sends in {@code X-Correlation-Id}, and nothing routes by it: the reply to a
  * saga's own command reaches that saga through the origin the command bus stores with the event,
- * and a cancellation a request causes reaches the saga of the order the event names; a confirmation
- * is written by the saga's own command, and one a request causes reaches no saga. A caller who
+ * and a cancellation a request causes reaches the saga of the order the event names. A caller who
  * names another order's saga in that header does not reach it.
  *
  * <p>Two customers place an order each, and the saga of each order waits for its payment. The first
- * customer then confirms their own order with the second customer's saga id as the correlation id.
- * The second saga must still be waiting for its payment afterwards, and its row must be the row
- * that was stored: a row records every event the runner hands its saga, so an untouched row is what
- * shows that the event was never routed there, whatever the saga would have made of it.
+ * customer then cancels their own order with the second customer's saga id as the correlation id.
+ * The cancellation reaches the first customer's saga, which starts compensating. The second saga
+ * must still be waiting for its payment afterwards, and its row must be the row that was stored: a
+ * row records every event the runner hands its saga, so an untouched row is what shows that the
+ * event was never routed there, whatever the saga would have made of it.
  *
  * <p>Saga dispatch binds a correlation id of its own, {@code streamrune:saga:<sagaId>}. A request
  * that sends an id with the {@code streamrune:} prefix is answered {@code 400} before any command
@@ -73,6 +74,8 @@ class FulfillmentSagaRoutingIT {
 
   private static final Money PRICE = new Money(new BigDecimal("9.99"), "USD");
 
+  private static final String CANCEL_BODY = "{\"reason\": \"changed my mind\"}";
+
   /** An operator: an identity with the ADMIN role. */
   private static final String OPERATOR = "q-route-operator";
 
@@ -88,6 +91,7 @@ class FulfillmentSagaRoutingIT {
   @Test
   void anEventOfOneOrderDoesNotReachTheSagaItsCorrelationIdNames() throws Exception {
     String product = uniqueId("p");
+    createProduct(product);
     commandBus.execute(new InventoryCommand.ReceiveShipment(product, 5));
     String alice = uniqueId("alice");
     String bob = uniqueId("bob");
@@ -102,24 +106,30 @@ class FulfillmentSagaRoutingIT {
       placeOrder(aliceOrder, alice, product);
       awaitOrderReadableBy(aliceOrder, alice);
 
-      // Alice confirms her own order and names Bob's saga in X-Correlation-Id.
-      HttpResponse<String> confirmed =
+      // Alice cancels her own order and names Bob's saga in X-Correlation-Id.
+      HttpResponse<String> cancelled =
           send(
               "POST",
-              "/api/orders/" + aliceOrder + "/confirm",
+              "/api/orders/" + aliceOrder + "/cancel",
               alice,
               "CUSTOMER",
               bobSaga.value(),
-              "");
-      assertThat(confirmed.statusCode()).isEqualTo(200);
-      EventMetadata stored = metadataOf(OrderState.TYPE, aliceOrder, "OrderConfirmed");
+              CANCEL_BODY);
+      assertThat(cancelled.statusCode()).isEqualTo(200);
+      EventMetadata stored = metadataOf(OrderState.TYPE, aliceOrder, "OrderCancelled");
       assertThat(stored.correlationId().value())
           .as("the correlation id the stored event carries is the one the client sent")
           .isEqualTo(bobSaga.value());
       assertThat(stored.sagaOrigin()).as("an event a request caused names no saga").isNull();
 
+      // The cancellation names Alice's order, so it reaches Alice's saga: it starts compensating.
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("COMPENSATING"));
+
       // The saga subscription reads the global stream in order: once the saga of an order
-      // placed afterwards exists, the subscription is past Alice's OrderConfirmed.
+      // placed afterwards exists, the subscription is past Alice's OrderCancelled.
       placeOrder(laterOrder, alice, product);
       await()
           .atMost(Duration.ofSeconds(30))
@@ -127,26 +137,25 @@ class FulfillmentSagaRoutingIT {
               () -> assertThat(fulfillmentStatus("fulfillment-" + laterOrder)).isNotNull());
 
       assertThat(fulfillmentStatus(bobSaga.value()))
-          .as("Bob's saga after Alice's OrderConfirmed named it in its correlation id")
+          .as("Bob's saga after Alice's OrderCancelled named it in its correlation id")
           .isEqualTo("AWAITING_PAYMENT");
-      // The event carries no origin, so the runner asked the saga, which names no saga for a
-      // confirmation: only the saga's own ConfirmOrder writes the OrderConfirmed it waits for.
-      assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("AWAITING_PAYMENT");
       assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
 
       // A saga's row records every event the runner hands it, whatever the saga makes of it:
-      // each one raises the row's version and becomes its last applied offset. Bob's row and
-      // Alice's row are the rows that were stored.
+      // each one raises the row's version and becomes its last applied offset. Bob's row is the
+      // row that was stored; Alice's row applied her cancellation.
       LoadedSaga<OrderFulfillmentState> bobRow = sagaRow(bobSaga);
       assertThat(bobRow.version()).as("the version of Bob's saga row").isEqualTo(1);
       assertThat(bobRow.lastAppliedOffset())
           .as("the offset of the last event applied to Bob's saga row")
           .isNull();
       LoadedSaga<OrderFulfillmentState> aliceRow = sagaRow(aliceSaga);
-      assertThat(aliceRow.version()).as("the version of Alice's saga row").isEqualTo(1);
+      assertThat(aliceRow.state().fulfillmentStatus())
+          .isEqualTo(OrderFulfillmentStatus.COMPENSATING);
+      assertThat(aliceRow.version()).as("the version of Alice's saga row").isGreaterThan(1);
       assertThat(aliceRow.lastAppliedOffset())
           .as("the offset of the last event applied to Alice's saga row")
-          .isNull();
+          .isNotNull();
     } finally {
       sagaStore.delete(aliceSaga, FULFILLMENT);
       sagaStore.delete(bobSaga, FULFILLMENT);
@@ -164,6 +173,7 @@ class FulfillmentSagaRoutingIT {
   @Test
   void theReservedFormOfAnotherOrdersSagaId_isAnswered400() throws Exception {
     String product = uniqueId("p");
+    createProduct(product);
     commandBus.execute(new InventoryCommand.ReceiveShipment(product, 5));
     String alice = uniqueId("alice");
     String bob = uniqueId("bob");
@@ -178,15 +188,15 @@ class FulfillmentSagaRoutingIT {
       placeOrder(aliceOrder, alice, product);
       awaitOrderReadableBy(aliceOrder, alice);
 
-      // Alice confirms her own order under the correlation id Bob's saga dispatches with.
+      // Alice cancels her own order under the correlation id Bob's saga dispatches with.
       HttpResponse<String> refused =
           send(
               "POST",
-              "/api/orders/" + aliceOrder + "/confirm",
+              "/api/orders/" + aliceOrder + "/cancel",
               alice,
               "CUSTOMER",
               "streamrune:saga:" + bobSaga.value(),
-              "");
+              CANCEL_BODY);
 
       assertThat(refused.statusCode()).isEqualTo(400);
       assertThat(refused.headers().firstValue("Content-Type")).contains("text/plain;charset=UTF-8");
@@ -297,11 +307,17 @@ class FulfillmentSagaRoutingIT {
 
   // --- requests ---
 
+  /** Creates the product in the catalogue, which prices the orders' lines. */
+  private void createProduct(String productId) {
+    commandBus.execute(
+        new ProductCommand.CreateProduct(productId, "Routing product", null, "General", PRICE, 0));
+  }
+
   private void placeOrder(String order, String customer, String product) throws Exception {
     String body =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 9.99}]}"""
+         "lines": [{"productId": "%s", "quantity": 1}]}"""
             .formatted(order, customer, product);
     assertThat(send("POST", "/api/orders", customer, "CUSTOMER", null, body).statusCode())
         .isEqualTo(200);

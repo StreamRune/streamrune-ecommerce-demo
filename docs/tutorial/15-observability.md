@@ -1348,7 +1348,7 @@ The `-N` flag disables buffering. The first line is `: connected`, a comment: th
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId": "o-obs-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
+  -d '{"orderId": "o-obs-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1}]}'
 ```
 
 Within one second you should see SSE frames appear in the first terminal, one per event appended. The feed needs no header, and a frame names no stream and carries no payload:
@@ -1429,15 +1429,15 @@ It prints `: keepalive` and waits: the stream is open, though no event of that o
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId": "o-obs-2", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
+  -d '{"orderId": "o-obs-2", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1}]}'
 ```
 
-Within the polling interval the `OrderPlaced` event arrives:
+Within the polling interval the `OrderPlaced` event arrives. The stored event holds each line's unit price, which the catalogue set when the order was placed: `p-1` at 21.99, the price an `ADMIN` gave it in Chapter 9 (Step 7) after Chapter 5 had raised it to 34.99:
 
 ```
 : keepalive
 
-data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":9.99,"currency":"USD"}}],"total":{"amount":9.99,"currency":"USD"}}
+data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":21.99,"currency":"USD"}}],"total":{"amount":21.99,"currency":"USD"}}
 id:22
 
 ```

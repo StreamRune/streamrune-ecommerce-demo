@@ -49,6 +49,7 @@ function order(orderId: string, status: string) {
     ],
     total: { amount: 19.99, currency: "USD" },
     status,
+    paymentStatus: status === "CREATED" ? "PENDING" : "CAPTURED",
     createdAt: "2026-10-04T00:00:00Z",
     updatedAt: "2026-10-04T00:00:00Z",
   };
@@ -69,7 +70,7 @@ async function pickRowAction(page: Page, item: string): Promise<void> {
 }
 
 test.describe("Orders — the commands the page sends", () => {
-  test("Place Order sends an order id and the unit price of the product picked", async ({
+  test("Place Order sends an order id, the product picked and its quantity, and no price", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
@@ -93,13 +94,40 @@ test.describe("Orders — the commands the page sends", () => {
     expect(sent[0].role).toBe("CUSTOMER");
     expect(sent[0].userId).toBe("cust-alice");
     expect(sent[0].contentType).toContain("application/json");
-    // PlaceOrderRequest(orderId, customerId, lines[OrderLineRequest(productId, quantity, unitPrice)])
+    // PlaceOrderRequest(orderId, customerId, lines[OrderLineRequest(productId, quantity)]): the
+    // catalogue sets the price.
     expect(Object.keys(sent[0].body ?? {}).sort()).toEqual(["customerId", "lines", "orderId"]);
     expect(sent[0].body?.orderId).toMatch(/^order-[0-9a-f]{8}$/);
     expect(sent[0].body?.customerId).toBe("cust-alice");
-    expect(sent[0].body?.lines).toEqual([
-      { productId: "prod-widget", quantity: 2, unitPrice: 19.99 },
-    ]);
+    expect(sent[0].body?.lines).toEqual([{ productId: "prod-widget", quantity: 2 }]);
+  });
+
+  test("Place Order sends products and quantities, merged per product", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/customers", [ALICE]);
+    const sent = await answerCommands(page, "/api/orders");
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "Place Order" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("combobox").filter({ hasText: "Select product" }).click();
+    await page.getByRole("option", { name: /Widget/ }).click();
+    await dialog.getByRole("button", { name: "Add Line" }).click();
+    await dialog.getByRole("combobox").filter({ hasText: "Select product" }).click();
+    await page.getByRole("option", { name: /Widget/ }).click();
+    await dialog.getByRole("spinbutton").nth(1).fill("2");
+    await dialog.getByRole("button", { name: "Place Order" }).click();
+
+    await expect(page.getByText(/Order placed: order-[0-9a-f]{8}/)).toBeVisible();
+    expect(sent).toHaveLength(1);
+    // The backend takes one line per product: two lines of one product become one line, the
+    // quantities summed.
+    expect(sent[0].body?.lines).toEqual([{ productId: "prod-widget", quantity: 3 }]);
+    for (const line of sent[0].body?.lines as Record<string, unknown>[]) {
+      expect(Object.keys(line).sort()).toEqual(["productId", "quantity"]);
+    }
   });
 
   test("Cancel sends a body with the reason, for a confirmed order too", async ({ page }) => {
@@ -183,7 +211,7 @@ test.describe("Orders — the commands the page sends", () => {
     expect(paths).toEqual(["/api/orders/order%20a%2F1%3Fx/cancel"]);
   });
 
-  test("Confirm, Ship and Deliver send no body; Ship and Deliver are an ADMIN's", async ({
+  test("Ship and Deliver send no body and are an ADMIN's; a CREATED order offers no Confirm", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
@@ -192,22 +220,19 @@ test.describe("Orders — the commands the page sends", () => {
       order("order-a1", "CONFIRMED"),
       order("order-a2", "SHIPPED"),
     ]);
-    const confirmed = await answerCommands(page, "/api/orders/*/confirm");
     const shipped = await answerCommands(page, "/api/orders/*/ship");
     const delivered = await answerCommands(page, "/api/orders/*/deliver");
     await actAs(page, "ADMIN");
 
     await page.goto("/orders");
-    await page.getByRole("button", { name: "Confirm" }).click();
-    await expect(page.getByText("Order confirmed")).toBeVisible();
+    // The fulfillment saga confirms an order; the page offers no way to confirm one by hand.
+    await expect(page.getByRole("row").filter({ hasText: "order-a0" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
     await page.getByRole("button", { name: "Ship" }).click();
     await expect(page.getByText("Order shipped")).toBeVisible();
     await page.getByRole("button", { name: "Deliver" }).click();
     await expect(page.getByText("Order delivered")).toBeVisible();
 
-    expect(confirmed.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
-      ["POST", "/api/orders/order-a0/confirm", "admin-1", null],
-    ]);
     expect(shipped.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
       ["POST", "/api/orders/order-a1/ship", "admin-1", null],
     ]);
@@ -270,7 +295,7 @@ test.describe("A command's result reaches the page", () => {
 });
 
 test.describe("Orders — what each role is offered", () => {
-  test("a CUSTOMER may confirm and cancel their order, and is told that Ship is an ADMIN's", async ({
+  test("a CUSTOMER may cancel their order, and is told that Ship is an ADMIN's", async ({
     page,
   }) => {
     await mockBackendRoutes(page);

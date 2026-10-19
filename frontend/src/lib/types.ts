@@ -25,12 +25,16 @@ export interface OrderLineView {
   unitPrice: Money;
 }
 
+/** The status of an order's payment; an order's row has none until the payment is initiated. */
+export type PaymentStatus = "PENDING" | "CAPTURED" | "REFUNDED" | "VOIDED" | "FAILED";
+
 export interface OrderView {
   orderId: string;
   customerId: string;
   lines: OrderLineView[];
   total: Money;
   status: OrderStatus;
+  paymentStatus: PaymentStatus | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.spring.controller;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -30,11 +31,13 @@ import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentIds;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 import org.streamrune.ecommerce.spring.SpringEcommerceApplication;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
@@ -274,10 +277,13 @@ class SagaDeadlineUndoE2EIT {
     SagaTimeoutRunnerTestAccess.pollOnce(runner);
   }
 
+  /** Creates the product in the catalogue, which prices the order's line, and stocks it. */
   private void stock(String product, int quantity) {
-    context
-        .getBean(VirtualThreadCommandBus.class)
-        .execute(new InventoryCommand.ReceiveShipment(product, quantity));
+    VirtualThreadCommandBus bus = context.getBean(VirtualThreadCommandBus.class);
+    bus.execute(
+        new ProductCommand.CreateProduct(
+            product, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD"), 0));
+    bus.execute(new InventoryCommand.ReceiveShipment(product, quantity));
   }
 
   private void place(String order, Map<String, Integer> lines) throws Exception {
@@ -292,7 +298,7 @@ class SagaDeadlineUndoE2EIT {
                     .map(
                         l ->
                             """
-                            {"productId": "%s", "quantity": %d, "unitPrice": 9.99}"""
+                            {"productId": "%s", "quantity": %d}"""
                                 .formatted(l.getKey(), l.getValue()))
                     .collect(Collectors.joining(", ")));
     int port = Integer.parseInt(context.getEnvironment().getRequiredProperty("local.server.port"));

@@ -66,7 +66,7 @@ class SagaControllerIT extends AbstractIntegrationTest {
           "orderId": "%s",
           "customerId": "%s",
           "lines": [
-            {"productId": "%s", "quantity": 1, "unitPrice": 15.00}
+            {"productId": "%s", "quantity": 1}
           ]
         }"""
             .formatted(oid, cid, pid);

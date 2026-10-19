@@ -242,6 +242,8 @@ test.describe("Writes against a running backend", () => {
     await expect(page.getByText("Order cancelled")).toBeVisible();
     await expect(placed).toContainText("CANCELLED", SETTLED);
     await expect(placed.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+    // The row's payment badge follows the refund.
+    await expect(placed.getByText("Payment REFUNDED")).toBeVisible(SETTLED);
 
     // The order's saga was complete before the cancel and stays so. The cancellation's undo
     // refunds the payment in full and releases the reserved unit.
@@ -346,7 +348,7 @@ test.describe("Writes against a running backend", () => {
     await page.getByRole("dialog").getByRole("button", { name: "Receive" }).click();
     await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
 
-    // The saga reserves from that inventory: the order is confirmed at the price the page read.
+    // The saga reserves from that inventory: the order is confirmed at the catalogue's price.
     const customer = await pageAs(browser, "CUSTOMER", created.customerId);
     const orderId = await placeOrder(customer, created.productName);
     const placed = row(customer, orderId);

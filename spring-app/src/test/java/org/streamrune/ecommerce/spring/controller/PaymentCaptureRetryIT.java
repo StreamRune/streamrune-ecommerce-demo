@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.spring.controller;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -23,11 +24,13 @@ import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
@@ -62,6 +65,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
     String orderId = "pm-retry-" + System.nanoTime();
     String productId = "pm-prod-" + System.nanoTime();
     String paymentId = "pay-" + orderId;
+    createProduct(productId);
     commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
 
     try (var failures = new AppendFailureInjection(dataSource)) {
@@ -129,6 +133,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
     String customerId = "pm-cust-" + System.nanoTime();
     String productId = "pm-prod-" + System.nanoTime();
     String paymentId = "pay-" + orderId;
+    createProduct(productId);
     commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
 
     try (var failures = new AppendFailureInjection(dataSource)) {
@@ -204,6 +209,13 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
     return eventStore.readStream(StreamId.of(type, AggregateId.of(id)), Version.initial(), 100);
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    commandBus.execute(
+        new ProductCommand.CreateProduct(
+            productId, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD"), 0));
+  }
+
   private void placeOrder(String orderId, String customerId, String productId) {
     client
         .post()
@@ -214,7 +226,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
         .bodyValue(
             """
             {"orderId": "%s", "customerId": "%s",
-             "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 9.99}]}"""
+             "lines": [{"productId": "%s", "quantity": 1}]}"""
                 .formatted(orderId, customerId, productId))
         .exchange()
         .expectStatus()

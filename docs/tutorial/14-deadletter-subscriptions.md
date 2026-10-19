@@ -649,7 +649,7 @@ Temporarily introduce a failure into `OrderProjection.process` by throwing a `Ru
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId":"o-fail-1","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":29.99}]}'
+  -d '{"orderId":"o-fail-1","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
 ```
 
 Check the projection dead letters table directly:

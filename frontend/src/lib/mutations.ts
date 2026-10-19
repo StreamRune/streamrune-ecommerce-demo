@@ -7,7 +7,6 @@ import {
   discontinueProduct,
   receiveShipment,
   placeOrder,
-  confirmOrder,
   shipOrder,
   deliverOrder,
   cancelOrder,
@@ -80,13 +79,6 @@ export function useReceiveShipment() {
 
 export function usePlaceOrder() {
   return useInvalidatingMutation(placeOrder, [["orders"], ["fulfillment"]]);
-}
-
-export function useConfirmOrder() {
-  return useInvalidatingMutation(
-    (orderId: string) => confirmOrder(orderId),
-    [["orders"]]
-  );
 }
 
 export function useShipOrder() {

@@ -110,6 +110,7 @@ class SseStreamAccessIT {
     String customer = uniqueId("buyer");
     String product = uniqueId("p");
     String order = uniqueId("o");
+    createProduct(product);
     stockProduct(product, 5);
     placeOrder(order, customer, product);
     // The saga confirms the order; by then the order read model has its row, which is what names
@@ -220,6 +221,17 @@ class SseStreamAccessIT {
         .isBetween(200, 299);
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String product) throws Exception {
+    String body =
+        """
+        {"productId": "%s", "name": "Stream product", "category": "General", "price": 12.50,
+         "initialStock": 0}"""
+            .formatted(product);
+    assertThat(send("POST", "/api/products", "stock-clerk", ADMIN, body).statusCode())
+        .isBetween(200, 299);
+  }
+
   private void stockProduct(String product, int quantity) throws Exception {
     String body = "{\"quantity\": " + quantity + "}";
     assertThat(
@@ -232,7 +244,7 @@ class SseStreamAccessIT {
     String body =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 12.50}]}"""
+         "lines": [{"productId": "%s", "quantity": 1}]}"""
             .formatted(order, customer, product);
     assertThat(send("POST", "/api/orders", customer, CUSTOMER, body).statusCode())
         .isBetween(200, 299);

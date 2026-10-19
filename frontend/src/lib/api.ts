@@ -195,19 +195,16 @@ export function fetchOrder(orderId: string): Promise<OrderView> {
 }
 
 /**
- * `POST /api/orders`: the id is the client's to pick, and each line carries
- * the unit price as a plain USD amount (the price of the product picked).
+ * `POST /api/orders`: the id is the client's to pick, and each line names a
+ * product and a quantity; the catalogue sets the price. The backend takes one
+ * line per product.
  */
 export function placeOrder(body: {
   orderId: string;
   customerId: string;
-  lines: { productId: string; quantity: number; unitPrice: number }[];
+  lines: { productId: string; quantity: number }[];
 }): Promise<void> {
   return apiCommand("/api/orders", "POST", body);
-}
-
-export function confirmOrder(orderId: string): Promise<void> {
-  return apiCommand(`/api/orders/${segment(orderId)}/confirm`, "POST");
 }
 
 export function shipOrder(orderId: string): Promise<void> {

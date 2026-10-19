@@ -8,9 +8,9 @@ import type { Role } from "./types";
  * - OWN_DATA_VIEW: read customers and orders. The backend serves them to an
  *   authenticated caller only: every row to an ADMIN, a CUSTOMER's own record
  *   and own orders to that customer. A GUEST has no identity and is refused.
- * - ORDER_PLACE, ORDER_CONFIRM_CANCEL: an order is placed, confirmed and
- *   cancelled by its customer or by an ADMIN. A CUSTOMER's table holds their
- *   own orders only, so the gate needs no check per row.
+ * - ORDER_PLACE, ORDER_CANCEL: an order is placed and cancelled by its
+ *   customer or by an ADMIN; the fulfillment saga confirms it. A CUSTOMER's
+ *   table holds their own orders only, so the gate needs no check per row.
  * - ORDER_SHIP, ORDER_DELIVER: an ADMIN's, whoever the order belongs to.
  * - PRODUCT_MANAGE: creating a product, its stock and price, discontinuing it
  *   and receiving a shipment are an ADMIN's; everyone reads the catalogue.
@@ -23,7 +23,7 @@ import type { Role } from "./types";
 const ROLE_PERMISSIONS: Record<Role, string[]> = {
   ADMIN: [
     "ORDER_PLACE",
-    "ORDER_CONFIRM_CANCEL",
+    "ORDER_CANCEL",
     "ORDER_SHIP",
     "ORDER_DELIVER",
     "PRODUCT_MANAGE",
@@ -36,7 +36,7 @@ const ROLE_PERMISSIONS: Record<Role, string[]> = {
   ],
   CUSTOMER: [
     "ORDER_PLACE",
-    "ORDER_CONFIRM_CANCEL",
+    "ORDER_CANCEL",
     "PROFILE_MANAGE",
     "OWN_DATA_VIEW",
     "FULFILLMENT_VIEW",

@@ -43,6 +43,24 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
   /** How long a stream may take to answer and deliver its opening comment. */
   private static final Duration OPENS_WITHIN = Duration.ofSeconds(5);
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    client
+        .post()
+        .uri("/api/products")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(
+            """
+            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50,
+             "initialStock": 0}"""
+                .formatted(productId))
+        .exchange()
+        .expectStatus()
+        .is2xxSuccessful();
+  }
+
   private void placeOrder(String orderId, String customerId, String productId) {
     String body =
         """
@@ -50,7 +68,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
           "orderId": "%s",
           "customerId": "%s",
           "lines": [
-            {"productId": "%s", "quantity": 1, "unitPrice": 12.50}
+            {"productId": "%s", "quantity": 1}
           ]
         }"""
             .formatted(orderId, customerId, productId);
@@ -117,6 +135,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String oid = "sse-order-" + System.nanoTime();
     String cid = "sse-cust-" + System.nanoTime();
     String pid = "sse-prod-" + System.nanoTime();
+    createProduct(pid);
 
     List<ServerSentEvent<String>> received = new CopyOnWriteArrayList<>();
     Disposable sub = subscribeSse(oid, received);
@@ -153,6 +172,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String streamB = "sse-isoB-" + System.nanoTime();
     String cid = "sse-iso-cust-" + System.nanoTime();
     String pid = "sse-iso-prod-" + System.nanoTime();
+    createProduct(pid);
 
     // Open BOTH subscriptions before emitting, so both are live when the feed reads the event.
     // The feed has a single advancing offset shared by the whole server; only subscribers that

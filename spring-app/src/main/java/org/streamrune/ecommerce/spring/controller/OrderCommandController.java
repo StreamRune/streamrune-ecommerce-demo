@@ -3,23 +3,23 @@ package org.streamrune.ecommerce.spring.controller;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
-import java.math.BigDecimal;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
- * The order commands. An order is placed, confirmed and cancelled by an authenticated {@code ADMIN}
- * or by the customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else.
- * Shipping and delivering are for the {@code ADMIN} role, which {@code @RequireRole} on the two
- * commands enforces in the command bus.
+ * The order commands. An order is placed and cancelled by an authenticated {@code ADMIN} or by the
+ * customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else. The price
+ * of each line comes from the product catalogue ({@link OrderPricing}). The fulfillment saga
+ * confirms an order; there is no endpoint for it. Shipping and delivering are for the {@code ADMIN}
+ * role, which {@code @RequireRole} on the two commands enforces in the command bus. A shipped or
+ * delivered order is not cancelled ({@code 400}).
  */
 @RestController
 @RequestMapping("/api/orders")
@@ -27,31 +27,29 @@ public class OrderCommandController {
 
   private final VirtualThreadCommandBus commandBus;
   private final OwnerOrAdminQueries queries;
+  private final OrderPricing orderPricing;
 
-  public OrderCommandController(VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries) {
+  public OrderCommandController(
+      VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries, OrderPricing orderPricing) {
     this.commandBus = commandBus;
     this.queries = queries;
+    this.orderPricing = orderPricing;
   }
 
-  /** The order's customer is the caller, unless the caller is an {@code ADMIN}. */
+  /**
+   * The order's customer is the caller, unless the caller is an {@code ADMIN}. A product nobody
+   * created, or one that is discontinued, answers {@code 400}.
+   */
   @PostMapping
   public ResponseEntity<Void> placeOrder(@Valid @RequestBody PlaceOrderRequest req) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
-    List<OrderCommand.OrderLine> lines =
-        req.lines().stream()
-            .map(
-                l ->
-                    new OrderCommand.OrderLine(
-                        l.productId(), l.quantity(), new Money(l.unitPrice(), "USD")))
-            .toList();
-    commandBus.execute(new OrderCommand.PlaceOrder(req.orderId(), req.customerId(), lines));
-    return ResponseEntity.ok().build();
-  }
-
-  @PostMapping("/{id}/confirm")
-  public ResponseEntity<Void> confirmOrder(@PathVariable String id) {
-    queries.requireOrderAccess(RequestCaller.current(), id);
-    commandBus.execute(new OrderCommand.ConfirmOrder(id));
+    commandBus.execute(
+        orderPricing.price(
+            req.orderId(),
+            req.customerId(),
+            req.lines().stream()
+                .map(l -> new OrderPricing.RequestedLine(l.productId(), l.quantity()))
+                .toList()));
     return ResponseEntity.ok().build();
   }
 
@@ -80,10 +78,8 @@ public class OrderCommandController {
       @NotBlank String customerId,
       @NotEmpty List<@Valid OrderLineRequest> lines) {}
 
-  public record OrderLineRequest(
-      @NotBlank String productId,
-      @NotNull @Positive int quantity,
-      @NotNull @Positive BigDecimal unitPrice) {}
+  /** One line as a client asks for it: a product and a quantity; the catalogue sets the price. */
+  public record OrderLineRequest(@NotBlank String productId, @Positive int quantity) {}
 
   public record CancelOrderRequest(String reason) {}
 }

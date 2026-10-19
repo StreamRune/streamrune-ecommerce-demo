@@ -30,6 +30,7 @@ function order(orderId: string, customerId: string) {
     ],
     total: { amount: 9.99, currency: "USD" },
     status: "CONFIRMED",
+    paymentStatus: "CAPTURED",
     createdAt: "2026-10-04T00:00:00Z",
     updatedAt: "2026-10-04T00:00:00Z",
   };

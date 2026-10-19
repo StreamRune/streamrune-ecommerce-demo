@@ -44,6 +44,20 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
         .exchange();
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    post(
+            "/api/products",
+            "ADMIN",
+            "test-admin",
+            """
+            {"productId": "%s", "name": "Product", "category": "General", "price": 9.99,
+             "initialStock": 0}"""
+                .formatted(productId))
+        .expectStatus()
+        .is2xxSuccessful();
+  }
+
   @Test
   void aSecondCreateProductIsRefusedAndTheProductIsUnchanged() {
     String pid = "dup-p-" + System.nanoTime();
@@ -100,12 +114,16 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
     String order =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": %d, "unitPrice": 9.99}]}""";
+         "lines": [{"productId": "%s", "quantity": %d}]}""";
+    String first = "dup-o-first-" + System.nanoTime();
+    String second = "dup-o-second-" + System.nanoTime();
+    createProduct(first);
+    createProduct(second);
 
-    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "dup-o-first", 1))
+    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, first, 1))
         .expectStatus()
         .is2xxSuccessful();
-    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "dup-o-second", 7))
+    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, second, 7))
         .expectStatus()
         .isBadRequest()
         .expectBody(String.class)
@@ -120,7 +138,7 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
             .toList();
     assertThat(placed).hasSize(1);
     assertThat(placed.getFirst().lines()).hasSize(1);
-    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo("dup-o-first");
+    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo(first);
     assertThat(placed.getFirst().lines().getFirst().quantity()).isEqualTo(1);
   }
 }

@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -13,13 +14,18 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
  * End-to-end proof of the transactional outbox path in the Spring demo app:
  *
  * <ol>
- *   <li>Placing and confirming an order writes an {@code outbox_events} row in the SAME transaction
- *       as the domain events.
+ *   <li>Placing an order of a stocked product, which the fulfillment saga confirms, writes an
+ *       {@code outbox_events} row for the {@code OrderConfirmed} in the SAME transaction as the
+ *       event.
  *   <li>The OutboxPoller picks up the entry and delivers it to RabbitMQ.
  *   <li>The received payload contains NO PII (no customer name, email, or customerId).
  *   <li>No customer events are ever published — CustomerEvent.* is excluded from the mapper
@@ -38,6 +44,7 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
   // -----------------------------------------------------------------------
 
   @Autowired private DataSource dataSource;
+  @Autowired private VirtualThreadCommandBus commandBus;
 
   // -----------------------------------------------------------------------
   // Helpers
@@ -66,13 +73,30 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
         .is2xxSuccessful();
   }
 
+  /** Creates the product in the catalogue, which prices the order's line. */
+  private void createProduct(String productId) {
+    commandBus.execute(
+        new ProductCommand.CreateProduct(
+            productId,
+            "Outbox product",
+            null,
+            "General",
+            new Money(new BigDecimal("9.99"), "USD"),
+            0));
+  }
+
+  /** Stocks the product, so that the saga reserves the line and confirms the order. */
+  private void stockProduct(String productId) {
+    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
+  }
+
   private void placeOrder(String orderId, String customerId, String productId) {
     String body =
         """
         {
           "orderId": "%s",
           "customerId": "%s",
-          "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 9.99}]
+          "lines": [{"productId": "%s", "quantity": 1}]
         }"""
             .formatted(orderId, customerId, productId);
     client
@@ -82,17 +106,6 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
         .header("X-User-Id", customerId)
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(body)
-        .exchange()
-        .expectStatus()
-        .is2xxSuccessful();
-  }
-
-  private void confirmOrder(String orderId) {
-    client
-        .post()
-        .uri("/api/orders/" + orderId + "/confirm")
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "system")
         .exchange()
         .expectStatus()
         .is2xxSuccessful();
@@ -150,12 +163,15 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
     //     row for Customer events.
     registerCustomer(customerId, customerName, customerEmail);
 
-    // (2) Place the order (OrderPlaced is excluded from the mapper — carries customerId).
+    // (2) Place the order of a stocked product (OrderPlaced is excluded from the mapper — carries
+    //     customerId).
+    createProduct(productId);
+    stockProduct(productId);
     placeOrder(orderId, customerId, productId);
 
-    // (3) Confirm the order directly. This emits OrderConfirmed, which IS in the allowlist.
-    //     The outbox entry is written in the SAME transaction as the event_stream row.
-    confirmOrder(orderId);
+    // (3) The fulfillment saga takes the payment, reserves the stock and confirms the order. Its
+    //     OrderConfirmed IS in the allowlist; the outbox entry is written in the SAME transaction
+    //     as the event_stream row.
 
     // ---- (a) Outbox row exists for OrderConfirmed -------------------------------------------
     await()
@@ -205,8 +221,12 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
                   .isNotEmpty();
               // The body must contain the orderId (proves it's the right order)
               assertThat(orderMessages)
-                  .extracting(ReceivedMessage::body)
-                  .anySatisfy(body -> assertThat(body).contains(orderId));
+                  .as("the saga's OrderConfirmed of this order reaches RabbitMQ")
+                  .anySatisfy(
+                      m -> {
+                        assertThat(m.payloadType()).isEqualTo("OrderConfirmed");
+                        assertThat(m.body()).contains(orderId);
+                      });
               // The body must NOT contain PII
               for (ReceivedMessage msg : orderMessages) {
                 assertThat(msg.body())

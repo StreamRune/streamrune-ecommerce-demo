@@ -464,6 +464,163 @@ The `evolve()` method is a pure function — no branches beyond the exhaustive s
 
 Run the tests again: they should all pass.
 
+### Step 1a — Show the payment on the order
+
+The order's row in the read model shows the status of its payment, so the Orders page (Chapter 16) can show it beside the order's own status. Give `OrderView` from Chapter 8 a `paymentStatus` component. Replace `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+import java.time.Instant;
+import java.util.List;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.order.OrderStatus;
+import org.streamrune.ecommerce.domain.payment.PaymentStatus;
+
+/**
+ * An order as the read model holds it. {@code paymentStatus} is the status of the order's payment,
+ * {@code null} until the payment is initiated.
+ */
+public record OrderView(
+    String orderId,
+    String customerId,
+    List<OrderLineView> lines,
+    Money total,
+    OrderStatus status,
+    PaymentStatus paymentStatus,
+    Instant createdAt,
+    Instant updatedAt) {
+  public record OrderLineView(String productId, int quantity, Money unitPrice) {}
+}
+```
+
+`OrderProjection` sets it from the payment events, which name the order they belong to: `PENDING` on `PaymentInitiated`, `CAPTURED`, `FAILED`, `VOIDED` and `REFUNDED` on the four that follow. A payment of an order the read model does not hold changes nothing, and an order event leaves the payment status as it is. A capture recorded after the payment was cancelled is stored together with its refund (Step 1), so the row ends `REFUNDED`. Replace `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProjection.java`:
+
+```java
+package org.streamrune.ecommerce.projections;
+
+import java.time.Instant;
+import java.util.List;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.ecommerce.domain.order.*;
+import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentStatus;
+import org.streamrune.ecommerce.queries.dto.OrderView;
+
+@org.streamrune.core.ProjectionConfig(
+    name = "orders",
+    deliveryMode = ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+public class OrderProjection extends BaseProjection {
+
+  public OrderProjection(ProjectionRepository repository) {
+    super(repository, "orders");
+  }
+
+  @Override
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      Instant at = envelope.metadata().timestamp();
+      switch (envelope.event()) {
+        case OrderEvent evt -> applyOrderEvent(evt, at);
+        case PaymentEvent.PaymentInitiated e ->
+            updatePayment(e.orderId(), PaymentStatus.PENDING, at);
+        case PaymentEvent.PaymentCaptured e ->
+            updatePayment(e.orderId(), PaymentStatus.CAPTURED, at);
+        case PaymentEvent.PaymentFailed e -> updatePayment(e.orderId(), PaymentStatus.FAILED, at);
+        case PaymentEvent.PaymentVoided e -> updatePayment(e.orderId(), PaymentStatus.VOIDED, at);
+        case PaymentEvent.PaymentRefunded e ->
+            updatePayment(e.orderId(), PaymentStatus.REFUNDED, at);
+        default -> {}
+      }
+    }
+  }
+
+  private void applyOrderEvent(OrderEvent evt, Instant at) {
+    switch (evt) {
+      case OrderEvent.OrderPlaced e ->
+          save(
+              e.orderId(),
+              new OrderView(
+                  e.orderId(),
+                  e.customerId(),
+                  e.lines().stream()
+                      .map(
+                          l ->
+                              new OrderView.OrderLineView(
+                                  l.productId(), l.quantity(), l.unitPrice()))
+                      .toList(),
+                  e.total(),
+                  OrderStatus.CREATED,
+                  null,
+                  at,
+                  at));
+      case OrderEvent.OrderConfirmed e -> updateStatus(e.orderId(), OrderStatus.CONFIRMED, at);
+      case OrderEvent.OrderShipped e -> updateStatus(e.orderId(), OrderStatus.SHIPPED, at);
+      case OrderEvent.OrderDelivered e -> updateStatus(e.orderId(), OrderStatus.DELIVERED, at);
+      case OrderEvent.OrderCancelled e -> updateStatus(e.orderId(), OrderStatus.CANCELLED, at);
+    }
+  }
+
+  /** The status of the order's row; its payment status stays as it is. */
+  private void updateStatus(String id, OrderStatus status, Instant timestamp) {
+    findById(id, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    id,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        status,
+                        existing.paymentStatus(),
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  /**
+   * The payment status of the order's row; a payment of an order the read model does not hold
+   * changes nothing.
+   */
+  private void updatePayment(String orderId, PaymentStatus paymentStatus, Instant timestamp) {
+    findById(orderId, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    orderId,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        existing.status(),
+                        paymentStatus,
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  public OrderView get(String orderId) {
+    return findById(orderId, OrderView.class).orElse(null);
+  }
+
+  public List<OrderView> listAll() {
+    return repository.findAll(projectionName(), OrderView.class);
+  }
+
+  public List<OrderView> listByCustomer(String customerId) {
+    return repository.findAll(projectionName(), OrderView.class).stream()
+        .filter(o -> customerId.equals(o.customerId()))
+        .toList();
+  }
+}
+```
+
+The projection runs transactionally with its checkpoint (Chapter 5), so a redelivered batch is rejected before it writes, and each payment event sets the status it names: the row follows the payment's last event. `OrderProjectionPaymentStatusTest` in the `projections` module drives the projection through each payment event, a late capture and an order event in between.
+
 ### Step 2 — Saga state types
 
 The saga needs its own status enum separate from `PaymentStatus`. Add `OrderFulfillmentStatus` to the domain module so both commands and domain code can reference it. Create `domain/src/main/java/org/streamrune/ecommerce/domain/saga/OrderFulfillmentStatus.java`:
@@ -978,7 +1135,7 @@ The methods that carry the weight here:
 - `extractSagaId` derives the saga's stable identity from the start event. The pattern `"fulfillment-" + orderId` is predictable and unique per order. The prefix is `OrderCommand.PlaceOrder.SAGA_ID_PREFIX`, the constant that also fixes the longest order id `PlaceOrder` accepts (243 characters, chapter 8), so the id this method builds always fits the 255 characters of a `SagaId`.
 - `correlateByEventData` routes an event that no fulfillment caused. `SagaRunner` calls it only for a non-start event whose metadata carries no origin of this saga type, and hands it the stream id and the payload, nothing of the metadata. A request writes one of the events the saga reacts to — `OrderCancelled`, by the order's customer or an `ADMIN` (Chapter 9) — and it belongs to the saga of the order it names. `OrderConfirmed` is written by the saga's own `ConfirmOrder` and arrives by its origin. Every other event belongs to no saga, and so does an event whose order id no `SagaId` can hold: the method answers `Optional.empty()` for it and does not throw, because a routing method that throws turns the event into a poison event (Step 6). The payment and inventory events are not listed: only the saga's commands and the process managers that continue its events write them for a fulfillment, and those events carry the saga's origin, by which `SagaRunner` routes them without calling this method.
 - `handle` advances the process. `AWAITING_INVENTORY` is gated on `PaymentEvent.PaymentCaptured` — the same `instanceof` discipline as every other branch — and dispatches one `ReserveStock` per order line, in the order of the lines (each targets the inventory stream `inventory:<productId>` — the bus resolves the `inventory` type from `ReserveStock`'s registration). Without that gate a redelivered or unrelated event of the same order would re-issue the reservations while the saga sat in `AWAITING_INVENTORY`. Each line's `StockReserved` adds its product to `reservedProductIds`; the one that completes the set moves the saga to `AWAITING_CONFIRMATION`, and `handle` answers that `StockReserved` with `ConfirmOrder`. A `StockReserved` that leaves a line unreserved dispatches nothing, and so does one of a product the order does not hold, in any state. `CANCELLING` mirrors that same gating discipline: it dispatches `CancelOrder` only for the `PaymentEvent.PaymentFailed` that put the saga there.
-- `evolve` moves on only from the step an event belongs to. `PaymentCaptured` and `PaymentFailed` count only while the saga waits for its payment: the gateway may take the money for a call it reported as failed, and the payment then records the capture and refunds it in one append (Step 1) — that late `PaymentCaptured` reaches a `CANCELLING` saga and changes nothing, so the saga does not reserve stock for an order it is cancelling. `StockReserved` counts in `AWAITING_INVENTORY`, for a product of the order's lines not counted yet; `OrderConfirmed` completes the saga in `AWAITING_CONFIRMATION`. An `OrderCancelled` while the saga waits for its payment, its stock or its confirmation is a cancellation the saga did not ask for, by the order's customer or an `ADMIN` (Chapter 9): the saga moves to `COMPENSATING`. That row write opens the saga's compensation episode, and from then on the forward fence ([Reliability under failure](#reliability-under-failure)) refuses every forward command of the saga at its commit. Nothing is dispatched at that moment: the compensation runs when the saga's next event arrives, its deadline passes, or the compensation retry sweeper (every 10 seconds in the demo, Step 6) takes the row. In `CANCELLING`, the `OrderCancelled` of the saga's own cancellation closes the saga `FAILED`. A customer who confirms their own order by hand while the saga still waits for the payment does not complete the saga: no saga is handed that `OrderConfirmed`, the saga goes on, its own `ConfirmOrder` is refused by the decider, and it compensates.
+- `evolve` moves on only from the step an event belongs to. `PaymentCaptured` and `PaymentFailed` count only while the saga waits for its payment: the gateway may take the money for a call it reported as failed, and the payment then records the capture and refunds it in one append (Step 1) — that late `PaymentCaptured` reaches a `CANCELLING` saga and changes nothing, so the saga does not reserve stock for an order it is cancelling. `StockReserved` counts in `AWAITING_INVENTORY`, for a product of the order's lines not counted yet; `OrderConfirmed` completes the saga in `AWAITING_CONFIRMATION`. An `OrderCancelled` while the saga waits for its payment, its stock or its confirmation is a cancellation the saga did not ask for, by the order's customer or an `ADMIN` (Chapter 9): the saga moves to `COMPENSATING`. That row write opens the saga's compensation episode, and from then on the forward fence ([Reliability under failure](#reliability-under-failure)) refuses every forward command of the saga at its commit. Nothing is dispatched at that moment: the compensation runs when the saga's next event arrives, its deadline passes, or the compensation retry sweeper (every 10 seconds in the demo, Step 6) takes the row. In `CANCELLING`, the `OrderCancelled` of the saga's own cancellation closes the saga `FAILED`. Nobody but the saga confirms an order: the order decider's `guard` refuses a `ConfirmOrder` that no saga dispatched (Chapter 8, Step 2), and the order endpoints have no confirm route, so every `OrderConfirmed` is the saga's own.
 - `evolve` and `handle` both start with `isAboutThisSaga`: an event that is not about this saga's order changes nothing and dispatches nothing. It does not depend on how the event was routed. It compares the event with what the saga stores: the order id and the payment id recorded from `OrderPlaced`, and for `OrderPlaced` itself the order the saga id is built from. Routing answers another question. An origin says which saga's command caused an event, and that is not by itself a statement about which order the event names; `correlateByEventData` could answer wrongly. The check keeps the rule true in both cases, and for a caller that feeds the saga by another path, a dead-letter replay under an explicit saga id (Chapter 14) for one.
 - `compensate` is called by `SagaRunner` when a dispatched `SagaCommand` fails for good, by the timeout runner when the deadline passes, and to resume a saga a foreign cancellation moved to `COMPENSATING`. In every state it returns the same list: one `CancelOrder` with the constant reason `COMPENSATION_REASON` ("Order fulfillment did not complete"). It is a pure function of the state, so every resume of an episode dispatches the same command under the same key. The release of the stock and the refund are not in the list, and that is the design: every `OrderCancelled` is undone by the `OrderCancellationProcessManager` (Step 5c), the compensation's too, and its undo reads what the streams hold — so a reservation or a capture stored before the claim, which the row does not record yet, is released or refunded all the same. The framework dispatches every compensation command even after one of them is refused, and the decider refuses to cancel a shipped order. Picture a deadline that claims a saga whose `ConfirmOrder` has just committed, and an `ADMIN` who ships the order before the compensation's `CancelOrder` runs: a list `[CancelOrder, ReleaseStock…, CancelPayment]` would refund and release that shipped order. With `[CancelOrder]` alone the refused cancellation stores no `OrderCancelled`, nothing is undone, and the episode ends `FAILED`: the order is shipped and paid for. `SagaCommand` pairs each command with an `AggregateId`, not a bare string — the type carries the routing target through `SagaRunner`'s dispatch. The saga builds it with `new AggregateId(...)`, not the `AggregateId.of(...)` your id extractors use. `of` is the factory for ids a client sends, and it refuses control characters and ids longer than 255 characters (chapter 2). Every id here comes from the saga's stored state instead: the order, payment and product ids it recorded from `OrderPlaced`. Inside `handle()` or `compensate()`, `of` would throw on such a value, and the framework would quarantine the event as poison, with the payment captured and never refunded. The order endpoints never record a product id that `of` would refuse here: the `OrderCommand.OrderLine` constructor (chapter 8) refuses one that carries a control character, or is longer than 255 characters, when the order is placed. The client gets a `400`, and no payment is taken. With the constructor, the command still reaches the bus, and the id extractor applies `AggregateId.of` there. A product id that reached the log without crossing the order-line check, such as one in an `OrderPlaced` event an application appended itself, is refused at that point with an `IllegalArgumentException`. The saga treats that like a business rejection: it compensates the step, and the order's cancellation refunds the payment.
 - `timeout` is the saga's deadline. The class implements `SagaDecider` as well as `SagaOrchestrator`: the two interfaces share `stateType`, `initialState`, `evolve`, `handle` and `compensate`, and `timeout()` exists only on the decider, which is what a `SagaTimeoutRunner` takes (Step 6). A fulfillment that has not reached `COMPLETED`, `COMPENSATED` or `FAILED` within the timeout, measured from the saga's start and not reset by its later events, is compensated with the same `compensate()`: the order is cancelled, and the cancellation's undo covers whatever a step in flight stored before the claim ([Reliability under failure](#reliability-under-failure)). `new OrderFulfillmentSaga()` takes `DEFAULT_TIMEOUT`, fifteen minutes; `new OrderFulfillmentSaga(Duration)` takes another, and refuses `null` and a zero or negative duration. The three apps pass `app.saga.fulfillment-timeout`.
@@ -990,11 +1147,11 @@ The methods that carry the weight here:
 
 When both could apply, the origin decides and `correlateByEventData` is not called.
 
-**What a correlation id is for.** It ties the commands and events of one flow together for whoever reads the log or the audit trail, and it is the client's to choose: the request filter binds whatever arrives in `X-Correlation-Id` and generates an id only when the header is missing or blank. Nothing routes by it, and the reason is what such routing would allow. A customer who confirms their own order with `X-Correlation-Id: fulfillment-<somebody else's order>` would have *their* `OrderConfirmed` handed to *that* saga. A saga that took it for the confirmation it asked for would complete while it still waits for its payment; the payment is captured a moment later all the same, and its `PaymentCaptured` finds a finished saga: the customer charged, no stock reserved, the order still `CREATED`, nothing left to refund the payment. `correlateByEventData` cannot make that mistake, because it never sees the metadata.
+**What a correlation id is for.** It ties the commands and events of one flow together for whoever reads the log or the audit trail, and it is the client's to choose: the request filter binds whatever arrives in `X-Correlation-Id` and generates an id only when the header is missing or blank. Nothing routes by it, and the reason is what such routing would allow. A customer who cancels their own order with `X-Correlation-Id: fulfillment-<somebody else's order>` would have *their* `OrderCancelled` handed to *that* saga. A saga that took it for a cancellation of its own order would start compensating, and its compensation cancels that order: somebody else's purchase cancelled, its stock released and its payment refunded, by a customer who may not even read it. `correlateByEventData` cannot make that mistake, because it never sees the metadata.
 
 Saga dispatch binds a correlation id of its own, `streamrune:saga:<sagaId>` — `streamrune:saga:fulfillment-o-100` for order `o-100` — so one fulfillment reads as one flow: its events and the audit rows of its commands carry that id. The `streamrune:` prefix is reserved for ids the framework binds. A request that sends one is answered `400` by the request filter before any command runs (Chapter 9), and the command bus refuses a command that runs under a reserved id without the saga origin that belongs to it (`ReservedCorrelationIdException`). A client keeps `X-Correlation-Id` for tracing its own requests, under any id that does not start with `streamrune:`; it has no value that addresses a saga.
 
-`FulfillmentSagaRoutingIT` in each of the three apps places two orders of two customers whose sagas wait for their payment. One customer confirms their own order with the other saga's id in `X-Correlation-Id`: the request succeeds, the stored event carries that correlation id and no origin, and the other saga's row is the row that was stored — still `AWAITING_PAYMENT`, at its first version, with no event applied to it — and so is the caller's own: a confirmation a request causes reaches no saga. The same request with `X-Correlation-Id: streamrune:saga:fulfillment-<the other order>` is answered `400` with a plain-text body; no event is stored and both rows stay as they were.
+`FulfillmentSagaRoutingIT` in each of the three apps places two orders of two customers whose sagas wait for their payment. One customer cancels their own order with the other saga's id in `X-Correlation-Id`: the request succeeds, and the stored `OrderCancelled` carries that correlation id and no origin. The cancellation names the caller's order, so it reaches the caller's saga, which moves to `COMPENSATING`; the other saga's row is the row that was stored — still `AWAITING_PAYMENT`, at its first version, with no event applied to it. The same request with `X-Correlation-Id: streamrune:saga:fulfillment-<the other order>` is answered `400` with a plain-text body; no event is stored and both rows stay as they were.
 
 ### Step 4 — Saga tests
 
@@ -1391,9 +1548,9 @@ class OrderFulfillmentSagaTest {
     assertThat(saga.handle(state, foreign)).isEmpty();
   }
 
-  // ---- The order's own confirmation completes the saga only where the saga asked for it. A
-  // caller who confirms their own order by hand while the saga still waits for the payment does
-  // not complete the saga: it goes on, and its ConfirmOrder is refused later. ----
+  // ---- The order's own confirmation completes the saga only where the saga asked for it. The
+  // saga is the only sender of ConfirmOrder (the order decider's guard refuses it from anybody
+  // else); an OrderConfirmed reaching a saga that waits for its payment changes nothing. ----
 
   @Test
   void evolve_theOrdersOwnConfirmation_completesTheSagaOnlyWhileItAwaitsConfirmation() {
@@ -2634,7 +2791,7 @@ curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" \
   -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId":"o-100","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":49.99}]}'
+  -d '{"orderId":"o-100","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
 ```
 
 The order lands in the event store as `OrderPlaced`, the saga's polling subscription feeds it to the runner, and the runner starts the saga and dispatches `InitiatePayment`. That records `PaymentInitiated` on the `payment:pay-o-100` stream; the `PaymentProcessManager`'s subscription picks that up, calls the gateway (the failure flag is off, so it succeeds), and dispatches `CapturePayment`. `PaymentCaptured` flows back to the saga, which reserves stock, confirms the order, and reaches `COMPLETED`. Because each leg goes through a separate polling subscription, the round-trip takes a moment — give it a second or two, then query the saga store (the `SagaController` you build in Step 8):
@@ -2673,9 +2830,10 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "
 `OrderPlaced` is the event of your request: it has no origin, and its correlation id is the one the filter generated because the `curl` sent none. The saga caused the four events after it: three through its own commands (hop 0), and `PaymentCaptured` through the process manager's continuation of `PaymentInitiated` (hop 1). They share the correlation id saga dispatch binds. A request cannot borrow it:
 
 ```bash
-curl -i -X POST http://localhost:8080/api/orders/o-100/confirm \
+curl -i -X POST http://localhost:8080/api/orders/o-100/cancel \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -H "X-Correlation-Id: streamrune:saga:fulfillment-o-100"
+  -H "X-Correlation-Id: streamrune:saga:fulfillment-o-100" \
+  -H "Content-Type: application/json" -d '{"reason": "changed my mind"}'
 # HTTP/1.1 400
 # Content-Type: text/plain;charset=UTF-8
 #

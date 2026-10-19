@@ -56,6 +56,24 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     return new SseTestStream(server.getURI(), "order", orderId, "sse-operator", "ADMIN");
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    var response =
+        client
+            .toBlocking()
+            .exchange(
+                HttpRequest.POST(
+                        "/api/products",
+                        """
+                        {"productId": "%s", "name": "SSE product", "category": "General",
+                         "price": 12.50, "initialStock": 0}"""
+                            .formatted(productId))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-User-Role", "ADMIN")
+                    .header("X-User-Id", "test-admin"));
+    assertThat(response.getStatus().getCode()).isBetween(200, 299);
+  }
+
   private void placeOrder(String orderId, String customerId, String productId) {
     String body =
         """
@@ -63,7 +81,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
           "orderId": "%s",
           "customerId": "%s",
           "lines": [
-            {"productId": "%s", "quantity": 1, "unitPrice": 12.50}
+            {"productId": "%s", "quantity": 1}
           ]
         }"""
             .formatted(orderId, customerId, productId);
@@ -98,6 +116,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String oid = "m-sse-order-" + System.nanoTime();
     String cid = "m-sse-cust-" + System.nanoTime();
     String pid = "m-sse-prod-" + System.nanoTime();
+    createProduct(pid);
 
     try (SseTestStream stream = orderStream(oid)) {
       stream.awaitSubscribed();
@@ -133,6 +152,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     String orderB = "m-sse-isoB-" + System.nanoTime();
     String cid = "m-sse-iso-cust-" + System.nanoTime();
     String pid = "m-sse-iso-prod-" + System.nanoTime();
+    createProduct(pid);
 
     try (SseTestStream streamA = orderStream(orderA);
         SseTestStream streamB = orderStream(orderB)) {

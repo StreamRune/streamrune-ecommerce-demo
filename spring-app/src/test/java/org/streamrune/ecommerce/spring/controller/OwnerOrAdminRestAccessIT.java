@@ -283,7 +283,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .isEmpty();
   }
 
-  // --- POST /api/orders, /api/orders/{id}/confirm, /api/orders/{id}/cancel ---
+  // --- POST /api/orders, /api/orders/{id}/cancel ---
 
   @Test
   void anOrderIsPlacedAndChangedByItsCustomerAndByAnAdminOnly() throws Exception {
@@ -312,15 +312,13 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     awaitOrderStatus(byAdmin, "CONFIRMED");
     assertThat(ids(get("/api/orders", alice, CUSTOMER), "orderId")).containsExactly(byAdmin);
 
-    // Confirming and cancelling an order that exists.
+    // Cancelling an order that exists.
     String order = placedOrder(alice);
     String cancel = "{\"reason\": \"changed my mind\"}";
-    for (String action : new String[] {"/confirm", "/cancel"}) {
-      String path = "/api/orders/" + order + action;
-      assertThat(send("POST", path, null, null, cancel).statusCode()).isEqualTo(403);
-      assertThat(send("POST", path, null, ADMIN, cancel).statusCode()).isEqualTo(403);
-      assertThat(send("POST", path, bob, CUSTOMER, cancel).statusCode()).isEqualTo(403);
-    }
+    String cancelPath = "/api/orders/" + order + "/cancel";
+    assertThat(send("POST", cancelPath, null, null, cancel).statusCode()).isEqualTo(403);
+    assertThat(send("POST", cancelPath, null, ADMIN, cancel).statusCode()).isEqualTo(403);
+    assertThat(send("POST", cancelPath, bob, CUSTOMER, cancel).statusCode()).isEqualTo(403);
     // An order without a row has no known owner: a customer is refused, as for another's order.
     assertThat(
             send("POST", "/api/orders/" + uniqueId("o-none") + "/cancel", alice, CUSTOMER, cancel)
@@ -605,10 +603,10 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .isEmpty();
 
     // An order nobody placed. A customer is refused by the access rule (403, no row); an ADMIN
-    // gets past it and the decider refuses to confirm, ship or deliver it. Cancelling is the
-    // saga's compensation and is accepted for any order that is not shipped or delivered.
+    // gets past it and the decider refuses to ship or deliver it. Cancelling is the saga's
+    // compensation and is accepted for any order that is not shipped or delivered.
     String order = uniqueId("o-none");
-    for (String action : new String[] {"/confirm", "/ship", "/deliver"}) {
+    for (String action : new String[] {"/ship", "/deliver"}) {
       assertThat(
               send(
                       "POST",
@@ -807,7 +805,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
   private static String orderBody(String order, String customer, String product) {
     return """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": 1, "unitPrice": 12.50}]}"""
+         "lines": [{"productId": "%s", "quantity": 1}]}"""
         .formatted(order, customer, product);
   }
 
@@ -843,9 +841,14 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
             });
   }
 
-  /** A product with stock, so that the fulfillment saga confirms the orders that name it. */
+  /**
+   * A product in the catalogue, which prices the orders that name it, with stock, so that the
+   * fulfillment saga confirms them.
+   */
   private String stockedProduct() throws Exception {
     String product = uniqueId("p");
+    assertThat(send("POST", "/api/products", OPERATOR, ADMIN, productBody(product)).statusCode())
+        .isBetween(200, 299);
     assertThat(
             send(
                     "POST",

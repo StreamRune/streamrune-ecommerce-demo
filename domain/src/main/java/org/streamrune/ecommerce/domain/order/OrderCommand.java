@@ -38,13 +38,7 @@ public sealed interface OrderCommand extends Command {
         IdConstraints.MAX_LENGTH - SAGA_ID_PREFIX.length();
 
     public PlaceOrder {
-      if (orderId != null && orderId.length() > MAX_ORDER_ID_LENGTH) {
-        throw new IllegalArgumentException(
-            "orderId must be at most "
-                + MAX_ORDER_ID_LENGTH
-                + " characters, got "
-                + orderId.length());
-      }
+      requireValidOrderId(orderId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -59,8 +53,27 @@ public sealed interface OrderCommand extends Command {
       }
       lines = List.copyOf(lines);
     }
+
+    /**
+     * The length rule of an order id: at most {@value #MAX_ORDER_ID_LENGTH} characters, so that the
+     * saga id fits. A blank id or one with a control character is the command bus's to refuse. The
+     * message never echoes the id.
+     */
+    public static void requireValidOrderId(String orderId) {
+      if (orderId != null && orderId.length() > MAX_ORDER_ID_LENGTH) {
+        throw new IllegalArgumentException(
+            "orderId must be at most "
+                + MAX_ORDER_ID_LENGTH
+                + " characters, got "
+                + orderId.length());
+      }
+    }
   }
 
+  /**
+   * Confirms a placed order. The fulfillment saga sends it once the payment is captured and every
+   * line reserved; the order decider's guard refuses it from anybody else.
+   */
   record ConfirmOrder(String orderId) implements OrderCommand {}
 
   @RequireRole("ADMIN")
@@ -79,6 +92,9 @@ public sealed interface OrderCommand extends Command {
    * character or an id longer than 255 characters. Refused only there, the order would already be
    * placed and paid for, and the saga would cancel it and the cancellation refund it. Refused here,
    * the order endpoint answers {@code 400} and nothing is written. The message never echoes the id.
+   *
+   * <p>The order endpoints take a product and a quantity from the client and the unit price from
+   * the product catalogue.
    *
    * <p>{@link OrderEvent.OrderLine}, the line an {@code OrderPlaced} event records, has no such
    * rule: it is rebuilt from the event log and from saga state, where a rule would make a stored

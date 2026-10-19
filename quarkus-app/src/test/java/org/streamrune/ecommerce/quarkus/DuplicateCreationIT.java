@@ -38,6 +38,19 @@ class DuplicateCreationIT {
     return eventStore.load(StreamId.of(type, AggregateId.of(id))).events();
   }
 
+  /** Creates the product in the catalogue, which prices an order's line. */
+  private void createProduct(String productId) {
+    post(
+            "/api/products",
+            "ADMIN",
+            "test-admin",
+            """
+            {"productId": "%s", "name": "Product", "category": "General", "price": 9.99,
+             "initialStock": 0}"""
+                .formatted(productId))
+        .statusCode(200);
+  }
+
   private ValidatableResponse post(String uri, String role, String userId, String body) {
     return given()
         .header("X-User-Role", role)
@@ -99,11 +112,14 @@ class DuplicateCreationIT {
     String order =
         """
         {"orderId": "%s", "customerId": "%s",
-         "lines": [{"productId": "%s", "quantity": %d, "unitPrice": 9.99}]}""";
+         "lines": [{"productId": "%s", "quantity": %d}]}""";
+    String first = "q-dup-o-first-" + System.nanoTime();
+    String second = "q-dup-o-second-" + System.nanoTime();
+    createProduct(first);
+    createProduct(second);
 
-    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "q-dup-o-first", 1))
-        .statusCode(200);
-    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, "q-dup-o-second", 7))
+    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, first, 1)).statusCode(200);
+    post("/api/orders", "CUSTOMER", cid, order.formatted(oid, cid, second, 7))
         .statusCode(400)
         .body(equalTo("Order already exists: " + oid));
 
@@ -116,7 +132,7 @@ class DuplicateCreationIT {
             .toList();
     assertThat(placed).hasSize(1);
     assertThat(placed.getFirst().lines()).hasSize(1);
-    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo("q-dup-o-first");
+    assertThat(placed.getFirst().lines().getFirst().productId()).isEqualTo(first);
     assertThat(placed.getFirst().lines().getFirst().quantity()).isEqualTo(1);
   }
 }

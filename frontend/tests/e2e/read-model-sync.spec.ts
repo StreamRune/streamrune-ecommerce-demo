@@ -11,10 +11,10 @@
 import { test, expect, type Page } from "@playwright/test";
 import { actAs, mockBackendRoutes, BACKEND_URL } from "./helpers";
 
-function frame(offset: number, eventType: string): string {
+function frame(offset: number, eventType: string, aggregateType = "order"): string {
   const data = JSON.stringify({
     globalOffset: offset,
-    aggregateType: "order",
+    aggregateType,
     eventType,
     timestamp: "2026-10-04T00:00:00Z",
   });
@@ -27,6 +27,7 @@ const ORDER = {
   lines: [{ productId: "prod-widget", quantity: 1, unitPrice: { amount: 9.99, currency: "USD" } }],
   total: { amount: 9.99, currency: "USD" },
   status: "CONFIRMED",
+  paymentStatus: "CAPTURED",
   createdAt: "2026-10-04T00:00:00Z",
   updatedAt: "2026-10-04T00:00:00Z",
 };
@@ -58,6 +59,27 @@ async function feedThatSendsOnce(
 }
 
 test.describe("Reads of a list after feed frames", () => {
+  // An order's row shows its payment status, so a payment event makes the orders stale.
+  for (const eventType of ["PaymentRefunded", "PaymentVoided"]) {
+    test(`a ${eventType} frame re-reads the orders`, async ({ page }) => {
+      await mockBackendRoutes(page);
+      await actAs(page, "ADMIN");
+      const readsAt: number[] = [];
+      page.on("request", (r) => {
+        if (new URL(r.url()).pathname === "/api/orders") readsAt.push(Date.now());
+      });
+      const feed = await feedThatSendsOnce(page, frame(1, eventType, "payment"), 1_500);
+
+      await page.goto("/orders");
+      await expect(page.getByRole("heading", { name: "Orders" })).toBeVisible();
+      const sentAt = await feed.sentAt;
+
+      await expect
+        .poll(() => readsAt.filter((at) => at >= sentAt).length, { timeout: 1_500 })
+        .toBeGreaterThan(0);
+    });
+  }
+
   test("a burst of fifty frames is answered by one read of the list, not fifty", async ({
     page,
   }) => {
