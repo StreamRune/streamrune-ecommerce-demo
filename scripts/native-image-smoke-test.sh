@@ -379,11 +379,19 @@ saga_origin_smoke() {
 
   # The cancellation of the completed order is undone by the order cancellation process manager:
   # its stock is released and its payment refunded. In a native image the process manager's
-  # commands and the events they store are records Jackson writes and reads by reflection.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders/$oid/cancel" \
-    -H 'Content-Type: application/json' \
-    -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
-    -d '{"reason":"smoke cancel"}')
+  # commands and the events they store are records Jackson writes and reads by reflection. The
+  # customer's access is checked against the order's read-model row, which may follow the saga by
+  # a poll: until it is there, the cancellation is answered 403.
+  for i in $(seq 1 20); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders/$oid/cancel" \
+      -H 'Content-Type: application/json' \
+      -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+      -d '{"reason":"smoke cancel"}')
+    if [ "$code" != "403" ]; then
+      break
+    fi
+    sleep 1
+  done
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/orders/$oid/cancel returned $code"
     return 1
