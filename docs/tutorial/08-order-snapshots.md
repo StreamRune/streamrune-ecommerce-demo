@@ -35,7 +35,7 @@ You activate them with a single call in the `CommandBus` builder:
 
 That is the only line you need to write. The rest of this chapter focuses on building the aggregate that benefits from it.
 
-The threshold counts events **per aggregate stream**, not across the whole system. With `everyNEvents(5)`, a snapshot is written once an individual order accumulates five events since its last snapshot. The happy-path lifecycle is only four events (placed, confirmed, shipped, delivered), so a plain happy-path order never reaches the threshold; you need at least one extra event — for example a cancellation-then-replacement scenario, or by adding a second order that shares the same order ID namespace to accumulate a fifth. Orders that stop well below the threshold never get a snapshot, and that is fine: the saving only matters for streams that grow long.
+The threshold counts events **per aggregate stream**, not across the whole system. With `everyNEvents(5)`, a snapshot is written once an individual order accumulates five events since its last snapshot. The happy-path lifecycle is only four events (placed, confirmed, shipped, delivered), so a plain happy-path order never reaches the threshold; you need at least one extra event — for example a second cancellation of a cancelled order, which the order accepts. Orders that stop well below the threshold never get a snapshot, and that is fine: the saving only matters for streams that grow long.
 
 ---
 
@@ -704,6 +704,8 @@ Snapshots need one more registration. The event store saves a snapshot under the
 
 (The payment and inventory states belong to chapters 11 and 13; register them when you add those aggregates.)
 
+A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, and the demo wires it in all three apps.
+
 ### Step 5 — Add the REST controller
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/OrderCommandController.java`:
@@ -1056,22 +1058,22 @@ The JSON `\n` puts a line feed into the product id. The response is `400 Bad Req
 
 **Trigger snapshot creation:**
 
-The threshold is counted **per order stream**, so to see a snapshot you have to drive a single order to five events. The basic happy-path lifecycle produces only four events (placed, confirmed, shipped, delivered), so it does **not** cross the `everyNEvents(5)` threshold on its own. You need a fifth event on the same stream.
-
-The quickest path: take `order-1` through the full lifecycle (4 events), then use a **fresh order** that you place, confirm, ship, and also cancel before delivery — place → confirm → ship → cancel gives 4 events on the new stream, still not enough. The simplest single-stream five-event scenario is: place → confirm → cancel (3 events), which does not reach 5 either.
-
-**The practical approach for this demo**: because the basic domain's lifecycle produces at most four events per order (deliver is terminal; cancel after confirm/ship is also terminal), the `everyNEvents(5)` threshold is intentionally set above the simple lifecycle. It is designed to protect orders that accumulate extra events in later chapters — for example saga retries or payment-failure compensation events (Chapters 11–12). To watch the threshold fire right now, **temporarily lower the value to 4** in `StreamRuneConfig.java`, restart, and walk `order-1` through the full lifecycle:
+The threshold is counted **per order stream**, so to see a snapshot you have to drive a single order to five events. The happy-path lifecycle produces only four events (placed, confirmed, shipped, delivered), so it does **not** cross the `everyNEvents(5)` threshold on its own, and a shipped order cannot be cancelled. A cancelled order, however, may be cancelled again: every cancellation is recorded. Place a fresh order and cancel it four times, which gives it five events:
 
 ```bash
-# Temporarily: .snapshotPolicy(SnapshotPolicy.everyNEvents(4)) in StreamRuneConfig.java, then restart
-# order-1 already has: OrderPlaced, OrderConfirmed (2 events)
-curl -X POST http://localhost:8080/api/orders/order-1/ship
-# 3 events
-curl -X POST http://localhost:8080/api/orders/order-1/deliver
-# 4 events on the order-1 stream -> snapshot written
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-5", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
+# 1 event
+for i in 1 2 3 4; do
+  curl -X POST http://localhost:8080/api/orders/order-5/cancel \
+    -H 'Content-Type: application/json' \
+    -d "{\"reason\": \"cancel $i\"}"
+done
+# 5 events on the order-5 stream -> snapshot written
 ```
 
-Set the value back to 5 after the observation.
+The fifth event makes the bus save the order's state as a snapshot (it can do so because the states are registered, Step 4a).
 
 **Inspect the snapshot table:**
 
@@ -1080,7 +1082,7 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, version, created_at FROM snapshot_store ORDER BY created_at DESC LIMIT 5;"
 ```
 
-You should see a row `order | order-1 | …` once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.)
+You should see a row `order | order-5 | …` with `version` 5 once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.)
 
 To confirm the snapshot is being used on reads:
 

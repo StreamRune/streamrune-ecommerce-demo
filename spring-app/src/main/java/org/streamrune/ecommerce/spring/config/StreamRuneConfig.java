@@ -21,6 +21,7 @@ import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -439,13 +440,26 @@ public class StreamRuneConfig {
       PostgresCryptoEngine cryptoEngine,
       PostgresAuditStore auditStore,
       CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
       CachingQueryBus cachingQueryBus) {
     return ForgetSubjectService.builder()
         .cryptoEngine(cryptoEngine)
         .auditStore(auditStore)
-        .purgers(List.of(customerPurger))
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
         .queryCache(cachingQueryBus)
         .build();
+  }
+
+  /**
+   * Deletes the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
   }
 
   @Bean

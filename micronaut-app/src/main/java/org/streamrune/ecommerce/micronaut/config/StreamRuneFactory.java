@@ -24,6 +24,7 @@ import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -63,6 +64,7 @@ import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
+import org.streamrune.postgres.PostgresSnapshotStorePurger;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.DeciderRegistration;
 import org.streamrune.runtime.SagaDeadLetterReplayer;
@@ -253,12 +255,25 @@ public class StreamRuneFactory {
   public ForgetSubjectService forgetSubjectService(
       PostgresCryptoEngine cryptoEngine,
       PostgresAuditStore auditStore,
-      CustomerSubjectDataPurger customerPurger) {
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource) {
     return ForgetSubjectService.builder()
         .cryptoEngine(cryptoEngine)
         .auditStore(auditStore)
-        .purgers(List.of(customerPurger))
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
         .build();
+  }
+
+  /**
+   * Deletes the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
   }
 
   /**

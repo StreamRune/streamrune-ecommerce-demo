@@ -116,6 +116,33 @@ class InventoryDeciderTest {
   }
 
   @Test
+  void confirmReservation_afterTheReservationWasReleased_storesNothing() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void reserveStock_afterTheOrdersReservationWasReleased_reservesAgain() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .expectState(
+            s -> {
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+            });
+  }
+
+  @Test
   void confirmReservation_commitsTheOrdersQuantity() {
     fixture
         .given(
