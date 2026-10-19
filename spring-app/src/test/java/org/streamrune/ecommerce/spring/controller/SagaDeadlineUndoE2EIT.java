@@ -100,6 +100,8 @@ class SagaDeadlineUndoE2EIT {
                 "--spring.rabbitmq.port=" + rabbit.getAmqpPort(),
                 "--spring.rabbitmq.username=" + rabbit.getAdminUsername(),
                 "--spring.rabbitmq.password=" + rabbit.getAdminPassword(),
+                // No read model is needed: the cancellations come from the test's timeout runner,
+                // not over HTTP, and every assertion reads the event store and the saga table.
                 "--streamrune.projections.auto-discovery.enabled=false",
                 "--streamrune.polling-interval-ms=200",
                 "--streamrune.sse.keep-alive-interval=1h");
@@ -138,8 +140,10 @@ class SagaDeadlineUndoE2EIT {
       failures.allowAppend(PaymentState.TYPE, payment, "PaymentCaptured");
     }
 
+    // The payment process manager delivers PaymentInitiated again after its failure backoff,
+    // which grows to 60 seconds at most.
     await()
-        .atMost(Duration.ofSeconds(60))
+        .atMost(Duration.ofSeconds(90))
         .untilAsserted(
             () -> {
               assertThat(probe().paymentEvents(order))
@@ -191,7 +195,9 @@ class SagaDeadlineUndoE2EIT {
         .untilAsserted(
             () ->
                 assertThat(probe().stockEventsOf(product, order))
-                    .as("the reservation of the claimed saga is refused at its commit")
+                    .as(
+                        "the reservation is never dispatched: the redelivered step finds the saga"
+                            + " ended")
                     .isEmpty());
     assertThat(probe().paymentEvents(order))
         .containsExactly("PaymentInitiated", "PaymentCaptured", "PaymentRefunded");

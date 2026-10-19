@@ -529,6 +529,19 @@ class OrderFulfillmentSagaTest {
   }
 
   @Test
+  void awaitingConfirmation_aStockReservedOfAProductTheOrderDoesNotHold_asksForNoConfirmation() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_CONFIRMATION, List.of("prod-1"), line("prod-1", 2));
+    var foreign = reservedBySagaOf("prod-9", 2);
+
+    var evolved = saga.evolve(state, foreign);
+
+    assertThat(evolved).isEqualTo(state);
+    assertThat(saga.handle(evolved, foreign)).isEmpty();
+  }
+
+  @Test
   void stockReserved_ofAProductTheOrderDoesNotHold_changesNothing() {
     var state =
         stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
@@ -679,29 +692,6 @@ class OrderFulfillmentSagaTest {
 
     assertThat(saga.evolve(state, failed)).isEqualTo(state);
     assertThat(saga.handle(state, failed)).isEmpty();
-  }
-
-  @Test
-  void paymentVoided_isAboutThisSagaAndChangesNothing() {
-    var state =
-        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_PAYMENT, List.of(), line("prod-1", 2));
-    var own =
-        causedBySagaOf(
-            "o-1",
-            new PaymentEvent.PaymentVoided("pay-o-1", "o-1", "changed my mind"),
-            PaymentState.TYPE,
-            "pay-o-1");
-    var another =
-        causedBySagaOf(
-            "o-1",
-            new PaymentEvent.PaymentVoided("pay-o-9", "o-9", "changed my mind"),
-            PaymentState.TYPE,
-            "pay-o-9");
-
-    assertThat(saga.evolve(state, own)).isEqualTo(state);
-    assertThat(saga.handle(state, own)).isEmpty();
-    assertThat(saga.evolve(state, another)).isEqualTo(state);
-    assertThat(saga.handle(state, another)).isEmpty();
   }
 
   // ---- The compensation is the order's cancellation in every status, a pure function of the

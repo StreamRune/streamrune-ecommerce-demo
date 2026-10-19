@@ -231,7 +231,6 @@ public class OrderFulfillmentSaga
       case PaymentEvent.PaymentCaptured e -> isTheSagasOwn(state.orderId(), e.orderId());
       case PaymentEvent.PaymentFailed e -> isTheSagasOwn(state.paymentId(), e.paymentId());
       case PaymentEvent.PaymentRefunded e -> isTheSagasOwn(state.paymentId(), e.paymentId());
-      case PaymentEvent.PaymentVoided e -> isTheSagasOwn(state.paymentId(), e.paymentId());
       case InventoryEvent.StockReserved e -> isTheSagasOwn(state.orderId(), e.orderId());
       case InventoryEvent.StockReleased e -> isTheSagasOwn(state.orderId(), e.orderId());
       default -> false;
@@ -342,9 +341,11 @@ public class OrderFulfillmentSaga
                   .toList()
               : List.of();
 
-      // The StockReserved that completed the set asks for the confirmation.
+      // The StockReserved that completed the set asks for the confirmation: one of a product the
+      // order holds, which evolve() counted last. A StockReserved of a product the order does not
+      // hold changes nothing and asks for nothing.
       case AWAITING_CONFIRMATION ->
-          event.event() instanceof InventoryEvent.StockReserved
+          event.event() instanceof InventoryEvent.StockReserved e && state.hasLineFor(e.productId())
               ? List.of(
                   new SagaCommand(
                       new OrderCommand.ConfirmOrder(state.orderId()),

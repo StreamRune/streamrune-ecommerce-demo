@@ -569,8 +569,8 @@ public class StreamRuneFactory {
   /**
    * Compensates a fulfillment that has not ended by its deadline ({@link
    * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
-   * unless configured) it claims each saga past its deadline and dispatches the compensation its
-   * state dictates — cancel the order.
+   * unless configured) it claims each saga past its deadline and dispatches its compensation, which
+   * is the order's cancellation whatever the state.
    *
    * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
    * follows its lease: it claims deadlines only while this backend leads the saga type through the
