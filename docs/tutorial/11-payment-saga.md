@@ -464,6 +464,163 @@ The `evolve()` method is a pure function — no branches beyond the exhaustive s
 
 Run the tests again: they should all pass.
 
+### Step 1a — Show the payment on the order
+
+The order's row in the read model shows the status of its payment, so the Orders page (Chapter 16) can show it beside the order's own status. Give `OrderView` from Chapter 8 a `paymentStatus` component. Replace `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+import java.time.Instant;
+import java.util.List;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.order.OrderStatus;
+import org.streamrune.ecommerce.domain.payment.PaymentStatus;
+
+/**
+ * An order as the read model holds it. {@code paymentStatus} is the status of the order's payment,
+ * {@code null} until the payment is initiated.
+ */
+public record OrderView(
+    String orderId,
+    String customerId,
+    List<OrderLineView> lines,
+    Money total,
+    OrderStatus status,
+    PaymentStatus paymentStatus,
+    Instant createdAt,
+    Instant updatedAt) {
+  public record OrderLineView(String productId, int quantity, Money unitPrice) {}
+}
+```
+
+`OrderProjection` sets it from the payment events, which name the order they belong to: `PENDING` on `PaymentInitiated`, `CAPTURED`, `FAILED`, `VOIDED` and `REFUNDED` on the four that follow. A payment of an order the read model does not hold changes nothing, and an order event leaves the payment status as it is. A capture recorded after the payment was cancelled is stored together with its refund (Step 1), so the row ends `REFUNDED`. Replace `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProjection.java`:
+
+```java
+package org.streamrune.ecommerce.projections;
+
+import java.time.Instant;
+import java.util.List;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.ecommerce.domain.order.*;
+import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentStatus;
+import org.streamrune.ecommerce.queries.dto.OrderView;
+
+@org.streamrune.core.ProjectionConfig(
+    name = "orders",
+    deliveryMode = ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+public class OrderProjection extends BaseProjection {
+
+  public OrderProjection(ProjectionRepository repository) {
+    super(repository, "orders");
+  }
+
+  @Override
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      Instant at = envelope.metadata().timestamp();
+      switch (envelope.event()) {
+        case OrderEvent evt -> applyOrderEvent(evt, at);
+        case PaymentEvent.PaymentInitiated e ->
+            updatePayment(e.orderId(), PaymentStatus.PENDING, at);
+        case PaymentEvent.PaymentCaptured e ->
+            updatePayment(e.orderId(), PaymentStatus.CAPTURED, at);
+        case PaymentEvent.PaymentFailed e -> updatePayment(e.orderId(), PaymentStatus.FAILED, at);
+        case PaymentEvent.PaymentVoided e -> updatePayment(e.orderId(), PaymentStatus.VOIDED, at);
+        case PaymentEvent.PaymentRefunded e ->
+            updatePayment(e.orderId(), PaymentStatus.REFUNDED, at);
+        default -> {}
+      }
+    }
+  }
+
+  private void applyOrderEvent(OrderEvent evt, Instant at) {
+    switch (evt) {
+      case OrderEvent.OrderPlaced e ->
+          save(
+              e.orderId(),
+              new OrderView(
+                  e.orderId(),
+                  e.customerId(),
+                  e.lines().stream()
+                      .map(
+                          l ->
+                              new OrderView.OrderLineView(
+                                  l.productId(), l.quantity(), l.unitPrice()))
+                      .toList(),
+                  e.total(),
+                  OrderStatus.CREATED,
+                  null,
+                  at,
+                  at));
+      case OrderEvent.OrderConfirmed e -> updateStatus(e.orderId(), OrderStatus.CONFIRMED, at);
+      case OrderEvent.OrderShipped e -> updateStatus(e.orderId(), OrderStatus.SHIPPED, at);
+      case OrderEvent.OrderDelivered e -> updateStatus(e.orderId(), OrderStatus.DELIVERED, at);
+      case OrderEvent.OrderCancelled e -> updateStatus(e.orderId(), OrderStatus.CANCELLED, at);
+    }
+  }
+
+  /** The status of the order's row; its payment status stays as it is. */
+  private void updateStatus(String id, OrderStatus status, Instant timestamp) {
+    findById(id, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    id,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        status,
+                        existing.paymentStatus(),
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  /**
+   * The payment status of the order's row; a payment of an order the read model does not hold
+   * changes nothing.
+   */
+  private void updatePayment(String orderId, PaymentStatus paymentStatus, Instant timestamp) {
+    findById(orderId, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    orderId,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        existing.status(),
+                        paymentStatus,
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  public OrderView get(String orderId) {
+    return findById(orderId, OrderView.class).orElse(null);
+  }
+
+  public List<OrderView> listAll() {
+    return repository.findAll(projectionName(), OrderView.class);
+  }
+
+  public List<OrderView> listByCustomer(String customerId) {
+    return repository.findAll(projectionName(), OrderView.class).stream()
+        .filter(o -> customerId.equals(o.customerId()))
+        .toList();
+  }
+}
+```
+
+The projection runs transactionally with its checkpoint (Chapter 5), so a redelivered batch is rejected before it writes, and each payment event sets the status it names: the row follows the payment's last event. `OrderProjectionPaymentStatusTest` in the `projections` module drives the projection through each payment event, a late capture and an order event in between.
+
 ### Step 2 — Saga state types
 
 The saga needs its own status enum separate from `PaymentStatus`. Add `OrderFulfillmentStatus` to the domain module so both commands and domain code can reference it. Create `domain/src/main/java/org/streamrune/ecommerce/domain/saga/OrderFulfillmentStatus.java`:

@@ -105,13 +105,7 @@ public sealed interface OrderCommand extends Command {
         IdConstraints.MAX_LENGTH - SAGA_ID_PREFIX.length();
 
     public PlaceOrder {
-      if (orderId != null && orderId.length() > MAX_ORDER_ID_LENGTH) {
-        throw new IllegalArgumentException(
-            "orderId must be at most "
-                + MAX_ORDER_ID_LENGTH
-                + " characters, got "
-                + orderId.length());
-      }
+      requireValidOrderId(orderId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -125,6 +119,21 @@ public sealed interface OrderCommand extends Command {
         }
       }
       lines = List.copyOf(lines);
+    }
+
+    /**
+     * The length rule of an order id: at most {@value #MAX_ORDER_ID_LENGTH} characters, so that the
+     * saga id fits. A blank id or one with a control character is the command bus's to refuse. The
+     * message never echoes the id.
+     */
+    public static void requireValidOrderId(String orderId) {
+      if (orderId != null && orderId.length() > MAX_ORDER_ID_LENGTH) {
+        throw new IllegalArgumentException(
+            "orderId must be at most "
+                + MAX_ORDER_ID_LENGTH
+                + " characters, got "
+                + orderId.length());
+      }
     }
   }
 
@@ -683,7 +692,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 }
 ```
 
-`guard` runs before `decide`, on every command the bus executes (chapter 9 uses it for ownership checks). It refuses `ConfirmOrder` unless the command is a saga's: `StreamRuneContext.isSagaDispatch()` is `true` only while a saga dispatches a command, on every attempt of its step, and `false` for a request, a process manager or a test that calls the bus. The refusal is an `AuthorizationException`, which the apps answer with `403`. The decider stays pure: `decide` and `evolve` read nothing but the command, the state and the event.
+`guard` runs before `decide`, on every command the bus executes (chapter 9 uses it for ownership checks). It refuses `ConfirmOrder` unless the command is a saga's: `StreamRuneContext.isSagaDispatch()` is `true` only while a saga dispatches a command, on every attempt of its step, and `false` for a request, a process manager or a test that calls the bus. The refusal is an `AuthorizationException`. It extends `DomainException`, so the `GlobalExceptionHandler` of chapter 1 answers it with `400` until Chapter 9 gives it a handler of its own that answers `403`. The decider stays pure: `decide` and `evolve` read nothing but the command, the state and the event.
 
 The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. `requirePlaced` is the other half of that guard: the empty state of an id nobody placed reads `CREATED`, so `ConfirmOrder` would pass the status check and open a stream for an order that does not exist. Confirming, shipping and delivering such an id are refused with `Order not found`. `CancelOrder` is deliberately left out of `requirePlaced`: in Chapter 11 it becomes the last step of the fulfillment saga's compensation, and a compensation command the decider refuses ends the saga `FAILED` instead of `COMPENSATED`, so a cancellation of an id nobody placed is recorded (with no lines) and undoes nothing. A shipped or delivered order is the one thing it refuses (`Cannot cancel SHIPPED orders`), and a cancelled order is cancelled again. For the same reason `PlaceOrder` also refuses an id whose stream already says `CANCELLED`: an id cancelled before anybody placed it is not placed afterwards. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
 
@@ -872,8 +881,10 @@ A line of the request names a product and a quantity, and nothing else: `OrderPr
 package org.streamrune.ecommerce.commands.order;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import org.streamrune.core.DomainException;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
@@ -891,7 +902,9 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * event stream holds it when the order is placed; the client names products and quantities only.
  * Read from the event store, not from the product read model, so a product created a moment ago is
  * orderable and a price change applies at once. A product nobody created, or one that is
- * discontinued, is refused ({@code DomainException}, {@code 400}).
+ * discontinued, is refused ({@code DomainException}, {@code 400}). An order id too long for its
+ * saga id, a malformed product id and two lines of one product are refused before the store is
+ * read.
  */
 public final class OrderPricing {
 
@@ -910,15 +923,23 @@ public final class OrderPricing {
   /** The {@code PlaceOrder} for the requested lines, each priced from the catalogue. */
   public OrderCommand.PlaceOrder price(
       String orderId, String customerId, List<RequestedLine> lines) {
+    // The rules that need no read come first, so a request they refuse costs no read of the store.
+    OrderCommand.PlaceOrder.requireValidOrderId(orderId);
     if (lines == null || lines.isEmpty()) {
       throw new IllegalArgumentException("lines must not be empty");
     }
-    List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
+    Set<String> products = new HashSet<>();
     for (RequestedLine line : lines) {
       if (line == null) {
         throw new IllegalArgumentException("lines must not hold null");
       }
       OrderCommand.OrderLine.requireValidProductId(line.productId());
+      if (!products.add(line.productId())) {
+        throw new IllegalArgumentException("lines must name each product once");
+      }
+    }
+    List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
+    for (RequestedLine line : lines) {
       ProductState product = current(line.productId());
       if (product.productId() == null) {
         throw new DomainException("Product not found");
@@ -950,7 +971,7 @@ public final class OrderPricing {
 }
 ```
 
-`OrderPricing` reads the product's stream from the event store (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. `@NotBlank` does not catch a control character in a product id; `requireValidProductId` does, before the store is read, so the request answers `400` and nothing is written. Two lines of one product are refused by the `PlaceOrder` constructor. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
+`OrderPricing` reads the product's stream from the event store (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
 
 Register it in `StreamRuneConfig`:
 
@@ -972,19 +993,13 @@ import java.time.Instant;
 import java.util.List;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
-import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 
-/**
- * An order as the read model holds it. {@code paymentStatus} is the status of the order's payment,
- * {@code null} until the payment is initiated.
- */
 public record OrderView(
     String orderId,
     String customerId,
     List<OrderLineView> lines,
     Money total,
     OrderStatus status,
-    PaymentStatus paymentStatus,
     Instant createdAt,
     Instant updatedAt) {
   public record OrderLineView(String productId, int quantity, Money unitPrice) {}
@@ -1005,8 +1020,6 @@ import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.ecommerce.domain.order.*;
-import org.streamrune.ecommerce.domain.payment.PaymentEvent;
-import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 
 @org.streamrune.core.ProjectionConfig(
@@ -1021,49 +1034,34 @@ public class OrderProjection extends BaseProjection {
   @Override
   public void process(List<EventEnvelope> events) {
     for (var envelope : events) {
-      Instant at = envelope.metadata().timestamp();
-      switch (envelope.event()) {
-        case OrderEvent evt -> applyOrderEvent(evt, at);
-        case PaymentEvent.PaymentInitiated e ->
-            updatePayment(e.orderId(), PaymentStatus.PENDING, at);
-        case PaymentEvent.PaymentCaptured e ->
-            updatePayment(e.orderId(), PaymentStatus.CAPTURED, at);
-        case PaymentEvent.PaymentFailed e -> updatePayment(e.orderId(), PaymentStatus.FAILED, at);
-        case PaymentEvent.PaymentVoided e -> updatePayment(e.orderId(), PaymentStatus.VOIDED, at);
-        case PaymentEvent.PaymentRefunded e ->
-            updatePayment(e.orderId(), PaymentStatus.REFUNDED, at);
-        default -> {}
+      if (envelope.event() instanceof OrderEvent evt) {
+        switch (evt) {
+          case OrderEvent.OrderPlaced e ->
+              save(
+                  e.orderId(),
+                  new OrderView(
+                      e.orderId(),
+                      e.customerId(),
+                      e.lines().stream()
+                          .map(l -> new OrderView.OrderLineView(l.productId(), l.quantity(), l.unitPrice()))
+                          .toList(),
+                      e.total(),
+                      OrderStatus.CREATED,
+                      envelope.metadata().timestamp(),
+                      envelope.metadata().timestamp()));
+          case OrderEvent.OrderConfirmed e ->
+              updateStatus(e.orderId(), OrderStatus.CONFIRMED, envelope.metadata().timestamp());
+          case OrderEvent.OrderShipped e ->
+              updateStatus(e.orderId(), OrderStatus.SHIPPED, envelope.metadata().timestamp());
+          case OrderEvent.OrderDelivered e ->
+              updateStatus(e.orderId(), OrderStatus.DELIVERED, envelope.metadata().timestamp());
+          case OrderEvent.OrderCancelled e ->
+              updateStatus(e.orderId(), OrderStatus.CANCELLED, envelope.metadata().timestamp());
+        }
       }
     }
   }
 
-  private void applyOrderEvent(OrderEvent evt, Instant at) {
-    switch (evt) {
-      case OrderEvent.OrderPlaced e ->
-          save(
-              e.orderId(),
-              new OrderView(
-                  e.orderId(),
-                  e.customerId(),
-                  e.lines().stream()
-                      .map(
-                          l ->
-                              new OrderView.OrderLineView(
-                                  l.productId(), l.quantity(), l.unitPrice()))
-                      .toList(),
-                  e.total(),
-                  OrderStatus.CREATED,
-                  null,
-                  at,
-                  at));
-      case OrderEvent.OrderConfirmed e -> updateStatus(e.orderId(), OrderStatus.CONFIRMED, at);
-      case OrderEvent.OrderShipped e -> updateStatus(e.orderId(), OrderStatus.SHIPPED, at);
-      case OrderEvent.OrderDelivered e -> updateStatus(e.orderId(), OrderStatus.DELIVERED, at);
-      case OrderEvent.OrderCancelled e -> updateStatus(e.orderId(), OrderStatus.CANCELLED, at);
-    }
-  }
-
-  /** The status of the order's row; its payment status stays as it is. */
   private void updateStatus(String id, OrderStatus status, Instant timestamp) {
     findById(id, OrderView.class)
         .ifPresent(
@@ -1071,35 +1069,8 @@ public class OrderProjection extends BaseProjection {
                 save(
                     id,
                     new OrderView(
-                        existing.orderId(),
-                        existing.customerId(),
-                        existing.lines(),
-                        existing.total(),
-                        status,
-                        existing.paymentStatus(),
-                        existing.createdAt(),
-                        timestamp)));
-  }
-
-  /**
-   * The payment status of the order's row; a payment of an order the read model does not hold
-   * changes nothing.
-   */
-  private void updatePayment(String orderId, PaymentStatus paymentStatus, Instant timestamp) {
-    findById(orderId, OrderView.class)
-        .ifPresent(
-            existing ->
-                save(
-                    orderId,
-                    new OrderView(
-                        existing.orderId(),
-                        existing.customerId(),
-                        existing.lines(),
-                        existing.total(),
-                        existing.status(),
-                        paymentStatus,
-                        existing.createdAt(),
-                        timestamp)));
+                        existing.orderId(), existing.customerId(), existing.lines(),
+                        existing.total(), status, existing.createdAt(), timestamp)));
   }
 
   public OrderView get(String orderId) {
@@ -1118,7 +1089,7 @@ public class OrderProjection extends BaseProjection {
 }
 ```
 
-The order's row also shows its payment. The payment events of Chapter 11 name the order they belong to, and the projection sets the row's `paymentStatus` from them: `PENDING` on `PaymentInitiated`, `CAPTURED`, `FAILED`, `VOIDED` and `REFUNDED` on the four that follow. A payment of an order the read model does not hold changes nothing, and an order event leaves the payment status as it is. A capture recorded after the payment was cancelled is stored together with its refund, so the row ends `REFUNDED`. Until Chapter 11 no payment event exists, and `paymentStatus` is `null`.
+The order's row shows its payment too, once there is one: Chapter 11 adds the payment aggregate, and its Step 1a gives `OrderView` a payment status that this projection sets from the payment events.
 
 Register the bean in `StreamRuneConfig`:
 

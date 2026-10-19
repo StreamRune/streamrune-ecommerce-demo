@@ -1432,12 +1432,12 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"orderId": "o-obs-2", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1}]}'
 ```
 
-Within the polling interval the `OrderPlaced` event arrives. The stored event holds each line's unit price, which the catalogue set when the order was placed (here `p-1` at 29.99):
+Within the polling interval the `OrderPlaced` event arrives. The stored event holds each line's unit price, which the catalogue set when the order was placed: `p-1` at 21.99, the price an `ADMIN` gave it in Chapter 9 (Step 7) after Chapter 5 had raised it to 34.99:
 
 ```
 : keepalive
 
-data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":29.99,"currency":"USD"}}],"total":{"amount":29.99,"currency":"USD"}}
+data:{"orderId":"o-obs-2","customerId":"c-1","lines":[{"productId":"p-1","quantity":1,"unitPrice":{"amount":21.99,"currency":"USD"}}],"total":{"amount":21.99,"currency":"USD"}}
 id:22
 
 ```
