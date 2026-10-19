@@ -19,7 +19,9 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
  * <p>ONLY the allowlisted integration events below are published to the broker. All {@code
  * CustomerEvent.*} and {@code InventoryEvent.*} types — and {@code OrderPlaced} (carries {@code
  * customerId}) and {@code PaymentInitiated} — are explicitly excluded. Each published entry
- * contains a small, hand-crafted integration DTO with ONLY non-PII business fields.
+ * contains a small, hand-crafted integration DTO with ONLY non-PII business fields. The payment
+ * outcomes published are {@code PaymentCaptured}, {@code PaymentRefunded}, {@code PaymentVoided}
+ * and {@code PaymentFailed}.
  *
  * <p>Every entry carries a {@code streamId} — the stream the event was appended to ({@code
  * order:<id>}, {@code payment:<id>}, {@code product:<id>}): the demo's outbox channel is {@code
@@ -64,6 +66,13 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                   eventId,
                   new PaymentRefundedDto(e.paymentId(), e.reason()),
                   "PaymentRefunded",
+                  stream));
+      case PaymentEvent.PaymentVoided e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PaymentVoidedDto(e.paymentId(), e.reason()),
+                  "PaymentVoided",
                   stream));
       case PaymentEvent.PaymentFailed e ->
           List.of(
@@ -144,6 +153,8 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
   record PaymentCapturedDto(String paymentId, String orderId) {}
 
   record PaymentRefundedDto(String paymentId, String reason) {}
+
+  record PaymentVoidedDto(String paymentId, String reason) {}
 
   record PaymentFailedDto(String paymentId, String reason) {}
 

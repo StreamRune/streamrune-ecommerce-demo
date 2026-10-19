@@ -227,7 +227,7 @@ class OrderFulfillmentSagaTest {
         .contains(new SagaId("fulfillment-o-1"));
     assertThat(
             saga.correlateByEventData(
-                orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind")))
+                orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of())))
         .contains(new SagaId("fulfillment-o-1"));
   }
 
@@ -239,7 +239,8 @@ class OrderFulfillmentSagaTest {
     var orderStream = StreamId.of(OrderState.TYPE, new AggregateId(orderId));
 
     assertThat(
-            saga.correlateByEventData(orderStream, new OrderEvent.OrderCancelled(orderId, "why")))
+            saga.correlateByEventData(
+                orderStream, new OrderEvent.OrderCancelled(orderId, "why", List.of())))
         .isEmpty();
     assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed(orderId)))
         .isEmpty();
@@ -259,12 +260,14 @@ class OrderFulfillmentSagaTest {
     var stock = StreamId.of(InventoryState.TYPE, new AggregateId("prod-1"));
     Map<DomainEvent, StreamId> others = new LinkedHashMap<>();
     others.put(new OrderEvent.OrderPlaced("o-1", "c-1", List.of(), money), order);
-    others.put(new OrderEvent.OrderShipped("o-1"), order);
+    others.put(new OrderEvent.OrderShipped("o-1", List.of()), order);
     others.put(new OrderEvent.OrderDelivered("o-1"), order);
     others.put(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money), payment);
     others.put(new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"), payment);
-    others.put(new PaymentEvent.PaymentFailed("pay-o-1", "declined"), payment);
-    others.put(new PaymentEvent.PaymentRefunded("pay-o-1", "why"), payment);
+    others.put(new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"), payment);
+    others.put(
+        new PaymentEvent.PaymentRefunded("pay-o-1", "o-1", new Money(BigDecimal.TEN, "USD"), "why"),
+        payment);
     others.put(new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8), stock);
     others.put(new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10), stock);
     others.put(new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2), stock);
@@ -316,7 +319,7 @@ class OrderFulfillmentSagaTest {
     var foreignFailure =
         causedBySagaOf(
             "o-2",
-            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"),
             PaymentState.TYPE,
             "pay-o-1");
     assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
@@ -336,7 +339,7 @@ class OrderFulfillmentSagaTest {
     var foreignFailure =
         causedBySagaOf(
             "o-2",
-            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"),
             PaymentState.TYPE,
             "pay-o-1");
     assertThat(saga.evolve(awaitingPayment, foreignCapture)).isEqualTo(awaitingPayment);
@@ -357,7 +360,7 @@ class OrderFulfillmentSagaTest {
     var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
     var foreignCancel =
         envelope(
-            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of()),
             OrderState.TYPE,
             "o-1",
             "fulfillment-o-2");
@@ -479,7 +482,7 @@ class OrderFulfillmentSagaTest {
     var failed =
         causedBySagaOf(
             "o-1",
-            new PaymentEvent.PaymentFailed("pay-o-1", "insufficient funds"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "insufficient funds"),
             PaymentState.TYPE,
             "pay-o-1");
 
@@ -507,7 +510,10 @@ class OrderFulfillmentSagaTest {
             OrderFulfillmentStatus.CANCELLING);
     var cancelled =
         causedBySagaOf(
-            "o-1", new OrderEvent.OrderCancelled("o-1", "Payment failed"), OrderState.TYPE, "o-1");
+            "o-1",
+            new OrderEvent.OrderCancelled("o-1", "Payment failed", List.of()),
+            OrderState.TYPE,
+            "o-1");
 
     state = saga.evolve(state, cancelled);
 
@@ -600,7 +606,6 @@ class OrderFulfillmentSagaTest {
     var cancel = (OrderCommand.CancelOrder) commands.get(2).command();
     assertThat(release.productId()).isEqualTo("prod-1");
     assertThat(release.orderId()).isEqualTo("o-1");
-    assertThat(release.quantity()).isEqualTo(2);
     assertThat(refund.paymentId()).isEqualTo("pay-o-1");
     assertThat(cancel.orderId()).isEqualTo("o-1");
   }

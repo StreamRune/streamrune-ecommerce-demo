@@ -19,6 +19,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
@@ -398,6 +399,40 @@ class OrderCommandQueryE2EIT {
         .post("/api/orders/" + oid + "/cancel")
         .then()
         .statusCode(200);
+  }
+
+  @Test
+  void cancellingAShippedOrderAnswers400() {
+    String oid = "q-o-cancel-shipped-" + System.nanoTime();
+    String cid = "q-o-cancel-shipped-cust-" + System.nanoTime();
+    String pid = "q-prod-cancel-shipped-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, pid);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    shipOrderAsAdmin(oid);
+
+    String body =
+        given()
+            .header("X-User-Role", "CUSTOMER")
+            .header("X-User-Id", cid)
+            .contentType(ContentType.JSON)
+            .body(
+                """
+                {"reason": "too late"}""")
+            .when()
+            .post("/api/orders/" + oid + "/cancel")
+            .then()
+            .statusCode(400)
+            .extract()
+            .asString();
+    assertThat(body).contains("Cannot cancel SHIPPED orders");
+
+    var events =
+        eventStore.readStream(
+            StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
+            Version.initial(),
+            Integer.MAX_VALUE);
+    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test

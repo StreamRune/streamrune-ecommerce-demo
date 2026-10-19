@@ -278,6 +278,7 @@ public class StreamRuneProducer {
         .registerEvent("PaymentCaptured", PaymentEvent.PaymentCaptured.class)
         .registerEvent("PaymentRefunded", PaymentEvent.PaymentRefunded.class)
         .registerEvent("PaymentFailed", PaymentEvent.PaymentFailed.class)
+        .registerEvent("PaymentVoided", PaymentEvent.PaymentVoided.class)
         // Inventory events
         .registerEvent("StockReserved", InventoryEvent.StockReserved.class)
         .registerEvent("StockReleased", InventoryEvent.StockReleased.class)
@@ -377,6 +378,7 @@ public class StreamRuneProducer {
                   case PaymentCommand.CapturePayment c -> c.paymentId();
                   case PaymentCommand.RefundPayment c -> c.paymentId();
                   case PaymentCommand.FailPayment c -> c.paymentId();
+                  case PaymentCommand.CancelPayment c -> c.paymentId();
                 }),
         new PaymentDecider());
   }

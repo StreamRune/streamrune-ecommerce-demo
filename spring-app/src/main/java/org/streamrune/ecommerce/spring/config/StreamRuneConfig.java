@@ -133,6 +133,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "PaymentFailed",
             org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+        .registerEvent(
+            "PaymentVoided",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
         // Inventory events
         .registerEvent(
             "StockReserved",
@@ -146,6 +149,13 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .registerState("PaymentState", PaymentState.class)
+        .registerState("InventoryState", InventoryState.class)
         .build();
   }
 
@@ -368,6 +378,7 @@ public class StreamRuneConfig {
                           case PaymentCommand.CapturePayment c -> c.paymentId();
                           case PaymentCommand.RefundPayment c -> c.paymentId();
                           case PaymentCommand.FailPayment c -> c.paymentId();
+                          case PaymentCommand.CancelPayment c -> c.paymentId();
                         }),
                 new PaymentDecider())
             .register(

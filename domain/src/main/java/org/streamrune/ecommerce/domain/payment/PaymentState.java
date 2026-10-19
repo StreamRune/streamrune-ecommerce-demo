@@ -14,4 +14,8 @@ public record PaymentState(String paymentId, String orderId, Money amount, Payme
   public PaymentState() {
     this(null, null, null, PaymentStatus.PENDING);
   }
+
+  public PaymentState withStatus(PaymentStatus newStatus) {
+    return new PaymentState(paymentId, orderId, amount, newStatus);
+  }
 }

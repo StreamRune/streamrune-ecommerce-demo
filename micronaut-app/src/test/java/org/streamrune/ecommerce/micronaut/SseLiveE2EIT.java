@@ -85,7 +85,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
     List<JsonNode> placed = new ArrayList<>();
     for (SseTestStream.Frame frame : frames) {
       JsonNode event = json.readTree(frame.data());
-      if (orderId.equals(event.path("orderId").asText()) && event.has("lines")) {
+      if (orderId.equals(event.path("orderId").asText()) && event.has("customerId")) {
         assertThat(frame.id()).as("the frame's id is the event's global offset").matches("\\d+");
         placed.add(event);
       }

@@ -19,8 +19,9 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       case OrderCommand.PlaceOrder c -> {
         // An order id is placed once. Without this check a second PlaceOrder would append another
         // OrderPlaced, and evolve would replace the order's lines and total and reset a confirmed
-        // or shipped order to CREATED.
-        if (state.orderId() != null)
+        // or shipped order to CREATED. An id cancelled before anybody placed it is not placed
+        // afterwards: its stream already says CANCELLED.
+        if (state.orderId() != null || state.status() == OrderStatus.CANCELLED)
           throw new DomainException("Order already exists: " + c.orderId());
         List<OrderEvent.OrderLine> eventLines =
             c.lines().stream()
@@ -46,7 +47,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
         if (state.status() != OrderStatus.CONFIRMED)
           throw new DomainException(
               "Can only ship CONFIRMED orders, current status: " + state.status());
-        yield List.of(new OrderEvent.OrderShipped(c.orderId()));
+        yield List.of(new OrderEvent.OrderShipped(c.orderId(), state.lines()));
       }
 
       case OrderCommand.DeliverOrder c -> {
@@ -58,13 +59,15 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.CancelOrder c -> {
-        // No requirePlaced here. CancelOrder is the last step of the fulfillment saga's
-        // compensation, and a compensation command the decider refuses ends the saga FAILED
-        // instead of COMPENSATED: it is accepted whatever the order's stream holds, short of a
-        // delivered order.
-        if (state.status() == OrderStatus.DELIVERED)
-          throw new DomainException("Cannot cancel DELIVERED orders");
-        yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason()));
+        // No requirePlaced here: a cancellation of an id nobody placed is recorded and undoes
+        // nothing, and a compensation command the decider refuses ends the saga FAILED instead of
+        // COMPENSATED. A shipped or delivered order is not cancelled. A cancelled order is
+        // cancelled again: every OrderCancelled starts the undo of the order's money and stock,
+        // and a reservation stored after an earlier undo ran is released by the undo of the next
+        // one.
+        if (state.status() == OrderStatus.SHIPPED || state.status() == OrderStatus.DELIVERED)
+          throw new DomainException("Cannot cancel " + state.status() + " orders");
+        yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason(), state.lines()));
       }
     };
   }

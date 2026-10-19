@@ -10,11 +10,25 @@ public sealed interface OrderEvent extends DomainEvent {
 
   record OrderConfirmed(String orderId) implements OrderEvent {}
 
-  record OrderShipped(String orderId) implements OrderEvent {}
+  /** {@code lines} are the order's lines: the shipment commits the stock reserved for each. */
+  record OrderShipped(String orderId, List<OrderLine> lines) implements OrderEvent {
+    public OrderShipped {
+      lines = lines == null ? List.of() : List.copyOf(lines);
+    }
+  }
 
   record OrderDelivered(String orderId) implements OrderEvent {}
 
-  record OrderCancelled(String orderId, String reason) implements OrderEvent {}
+  /**
+   * {@code lines} are the order's lines, empty for an id nobody placed: the undo of a cancellation
+   * acts on the stock reserved for each line.
+   */
+  record OrderCancelled(String orderId, String reason, List<OrderLine> lines)
+      implements OrderEvent {
+    public OrderCancelled {
+      lines = lines == null ? List.of() : List.copyOf(lines);
+    }
+  }
 
   record OrderLine(String productId, int quantity, Money unitPrice) {}
 }
