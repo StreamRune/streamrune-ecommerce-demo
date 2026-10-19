@@ -793,7 +793,7 @@ Snapshots need one more registration. The event store saves a snapshot under the
 
 (The payment and inventory states belong to chapters 11 and 13; register them when you add those aggregates.)
 
-A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, and the demo wires it in all three apps.
+A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, and the demo wires it in all three apps. The framework requires that decision: a `ForgetSubjectService` is not built without a snapshot purger, or without `withoutSnapshotPurge()` for an application that never stores a snapshot (the integrations read it as the property `streamrune.gdpr.snapshot-purge`, `required` by default and `none` for that statement), because a snapshot holds state in the clear that deleting the key does not reach.
 
 ### Step 5 — Add the REST controller
 
@@ -952,7 +952,13 @@ public final class OrderPricing {
     return new OrderCommand.PlaceOrder(orderId, customerId, priced);
   }
 
-  /** The product as its stream holds it, folded from its first event. */
+  /**
+   * The product as its stream holds it, folded from its first event. This reads and folds the whole
+   * stream for each line of each order, so its cost grows with the product's history, not with the
+   * order. A product's stream is small in the demo (its creation, a few price changes and stock
+   * adjustments), so the read is cheap here; a catalogue whose products have long histories would
+   * price from a snapshot or a read model instead, and accept the lag of the read model.
+   */
   private ProductState current(String productId) {
     StreamId stream = StreamId.of(ProductState.TYPE, AggregateId.of(productId));
     ProductState state = products.initialState();
@@ -971,7 +977,7 @@ public final class OrderPricing {
 }
 ```
 
-`OrderPricing` reads the product's stream from the event store (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
+`OrderPricing` reads the product's stream from the event store (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It does so for every line of every order, so the cost of an order grows with the history of the products it names; a product's stream is small in the demo (its creation, a few price changes and stock adjustments), which is why the read is cheap here although it starts from the first event and does not use the snapshots the command bus takes. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
 
 Register it in `StreamRuneConfig`:
 
