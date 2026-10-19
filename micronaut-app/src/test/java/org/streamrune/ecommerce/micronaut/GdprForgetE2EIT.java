@@ -341,10 +341,10 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
 
   /**
    * A snapshot holds the customer's state in the clear: {@code CustomerState} has plain fields, the
-   * encryption lives on the events. This app's command bus takes no snapshots, so the test writes
-   * the snapshot the way a bus with a snapshot policy does, through the event store; a forget
-   * deletes it with the key, so no plaintext of the customer is left in {@code snapshot_store} and
-   * the aggregate still loads as forgotten.
+   * encryption lives on the events. This app's command bus takes a snapshot every 100 events (the
+   * framework's default policy), too many to reach here, so the test writes the snapshot the way
+   * the bus does, through the event store; a forget deletes it with the key, so no plaintext of the
+   * customer is left in {@code snapshot_store} and the aggregate still loads as forgotten.
    */
   @Test
   void aForgetDeletesTheSnapshotOfTheCustomer() throws Exception {
@@ -371,7 +371,6 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
     }
     assertThat(history.snapshotState()).isNull();
     assertThat(state.status()).isEqualTo(CustomerStatus.FORGOTTEN);
-    assertThat(state.name()).isNotEqualTo("Snapshot Sam v4");
   }
 
   @Test

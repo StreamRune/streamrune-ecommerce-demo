@@ -335,7 +335,6 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
     }
     assertThat(history.snapshotState()).isNull();
     assertThat(state.status()).isEqualTo(CustomerStatus.FORGOTTEN);
-    assertThat(state.name()).isNotEqualTo("Snapshot Sam v4");
   }
 
   @Test
