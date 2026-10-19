@@ -44,6 +44,7 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 @SerdeImport(PaymentEvent.PaymentCaptured.class)
 @SerdeImport(PaymentEvent.PaymentRefunded.class)
 @SerdeImport(PaymentEvent.PaymentFailed.class)
+@SerdeImport(PaymentEvent.PaymentVoided.class)
 @SerdeImport(InventoryEvent.StockReserved.class)
 @SerdeImport(InventoryEvent.StockReleased.class)
 @SerdeImport(InventoryEvent.ReservationConfirmed.class)

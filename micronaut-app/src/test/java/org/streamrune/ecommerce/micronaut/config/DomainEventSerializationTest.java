@@ -39,9 +39,10 @@ class DomainEventSerializationTest {
           new OrderEvent.OrderPlaced(
               "o-1", "c-1", List.of(new OrderEvent.OrderLine("p-1", 2, PRICE)), PRICE.multiply(2)),
           new OrderEvent.OrderConfirmed("o-1"),
-          new OrderEvent.OrderShipped("o-1"),
+          new OrderEvent.OrderShipped("o-1", List.of(new OrderEvent.OrderLine("p-1", 2, PRICE))),
           new OrderEvent.OrderDelivered("o-1"),
-          new OrderEvent.OrderCancelled("o-1", "out of stock"),
+          new OrderEvent.OrderCancelled(
+              "o-1", "out of stock", List.of(new OrderEvent.OrderLine("p-1", 2, PRICE))),
           new CustomerEvent.CustomerRegistered(
               "c-1", "Ada", "ada@example.com", "1 Main St", "555-0100"),
           new CustomerEvent.ProfileUpdated(
@@ -50,8 +51,9 @@ class DomainEventSerializationTest {
           new CustomerEvent.CustomerForgotten("c-1"),
           new PaymentEvent.PaymentInitiated("pay-1", "o-1", PRICE),
           new PaymentEvent.PaymentCaptured("pay-1", "o-1"),
-          new PaymentEvent.PaymentRefunded("pay-1", "order cancelled"),
-          new PaymentEvent.PaymentFailed("pay-1", "card declined"),
+          new PaymentEvent.PaymentRefunded("pay-1", "o-1", PRICE, "order cancelled"),
+          new PaymentEvent.PaymentFailed("pay-1", "o-1", "card declined"),
+          new PaymentEvent.PaymentVoided("pay-1", "o-1", "order cancelled"),
           new InventoryEvent.StockReserved("p-1", "o-1", 2, 5),
           new InventoryEvent.StockReleased("p-1", "o-1", 2, 7),
           new InventoryEvent.ReservationConfirmed("p-1", "o-1", 2),

@@ -26,8 +26,10 @@ import org.streamrune.core.types.SubjectId;
 import org.streamrune.core.types.UserId;
 import org.streamrune.crypto.CryptoShreddingModule;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
 import org.streamrune.ecommerce.domain.customer.CustomerEvent;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.customer.CustomerStatus;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 
 /**
@@ -263,6 +265,53 @@ class GdprForgetE2EIT {
       assertThat(customerViewRowExists(cid)).isFalse();
       assertThat(eventCount(cid, "CustomerForgotten")).isEqualTo(1);
     }
+  }
+
+  private String snapshotPayload(String customerId) throws Exception {
+    try (Connection conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "SELECT state_payload::text FROM snapshot_store"
+                    + " WHERE aggregate_type = 'customer' AND aggregate_id = ?")) {
+      ps.setString(1, customerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  /**
+   * A snapshot holds the customer's state in the clear: {@code CustomerState} has plain fields, the
+   * encryption lives on the events. This app's command bus takes a snapshot every 100 events (the
+   * framework's default policy), too many to reach here, so the test writes the snapshot the way
+   * the bus does, through the event store; a forget deletes it with the key, so no plaintext of the
+   * customer is left in {@code snapshot_store} and the aggregate still loads as forgotten.
+   */
+  @Test
+  void aForgetDeletesTheSnapshotOfTheCustomer() throws Exception {
+    String cid = "gdpr-snap-" + System.nanoTime();
+    registerCustomer(cid, "Snapshot Sam", "sam-" + cid + "@example.com");
+    StreamId stream = StreamId.of(CustomerState.TYPE, new AggregateId(cid));
+    eventStore.saveSnapshot(
+        stream,
+        eventStore.load(stream).version(),
+        new CustomerState(
+            cid, "Snapshot Sam v4", "sam@example.com", "1 Main St", "555", CustomerStatus.ACTIVE));
+    assertThat(snapshotPayload(cid))
+        .as("the snapshot holds the profile in the clear")
+        .contains("Snapshot Sam v4");
+
+    forget(cid, "CUSTOMER", cid).statusCode(200);
+
+    assertThat(snapshotPayload(cid)).as("the forget deleted the snapshot of the customer").isNull();
+    var history = eventStore.load(StreamId.of(CustomerState.TYPE, new AggregateId(cid)));
+    var decider = new CustomerDecider();
+    var state = decider.initialState();
+    for (var envelope : history.events()) {
+      state = decider.evolve(state, (CustomerEvent) envelope.event());
+    }
+    assertThat(history.snapshotState()).isNull();
+    assertThat(state.status()).isEqualTo(CustomerStatus.FORGOTTEN);
   }
 
   @Test

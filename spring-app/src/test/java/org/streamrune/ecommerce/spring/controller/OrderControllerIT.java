@@ -17,6 +17,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
@@ -467,6 +468,43 @@ class OrderControllerIT extends AbstractIntegrationTest {
         .exchange()
         .expectStatus()
         .is2xxSuccessful();
+  }
+
+  /**
+   * A shipped order is on its way: its cancellation answers 400 with the rule, and the order's
+   * stream ends with {@code OrderShipped}.
+   */
+  @Test
+  void cancellingAShippedOrderAnswers400() {
+    String oid = "o-cancel-shipped-" + System.nanoTime();
+    String cid = "o-cancel-shipped-cust-" + System.nanoTime();
+    String pid = "prod-cancel-shipped-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, pid);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    shipOrderAsAdmin(oid);
+
+    client
+        .post()
+        .uri("/api/orders/" + oid + "/cancel")
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", cid)
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(
+            """
+            {"reason": "too late"}""")
+        .exchange()
+        .expectStatus()
+        .isBadRequest()
+        .expectBody(String.class)
+        .value(body -> assertThat(body).contains("Cannot cancel SHIPPED orders"));
+
+    var events =
+        eventStore.readStream(
+            StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
+            Version.initial(),
+            Integer.MAX_VALUE);
+    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test

@@ -11,9 +11,9 @@
 
 ## What We're Building and Why
 
-Every e-commerce system has an `Order`. An order is not just a bag of data — it has a **lifecycle**. It starts as `CREATED` when a customer places it. It becomes `CONFIRMED` when a merchant accepts it. It becomes `SHIPPED` when it leaves the warehouse. It becomes `DELIVERED` when a courier hands it over. At any point before delivery it can be `CANCELLED`.
+Every e-commerce system has an `Order`. An order is not just a bag of data — it has a **lifecycle**. It starts as `CREATED` when a customer places it. It becomes `CONFIRMED` when a merchant accepts it. It becomes `SHIPPED` when it leaves the warehouse. It becomes `DELIVERED` when a courier hands it over. Until it ships it can be `CANCELLED`.
 
-Each state transition is one-way. An order cannot move backwards from `CONFIRMED` to `CREATED`. An order cannot be shipped before it is confirmed. An order cannot be cancelled after it is delivered. These rules are not UI-level validations — they are domain invariants that must be enforced regardless of how a command arrives. The `decide` function is the right place to enforce them.
+Each state transition is one-way. An order cannot move backwards from `CONFIRMED` to `CREATED`. An order cannot be shipped before it is confirmed. A shipped or delivered order cannot be cancelled: it is on its way. A cancelled order, on the other hand, may be cancelled again, because every cancellation starts the undo of the order's money and stock (chapter 11), and a reservation stored after an earlier undo ran is released by the next one. These rules are not UI-level validations — they are domain invariants that must be enforced regardless of how a command arrives. The `decide` function is the right place to enforce them.
 
 ### The Snapshot Problem
 
@@ -35,7 +35,7 @@ You activate them with a single call in the `CommandBus` builder:
 
 That is the only line you need to write. The rest of this chapter focuses on building the aggregate that benefits from it.
 
-The threshold counts events **per aggregate stream**, not across the whole system. With `everyNEvents(5)`, a snapshot is written once an individual order accumulates five events since its last snapshot. The happy-path lifecycle is only four events (placed, confirmed, shipped, delivered), so a plain happy-path order never reaches the threshold; you need at least one extra event — for example a cancellation-then-replacement scenario, or by adding a second order that shares the same order ID namespace to accumulate a fifth. Orders that stop well below the threshold never get a snapshot, and that is fine: the saving only matters for streams that grow long.
+The threshold counts events **per aggregate stream**, not across the whole system. With `everyNEvents(5)`, a snapshot is written once an individual order accumulates five events since its last snapshot. The happy-path lifecycle is only four events (placed, confirmed, shipped, delivered), so a plain happy-path order never reaches the threshold; you need at least one extra event — for example a second cancellation of a cancelled order, which the order accepts. Orders that stop well below the threshold never get a snapshot, and that is fine: the saving only matters for streams that grow long.
 
 ---
 
@@ -68,7 +68,9 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/order/OrderCommand.
 ```java
 package org.streamrune.ecommerce.domain.order;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.streamrune.core.Command;
 import org.streamrune.core.types.IdConstraints;
 import org.streamrune.ecommerce.domain.common.Money;
@@ -88,6 +90,9 @@ public sealed interface OrderCommand extends Command {
    * stream id with {@code AggregateId.of}, before anything is written, so the constructor adds only
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
+   *
+   * <p>The lines are not empty and name each product once: stock is reserved per order and product,
+   * so two lines of one product would be reserved once. The message never echoes a product id.
    */
   record PlaceOrder(String orderId, String customerId, List<OrderLine> lines)
       implements OrderCommand {
@@ -107,6 +112,19 @@ public sealed interface OrderCommand extends Command {
                 + " characters, got "
                 + orderId.length());
       }
+      if (lines == null || lines.isEmpty()) {
+        throw new IllegalArgumentException("lines must not be empty");
+      }
+      Set<String> products = new HashSet<>();
+      for (OrderLine line : lines) {
+        if (line == null) {
+          throw new IllegalArgumentException("lines must not hold null");
+        }
+        if (!products.add(line.productId())) {
+          throw new IllegalArgumentException("lines must name each product once");
+        }
+      }
+      lines = List.copyOf(lines);
     }
   }
 
@@ -137,6 +155,20 @@ public sealed interface OrderCommand extends Command {
     public static final int MAX_PRODUCT_ID_LENGTH = IdConstraints.MAX_LENGTH;
 
     public OrderLine {
+      requireValidProductId(productId);
+      if (quantity <= 0) {
+        throw new IllegalArgumentException("quantity must be positive, got " + quantity);
+      }
+      if (unitPrice == null || unitPrice.amount() == null || unitPrice.amount().signum() <= 0) {
+        throw new IllegalArgumentException("unitPrice must be positive");
+      }
+    }
+
+    /**
+     * The rule a product id of an order line follows: present, at most {@value
+     * #MAX_PRODUCT_ID_LENGTH} characters, no control character. The message never echoes the id.
+     */
+    public static void requireValidProductId(String productId) {
       if (productId == null || productId.isBlank()) {
         throw new IllegalArgumentException("productId is required");
       }
@@ -154,6 +186,8 @@ public sealed interface OrderCommand extends Command {
 ```
 
 `PlaceOrder` carries `OrderLine` records from the command layer. Notice that `OrderCommand.OrderLine` and `OrderEvent.OrderLine` are separate types even though they have the same shape — a command's line is an intent; an event's line is a recorded fact. The decider maps one to the other explicitly rather than sharing a mutable DTO.
+
+The constructors refuse what the saga could not process. `PlaceOrder` refuses an empty line list (`lines must not be empty`), a `null` line, and two lines of one product (`lines must name each product once`): stock is reserved per order and product, so two lines of one product would be reserved once. `OrderLine` refuses a quantity that is not positive and a unit price that is missing, zero or negative. Every message names the rule and never echoes a product id. `requireValidProductId` is the product id rule on its own, so any code that has only a product id applies the same check with the same message.
 
 The two types differ in one rule. The constructor of `OrderCommand.OrderLine` checks the product id. The id must not be blank, must not contain a control character (C0 `U+0000`–`U+001F`, DEL `U+007F` or C1 `U+0080`–`U+009F`), and must be at most 255 characters. Otherwise the constructor throws an `IllegalArgumentException`, and the message names the rule without echoing the id. The order endpoints of all three apps build their lines with this constructor, so they apply the same rule and cannot drift apart. The `IllegalArgumentException` handler from chapter 1 answers `400 Bad Request` before anything is written.
 
@@ -178,17 +212,33 @@ public sealed interface OrderEvent extends DomainEvent {
 
   record OrderConfirmed(String orderId) implements OrderEvent {}
 
-  record OrderShipped(String orderId) implements OrderEvent {}
+  /** {@code lines} are the order's lines: the shipment commits the stock reserved for each. */
+  record OrderShipped(String orderId, List<OrderLine> lines) implements OrderEvent {
+    public OrderShipped {
+      lines = lines == null ? List.of() : List.copyOf(lines);
+    }
+  }
 
   record OrderDelivered(String orderId) implements OrderEvent {}
 
-  record OrderCancelled(String orderId, String reason) implements OrderEvent {}
+  /**
+   * {@code lines} are the order's lines, empty for an id nobody placed: the undo of a cancellation
+   * acts on the stock reserved for each line.
+   */
+  record OrderCancelled(String orderId, String reason, List<OrderLine> lines)
+      implements OrderEvent {
+    public OrderCancelled {
+      lines = lines == null ? List.of() : List.copyOf(lines);
+    }
+  }
 
   record OrderLine(String productId, int quantity, Money unitPrice) {}
 }
 ```
 
 `OrderPlaced` includes the computed `total` so any downstream projection can display the order value without re-running the multiplication. Compute in the decider, record in the event.
+
+`OrderShipped` and `OrderCancelled` carry the order's `lines`. Both events start work per line: a shipment commits the stock reserved for each line, and the undo of a cancellation releases it. The decider copies the lines from the order's state into the event, so the code that reacts to the event needs neither a query nor the order's stream. Both events keep a missing `lines` readable as an empty list (a compact constructor, not a rule), and a cancellation of an id nobody placed has no lines.
 
 ### OrderState
 
@@ -308,7 +358,19 @@ class OrderDeciderTest {
     fixture
         .given(placed(), new OrderEvent.OrderConfirmed("o-1"))
         .when(new OrderCommand.ShipOrder("o-1"))
-        .expectEvents(new OrderEvent.OrderShipped("o-1"));
+        .expectEvents(new OrderEvent.OrderShipped("o-1", placed().lines()));
+  }
+
+  @Test
+  void shipOrder_carriesTheLines() {
+    fixture
+        .given(placed(), new OrderEvent.OrderConfirmed("o-1"))
+        .when(new OrderCommand.ShipOrder("o-1"))
+        .expectProduced(
+            events ->
+                assertThat(events)
+                    .containsExactly(new OrderEvent.OrderShipped("o-1", placed().lines())),
+            s -> assertThat(s.status()).isEqualTo(OrderStatus.SHIPPED));
   }
 
   @Test
@@ -322,7 +384,10 @@ class OrderDeciderTest {
   @Test
   void deliverOrder_fromShipped() {
     fixture
-        .given(placed(), new OrderEvent.OrderConfirmed("o-1"), new OrderEvent.OrderShipped("o-1"))
+        .given(
+            placed(),
+            new OrderEvent.OrderConfirmed("o-1"),
+            new OrderEvent.OrderShipped("o-1", placed().lines()))
         .when(new OrderCommand.DeliverOrder("o-1"))
         .expectEvents(new OrderEvent.OrderDelivered("o-1"));
   }
@@ -332,7 +397,42 @@ class OrderDeciderTest {
     fixture
         .given(placed())
         .when(new OrderCommand.CancelOrder("o-1", "Changed mind"))
-        .expectEvents(new OrderEvent.OrderCancelled("o-1", "Changed mind"));
+        .expectEvents(new OrderEvent.OrderCancelled("o-1", "Changed mind", placed().lines()));
+  }
+
+  @Test
+  void cancelOrder_confirmed_carriesTheLines() {
+    OrderEvent.OrderPlaced twoLines =
+        new OrderEvent.OrderPlaced(
+            "o-1",
+            "c-1",
+            List.of(
+                new OrderEvent.OrderLine("p-1", 2, TEN_USD),
+                new OrderEvent.OrderLine("p-2", 1, TEN_USD)),
+            new Money(BigDecimal.valueOf(30), "USD"));
+    fixture
+        .given(twoLines, new OrderEvent.OrderConfirmed("o-1"))
+        .when(new OrderCommand.CancelOrder("o-1", "why"))
+        .expectEvents(new OrderEvent.OrderCancelled("o-1", "why", twoLines.lines()));
+  }
+
+  @Test
+  void cancelOrder_cancelled_appendsAnotherCancellation() {
+    fixture
+        .given(placed(), new OrderEvent.OrderCancelled("o-1", "first", placed().lines()))
+        .when(new OrderCommand.CancelOrder("o-1", "second"))
+        .expectEvents(new OrderEvent.OrderCancelled("o-1", "second", placed().lines()));
+  }
+
+  @Test
+  void cancelOrder_shipped_isRefused() {
+    fixture
+        .given(
+            placed(),
+            new OrderEvent.OrderConfirmed("o-1"),
+            new OrderEvent.OrderShipped("o-1", placed().lines()))
+        .when(new OrderCommand.CancelOrder("o-1", "Too late"))
+        .expectFailedWith(DomainException.class, "Cannot cancel SHIPPED orders");
   }
 
   @Test
@@ -341,10 +441,10 @@ class OrderDeciderTest {
         .given(
             placed(),
             new OrderEvent.OrderConfirmed("o-1"),
-            new OrderEvent.OrderShipped("o-1"),
+            new OrderEvent.OrderShipped("o-1", placed().lines()),
             new OrderEvent.OrderDelivered("o-1"))
         .when(new OrderCommand.CancelOrder("o-1", "Too late"))
-        .expectException(DomainException.class);
+        .expectFailedWith(DomainException.class, "Cannot cancel DELIVERED orders");
   }
 
   // An order that was never placed is not confirmed, shipped or delivered: its empty state reads
@@ -375,14 +475,24 @@ class OrderDeciderTest {
   }
 
   @Test
-  void cancelOrder_neverPlaced_isAccepted() {
+  void cancelOrder_neverPlaced_isAcceptedWithoutLines() {
     // CancelOrder is the last step of the fulfillment saga's compensation, and a refused
     // compensation command ends the saga FAILED: the decider accepts it for any order that is not
-    // delivered, an id nobody placed included.
+    // shipped or delivered, an id nobody placed included.
     fixture
         .given()
         .when(new OrderCommand.CancelOrder("o-none", "Compensation"))
-        .expectEvents(new OrderEvent.OrderCancelled("o-none", "Compensation"));
+        .expectEvents(new OrderEvent.OrderCancelled("o-none", "Compensation", List.of()));
+  }
+
+  @Test
+  void placeOrder_afterACancellationOfTheUnplacedId_isRefused() {
+    fixture
+        .given(new OrderEvent.OrderCancelled("o-1", "x", List.of()))
+        .when(
+            new OrderCommand.PlaceOrder(
+                "o-1", "c-1", List.of(new OrderCommand.OrderLine("p-1", 2, TEN_USD))))
+        .expectFailedWith(DomainException.class, "Order already exists: o-1");
   }
 }
 ```
@@ -419,8 +529,9 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       case OrderCommand.PlaceOrder c -> {
         // An order id is placed once. Without this check a second PlaceOrder would append another
         // OrderPlaced, and evolve would replace the order's lines and total and reset a confirmed
-        // or shipped order to CREATED.
-        if (state.orderId() != null)
+        // or shipped order to CREATED. An id cancelled before anybody placed it is not placed
+        // afterwards: its stream already says CANCELLED.
+        if (state.orderId() != null || state.status() == OrderStatus.CANCELLED)
           throw new DomainException("Order already exists: " + c.orderId());
         List<OrderEvent.OrderLine> eventLines =
             c.lines().stream()
@@ -446,7 +557,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
         if (state.status() != OrderStatus.CONFIRMED)
           throw new DomainException(
               "Can only ship CONFIRMED orders, current status: " + state.status());
-        yield List.of(new OrderEvent.OrderShipped(c.orderId()));
+        yield List.of(new OrderEvent.OrderShipped(c.orderId(), state.lines()));
       }
 
       case OrderCommand.DeliverOrder c -> {
@@ -458,13 +569,15 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
       }
 
       case OrderCommand.CancelOrder c -> {
-        // No requirePlaced here. CancelOrder is the last step of the fulfillment saga's
-        // compensation, and a compensation command the decider refuses ends the saga FAILED
-        // instead of COMPENSATED: it is accepted whatever the order's stream holds, short of a
-        // delivered order.
-        if (state.status() == OrderStatus.DELIVERED)
-          throw new DomainException("Cannot cancel DELIVERED orders");
-        yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason()));
+        // No requirePlaced here: a cancellation of an id nobody placed is recorded and undoes
+        // nothing, and a compensation command the decider refuses ends the saga FAILED instead of
+        // COMPENSATED. A shipped or delivered order is not cancelled. A cancelled order is
+        // cancelled again: every OrderCancelled starts the undo of the order's money and stock,
+        // and a reservation stored after an earlier undo ran is released by the undo of the next
+        // one.
+        if (state.status() == OrderStatus.SHIPPED || state.status() == OrderStatus.DELIVERED)
+          throw new DomainException("Cannot cancel " + state.status() + " orders");
+        yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason(), state.lines()));
       }
     };
   }
@@ -492,7 +605,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 }
 ```
 
-The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. `requirePlaced` is the other half of that guard: the empty state of an id nobody placed reads `CREATED`, so `ConfirmOrder` would pass the status check and open a stream for an order that does not exist. Confirming, shipping and delivering such an id are refused with `Order not found`. `CancelOrder` is deliberately left out: in Chapter 11 it becomes the last step of the fulfillment saga's compensation, and a compensation command the decider refuses ends the saga `FAILED` instead of `COMPENSATED`. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
+The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. `requirePlaced` is the other half of that guard: the empty state of an id nobody placed reads `CREATED`, so `ConfirmOrder` would pass the status check and open a stream for an order that does not exist. Confirming, shipping and delivering such an id are refused with `Order not found`. `CancelOrder` is deliberately left out of `requirePlaced`: in Chapter 11 it becomes the last step of the fulfillment saga's compensation, and a compensation command the decider refuses ends the saga `FAILED` instead of `COMPENSATED`, so a cancellation of an id nobody placed is recorded (with no lines) and undoes nothing. A shipped or delivered order is the one thing it refuses (`Cannot cancel SHIPPED orders`), and a cancelled order is cancelled again. For the same reason `PlaceOrder` also refuses an id whose stream already says `CANCELLED`: an id cancelled before anybody placed it is not placed afterwards. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
 
 Run the tests again:
 
@@ -500,7 +613,7 @@ Run the tests again:
 ./gradlew :commands:test
 ```
 
-All nine tests should pass. If `shipOrder_notConfirmed_throws` fails, check that the guard in `ShipOrder` checks for `CONFIRMED` (not `CREATED`).
+All the tests should pass. If `shipOrder_notConfirmed_throws` fails, check that the guard in `ShipOrder` checks for `CONFIRMED` (not `CREATED`).
 
 ### Step 3 — Configure SnapshotPolicy in the CommandBus
 
@@ -578,6 +691,20 @@ Just as you did for products (chapter 2) and customers (chapter 6, Step 5), add 
 ```
 
 Add `import org.streamrune.ecommerce.domain.order.OrderEvent;` to `StreamRuneConfig.java` (or use the fully-qualified form as earlier chapters do).
+
+Snapshots need one more registration. The event store saves a snapshot under the simple class name of the state, and refuses to write one for a state the registry does not resolve: the bus logs `Snapshot save failed` and the events stay committed, but no snapshot is ever written. Register each aggregate state in the same builder:
+
+```java
+.registerState("ProductState",   ProductState.class)
+.registerState("OrderState",     OrderState.class)
+.registerState("CustomerState",  CustomerState.class)
+.registerState("PaymentState",   PaymentState.class)
+.registerState("InventoryState", InventoryState.class)
+```
+
+(The payment and inventory states belong to chapters 11 and 13; register them when you add those aggregates.)
+
+A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, and the demo wires it in all three apps.
 
 ### Step 5 — Add the REST controller
 
@@ -903,6 +1030,16 @@ curl -X POST http://localhost:8080/api/orders/order-2/ship
 
 The second `curl` returns `400 Bad Request` with a message like `Can only ship CONFIRMED orders, current status: CREATED`. The state machine guard fired in `decide` before any event was written.
 
+**Verify that a shipped order cannot be cancelled** (ship `order-1` first, with `curl -X POST http://localhost:8080/api/orders/order-1/ship`):
+
+```bash
+curl -i -X POST http://localhost:8080/api/orders/order-1/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "changed my mind"}'
+```
+
+The response is `400 Bad Request` with the body `Cannot cancel SHIPPED orders`, and the order's stream still ends with `OrderShipped`.
+
 **Verify that a bad product id is refused when the order is placed:**
 
 ```bash
@@ -921,22 +1058,22 @@ The JSON `\n` puts a line feed into the product id. The response is `400 Bad Req
 
 **Trigger snapshot creation:**
 
-The threshold is counted **per order stream**, so to see a snapshot you have to drive a single order to five events. The basic happy-path lifecycle produces only four events (placed, confirmed, shipped, delivered), so it does **not** cross the `everyNEvents(5)` threshold on its own. You need a fifth event on the same stream.
-
-The quickest path: take `order-1` through the full lifecycle (4 events), then use a **fresh order** that you place, confirm, ship, and also cancel before delivery — place → confirm → ship → cancel gives 4 events on the new stream, still not enough. The simplest single-stream five-event scenario is: place → confirm → cancel (3 events), which does not reach 5 either.
-
-**The practical approach for this demo**: because the basic domain's lifecycle produces at most four events per order (deliver is terminal; cancel after confirm/ship is also terminal), the `everyNEvents(5)` threshold is intentionally set above the simple lifecycle. It is designed to protect orders that accumulate extra events in later chapters — for example saga retries or payment-failure compensation events (Chapters 11–12). To watch the threshold fire right now, **temporarily lower the value to 4** in `StreamRuneConfig.java`, restart, and walk `order-1` through the full lifecycle:
+The threshold is counted **per order stream**, so to see a snapshot you have to drive a single order to five events. The happy-path lifecycle produces only four events (placed, confirmed, shipped, delivered), so it does **not** cross the `everyNEvents(5)` threshold on its own, and a shipped order cannot be cancelled. A cancelled order, however, may be cancelled again: every cancellation is recorded. Place a fresh order and cancel it four times, which gives it five events:
 
 ```bash
-# Temporarily: .snapshotPolicy(SnapshotPolicy.everyNEvents(4)) in StreamRuneConfig.java, then restart
-# order-1 already has: OrderPlaced, OrderConfirmed (2 events)
-curl -X POST http://localhost:8080/api/orders/order-1/ship
-# 3 events
-curl -X POST http://localhost:8080/api/orders/order-1/deliver
-# 4 events on the order-1 stream -> snapshot written
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-5", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 9.99}]}'
+# 1 event
+for i in 1 2 3 4; do
+  curl -X POST http://localhost:8080/api/orders/order-5/cancel \
+    -H 'Content-Type: application/json' \
+    -d "{\"reason\": \"cancel $i\"}"
+done
+# 5 events on the order-5 stream -> snapshot written
 ```
 
-Set the value back to 5 after the observation.
+The fifth event makes the bus save the order's state as a snapshot (it can do so because the states are registered, Step 4a).
 
 **Inspect the snapshot table:**
 
@@ -945,7 +1082,7 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, version, created_at FROM snapshot_store ORDER BY created_at DESC LIMIT 5;"
 ```
 
-You should see a row `order | order-1 | …` once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.)
+You should see a row `order | order-5 | …` with `version` 5 once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.)
 
 To confirm the snapshot is being used on reads:
 

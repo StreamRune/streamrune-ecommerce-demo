@@ -198,13 +198,16 @@ class PaymentProcessManagerTest {
   }
 
   @Test
-  void aRejectionBecauseThePaymentIsAlreadySettledIsNotAnError() {
+  void aCaptureOfAPaymentThatFailedInTheMeantimeIsRecordedAndRefunded() {
     EventEnvelope initiated = store.initiate(PAYMENT);
     bus.settleFirst(PAYMENT);
 
     manager.onEvents(List.of(initiated));
 
-    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentFailed");
+    // The gateway took the money, so the capture is recorded; the payment is refunded in the same
+    // append.
+    assertThat(store.types(STREAM))
+        .containsExactly("PaymentInitiated", "PaymentFailed", "PaymentCaptured", "PaymentRefunded");
   }
 
   @Test
@@ -438,6 +441,7 @@ class PaymentProcessManagerTest {
                           case PaymentCommand.CapturePayment c -> c.paymentId();
                           case PaymentCommand.RefundPayment c -> c.paymentId();
                           case PaymentCommand.FailPayment c -> c.paymentId();
+                          case PaymentCommand.CancelPayment c -> c.paymentId();
                         }),
                 new PaymentDecider())
             .build();
@@ -734,13 +738,14 @@ class PaymentProcessManagerTest {
             case PaymentCommand.CapturePayment c -> c.paymentId();
             case PaymentCommand.RefundPayment c -> c.paymentId();
             case PaymentCommand.FailPayment c -> c.paymentId();
+            case PaymentCommand.CancelPayment c -> c.paymentId();
           };
       StreamId streamId = StreamId.of(PaymentState.TYPE, AggregateId.of(paymentId));
       if (paymentId.equals(settleFirst)) {
         settleFirst = null;
         store.append(
             streamId,
-            new PaymentEvent.PaymentFailed(paymentId, "settled elsewhere"),
+            new PaymentEvent.PaymentFailed(paymentId, "o-settled", "settled elsewhere"),
             PaymentStreams.causedBySagaOf(paymentId));
       }
       List<PaymentEvent> events = decider.decide(payment, store.state(streamId, decider));

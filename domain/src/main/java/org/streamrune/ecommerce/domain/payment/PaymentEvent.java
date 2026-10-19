@@ -8,7 +8,10 @@ public sealed interface PaymentEvent extends DomainEvent {
 
   record PaymentCaptured(String paymentId, String orderId) implements PaymentEvent {}
 
-  record PaymentRefunded(String paymentId, String reason) implements PaymentEvent {}
+  record PaymentRefunded(String paymentId, String orderId, Money amount, String reason)
+      implements PaymentEvent {}
 
-  record PaymentFailed(String paymentId, String reason) implements PaymentEvent {}
+  record PaymentFailed(String paymentId, String orderId, String reason) implements PaymentEvent {}
+
+  record PaymentVoided(String paymentId, String orderId, String reason) implements PaymentEvent {}
 }

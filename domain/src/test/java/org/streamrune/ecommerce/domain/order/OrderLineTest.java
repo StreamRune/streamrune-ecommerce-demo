@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -100,5 +101,58 @@ class OrderLineTest {
     OrderEvent.OrderLine stored = new OrderEvent.OrderLine("p\nstored", 1, TEN_USD);
 
     assertTrue(stored.productId().contains("\n"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1})
+  void aZeroOrNegativeQuantityIsRefused(int quantity) {
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new OrderCommand.OrderLine("p", quantity, TEN_USD));
+
+    assertEquals("quantity must be positive, got " + quantity, e.getMessage());
+  }
+
+  @Test
+  void aMissingOrNonPositiveUnitPriceIsRefused() {
+    for (Money unitPrice :
+        List.of(
+            new Money(null, "USD"),
+            new Money(BigDecimal.ZERO, "USD"),
+            new Money(BigDecimal.valueOf(-1), "USD"))) {
+      IllegalArgumentException e =
+          assertThrows(
+              IllegalArgumentException.class, () -> new OrderCommand.OrderLine("p", 1, unitPrice));
+
+      assertEquals("unitPrice must be positive", e.getMessage());
+    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class, () -> new OrderCommand.OrderLine("p", 1, null));
+    assertEquals("unitPrice must be positive", e.getMessage());
+  }
+
+  @Test
+  void requireValidProductId_isTheConstructorsRule() {
+    assertEquals(
+        "productId is required",
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> OrderCommand.OrderLine.requireValidProductId(" "))
+            .getMessage());
+    assertEquals(
+        "productId must be at most 255 characters, got 256",
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> OrderCommand.OrderLine.requireValidProductId("x".repeat(256)))
+            .getMessage());
+    assertEquals(
+        "productId must not contain control characters (U+0000-U+001F, U+007F, U+0080-U+009F)",
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> OrderCommand.OrderLine.requireValidProductId("p\nq"))
+            .getMessage());
+    assertDoesNotThrow(() -> OrderCommand.OrderLine.requireValidProductId("prod-001"));
   }
 }

@@ -115,12 +115,14 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
       PaymentEvent.PaymentCaptured.class,
       PaymentEvent.PaymentRefunded.class,
       PaymentEvent.PaymentFailed.class,
+      PaymentEvent.PaymentVoided.class,
       PaymentState.class,
       PaymentStatus.class,
       PaymentCommand.InitiatePayment.class,
       PaymentCommand.CapturePayment.class,
       PaymentCommand.RefundPayment.class,
       PaymentCommand.FailPayment.class,
+      PaymentCommand.CancelPayment.class,
 
       // ── inventory ────────────────────────────────────────────────────────────
       InventoryEvent.StockReserved.class,

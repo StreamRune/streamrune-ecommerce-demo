@@ -5,7 +5,7 @@ import org.streamrune.core.Command;
 public sealed interface InventoryCommand extends Command {
   record ReserveStock(String productId, String orderId, int quantity) implements InventoryCommand {}
 
-  record ReleaseStock(String productId, String orderId, int quantity) implements InventoryCommand {}
+  record ReleaseStock(String productId, String orderId) implements InventoryCommand {}
 
   record ConfirmReservation(String productId, String orderId) implements InventoryCommand {}
 

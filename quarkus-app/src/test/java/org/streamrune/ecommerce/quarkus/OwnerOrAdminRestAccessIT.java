@@ -583,7 +583,7 @@ class OwnerOrAdminRestAccessIT {
 
     // An order nobody placed. A customer is refused by the access rule (403, no row); an ADMIN
     // gets past it and the decider refuses to confirm, ship or deliver it. Cancelling is the
-    // saga's compensation and is accepted for any order that is not delivered.
+    // saga's compensation and is accepted for any order that is not shipped or delivered.
     String order = uniqueId("o-none");
     for (String action : new String[] {"/confirm", "/ship", "/deliver"}) {
       assertThat(

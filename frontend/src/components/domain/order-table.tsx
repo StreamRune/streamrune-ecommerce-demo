@@ -311,7 +311,7 @@ function OrderRow({ order }: { order: OrderView }) {
                 </Button>
               </PermissionGate>
             )}
-            {/* The backend accepts a cancel for any order that is not delivered, from the order's
+            {/* The backend accepts a cancel for any order that is not shipped or delivered, from the order's
                 customer or an ADMIN, and the fulfillment saga confirms a placed order within
                 seconds: the page offers Cancel for an order that is not shipped yet, confirmed
                 or not. A cancel of a confirmed order changes the order's status and nothing

@@ -79,4 +79,47 @@ class PlaceOrderTest {
     assertDoesNotThrow(() -> placeOrder(null));
     assertDoesNotThrow(() -> placeOrder(" "));
   }
+
+  @Test
+  void anOrderWithoutLinesIsRefused() {
+    for (List<OrderCommand.OrderLine> lines :
+        java.util.Arrays.asList(null, List.<OrderCommand.OrderLine>of())) {
+      IllegalArgumentException e =
+          assertThrows(
+              IllegalArgumentException.class,
+              () -> new OrderCommand.PlaceOrder("o-1", "cust-1", lines));
+
+      assertEquals("lines must not be empty", e.getMessage());
+    }
+  }
+
+  @Test
+  void aNullLineIsRefused() {
+    java.util.List<OrderCommand.OrderLine> lines = new java.util.ArrayList<>();
+    lines.add(null);
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new OrderCommand.PlaceOrder("o-1", "cust-1", lines));
+
+    assertEquals("lines must not hold null", e.getMessage());
+  }
+
+  @Test
+  void twoLinesOfOneProductAreRefused_withoutEchoingTheId() {
+    Money ten = new Money(BigDecimal.TEN, "USD");
+    List<OrderCommand.OrderLine> lines =
+        List.of(
+            new OrderCommand.OrderLine("SECRET-p", 1, ten),
+            new OrderCommand.OrderLine("SECRET-p", 2, ten));
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new OrderCommand.PlaceOrder("o-1", "cust-1", lines));
+
+    assertEquals("lines must name each product once", e.getMessage());
+    assertFalse(e.getMessage().contains("SECRET"));
+  }
 }

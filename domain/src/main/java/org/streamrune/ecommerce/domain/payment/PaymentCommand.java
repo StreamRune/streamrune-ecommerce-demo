@@ -12,4 +12,7 @@ public sealed interface PaymentCommand extends Command {
   record RefundPayment(String paymentId, String reason) implements PaymentCommand {}
 
   record FailPayment(String paymentId, String reason) implements PaymentCommand {}
+
+  /** Voids a pending payment, refunds a captured one in full, and does nothing otherwise. */
+  record CancelPayment(String paymentId, String reason) implements PaymentCommand {}
 }

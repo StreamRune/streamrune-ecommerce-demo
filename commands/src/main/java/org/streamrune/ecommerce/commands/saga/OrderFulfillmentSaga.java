@@ -19,6 +19,7 @@ import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentIds;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 
 /**
@@ -124,9 +125,6 @@ public class OrderFulfillmentSaga
 
   /** The deadline of a fulfillment when the application names none: fifteen minutes. */
   public static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
-
-  /** A fulfillment's payment id is this prefix and the order id. */
-  private static final String PAYMENT_ID_PREFIX = "pay-";
 
   private final Duration timeout;
 
@@ -251,7 +249,7 @@ public class OrderFulfillmentSaga
               state.sagaId(),
               e.orderId(),
               e.customerId(),
-              PAYMENT_ID_PREFIX + e.orderId(),
+              PaymentIds.forOrder(e.orderId()),
               e.total(),
               e.lines(),
               OrderFulfillmentStatus.AWAITING_PAYMENT);
@@ -410,8 +408,7 @@ public class OrderFulfillmentSaga
           var line = state.lines().get(0);
           commands.add(
               new SagaCommand(
-                  new InventoryCommand.ReleaseStock(
-                      line.productId(), state.orderId(), line.quantity()),
+                  new InventoryCommand.ReleaseStock(line.productId(), state.orderId()),
                   new AggregateId(line.productId())));
         }
         commands.add(

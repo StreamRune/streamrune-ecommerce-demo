@@ -232,7 +232,11 @@ In `StreamRuneConfig` you already declared the `PostgresCryptoEngine` bean in Ch
 
 ```java
 import java.util.List;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
 import org.streamrune.postgres.PostgresAuditStore;
+import org.streamrune.postgres.PostgresSnapshotStorePurger;
 import org.streamrune.runtime.CachingQueryBus;
 import org.streamrune.runtime.gdpr.ForgetSubjectService;
 import org.streamrune.ecommerce.projections.CustomerSubjectDataPurger;
@@ -254,13 +258,20 @@ public ForgetSubjectService forgetSubjectService(
         PostgresCryptoEngine cryptoEngine,
         PostgresAuditStore auditStore,
         CustomerSubjectDataPurger customerPurger,
+        DataSource dataSource,
         CachingQueryBus cachingQueryBus) {
     return ForgetSubjectService.builder()
             .cryptoEngine(cryptoEngine)
             .auditStore(auditStore)
-            .purgers(List.of(customerPurger))
+            .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
             .queryCache(cachingQueryBus)
             .build();
+}
+
+static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+            dataSource,
+            subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
 }
 ```
 
@@ -268,7 +279,7 @@ This is the bean `CustomerCommandController` injects in Step 2. The wiring is de
 
 - `.cryptoEngine(cryptoEngine)` — the same `PostgresCryptoEngine` that backs the event store, so `forget(...)` deletes the very key used to encrypt the subject's fields.
 - `.auditStore(auditStore)` — each forget and each purge outcome is written to the `audit_log` table.
-- `.purgers(List.of(customerPurger))` — the purger list `forget(...)` runs after the key is shredded. As you add aggregates in later chapters, register a purger per read model holding PII and add it to this list.
+- `.purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))` — the purger list `forget(...)` runs after the key is shredded. As you add aggregates in later chapters, register a purger per read model holding PII and add it to this list. The second purger deletes the customer's snapshot: a snapshot (chapter 8) holds the aggregate's *decrypted* state as plain JSON, so `CustomerState` would keep the name, email, address and phone readable in `snapshot_store` after the key is gone. `PostgresSnapshotStorePurger` takes the streams to clear for a subject, here `customer:<subject id>`; the demo wires it in all three apps.
 - `.queryCache(cachingQueryBus)` — the `CachingQueryBus` from Chapter 5. After the last purger, `forget(...)` evicts every cached query answer, so none taken before the erasure (a decrypted field, or a row the purger just deleted) is served after it. If the eviction fails, `fullyErased()` is `false`, like a failed purge.
 
 ### Step 5 — Verify the full cycle

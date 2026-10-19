@@ -21,6 +21,7 @@ import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -133,6 +134,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "PaymentFailed",
             org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+        .registerEvent(
+            "PaymentVoided",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
         // Inventory events
         .registerEvent(
             "StockReserved",
@@ -146,6 +150,13 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .registerState("PaymentState", PaymentState.class)
+        .registerState("InventoryState", InventoryState.class)
         .build();
   }
 
@@ -368,6 +379,7 @@ public class StreamRuneConfig {
                           case PaymentCommand.CapturePayment c -> c.paymentId();
                           case PaymentCommand.RefundPayment c -> c.paymentId();
                           case PaymentCommand.FailPayment c -> c.paymentId();
+                          case PaymentCommand.CancelPayment c -> c.paymentId();
                         }),
                 new PaymentDecider())
             .register(
@@ -428,13 +440,26 @@ public class StreamRuneConfig {
       PostgresCryptoEngine cryptoEngine,
       PostgresAuditStore auditStore,
       CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
       CachingQueryBus cachingQueryBus) {
     return ForgetSubjectService.builder()
         .cryptoEngine(cryptoEngine)
         .auditStore(auditStore)
-        .purgers(List.of(customerPurger))
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
         .queryCache(cachingQueryBus)
         .build();
+  }
+
+  /**
+   * Deletes the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
   }
 
   @Bean

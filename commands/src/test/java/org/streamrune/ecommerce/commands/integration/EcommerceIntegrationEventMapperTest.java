@@ -113,7 +113,7 @@ class EcommerceIntegrationEventMapperTest {
 
   @Test
   void orderShipped_producesOneEntry() {
-    var event = new OrderEvent.OrderShipped("order-5");
+    var event = new OrderEvent.OrderShipped("order-5", List.of());
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(OrderState.TYPE, "order-5")));
     assertThat(entries).hasSize(1);
@@ -133,7 +133,7 @@ class EcommerceIntegrationEventMapperTest {
 
   @Test
   void orderCancelled_producesOneEntry_withReason() {
-    var event = new OrderEvent.OrderCancelled("order-7", "Customer changed mind");
+    var event = new OrderEvent.OrderCancelled("order-7", "Customer changed mind", List.of());
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(OrderState.TYPE, "order-7")));
     assertThat(entries).hasSize(1);
@@ -184,7 +184,7 @@ class EcommerceIntegrationEventMapperTest {
 
   @Test
   void paymentRefunded_producesOneEntry() {
-    var event = new PaymentEvent.PaymentRefunded("pay-2", "Fraud");
+    var event = new PaymentEvent.PaymentRefunded("pay-2", "order-2", TEN_USD, "Fraud");
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-2")));
     assertThat(entries).hasSize(1);
@@ -194,10 +194,23 @@ class EcommerceIntegrationEventMapperTest {
 
   @Test
   void paymentFailed_producesOneEntry() {
-    var event = new PaymentEvent.PaymentFailed("pay-3", "Insufficient funds");
+    var event = new PaymentEvent.PaymentFailed("pay-3", "order-3", "Insufficient funds");
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-3")));
     assertThat(entries).hasSize(1);
+    assertPiiAbsent(entries.get(0).payload());
+  }
+
+  @Test
+  void aVoidedPaymentIsPublishedOnThePaymentStream() {
+    var event = new PaymentEvent.PaymentVoided("pay-1", "order-1", "Customer changed mind");
+    List<OutboxEntry> entries =
+        mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-1")));
+    assertThat(entries).hasSize(1);
+    assertThat(entries.get(0).streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-1"));
+    assertThat(entries.get(0).payloadType()).isEqualTo("PaymentVoided");
+    assertThat(entries.get(0).payload())
+        .isEqualTo("{\"paymentId\":\"pay-1\",\"reason\":\"Customer changed mind\"}");
     assertPiiAbsent(entries.get(0).payload());
   }
 

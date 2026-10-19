@@ -72,12 +72,16 @@ class SseLiveE2EIT {
 
   /**
    * The frames of the {@code OrderPlaced} event of the given order: of the order's events, the only
-   * one that names the product.
+   * one that names the customer.
    */
   private static List<SseTestStream.Frame> orderPlacedFrames(
       List<SseTestStream.Frame> frames, String orderId, String productId) {
     return frames.stream()
-        .filter(frame -> frame.data().contains(orderId) && frame.data().contains(productId))
+        .filter(
+            frame ->
+                frame.data().contains(orderId)
+                    && frame.data().contains(productId)
+                    && frame.data().contains("\"customerId\""))
         .toList();
   }
 

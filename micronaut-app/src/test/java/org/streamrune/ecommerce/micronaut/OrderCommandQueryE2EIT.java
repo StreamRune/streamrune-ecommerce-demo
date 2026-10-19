@@ -23,6 +23,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
@@ -427,6 +428,43 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
                     .header("X-User-Role", "CUSTOMER")
                     .header("X-User-Id", cid));
     assertThat(response.getStatus().getCode()).isBetween(200, 299);
+  }
+
+  @Test
+  void cancellingAShippedOrderAnswers400() {
+    String oid = "m-o-cancel-shipped-" + System.nanoTime();
+    String cid = "m-o-cancel-shipped-cust-" + System.nanoTime();
+    String pid = "m-prod-cancel-shipped-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, pid);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    shipOrderAsAdmin(oid);
+
+    HttpClientResponseException ex =
+        assertThrows(
+            HttpClientResponseException.class,
+            () ->
+                client
+                    .toBlocking()
+                    .exchange(
+                        HttpRequest.POST(
+                                "/api/orders/" + oid + "/cancel",
+                                """
+                                {"reason": "too late"}""")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .header("X-User-Role", "CUSTOMER")
+                            .header("X-User-Id", cid),
+                        String.class));
+    assertThat(ex.getStatus().getCode()).isEqualTo(400);
+    assertThat(ex.getResponse().getBody(String.class).orElse(""))
+        .contains("Cannot cancel SHIPPED orders");
+
+    var events =
+        eventStore.readStream(
+            StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
+            Version.initial(),
+            Integer.MAX_VALUE);
+    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test

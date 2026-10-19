@@ -32,7 +32,9 @@ The `@Auditable` annotation on commands is not actually what drives command audi
 ```java
 package org.streamrune.ecommerce.domain.order;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.streamrune.core.Command;
 import org.streamrune.core.RequireRole;
 import org.streamrune.core.types.IdConstraints;
@@ -53,6 +55,9 @@ public sealed interface OrderCommand extends Command {
    * stream id with {@code AggregateId.of}, before anything is written, so the constructor adds only
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
+   *
+   * <p>The lines are not empty and name each product once: stock is reserved per order and product,
+   * so two lines of one product would be reserved once. The message never echoes a product id.
    */
   record PlaceOrder(String orderId, String customerId, List<OrderLine> lines)
       implements OrderCommand {
@@ -72,6 +77,19 @@ public sealed interface OrderCommand extends Command {
                 + " characters, got "
                 + orderId.length());
       }
+      if (lines == null || lines.isEmpty()) {
+        throw new IllegalArgumentException("lines must not be empty");
+      }
+      Set<String> products = new HashSet<>();
+      for (OrderLine line : lines) {
+        if (line == null) {
+          throw new IllegalArgumentException("lines must not hold null");
+        }
+        if (!products.add(line.productId())) {
+          throw new IllegalArgumentException("lines must name each product once");
+        }
+      }
+      lines = List.copyOf(lines);
     }
   }
 
@@ -104,6 +122,20 @@ public sealed interface OrderCommand extends Command {
     public static final int MAX_PRODUCT_ID_LENGTH = IdConstraints.MAX_LENGTH;
 
     public OrderLine {
+      requireValidProductId(productId);
+      if (quantity <= 0) {
+        throw new IllegalArgumentException("quantity must be positive, got " + quantity);
+      }
+      if (unitPrice == null || unitPrice.amount() == null || unitPrice.amount().signum() <= 0) {
+        throw new IllegalArgumentException("unitPrice must be positive");
+      }
+    }
+
+    /**
+     * The rule a product id of an order line follows: present, at most {@value
+     * #MAX_PRODUCT_ID_LENGTH} characters, no control character. The message never echoes the id.
+     */
+    public static void requireValidProductId(String productId) {
       if (productId == null || productId.isBlank()) {
         throw new IllegalArgumentException("productId is required");
       }
