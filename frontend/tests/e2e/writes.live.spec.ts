@@ -22,8 +22,9 @@
  * What a run leaves behind: a forgotten customer, two products (the one it
  * ordered from, with the units no order took, and a discontinued one), four
  * orders with their payments and sagas (one delivered, one confirmed, one
- * cancelled after its confirmation, one cancelled by a failed payment), and
- * the events of all of them. The payment-failure switch is left off.
+ * cancelled after its confirmation, its payment refunded and its unit
+ * released, one cancelled by a failed payment), and the events of all of
+ * them. The payment-failure switch is left off.
  */
 
 import { test, expect, request, type Browser, type Page } from "@playwright/test";
@@ -221,7 +222,7 @@ test.describe("Writes against a running backend", () => {
     await expect(page.getByText("fulfillment-order-seed-1")).toHaveCount(0);
   });
 
-  test("the customer cancels a confirmed order: it is CANCELLED, its payment stays captured and its stock reserved", async ({
+  test("the customer cancels a confirmed order: its stock is released and its payment refunded", async ({
     page,
   }) => {
     await actAs(page, "CUSTOMER", created.customerId);
@@ -229,11 +230,11 @@ test.describe("Writes against a running backend", () => {
     const placed = row(page, orderId);
     await expect(placed).toContainText("CONFIRMED", SETTLED);
 
-    // The dialog says what a cancel of a confirmed order does and what it does not.
+    // The dialog says what a cancel does.
     await placed.getByRole("button", { name: "Cancel" }).click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("note")).toContainText(
-      "The demo does not refund the payment and does not release the reservation."
+    await expect(dialog.getByRole("note")).toHaveText(
+      "Cancelling releases the order's stock and voids or refunds its payment in full."
     );
     await dialog.getByLabel("Reason (optional)").fill("changed my mind");
     await dialog.getByRole("button", { name: "Cancel Order" }).click();
@@ -242,8 +243,8 @@ test.describe("Writes against a running backend", () => {
     await expect(placed).toContainText("CANCELLED", SETTLED);
     await expect(placed.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 
-    // That is all the cancel did. The order's saga was complete before it and stays so, the
-    // payment is still captured and the unit is still reserved: nothing refunds or releases.
+    // The order's saga was complete before the cancel and stays so. The cancellation's undo
+    // refunds the payment in full and releases the reserved unit.
     await page.goto("/fulfillment");
     const saga = page.locator('[data-slot="card"]').filter({ hasText: `fulfillment-${orderId}` });
     await expect(saga).toContainText("COMPLETED", SETTLED);
@@ -260,13 +261,12 @@ test.describe("Writes against a running backend", () => {
       "OrderConfirmed",
       "OrderCancelled",
     ]);
-    expect(await eventTypesOf(`payment/pay-${orderId}`)).toEqual([
-      "PaymentInitiated",
-      "PaymentCaptured",
-    ]);
-    const inventory = await eventTypesOf(`inventory/${created.stockedProductId}`);
-    expect(inventory).toContain("StockReserved");
-    expect(inventory).not.toContain("StockReleased");
+    await expect
+      .poll(() => eventTypesOf(`payment/pay-${orderId}`), SETTLED)
+      .toEqual(["PaymentInitiated", "PaymentCaptured", "PaymentRefunded"]);
+    await expect
+      .poll(() => eventTypesOf(`inventory/${created.stockedProductId}`), SETTLED)
+      .toContain("StockReleased");
     await api.dispose();
   });
 

@@ -7,6 +7,7 @@ import io.micronaut.http.HttpRequest;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.client.HttpClient;
 import io.micronaut.http.client.annotation.Client;
+import io.micronaut.http.client.exceptions.HttpClientResponseException;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
 import jakarta.inject.Inject;
 import java.time.Duration;
@@ -28,6 +29,7 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
@@ -122,6 +124,81 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
         .isEqualTo(initiated.metadata().correlationId())
         .isEqualTo(CorrelationId.of("streamrune:saga:" + sagaId.value()));
     assertThat(captured.userId()).as("no user issued the capture").isNull();
+  }
+
+  /**
+   * The customer cancels while the capture cannot be recorded: the cancellation voids the pending
+   * payment, though the gateway has taken the money. The redelivered {@code PaymentInitiated} finds
+   * the void and the gateway's capture, and records the capture, which the payment refunds in the
+   * same append; the refund reaches the gateway.
+   */
+  @Test
+  void aCaptureRedeliveredAfterTheOrderWasCancelled_isRecordedAndRefunded() throws Exception {
+    String orderId = "m-pm-cancel-" + System.nanoTime();
+    String customerId = "m-pm-cust-" + System.nanoTime();
+    String productId = "m-pm-prod-" + System.nanoTime();
+    String paymentId = "pay-" + orderId;
+    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
+
+    try (var failures = new AppendFailureInjection(dataSource)) {
+      failures.failAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
+      placeOrder(orderId, customerId, productId);
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> {
+                assertThat(failures.refusals()).isPositive();
+                assertThat(paymentGateway.hasCaptured(paymentId)).isTrue();
+              });
+
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .pollInterval(Duration.ofMillis(100))
+          .untilAsserted(() -> assertThat(cancel(orderId, customerId)).isEqualTo(200));
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () ->
+                  assertThat(eventTypes(PaymentState.TYPE, paymentId))
+                      .containsExactly("PaymentInitiated", "PaymentVoided"));
+      failures.allowAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
+    }
+
+    await()
+        .atMost(Duration.ofSeconds(90))
+        .untilAsserted(
+            () -> {
+              assertThat(eventTypes(PaymentState.TYPE, paymentId))
+                  .containsExactly(
+                      "PaymentInitiated", "PaymentVoided", "PaymentCaptured", "PaymentRefunded");
+              assertThat(paymentGateway.hasRefunded(paymentId))
+                  .as("the refund reached the gateway")
+                  .isTrue();
+            });
+    assertThat(eventTypes(OrderState.TYPE, orderId)).contains("OrderCancelled");
+    assertThat(eventTypes(OrderState.TYPE, orderId)).doesNotContain("OrderConfirmed");
+    assertThat(eventTypes(InventoryState.TYPE, productId))
+        .as("the order reserved no stock")
+        .doesNotContain("StockReserved");
+  }
+
+  private int cancel(String orderId, String customerId) {
+    try {
+      return client
+          .toBlocking()
+          .exchange(
+              HttpRequest.POST(
+                      "/api/orders/" + orderId + "/cancel",
+                      """
+                      {"reason": "changed my mind"}""")
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .header("X-User-Role", "CUSTOMER")
+                  .header("X-User-Id", customerId))
+          .getStatus()
+          .getCode();
+    } catch (HttpClientResponseException refused) {
+      return refused.getStatus().getCode();
+    }
   }
 
   private List<DeadLetterQueue.DeadLetterEntry> captureDeadLetters(String paymentId) {

@@ -58,10 +58,10 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
   // ── Admin endpoints ────────────────────────────────────────────────────────
 
   /**
-   * The saga subscription and the payment process manager's subscription are registered with the
-   * health contributor, each under its own lease; a single application takes both leases. The
-   * application of the previous test class does not give its leases back, so this one may wait for
-   * them to expire (the test lease lives 5 s).
+   * The saga subscription and the subscriptions of the payment, order cancellation and order
+   * shipment process managers are registered with the health contributor, each under its own lease;
+   * a single application takes every lease. The application of the previous test class does not
+   * give its leases back, so this one may wait for them to expire (the test lease lives 5 s).
    */
   @Test
   void theSagaSubscriptionIsRegisteredAndLeads() {
@@ -76,7 +76,9 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                           Collectors.toMap(SubscriptionHealth::name, SubscriptionHealth::role));
               assertThat(roles)
                   .containsEntry("order-fulfillment-saga", LeaseRole.LEADING)
-                  .containsEntry("payment-process-manager", LeaseRole.LEADING);
+                  .containsEntry("payment-process-manager", LeaseRole.LEADING)
+                  .containsEntry("order-cancellation", LeaseRole.LEADING)
+                  .containsEntry("order-shipment", LeaseRole.LEADING);
             });
   }
 

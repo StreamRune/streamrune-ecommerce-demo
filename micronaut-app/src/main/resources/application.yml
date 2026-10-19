@@ -48,6 +48,12 @@ datasources:
     driver-class-name: org.postgresql.Driver
 
 streamrune:
+  saga:
+    # How often the compensation retry sweeper resumes a saga stamped COMPENSATING whose episode no
+    # event or deadline has resumed yet; it takes rows older than this interval. A cancellation by
+    # the order's customer or an ADMIN stamps the running saga, so the saga's own cancellation
+    # follows within about 10 to 20 seconds. The framework default is 60s.
+    compensation-retry-interval: 10s
   event-store:
     type: postgres
     # The framework creates its own schema at startup (this is also the default): the event

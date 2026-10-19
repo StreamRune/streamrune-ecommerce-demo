@@ -30,7 +30,9 @@ import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
 import org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper;
 import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
 import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
@@ -365,7 +367,6 @@ public class StreamRuneFactory {
                 switch (cmd) {
                   case PaymentCommand.InitiatePayment c -> c.paymentId();
                   case PaymentCommand.CapturePayment c -> c.paymentId();
-                  case PaymentCommand.RefundPayment c -> c.paymentId();
                   case PaymentCommand.FailPayment c -> c.paymentId();
                   case PaymentCommand.CancelPayment c -> c.paymentId();
                 }),
@@ -569,7 +570,7 @@ public class StreamRuneFactory {
    * Compensates a fulfillment that has not ended by its deadline ({@link
    * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
    * unless configured) it claims each saga past its deadline and dispatches the compensation its
-   * state dictates — cancel the order, or refund and cancel.
+   * state dictates — cancel the order.
    *
    * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
    * follows its lease: it claims deadlines only while this backend leads the saga type through the
@@ -578,11 +579,10 @@ public class StreamRuneFactory {
    * handover two backends can overlap for a moment — a backend that dies keeps its lease until the
    * lease expires, and a deposed one may finish its page; there the saga runner's forward fence
    * keeps the order: a forward command is stored before the claim, and its compensation has to
-   * cover it, or it is refused at its commit ({@link OrderFulfillmentSaga} names the two cases the
-   * demo's compensation leaves open). {@code inboxRetentionMaxAge} is the deployment's {@code
-   * streamrune.inbox.retention-max-age}: a compensation this runner resumes after its keys may have
-   * been pruned is faulted instead of dispatched again. {@link EcommerceSubscriptionLifecycle}
-   * starts it with the saga subscription and stops it on shutdown.
+   * cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is the deployment's
+   * {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes after its keys
+   * may have been pruned is faulted instead of dispatched again. {@link
+   * EcommerceSubscriptionLifecycle} starts it with the saga subscription and stops it on shutdown.
    */
   @Singleton
   public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
@@ -638,5 +638,25 @@ public class StreamRuneFactory {
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
         .metrics(metrics)
         .build();
+  }
+
+  /**
+   * Undoes the money and stock of every cancelled order; {@link EcommerceSubscriptionLifecycle}
+   * feeds it from the event stream under the lease {@code order-cancellation}.
+   */
+  @Singleton
+  public OrderCancellationProcessManager orderCancellationProcessManager(
+      org.streamrune.core.CommandBus commandBus) {
+    return new OrderCancellationProcessManager(commandBus);
+  }
+
+  /**
+   * Commits the stock of every shipped order; {@link EcommerceSubscriptionLifecycle} feeds it from
+   * the event stream under the lease {@code order-shipment}.
+   */
+  @Singleton
+  public OrderShipmentProcessManager orderShipmentProcessManager(
+      org.streamrune.core.CommandBus commandBus) {
+    return new OrderShipmentProcessManager(commandBus);
   }
 }

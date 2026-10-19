@@ -15,17 +15,28 @@ import jakarta.inject.Inject;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import javax.sql.DataSource;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventStore;
+import org.streamrune.core.saga.SagaStatus;
+import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
+import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
+import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentIds;
+import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
@@ -64,6 +75,14 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
   @Inject VirtualThreadCommandBus commandBus;
   @Inject EventStore eventStore;
   @Inject DataSource dataSource;
+  @Inject SagaStore sagaStore;
+
+  private OrderUndoProbe probe;
+
+  @BeforeEach
+  void probe() {
+    probe = new OrderUndoProbe(eventStore, sagaStore, dataSource);
+  }
 
   /** One {@code audit_log} row, as the command bus's audit interceptor wrote it. */
   private record AuditRow(String outcome, String userId, String errorMessage) {}
@@ -157,6 +176,58 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
               assertThat(r.body()).isNotNull();
               assertThat(r.body().status()).isEqualTo(expected);
             });
+  }
+
+  /** Places an order of the given products and quantities, in the map's order, at 9.99 each. */
+  private void placeOrder(String orderId, String customerId, Map<String, Integer> lines) {
+    String body =
+        """
+        {"orderId": "%s", "customerId": "%s", "lines": [%s]}"""
+            .formatted(
+                orderId,
+                customerId,
+                lines.entrySet().stream()
+                    .map(
+                        l ->
+                            """
+                            {"productId": "%s", "quantity": %d, "unitPrice": 9.99}"""
+                                .formatted(l.getKey(), l.getValue()))
+                    .collect(Collectors.joining(", ")));
+    var response =
+        client
+            .toBlocking()
+            .exchange(
+                HttpRequest.POST("/api/orders", body)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-User-Role", "CUSTOMER")
+                    .header("X-User-Id", customerId));
+    assertThat(response.getStatus().getCode()).isBetween(200, 299);
+  }
+
+  /** Cancels the order with the reason "changed my mind" and returns the HTTP status. */
+  private int cancel(String orderId, String role, String userId) {
+    try {
+      return client
+          .toBlocking()
+          .exchange(
+              HttpRequest.POST(
+                      "/api/orders/" + orderId + "/cancel",
+                      """
+                      {"reason": "changed my mind"}""")
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .header("X-User-Role", role)
+                  .header("X-User-Id", userId))
+          .getStatus()
+          .getCode();
+    } catch (HttpClientResponseException refused) {
+      return refused.getStatus().getCode();
+    }
+  }
+
+  /** The order's total, as its {@code OrderPlaced} recorded it. */
+  private Money orderTotal(String orderId) {
+    return ((OrderEvent.OrderPlaced) probe.events(OrderState.TYPE, orderId).getFirst().event())
+        .total();
   }
 
   private void shipOrderAsAdmin(String orderId) {
@@ -405,29 +476,128 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
   }
 
+  // ---- Every cancellation of an order is undone through its OrderCancelled: the order
+  // cancellation process manager releases each line's stock and voids or refunds the payment. ----
+
   @Test
-  void cancelOrderReturns2xx() {
+  void cancellingAConfirmedOrderRefundsItsPaymentAndReleasesItsStock() {
     String oid = "m-o-cancel-" + System.nanoTime();
     String cid = "m-o-cancel-cust-" + System.nanoTime();
     String pid = "m-prod-cancel-" + System.nanoTime();
     stockProduct(pid, 5);
-    placeOrder(oid, cid, pid);
-    // Let the saga settle the order at CONFIRMED first, then cancel (CancelOrder is legal from any
-    // non-DELIVERED state) — avoids racing the saga's in-flight ConfirmOrder on the same stream.
+    placeOrder(oid, cid, Map.of(pid, 2));
     awaitOrderStatus(oid, OrderStatus.CONFIRMED);
 
-    var response =
-        client
-            .toBlocking()
-            .exchange(
-                HttpRequest.POST(
-                        "/api/orders/" + oid + "/cancel",
-                        """
-                        {"reason": "test cancellation"}""")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .header("X-User-Role", "CUSTOMER")
-                    .header("X-User-Id", cid));
-    assertThat(response.getStatus().getCode()).isBetween(200, 299);
+    assertThat(cancel(oid, "CUSTOMER", cid)).isEqualTo(200);
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () ->
+                assertThat(probe.paymentEvents(oid))
+                    .containsExactly("PaymentInitiated", "PaymentCaptured", "PaymentRefunded"));
+    var refunded =
+        (PaymentEvent.PaymentRefunded)
+            probe.events(PaymentState.TYPE, PaymentIds.forOrder(oid)).getLast().event();
+    assertThat(refunded.amount()).as("a full refund").isEqualTo(orderTotal(oid));
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () -> {
+              assertThat(probe.stockEventsOf(pid, oid))
+                  .containsExactly("StockReserved:2", "StockReleased:2");
+              assertThat(probe.inventory(pid).available()).isEqualTo(5);
+            });
+  }
+
+  @Test
+  void cancellingRightAfterPlacing_leavesNoChargeAndNoReservation() {
+    String oid = "m-o-cancel-early-" + System.nanoTime();
+    String cid = "m-o-cancel-early-cust-" + System.nanoTime();
+    String pid = "m-prod-cancel-early-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, Map.of(pid, 1));
+
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .pollInterval(Duration.ofMillis(50))
+        .untilAsserted(() -> assertThat(cancel(oid, "CUSTOMER", cid)).isEqualTo(200));
+
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .pollInterval(Duration.ofMillis(500))
+        .untilAsserted(
+            () -> {
+              assertThat(probe.sagaStatus(oid))
+                  .isIn(SagaStatus.COMPENSATED, SagaStatus.COMPLETED, SagaStatus.FAILED);
+              List<String> payment = probe.paymentEvents(oid);
+              assertThat(payment.getLast())
+                  .as("the payment ends voided or refunded, never only captured: %s", payment)
+                  .isIn("PaymentVoided", "PaymentRefunded");
+              assertThat(probe.inventory(pid).reservationOf(oid))
+                  .as("the order's net reservation")
+                  .isEmpty();
+              assertThat(probe.inventory(pid).available()).isEqualTo(5);
+            });
+  }
+
+  @Test
+  void cancellingTwiceRefundsOnce() throws SQLException {
+    String oid = "m-o-cancel-twice-" + System.nanoTime();
+    String cid = "m-o-cancel-twice-cust-" + System.nanoTime();
+    String pid = "m-prod-cancel-twice-" + System.nanoTime();
+    stockProduct(pid, 5);
+    placeOrder(oid, cid, Map.of(pid, 1));
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+
+    assertThat(cancel(oid, "CUSTOMER", cid)).isEqualTo(200);
+    assertThat(cancel(oid, "CUSTOMER", cid)).isEqualTo(200);
+
+    long secondCancellation = probe.events(OrderState.TYPE, oid).getLast().globalOffset().value();
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () ->
+                assertThat(probe.checkpoint(OrderCancellationProcessManager.SUBSCRIPTION_NAME))
+                    .as("the undo of both cancellations ran")
+                    .isGreaterThanOrEqualTo(secondCancellation));
+    assertThat(probe.eventTypes(OrderState.TYPE, oid))
+        .filteredOn("OrderCancelled"::equals)
+        .hasSize(2);
+    assertThat(probe.paymentEvents(oid))
+        .containsExactly("PaymentInitiated", "PaymentCaptured", "PaymentRefunded");
+    assertThat(probe.stockEventsOf(pid, oid)).containsExactly("StockReserved:1", "StockReleased:1");
+  }
+
+  @Test
+  void aMultiLineOrderReservesEveryLine_andItsShipmentCommitsEveryLine() {
+    String oid = "m-o-multi-" + System.nanoTime();
+    String cid = "m-o-multi-cust-" + System.nanoTime();
+    String first = "m-prod-multi-a-" + System.nanoTime();
+    String second = "m-prod-multi-b-" + System.nanoTime();
+    stockProduct(first, 5);
+    stockProduct(second, 5);
+    var lines = new LinkedHashMap<String, Integer>();
+    lines.put(first, 2);
+    lines.put(second, 3);
+    placeOrder(oid, cid, lines);
+    awaitOrderStatus(oid, OrderStatus.CONFIRMED);
+    assertThat(probe.stockEventsOf(first, oid)).containsExactly("StockReserved:2");
+    assertThat(probe.stockEventsOf(second, oid)).containsExactly("StockReserved:3");
+
+    shipOrderAsAdmin(oid);
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () -> {
+              assertThat(probe.stockEventsOf(first, oid))
+                  .containsExactly("StockReserved:2", "ReservationConfirmed:2");
+              assertThat(probe.stockEventsOf(second, oid))
+                  .containsExactly("StockReserved:3", "ReservationConfirmed:3");
+            });
+    assertThat(probe.inventory(first).committed()).isEqualTo(2);
+    assertThat(probe.inventory(second).committed()).isEqualTo(3);
   }
 
   @Test

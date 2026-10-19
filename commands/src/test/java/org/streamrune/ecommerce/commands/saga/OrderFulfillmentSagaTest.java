@@ -6,17 +6,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.saga.SagaCommand;
 import org.streamrune.core.saga.SagaId;
+import org.streamrune.core.saga.SagaStatus;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.CommandId;
@@ -194,6 +198,7 @@ class OrderFulfillmentSagaTest {
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     var captured =
         causedBySagaOf(
@@ -214,17 +219,18 @@ class OrderFulfillmentSagaTest {
   }
 
   // ---- SagaRunner routes the reply to a saga's own command by the origin the command bus stores
-  // with the event, and asks the saga only about an event no fulfillment caused. A request can
-  // write two of the events this saga reacts to, OrderConfirmed and OrderCancelled; each belongs
-  // to the saga of the order it names. The method receives the stream id and the payload, so
-  // nothing a request header carries can take part in the answer. ----
+  // with the event, and asks the saga only about an event no fulfillment caused. A request writes
+  // one of the events this saga reacts to, OrderCancelled; it belongs to the saga of the order it
+  // names. The saga's own ConfirmOrder writes OrderConfirmed, which arrives by its origin. The
+  // method receives the stream id and the payload, so nothing a request header carries can take
+  // part in the answer. ----
 
   @Test
-  void correlateByEventData_routesAConfirmationAndACancellationToTheSagaOfTheirOrder() {
+  void correlateByEventData_routesACancellationOnly() {
     var orderStream = StreamId.of(OrderState.TYPE, new AggregateId("o-1"));
 
     assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed("o-1")))
-        .contains(new SagaId("fulfillment-o-1"));
+        .isEmpty();
     assertThat(
             saga.correlateByEventData(
                 orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of())))
@@ -265,6 +271,7 @@ class OrderFulfillmentSagaTest {
     others.put(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money), payment);
     others.put(new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"), payment);
     others.put(new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"), payment);
+    others.put(new PaymentEvent.PaymentVoided("pay-o-1", "o-1", "changed my mind"), payment);
     others.put(
         new PaymentEvent.PaymentRefunded("pay-o-1", "o-1", new Money(BigDecimal.TEN, "USD"), "why"),
         payment);
@@ -407,6 +414,7 @@ class OrderFulfillmentSagaTest {
         "pay-o-2",
         new Money(BigDecimal.TEN, "USD"),
         List.of(line),
+        List.of(),
         status);
   }
 
@@ -423,6 +431,7 @@ class OrderFulfillmentSagaTest {
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     // A redelivered/unrelated event arrives while the saga sits in AWAITING_INVENTORY — must not
     // re-issue ReserveStock for anything other than the PaymentCaptured that drives this step.
@@ -435,17 +444,14 @@ class OrderFulfillmentSagaTest {
   }
 
   @Test
-  void awaitingInventory_paymentCaptured_reservesStock() {
-    var line = new OrderEvent.OrderLine("prod-1", 2, new Money(BigDecimal.TEN, "USD"));
+  void awaitingInventory_paymentCaptured_reservesEveryLineInTheOrderOfTheLines() {
     var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
-            "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(line),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            List.of(),
+            line("prod-1", 2),
+            line("prod-2", 1),
+            line("prod-3", 5));
     var captured =
         causedBySagaOf(
             "o-1",
@@ -453,13 +459,106 @@ class OrderFulfillmentSagaTest {
             PaymentState.TYPE,
             "pay-o-1");
 
+    state = saga.evolve(state, captured);
     var commands = saga.handle(state, captured);
 
-    assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    var reserve = (InventoryCommand.ReserveStock) commands.get(0).command();
-    assertThat(reserve.productId()).isEqualTo("prod-1");
-    assertThat(reserve.quantity()).isEqualTo(2);
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_INVENTORY);
+    assertThat(commands)
+        .containsExactly(
+            new SagaCommand(
+                new InventoryCommand.ReserveStock("prod-1", "o-1", 2), new AggregateId("prod-1")),
+            new SagaCommand(
+                new InventoryCommand.ReserveStock("prod-2", "o-1", 1), new AggregateId("prod-2")),
+            new SagaCommand(
+                new InventoryCommand.ReserveStock("prod-3", "o-1", 5), new AggregateId("prod-3")));
+  }
+
+  // ---- One StockReserved per line. The saga counts each product once and moves on to the
+  // confirmation with the StockReserved that completes the set. ----
+
+  @Test
+  void stockReserved_ofTheLastLine_movesToAwaitingConfirmationAndAsksForTheConfirmation() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            List.of("prod-2"),
+            line("prod-1", 2),
+            line("prod-2", 1));
+    var reserved = reservedBySagaOf("prod-1", 2);
+
+    state = saga.evolve(state, reserved);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_CONFIRMATION);
+    assertThat(state.reservedProductIds()).containsExactly("prod-1", "prod-2");
+    assertThat(saga.handle(state, reserved))
+        .containsExactly(
+            new SagaCommand(new OrderCommand.ConfirmOrder("o-1"), new AggregateId("o-1")));
+  }
+
+  @Test
+  void stockReserved_ofSomeLines_staysAwaitingInventoryAndDispatchesNothing() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            List.of(),
+            line("prod-1", 2),
+            line("prod-2", 1));
+    var reserved = reservedBySagaOf("prod-1", 2);
+
+    state = saga.evolve(state, reserved);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_INVENTORY);
+    assertThat(state.reservedProductIds()).containsExactly("prod-1");
+    assertThat(saga.handle(state, reserved)).isEmpty();
+  }
+
+  @Test
+  void stockReserved_twiceForOneProduct_countsOnce() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            List.of(),
+            line("prod-1", 2),
+            line("prod-2", 1));
+    var reserved = reservedBySagaOf("prod-1", 2);
+
+    state = saga.evolve(saga.evolve(state, reserved), reserved);
+
+    assertThat(state.reservedProductIds()).hasSize(1);
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_INVENTORY);
+  }
+
+  @Test
+  void stockReserved_ofAProductTheOrderDoesNotHold_changesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
+
+    assertThat(saga.evolve(state, reservedBySagaOf("prod-9", 2))).isEqualTo(state);
+  }
+
+  private EventEnvelope reservedBySagaOf(String productId, int quantity) {
+    return causedBySagaOf(
+        "o-1",
+        new InventoryEvent.StockReserved(productId, "o-1", quantity, 10),
+        InventoryState.TYPE,
+        productId);
+  }
+
+  private static OrderEvent.OrderLine line(String productId, int quantity) {
+    return new OrderEvent.OrderLine(productId, quantity, new Money(BigDecimal.TEN, "USD"));
+  }
+
+  private static OrderFulfillmentState stateOfOrderOne(
+      OrderFulfillmentStatus status, List<String> reserved, OrderEvent.OrderLine... lines) {
+    return new OrderFulfillmentState(
+        new SagaId("fulfillment-o-1"),
+        "o-1",
+        "c-1",
+        "pay-o-1",
+        new Money(BigDecimal.TEN, "USD"),
+        List.of(lines),
+        reserved,
+        status);
   }
 
   // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
@@ -477,6 +576,7 @@ class OrderFulfillmentSagaTest {
             "c-1",
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
+            List.of(),
             List.of(),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     var failed =
@@ -507,6 +607,7 @@ class OrderFulfillmentSagaTest {
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
             List.of(),
+            List.of(),
             OrderFulfillmentStatus.CANCELLING);
     var cancelled =
         causedBySagaOf(
@@ -520,116 +621,120 @@ class OrderFulfillmentSagaTest {
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.FAILED);
   }
 
-  // ---- Compensation must be step-appropriate, not a blanket cancel ----
+  // ---- A cancellation the saga did not ask for ends the fulfillment: the saga moves to
+  // COMPENSATING, the forward fence refuses its later forward commands, and the compensation
+  // cancels the order once more. ----
+
+  @ParameterizedTest
+  @EnumSource(
+      value = OrderFulfillmentStatus.class,
+      names = {"AWAITING_PAYMENT", "AWAITING_INVENTORY", "AWAITING_CONFIRMATION"})
+  void orderCancelled_whileAwaiting_movesToCompensatingAndDispatchesNothing(
+      OrderFulfillmentStatus status) {
+    var state = stateOfOrderOne(status, List.of(), line("prod-1", 2));
+    var cancelled =
+        envelope(
+            new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of(line("prod-1", 2))),
+            OrderState.TYPE,
+            "o-1",
+            "corr-of-a-request");
+
+    state = saga.evolve(state, cancelled);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.COMPENSATING);
+    assertThat(state.status()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(saga.handle(state, cancelled)).isEmpty();
+  }
+
+  // ---- The payment decides once, while the saga waits for it. ----
 
   @Test
-  void compensate_awaitingPayment_cancelOnly_noRefund() {
-    var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
+  void evolve_aCaptureRecordedAfterTheFailure_leavesTheSagaCancelling() {
+    // The gateway took the money of a payment it reported as failed: the payment records the
+    // capture and refunds it in one append. The saga is cancelling the order and stays so.
+    var state = stateOfOrderOne(OrderFulfillmentStatus.CANCELLING, List.of(), line("prod-1", 2));
+    var captured =
+        causedBySagaOf(
             "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
-    var failure = new RuntimeException("payment initiation failed");
-    var failedCommand =
-        new SagaCommand(
-            new PaymentCommand.InitiatePayment("pay-o-1", "o-1", state.orderTotal()),
-            org.streamrune.core.types.AggregateId.of("pay-o-1"));
+            new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"),
+            PaymentState.TYPE,
+            "pay-o-1");
 
-    var commands = saga.compensate(state, failure, failedCommand);
+    state = saga.evolve(state, captured);
 
-    // Payment was never captured — nothing to refund.
-    assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(OrderCommand.CancelOrder.class);
-    var cancel = (OrderCommand.CancelOrder) commands.get(0).command();
-    assertThat(cancel.orderId()).isEqualTo("o-1");
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
+    assertThat(saga.handle(state, captured)).isEmpty();
   }
 
   @Test
-  void compensate_awaitingInventory_refundAndCancel() {
-    var line = new OrderEvent.OrderLine("prod-1", 2, new Money(BigDecimal.TEN, "USD"));
+  void evolve_aFailureOutsideTheWaitForThePayment_changesNothing() {
     var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
+    var failed =
+        causedBySagaOf(
             "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(line),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"),
+            PaymentState.TYPE,
+            "pay-o-1");
+
+    assertThat(saga.evolve(state, failed)).isEqualTo(state);
+    assertThat(saga.handle(state, failed)).isEmpty();
+  }
+
+  @Test
+  void paymentVoided_isAboutThisSagaAndChangesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_PAYMENT, List.of(), line("prod-1", 2));
+    var own =
+        causedBySagaOf(
+            "o-1",
+            new PaymentEvent.PaymentVoided("pay-o-1", "o-1", "changed my mind"),
+            PaymentState.TYPE,
+            "pay-o-1");
+    var another =
+        causedBySagaOf(
+            "o-1",
+            new PaymentEvent.PaymentVoided("pay-o-9", "o-9", "changed my mind"),
+            PaymentState.TYPE,
+            "pay-o-9");
+
+    assertThat(saga.evolve(state, own)).isEqualTo(state);
+    assertThat(saga.handle(state, own)).isEmpty();
+    assertThat(saga.evolve(state, another)).isEqualTo(state);
+    assertThat(saga.handle(state, another)).isEmpty();
+  }
+
+  // ---- The compensation is the order's cancellation in every status, a pure function of the
+  // state: the cancellation's OrderCancelled starts the undo of the order's stock and payment. ----
+
+  @ParameterizedTest
+  @EnumSource(OrderFulfillmentStatus.class)
+  void compensate_isACancellationWithTheConstantReason_inEveryStatus(
+      OrderFulfillmentStatus status) {
+    var state = stateOfOrderOne(status, List.of("prod-1"), line("prod-1", 2));
+    var reserve =
+        new SagaCommand(
+            new InventoryCommand.ReserveStock("prod-1", "o-1", 2), new AggregateId("prod-1"));
+    var cancel =
+        new SagaCommand(
+            new OrderCommand.CancelOrder("o-1", OrderFulfillmentSaga.COMPENSATION_REASON),
+            new AggregateId("o-1"));
+
+    for (Throwable failure : Arrays.asList(null, new RuntimeException("reservation failed"))) {
+      for (SagaCommand failed : Arrays.asList(null, reserve)) {
+        assertThat(saga.compensate(state, failure, failed)).containsExactly(cancel);
+      }
+    }
+  }
+
+  @Test
+  void compensate_isTheSameListOnEveryCall() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
     var failure = new RuntimeException("reservation failed");
-    var failedCommand =
-        new SagaCommand(
-            new InventoryCommand.ReserveStock("prod-1", "o-1", 2), AggregateId.of("prod-1"));
 
-    var commands = saga.compensate(state, failure, failedCommand);
-
-    // Payment WAS captured, stock was not reserved — refund + cancel (existing behavior, kept).
-    assertThat(commands).hasSize(2);
-    assertThat(commands.get(0).command()).isInstanceOf(PaymentCommand.RefundPayment.class);
-    assertThat(commands.get(1).command()).isInstanceOf(OrderCommand.CancelOrder.class);
-    var refund = (PaymentCommand.RefundPayment) commands.get(0).command();
-    var cancel = (OrderCommand.CancelOrder) commands.get(1).command();
-    assertThat(refund.paymentId()).isEqualTo("pay-o-1");
-    assertThat(cancel.orderId()).isEqualTo("o-1");
-  }
-
-  @Test
-  void compensate_awaitingConfirmation_releasesStockRefundsAndCancels() {
-    var line = new OrderEvent.OrderLine("prod-1", 2, new Money(BigDecimal.TEN, "USD"));
-    var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
-            "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(line),
-            OrderFulfillmentStatus.AWAITING_CONFIRMATION);
-    var failure = new RuntimeException("order confirmation failed");
-    var failedCommand =
-        new SagaCommand(
-            new OrderCommand.ConfirmOrder("o-1"), org.streamrune.core.types.AggregateId.of("o-1"));
-
-    var commands = saga.compensate(state, failure, failedCommand);
-
-    // Payment WAS captured AND stock WAS reserved — release the reservation, refund, cancel.
-    assertThat(commands).hasSize(3);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReleaseStock.class);
-    assertThat(commands.get(1).command()).isInstanceOf(PaymentCommand.RefundPayment.class);
-    assertThat(commands.get(2).command()).isInstanceOf(OrderCommand.CancelOrder.class);
-    var release = (InventoryCommand.ReleaseStock) commands.get(0).command();
-    var refund = (PaymentCommand.RefundPayment) commands.get(1).command();
-    var cancel = (OrderCommand.CancelOrder) commands.get(2).command();
-    assertThat(release.productId()).isEqualTo("prod-1");
-    assertThat(release.orderId()).isEqualTo("o-1");
-    assertThat(refund.paymentId()).isEqualTo("pay-o-1");
-    assertThat(cancel.orderId()).isEqualTo("o-1");
-  }
-
-  @Test
-  void compensate_terminalState_returnsEmpty() {
-    var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
-            "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(),
-            OrderFulfillmentStatus.COMPLETED);
-    var failure = new RuntimeException("unexpected compensation request");
-    var failedCommand =
-        new SagaCommand(
-            new OrderCommand.ConfirmOrder("o-1"), org.streamrune.core.types.AggregateId.of("o-1"));
-
-    var commands = saga.compensate(state, failure, failedCommand);
-
-    // Nothing to compensate in a terminal state — the framework classifies empty as FAILED.
-    assertThat(commands).isEmpty();
+    assertThat(saga.compensate(state, failure, null))
+        .isEqualTo(saga.compensate(state, new RuntimeException("another failure"), null));
   }
 
   // ---- AggregateId.of is the INGRESS factory and refuses control characters
@@ -640,7 +745,8 @@ class OrderFulfillmentSagaTest {
   // would quarantine the PaymentCaptured event as poison with the payment captured and never
   // refunded. With the constructor the ReserveStock reaches the bus, whose id extractor
   // (AggregateId.of) refuses it with an IllegalArgumentException, and the framework compensates the
-  // forward step: refund + cancel. ----
+  // forward step: the order is cancelled, and its cancellation releases the stock and refunds the
+  // payment. ----
 
   @Test
   void awaitingInventory_storedProductIdWithAControlCharacter_stillYieldsReserveStock() {
@@ -654,6 +760,7 @@ class OrderFulfillmentSagaTest {
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     var captured =
         causedBySagaOf(
@@ -681,6 +788,7 @@ class OrderFulfillmentSagaTest {
             "pay-o-1",
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_INVENTORY);
     var captured =
         causedBySagaOf(
@@ -693,30 +801,6 @@ class OrderFulfillmentSagaTest {
 
     assertThat(commands).hasSize(1);
     assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
-  }
-
-  @Test
-  void compensate_storedProductIdWithAControlCharacter_stillBuildsTheUndo() {
-    var raw = "prod\u0085-1";
-    var line = new OrderEvent.OrderLine(raw, 2, new Money(BigDecimal.TEN, "USD"));
-    var state =
-        new OrderFulfillmentState(
-            new SagaId("fulfillment-o-1"),
-            "o-1",
-            "c-1",
-            "pay-o-1",
-            new Money(BigDecimal.TEN, "USD"),
-            List.of(line),
-            OrderFulfillmentStatus.AWAITING_CONFIRMATION);
-    var failedCommand =
-        new SagaCommand(new OrderCommand.ConfirmOrder("o-1"), new AggregateId("o-1"));
-
-    var commands =
-        saga.compensate(state, new RuntimeException("order confirmation failed"), failedCommand);
-
-    assertThat(commands).hasSize(3);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReleaseStock.class);
     assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
   }
 }

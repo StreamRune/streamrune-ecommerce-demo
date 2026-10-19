@@ -211,14 +211,90 @@ class PaymentProcessManagerTest {
   }
 
   @Test
-  void aRejectionOfAPaymentThatIsStillPendingIsNotSwallowed() {
+  void aRejectionPropagates() {
     EventEnvelope initiated = store.initiate(PAYMENT);
-    bus.failNext(
-        PaymentCommand.CapturePayment.class, new DomainException("rejected for another reason"));
+    bus.failNext(PaymentCommand.CapturePayment.class, new DomainException("rejected"));
 
     assertThatThrownBy(() -> manager.onEvents(List.of(initiated)))
+        .as("no decider refuses a capture of this payment: a rejection is a fault")
         .isInstanceOf(DomainException.class);
     assertThat(store.types(STREAM)).containsExactly("PaymentInitiated");
+  }
+
+  // ---- A payment cancelled while the gateway charged it: the capture is recorded, and the payment
+  // refunds it in the same append. One the gateway never charged is left alone. ----
+
+  @Test
+  void aVoidedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.chargedEarlier(PAYMENT);
+    store.append(
+        STREAM, new PaymentEvent.PaymentVoided(PAYMENT, "o-1", "changed my mind"), byARequest());
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted()).containsExactly(new PaymentCommand.CapturePayment(PAYMENT));
+    assertThat(bus.keys()).containsExactly(new IdempotencyKey("payment-capture:" + PAYMENT));
+    assertThat(bus.causes().getFirst().causationId())
+        .as("the capture continues PaymentInitiated")
+        .isEqualTo(CausationId.of(initiated.metadata().eventId().value()));
+    assertThat(gateway.calls()).as("the gateway is not asked again").isZero();
+    assertThat(store.types(STREAM))
+        .containsExactly("PaymentInitiated", "PaymentVoided", "PaymentCaptured", "PaymentRefunded");
+  }
+
+  @Test
+  void aVoidedPaymentTheGatewayNeverCharged_isLeftAlone() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    store.append(
+        STREAM, new PaymentEvent.PaymentVoided(PAYMENT, "o-1", "changed my mind"), byARequest());
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted()).isEmpty();
+    assertThat(gateway.calls()).as("a voided payment is not charged").isZero();
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentVoided");
+  }
+
+  @Test
+  void aFailedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.chargedEarlier(PAYMENT);
+    store.append(
+        STREAM,
+        new PaymentEvent.PaymentFailed(PAYMENT, "o-1", "gateway timeout"),
+        PaymentStreams.causedBySagaOf(PAYMENT));
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted()).containsExactly(new PaymentCommand.CapturePayment(PAYMENT));
+    assertThat(store.types(STREAM))
+        .containsExactly("PaymentInitiated", "PaymentFailed", "PaymentCaptured", "PaymentRefunded");
+  }
+
+  @Test
+  void aRefundIsSentToTheGateway() {
+    gateway.chargedEarlier(PAYMENT);
+    EventEnvelope refunded =
+        new EventEnvelope(
+            GlobalOffset.of(9),
+            STREAM,
+            new Version(3),
+            EventType.fromClass(PaymentEvent.PaymentRefunded.class),
+            new PaymentEvent.PaymentRefunded(
+                PAYMENT, "o-1", new Money(new BigDecimal("10.00"), "USD"), "changed my mind"),
+            byARequest());
+
+    manager.onEvents(List.of(refunded));
+    manager.onEvents(List.of(refunded));
+
+    assertThat(gateway.hasRefunded(PAYMENT)).isTrue();
+    assertThat(bus.attempted()).as("a refund at the gateway sends no command").isEmpty();
+  }
+
+  /** Metadata of an event a request's command left: no saga origin. */
+  private static EventMetadata byARequest() {
+    return initiatedByARequest().metadata();
   }
 
   @Test
@@ -439,7 +515,6 @@ class PaymentProcessManagerTest {
                         switch (cmd) {
                           case PaymentCommand.InitiatePayment c -> c.paymentId();
                           case PaymentCommand.CapturePayment c -> c.paymentId();
-                          case PaymentCommand.RefundPayment c -> c.paymentId();
                           case PaymentCommand.FailPayment c -> c.paymentId();
                           case PaymentCommand.CancelPayment c -> c.paymentId();
                         }),
@@ -567,6 +642,11 @@ class PaymentProcessManagerTest {
 
     int calls() {
       return calls;
+    }
+
+    /** Captures the payment as an earlier call did, counted as neither a call nor a charge. */
+    void chargedEarlier(String paymentId) {
+      super.processPayment(paymentId);
     }
 
     int charges() {
@@ -736,7 +816,6 @@ class PaymentProcessManagerTest {
           switch (payment) {
             case PaymentCommand.InitiatePayment c -> c.paymentId();
             case PaymentCommand.CapturePayment c -> c.paymentId();
-            case PaymentCommand.RefundPayment c -> c.paymentId();
             case PaymentCommand.FailPayment c -> c.paymentId();
             case PaymentCommand.CancelPayment c -> c.paymentId();
           };

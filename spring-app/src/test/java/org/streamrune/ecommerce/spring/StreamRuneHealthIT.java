@@ -72,7 +72,10 @@ class StreamRuneHealthIT extends AbstractIntegrationTest {
               Health health = healthIndicator.health();
               for (String subscription :
                   new String[] {
-                    "subscription.order-fulfillment-saga", "subscription.payment-process-manager"
+                    "subscription.order-fulfillment-saga",
+                    "subscription.payment-process-manager",
+                    "subscription.order-cancellation",
+                    "subscription.order-shipment"
                   }) {
                 assertThat(block(health, subscription))
                     .as(subscription)

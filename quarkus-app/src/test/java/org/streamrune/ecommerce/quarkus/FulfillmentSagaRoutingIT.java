@@ -40,8 +40,9 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * Whose saga an event reaches, against the running Quarkus app. The correlation id of a request is
  * whatever the client sends in {@code X-Correlation-Id}, and nothing routes by it: the reply to a
  * saga's own command reaches that saga through the origin the command bus stores with the event,
- * and a confirmation or a cancellation a request causes reaches the saga of the order the event
- * names. A caller who names another order's saga in that header does not reach it.
+ * and a cancellation a request causes reaches the saga of the order the event names; a confirmation
+ * is written by the saga's own command, and one a request causes reaches no saga. A caller who
+ * names another order's saga in that header does not reach it.
  *
  * <p>Two customers place an order each, and the saga of each order waits for its payment. The first
  * customer then confirms their own order with the second customer's saga id as the correlation id.
@@ -128,22 +129,24 @@ class FulfillmentSagaRoutingIT {
       assertThat(fulfillmentStatus(bobSaga.value()))
           .as("Bob's saga after Alice's OrderConfirmed named it in its correlation id")
           .isEqualTo("AWAITING_PAYMENT");
-      // The event carries no origin, so the runner asked the saga, which named the saga of the
-      // order in the event. That saga did not ask for a confirmation yet: it stays where it is too.
+      // The event carries no origin, so the runner asked the saga, which names no saga for a
+      // confirmation: only the saga's own ConfirmOrder writes the OrderConfirmed it waits for.
       assertThat(fulfillmentStatus(aliceSaga.value())).isEqualTo("AWAITING_PAYMENT");
       assertThat(eventTypes(OrderState.TYPE, bobOrder)).containsExactly("OrderPlaced");
 
       // A saga's row records every event the runner hands it, whatever the saga makes of it:
-      // each one raises the row's version and becomes its last applied offset. Bob's row is
-      // the row that was stored, and the event Alice's row applied last is her OrderConfirmed.
+      // each one raises the row's version and becomes its last applied offset. Bob's row and
+      // Alice's row are the rows that were stored.
       LoadedSaga<OrderFulfillmentState> bobRow = sagaRow(bobSaga);
       assertThat(bobRow.version()).as("the version of Bob's saga row").isEqualTo(1);
       assertThat(bobRow.lastAppliedOffset())
           .as("the offset of the last event applied to Bob's saga row")
           .isNull();
-      assertThat(sagaRow(aliceSaga).lastAppliedOffset())
+      LoadedSaga<OrderFulfillmentState> aliceRow = sagaRow(aliceSaga);
+      assertThat(aliceRow.version()).as("the version of Alice's saga row").isEqualTo(1);
+      assertThat(aliceRow.lastAppliedOffset())
           .as("the offset of the last event applied to Alice's saga row")
-          .isEqualTo(offsetOf(OrderState.TYPE, aliceOrder, "OrderConfirmed"));
+          .isNull();
     } finally {
       sagaStore.delete(aliceSaga, FULFILLMENT);
       sagaStore.delete(bobSaga, FULFILLMENT);
@@ -240,6 +243,7 @@ class FulfillmentSagaRoutingIT {
             "pay-" + order,
             PRICE,
             List.of(new OrderEvent.OrderLine(product, 1, PRICE)),
+            List.of(),
             OrderFulfillmentStatus.AWAITING_PAYMENT);
     sagaStore.create(sagaId, FULFILLMENT, state, SagaStatus.STARTED);
     return sagaId;
@@ -273,15 +277,6 @@ class FulfillmentSagaRoutingIT {
   /** The stored row of one fulfillment saga. */
   private LoadedSaga<OrderFulfillmentState> sagaRow(SagaId sagaId) {
     return sagaStore.load(sagaId, FULFILLMENT, OrderFulfillmentState.class).orElseThrow();
-  }
-
-  private long offsetOf(AggregateType type, String id, String eventType) {
-    return events(type, id).stream()
-        .filter(e -> e.eventType().name().equals(eventType))
-        .findFirst()
-        .orElseThrow()
-        .globalOffset()
-        .value();
   }
 
   private List<String> eventTypes(AggregateType type, String id) {

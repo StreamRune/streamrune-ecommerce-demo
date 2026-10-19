@@ -285,6 +285,7 @@ class SagaRecoveryAdminIT {
         "pay-" + orderId,
         new Money(new BigDecimal("19.99"), "USD"),
         List.of(),
+        List.of(),
         status);
   }
 

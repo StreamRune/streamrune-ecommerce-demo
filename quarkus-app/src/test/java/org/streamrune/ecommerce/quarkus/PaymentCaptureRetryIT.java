@@ -27,6 +27,7 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
@@ -118,6 +119,77 @@ class PaymentCaptureRetryIT {
         .isEqualTo(initiated.metadata().correlationId())
         .isEqualTo(CorrelationId.of("streamrune:saga:" + sagaId.value()));
     assertThat(captured.userId()).as("no user issued the capture").isNull();
+  }
+
+  /**
+   * The customer cancels while the capture cannot be recorded: the cancellation voids the pending
+   * payment, though the gateway has taken the money. The redelivered {@code PaymentInitiated} finds
+   * the void and the gateway's capture, and records the capture, which the payment refunds in the
+   * same append; the refund reaches the gateway.
+   */
+  @Test
+  void aCaptureRedeliveredAfterTheOrderWasCancelled_isRecordedAndRefunded() throws Exception {
+    String orderId = "q-pm-cancel-" + System.nanoTime();
+    String customerId = "q-pm-cust-" + System.nanoTime();
+    String productId = "q-pm-prod-" + System.nanoTime();
+    String paymentId = "pay-" + orderId;
+    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
+
+    try (var failures = new AppendFailureInjection(dataSource)) {
+      failures.failAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
+      placeOrder(orderId, customerId, productId);
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> {
+                assertThat(failures.refusals()).isPositive();
+                assertThat(paymentGateway.hasCaptured(paymentId)).isTrue();
+              });
+
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .pollInterval(Duration.ofMillis(100))
+          .untilAsserted(() -> assertThat(cancel(orderId, customerId)).isEqualTo(200));
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () ->
+                  assertThat(eventTypes(PaymentState.TYPE, paymentId))
+                      .containsExactly("PaymentInitiated", "PaymentVoided"));
+      failures.allowAppend(PaymentState.TYPE, paymentId, "PaymentCaptured");
+    }
+
+    await()
+        .atMost(Duration.ofSeconds(90))
+        .untilAsserted(
+            () -> {
+              assertThat(eventTypes(PaymentState.TYPE, paymentId))
+                  .containsExactly(
+                      "PaymentInitiated", "PaymentVoided", "PaymentCaptured", "PaymentRefunded");
+              assertThat(paymentGateway.hasRefunded(paymentId))
+                  .as("the refund reached the gateway")
+                  .isTrue();
+            });
+    assertThat(eventTypes(OrderState.TYPE, orderId)).contains("OrderCancelled");
+    assertThat(eventTypes(OrderState.TYPE, orderId)).doesNotContain("OrderConfirmed");
+    assertThat(eventTypes(InventoryState.TYPE, productId))
+        .as("the order reserved no stock")
+        .doesNotContain("StockReserved");
+  }
+
+  private int cancel(String orderId, String customerId) {
+    return given()
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", customerId)
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"reason": "changed my mind"}""")
+        .when()
+        .post("/api/orders/" + orderId + "/cancel")
+        .then()
+        .extract()
+        .statusCode();
   }
 
   private List<DeadLetterQueue.DeadLetterEntry> captureDeadLetters(String paymentId) {
