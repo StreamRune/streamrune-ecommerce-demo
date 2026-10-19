@@ -387,6 +387,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
             "paymentId",
             "orderTotal",
             "lines",
+            "reservedProductIds",
             "fulfillmentStatus");
     assertThat(state.get("orderId").asText()).isEqualTo(order);
     assertThat(state.get("customerId").asText()).isEqualTo(alice);

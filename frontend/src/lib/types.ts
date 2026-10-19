@@ -89,6 +89,8 @@ export interface OrderFulfillmentState {
   paymentId: string;
   orderTotal: Money;
   lines: OrderLineView[];
+  /** The products whose stock the saga has reserved so far, once each, in the order of the lines. */
+  reservedProductIds: string[];
   fulfillmentStatus: OrderFulfillmentStatus;
 }
 
