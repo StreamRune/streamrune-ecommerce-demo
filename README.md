@@ -112,7 +112,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 - **Operations are for an `ADMIN`**: the audit log, the event history, the payment-failure switch and everything under `/api/admin` except `/api/admin/health`, reads and writes alike.
 - **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price or stock, discontinuing it and receiving a shipment into the inventory are for an `ADMIN`.
 - **A request is read before the caller is decided.** A request without a body, with malformed JSON or without a required field is `400` for every caller, in all three apps, and so is a query parameter that cannot be read: a `limit`, `offset` or `eventOffset` that is not a whole number, or a required `sagaId` or `eventOffset` that is missing. A well-formed request from a caller the rule refuses is `403`.
-- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a confirm, ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not delivered.
+- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a confirm, ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not shipped or delivered.
 
 ### Products
 
@@ -132,7 +132,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 |--------|------|-------------|-----|
 | `POST` | `/api/orders` | Place order | `ADMIN`, or the customer the order names in `customerId` |
 | `POST` | `/api/orders/{id}/confirm` | Confirm order (the fulfillment saga does this itself) | `ADMIN` or the order's customer |
-| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not delivered; a confirmed order becomes `CANCELLED` and keeps its captured payment and its reserved stock (the demo has no refund flow after the saga completed) | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); a confirmed order becomes `CANCELLED` and keeps its captured payment and its reserved stock (the demo has no refund flow after the saga completed) | `ADMIN` or the order's customer |
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
 | `GET` | `/api/orders/{id}` | Get order | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |

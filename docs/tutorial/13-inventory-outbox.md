@@ -34,10 +34,10 @@ StreamRune provides `OutboxStore`, `PostgresOutboxStore`, `OutboxPoller`, `Outbo
 Inventory tracks stock for a single product across three pools:
 
 - **available** — units that can be sold right now.
-- **reserved** — units held for a placed order but not yet confirmed (payment pending).
+- **reserved** — units held for an order between its payment and its shipment, per order: each order has its own reservation at the product.
 - **committed** — units confirmed for fulfillment; they leave the warehouse when the order ships.
 
-The lifecycle of a unit flows: available → reserved (on `ReserveStock`) → committed (on `ConfirmReservation`) → gone. Cancellations reverse the first step: reserved → available again (on `ReleaseStock`). New stock arrives via `ReceiveShipment`.
+The lifecycle of a unit flows: available → reserved (on `ReserveStock`) → committed (on `ConfirmReservation`) → gone. Cancellations reverse the first step: reserved → available again (on `ReleaseStock`). New stock arrives via `ReceiveShipment`. The lifecycle is per order: a release or a confirmation acts on the reservation of the order it names, at the product it names, and stores nothing when that order holds none. So a release that runs twice releases once, a release after the shipment committed the stock changes nothing, and two orders at one product are released and confirmed apart.
 
 ### Commands
 
@@ -51,7 +51,7 @@ import org.streamrune.core.Command;
 public sealed interface InventoryCommand extends Command {
   record ReserveStock(String productId, String orderId, int quantity) implements InventoryCommand {}
 
-  record ReleaseStock(String productId, String orderId, int quantity) implements InventoryCommand {}
+  record ReleaseStock(String productId, String orderId) implements InventoryCommand {}
 
   record ConfirmReservation(String productId, String orderId) implements InventoryCommand {}
 
@@ -83,7 +83,7 @@ public sealed interface InventoryEvent extends DomainEvent {
 }
 ```
 
-Each event records the `availableAfter` pool size at the time of the transition. This makes the event self-describing: a consumer can reconstruct the current availability without replaying the entire stream.
+`ReleaseStock` and `ConfirmReservation` name the order and no quantity: the quantity is the one the order reserved, which the aggregate knows. Each event records the `availableAfter` pool size at the time of the transition. This makes the event self-describing: a consumer can reconstruct the current availability without replaying the entire stream.
 
 ### State
 
@@ -92,10 +92,15 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/Inventory
 ```java
 package org.streamrune.ecommerce.domain.inventory;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.Map;
+import java.util.OptionalInt;
 import org.streamrune.core.AggregateState;
 import org.streamrune.core.types.AggregateType;
 
-public record InventoryState(String productId, int available, int reserved, int committed)
+public record InventoryState(
+    String productId, int available, int reserved, int committed, Map<String, Integer> reservations)
     implements AggregateState {
   /**
    * The aggregate type the inventory decider is registered under: streams are
@@ -103,13 +108,40 @@ public record InventoryState(String productId, int available, int reserved, int 
    */
   public static final AggregateType TYPE = AggregateType.of("inventory");
 
+  /**
+   * {@code reservations} holds the open reservation of each order at this product, by order id: an
+   * entry is added by {@code StockReserved} and removed by {@code StockReleased} or {@code
+   * ReservationConfirmed}. The state is snapshotted with the map.
+   */
+  @JsonCreator
+  public InventoryState(
+      @JsonProperty("productId") String productId,
+      @JsonProperty("available") int available,
+      @JsonProperty("reserved") int reserved,
+      @JsonProperty("committed") int committed,
+      @JsonProperty("reservations") Map<String, Integer> reservations) {
+    this.productId = productId;
+    this.available = available;
+    this.reserved = reserved;
+    this.committed = committed;
+    this.reservations = reservations == null ? Map.of() : Map.copyOf(reservations);
+  }
+
   public InventoryState() {
-    this(null, 0, 0, 0);
+    this(null, 0, 0, 0, Map.of());
+  }
+
+  /** The quantity the order holds reserved at this product, or none. */
+  public OptionalInt reservationOf(String orderId) {
+    Integer quantity = reservations.get(orderId);
+    return quantity == null ? OptionalInt.empty() : OptionalInt.of(quantity);
   }
 }
 ```
 
 The zero-argument constructor satisfies `AggregateState`; StreamRune calls it when no prior events exist for the stream.
+
+`reservations` holds the open reservation of each order at this product, by order id. `StockReserved` adds an entry; `StockReleased` and `ReservationConfirmed` remove it, so the map holds only the orders in flight for the product. The bus snapshots the state with the map (chapter 8): the canonical constructor is the one Jackson uses (`@JsonCreator`, one `@JsonProperty` per component), and it reads a state written without `reservations` as an empty map. A snapshot that lost the map would make every release and confirmation after it store nothing, with no error, and strand the stock. `reservationOf(orderId)` is the quantity an order holds, or none.
 
 ---
 
@@ -124,7 +156,10 @@ package org.streamrune.ecommerce.commands.inventory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.OptionalInt;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.inventory.*;
 import org.streamrune.test.DeciderFixture;
@@ -135,7 +170,7 @@ class InventoryDeciderTest {
       DeciderFixture.of(new InventoryDecider());
 
   private InventoryEvent.ShipmentReceived received() {
-    return new InventoryEvent.ShipmentReceived("p-1", 100, 100);
+    return new InventoryEvent.ShipmentReceived("p-1", 10, 10);
   }
 
   @Test
@@ -143,7 +178,7 @@ class InventoryDeciderTest {
     fixture
         .given()
         .when(new InventoryCommand.ReceiveShipment("p-1", 100))
-        .expectEvents(received())
+        .expectEvents(new InventoryEvent.ShipmentReceived("p-1", 100, 100))
         .expectState(
             s -> {
               assertThat(s.available()).isEqualTo(100);
@@ -152,16 +187,34 @@ class InventoryDeciderTest {
   }
 
   @Test
-  void reserveStock() {
+  void reserveStock_recordsTheOrdersReservation() {
     fixture
         .given(received())
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 10))
-        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 10, 90))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
         .expectState(
             s -> {
-              assertThat(s.available()).isEqualTo(90);
-              assertThat(s.reserved()).isEqualTo(10);
+              assertThat(s.available()).isEqualTo(7);
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
             });
+  }
+
+  @Test
+  void reserveStock_twiceForOneOrder_storesNothingTheSecondTime() {
+    fixture
+        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectNoEvents();
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1})
+  void reserveStock_aNonPositiveQuantity_isRefused(int quantity) {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", quantity))
+        .expectException(DomainException.class);
   }
 
   @Test
@@ -173,28 +226,87 @@ class InventoryDeciderTest {
   }
 
   @Test
-  void releaseStock() {
+  void releaseStock_releasesWhatTheOrderHolds() {
     fixture
-        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 10, 90))
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-1", 10))
-        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-1", 10, 100))
+        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
         .expectState(
             s -> {
-              assertThat(s.available()).isEqualTo(100);
+              assertThat(s.available()).isEqualTo(10);
               assertThat(s.reserved()).isEqualTo(0);
+              assertThat(s.reservations()).isEmpty();
             });
   }
 
   @Test
-  void confirmReservation() {
+  void releaseStock_withoutAReservation_storesNothing() {
     fixture
-        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 10, 90))
+        .given(received())
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void releaseStock_afterTheReservationWasConfirmed_storesNothing() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void releaseStock_twice_releasesOnce() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void confirmReservation_commitsTheOrdersQuantity() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
         .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
-        .expectEvents(new InventoryEvent.ReservationConfirmed("p-1", "o-1", 10))
+        .expectEvents(new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
         .expectState(
             s -> {
-              assertThat(s.reserved()).isEqualTo(0);
-              assertThat(s.committed()).isEqualTo(10);
+              assertThat(s.reserved()).isEqualTo(5);
+              assertThat(s.committed()).isEqualTo(3);
+            });
+  }
+
+  @Test
+  void confirmReservation_withoutAReservation_storesNothing() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void twoOrdersAtOneProduct_areReleasedAndConfirmedApart() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-2"))
+        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-2", 5, 17))
+        .expectState(
+            s -> {
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+              assertThat(s.reservationOf("o-2")).isEqualTo(OptionalInt.empty());
             });
   }
 }
@@ -209,7 +321,10 @@ Create `commands/src/main/java/org/streamrune/ecommerce/commands/inventory/Inven
 ```java
 package org.streamrune.ecommerce.commands.inventory;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalInt;
 import org.streamrune.core.Decider;
 import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.inventory.*;
@@ -221,10 +336,17 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
     return new InventoryState();
   }
 
+  /**
+   * Stock is held per order: a second reservation of one order at one product stores nothing, and a
+   * release or a confirmation acts on this order's reservation alone — nothing when it holds none.
+   */
   @Override
   public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
     return switch (cmd) {
       case InventoryCommand.ReserveStock c -> {
+        if (c.quantity() <= 0)
+          throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
+        if (state.reservationOf(c.orderId()).isPresent()) yield List.of();
         if (state.available() < c.quantity())
           throw new DomainException(
               "Insufficient stock for "
@@ -233,29 +355,30 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
                   + state.available()
                   + ", requested="
                   + c.quantity());
-        int newAvailable = state.available() - c.quantity();
         yield List.of(
             new InventoryEvent.StockReserved(
-                c.productId(), c.orderId(), c.quantity(), newAvailable));
+                c.productId(), c.orderId(), c.quantity(), state.available() - c.quantity()));
       }
 
       case InventoryCommand.ReleaseStock c -> {
-        int newAvailable = state.available() + c.quantity();
+        OptionalInt held = state.reservationOf(c.orderId());
+        if (held.isEmpty()) yield List.of();
         yield List.of(
             new InventoryEvent.StockReleased(
-                c.productId(), c.orderId(), c.quantity(), newAvailable));
+                c.productId(), c.orderId(), held.getAsInt(), state.available() + held.getAsInt()));
       }
 
-      case InventoryCommand.ConfirmReservation c ->
-          List.of(
-              new InventoryEvent.ReservationConfirmed(
-                  c.productId(), c.orderId(), state.reserved()));
-
-      case InventoryCommand.ReceiveShipment c -> {
-        int newAvailable = state.available() + c.quantity();
+      case InventoryCommand.ConfirmReservation c -> {
+        OptionalInt held = state.reservationOf(c.orderId());
+        if (held.isEmpty()) yield List.of();
         yield List.of(
-            new InventoryEvent.ShipmentReceived(c.productId(), c.quantity(), newAvailable));
+            new InventoryEvent.ReservationConfirmed(c.productId(), c.orderId(), held.getAsInt()));
       }
+
+      case InventoryCommand.ReceiveShipment c ->
+          List.of(
+              new InventoryEvent.ShipmentReceived(
+                  c.productId(), c.quantity(), state.available() + c.quantity()));
     };
   }
 
@@ -267,30 +390,50 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
               e.productId(),
               e.availableAfter(),
               state.reserved() + e.quantity(),
-              state.committed());
+              state.committed(),
+              with(state.reservations(), e.orderId(), e.quantity()));
       case InventoryEvent.StockReleased e ->
           new InventoryState(
               e.productId(),
               e.availableAfter(),
               state.reserved() - e.quantity(),
-              state.committed());
+              state.committed(),
+              without(state.reservations(), e.orderId()));
       case InventoryEvent.ReservationConfirmed e ->
           new InventoryState(
               state.productId(),
               state.available(),
               state.reserved() - e.quantity(),
-              state.committed() + e.quantity());
+              state.committed() + e.quantity(),
+              without(state.reservations(), e.orderId()));
       case InventoryEvent.ShipmentReceived e ->
           new InventoryState(
-              e.productId(), e.availableAfter(), state.reserved(), state.committed());
+              e.productId(),
+              e.availableAfter(),
+              state.reserved(),
+              state.committed(),
+              state.reservations());
     };
+  }
+
+  private static Map<String, Integer> with(
+      Map<String, Integer> reservations, String orderId, int quantity) {
+    var next = new HashMap<>(reservations);
+    next.put(orderId, quantity);
+    return next;
+  }
+
+  private static Map<String, Integer> without(Map<String, Integer> reservations, String orderId) {
+    var next = new HashMap<>(reservations);
+    next.remove(orderId);
+    return next;
   }
 }
 ```
 
-A few things worth noting. `ReserveStock` is the only command that can fail: it checks `state.available()` before emitting an event. All other commands are unconditional — there is no business rule that prevents releasing more than was reserved, because the event stream itself is the source of truth and such a scenario indicates a bug upstream. `ConfirmReservation` reads `state.reserved()` rather than the command's quantity because by the time the command is processed the reservation quantity is already recorded in state; this avoids a stale-quantity bug if the command is replayed.
+A few things worth noting. `ReserveStock` is the only command that can fail: it refuses a quantity that is not positive and checks `state.available()` before emitting an event. A second reservation of one order at one product stores nothing, so a redelivered `ReserveStock` reserves once. `ReleaseStock` and `ConfirmReservation` act on `state.reservationOf(orderId)`, the quantity this order reserved at this product: they never take a quantity from the command and never read the pool-wide `reserved` counter, so one order cannot release or commit the units another order holds. Both store nothing when the order holds no reservation, which is what makes them safe to send whether or not the reservation step ran, and safe to send twice.
 
-Run the tests. All five should pass.
+Run the tests. They should all pass.
 
 ### Step 3: Register Inventory Events in the Event Type Registry
 
@@ -336,7 +479,7 @@ In the same file, add the `InventoryCommand` block to the `VirtualThreadCommandB
 
 ### Step 4b: Add `InventoryProjection` and register it in `MultiProjectionRunner`
 
-Create `projections/src/main/java/org/streamrune/ecommerce/projections/InventoryProjection.java` (source follows the same pattern as `ProductProjection` and `OrderProjection` — copy the full implementation from the real demo at that path). Like the other projections, it extends `org.streamrune.core.projection.BaseProjection` (introduced in the projections chapter) and persists the `org.streamrune.ecommerce.queries.dto.InventoryView` DTO in the `queries` module, so make sure both already exist before you compile.
+Create `projections/src/main/java/org/streamrune/ecommerce/projections/InventoryProjection.java` (source follows the same pattern as `ProductProjection` and `OrderProjection` — copy the full implementation from the real demo at that path). Like the other projections, it extends `org.streamrune.core.projection.BaseProjection` (introduced in the projections chapter) and persists the `org.streamrune.ecommerce.queries.dto.InventoryView` DTO in the `queries` module, so make sure both already exist before you compile. The projection applies each event's own quantity: `StockReserved` and `StockReleased` carry the order's quantity, and `ReservationConfirmed` carries the quantity that order reserved, not the product's whole reserved pool, so the counters stay right while several orders hold stock at one product.
 
 Register the bean in `StreamRuneConfig`:
 
@@ -1010,7 +1153,7 @@ Nothing else releases a blocked stream: `OutboxStore.delete` refuses a `FAILED` 
 
 **`OutboxStore`** is the core interface. `PostgresOutboxStore` implements it using the `outbox_events` table. The auto-configured `postgresEventStoreFactory` discovers the `PostgresOutboxStore` and `OutboxEventMapper` beans, and arranges for every event append to call `mapper.toOutbox(envelope)`. If the mapper returns entries, they are inserted in the same JDBC transaction as the event append — so they commit (or roll back) together.
 
-**`OutboxEventMapper`** is the PII boundary. `EcommerceIntegrationEventMapper.toOutbox(EventEnvelope)` returns an empty list for excluded event types (`CustomerEvent.*`, `InventoryEvent.*`, `OrderPlaced`, `PaymentInitiated`) and a list with one compact integration DTO for allowed types (`OrderConfirmed`, `OrderShipped`, `OrderDelivered`, `OrderCancelled`, `PaymentCaptured`, `PaymentRefunded`, `PaymentFailed`, and the four `ProductEvent` variants). The DTO records carry only non-PII business fields — there is no `customerId`, no name, no email, no address.
+**`OutboxEventMapper`** is the PII boundary. `EcommerceIntegrationEventMapper.toOutbox(EventEnvelope)` returns an empty list for excluded event types (`CustomerEvent.*`, `InventoryEvent.*`, `OrderPlaced`, `PaymentInitiated`) and a list with one compact integration DTO for allowed types (`OrderConfirmed`, `OrderShipped`, `OrderDelivered`, `OrderCancelled`, `PaymentCaptured`, `PaymentRefunded`, `PaymentVoided`, `PaymentFailed`, and the four `ProductEvent` variants). The DTO records carry only non-PII business fields — there is no `customerId`, no name, no email, no address.
 
 **`OutboxEntry`** is the record the poller reads. It carries an `id` (`OutboxEntryId` — a record wrapping a `String` value, used as the idempotency key), `payloadType` (e.g. `"OrderConfirmed"`), a JSON `payload` containing the integration DTO, a `streamId` ordering key — the event's own stream (mandatory on the demo's strict channel), and an `OutboxStatus`.
 

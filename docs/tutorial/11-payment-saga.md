@@ -54,7 +54,7 @@ This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, and the
 
 ## Domain Model: Payment Types
 
-The payment domain is clean and focused. A payment moves through four statuses: `PENDING` after initiation, `CAPTURED` after the gateway confirms it, `REFUNDED` if a saga compensation refunds it, and `FAILED` if the gateway rejects it.
+The payment domain is clean and focused. A payment moves through five statuses: `PENDING` after initiation, `CAPTURED` after the gateway confirms it, `REFUNDED` when the money goes back to the customer, `VOIDED` when a pending payment is cancelled before the gateway took anything, and `FAILED` if the gateway rejects it. Every payment has one id, `PaymentIds.forOrder(orderId)`, which is `"pay-" + orderId`; the saga and every other piece of code that addresses an order's payment build the id with this class, so the convention lives in one place.
 
 ### PaymentStatus
 
@@ -67,6 +67,7 @@ public enum PaymentStatus {
   PENDING,
   CAPTURED,
   REFUNDED,
+  VOIDED,
   FAILED
 }
 ```
@@ -90,10 +91,13 @@ public sealed interface PaymentCommand extends Command {
   record RefundPayment(String paymentId, String reason) implements PaymentCommand {}
 
   record FailPayment(String paymentId, String reason) implements PaymentCommand {}
+
+  /** Voids a pending payment, refunds a captured one in full, and does nothing otherwise. */
+  record CancelPayment(String paymentId, String reason) implements PaymentCommand {}
 }
 ```
 
-`InitiatePayment` carries the full amount so the `PaymentDecider` can record it in state without needing to look up the order. `RefundPayment` and `FailPayment` both carry a `reason` so the event stream explains what happened — important for audit and projection consumers.
+`InitiatePayment` carries the full amount so the `PaymentDecider` can record it in state without needing to look up the order. `RefundPayment`, `FailPayment` and `CancelPayment` carry a `reason` so the event stream explains what happened — important for audit and projection consumers. `RefundPayment` is used by the saga's compensation. `CancelPayment` is the undo that does not need to know what happened to the payment: it voids a pending payment, refunds a captured one in full, and does nothing otherwise, so a caller that cancels an order can send it whether or not the payment ever got that far.
 
 ### PaymentEvent
 
@@ -110,13 +114,16 @@ public sealed interface PaymentEvent extends DomainEvent {
 
   record PaymentCaptured(String paymentId, String orderId) implements PaymentEvent {}
 
-  record PaymentRefunded(String paymentId, String reason) implements PaymentEvent {}
+  record PaymentRefunded(String paymentId, String orderId, Money amount, String reason)
+      implements PaymentEvent {}
 
-  record PaymentFailed(String paymentId, String reason) implements PaymentEvent {}
+  record PaymentFailed(String paymentId, String orderId, String reason) implements PaymentEvent {}
+
+  record PaymentVoided(String paymentId, String orderId, String reason) implements PaymentEvent {}
 }
 ```
 
-`PaymentCaptured` carries `orderId` so consumers can relate the event to its order without querying state; the saga compares it with the order id in its own state before it reacts (Step 3). `PaymentFailed` and `PaymentRefunded` carry the payment id only; the saga gives a fulfillment's payment the id `pay-<orderId>` and compares that.
+Every payment event carries `orderId`, so consumers can relate the event to its order without querying state; the saga compares the payment id with the one it derives from its order (`PaymentIds.forOrder`) before it reacts (Step 3). `PaymentRefunded` carries the refunded `amount` (always the full captured amount), and `PaymentVoided` and `PaymentFailed` carry the `reason`.
 
 ### PaymentState
 
@@ -139,10 +146,14 @@ public record PaymentState(String paymentId, String orderId, Money amount, Payme
   public PaymentState() {
     this(null, null, null, PaymentStatus.PENDING);
   }
+
+  public PaymentState withStatus(PaymentStatus newStatus) {
+    return new PaymentState(paymentId, orderId, amount, newStatus);
+  }
 }
 ```
 
-The no-arg constructor initialises status to `PENDING`. StreamRune calls this constructor to create a blank state before replaying the event stream for an aggregate that has never been seen before. `TYPE` is the aggregate type the payment decider registers under (Step 6); a payment's stream is `payment:<paymentId>`.
+`withStatus` copies the state with another status, the way `evolve` moves a payment on. The no-arg constructor initialises status to `PENDING`, with no payment id: a payment id of `null` is how `decide` tells an id nobody initiated from a pending payment. StreamRune calls this constructor to create a blank state before replaying the event stream for an aggregate that has never been seen before. `TYPE` is the aggregate type the payment decider registers under (Step 6); a payment's stream is `payment:<paymentId>`.
 
 ---
 
@@ -159,6 +170,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.EnumSource.Mode;
 import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.payment.*;
@@ -171,12 +185,39 @@ class PaymentDeciderTest {
 
   private static final Money HUNDRED = new Money(BigDecimal.valueOf(100), "USD");
 
-  private PaymentEvent.PaymentInitiated initiated() {
+  private static PaymentEvent.PaymentInitiated initiated() {
     return new PaymentEvent.PaymentInitiated("pay-1", "o-1", HUNDRED);
   }
 
+  private static PaymentEvent.PaymentCaptured captured() {
+    return new PaymentEvent.PaymentCaptured("pay-1", "o-1");
+  }
+
+  private static PaymentEvent.PaymentRefunded refunded() {
+    return new PaymentEvent.PaymentRefunded("pay-1", "o-1", HUNDRED, "earlier");
+  }
+
+  /** The events of a payment that stands in {@code status}. */
+  private static PaymentEvent[] historyOf(PaymentStatus status) {
+    return switch (status) {
+      case PENDING -> new PaymentEvent[] {initiated()};
+      case CAPTURED -> new PaymentEvent[] {initiated(), captured()};
+      case REFUNDED -> new PaymentEvent[] {initiated(), captured(), refunded()};
+      case VOIDED ->
+          new PaymentEvent[] {
+            initiated(), new PaymentEvent.PaymentVoided("pay-1", "o-1", "earlier")
+          };
+      case FAILED ->
+          new PaymentEvent[] {
+            initiated(), new PaymentEvent.PaymentFailed("pay-1", "o-1", "earlier")
+          };
+    };
+  }
+
+  // InitiatePayment
+
   @Test
-  void initiatePayment() {
+  void initiatePayment_onANewStream_initiatesIt() {
     fixture
         .given()
         .when(new PaymentCommand.InitiatePayment("pay-1", "o-1", HUNDRED))
@@ -184,39 +225,138 @@ class PaymentDeciderTest {
         .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.PENDING));
   }
 
-  @Test
-  void capturePayment() {
+  @ParameterizedTest
+  @EnumSource(PaymentStatus.class)
+  void initiatePayment_onAnExistingPayment_isRefused(PaymentStatus status) {
     fixture
-        .given(initiated())
-        .when(new PaymentCommand.CapturePayment("pay-1"))
-        .expectEvents(new PaymentEvent.PaymentCaptured("pay-1", "o-1"))
-        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.CAPTURED));
+        .given(historyOf(status))
+        .when(new PaymentCommand.InitiatePayment("pay-1", "o-1", HUNDRED))
+        .expectException(DomainException.class);
   }
 
+  // CapturePayment
+
   @Test
-  void capturePayment_notPending_throws() {
+  void capturePayment_withoutAStream_isRefused() {
     fixture
-        .given(initiated(), new PaymentEvent.PaymentCaptured("pay-1", "o-1"))
+        .given()
         .when(new PaymentCommand.CapturePayment("pay-1"))
         .expectException(DomainException.class);
   }
 
   @Test
-  void refundPayment_fromCaptured() {
+  void capturePayment_pending_capturesIt() {
     fixture
-        .given(initiated(), new PaymentEvent.PaymentCaptured("pay-1", "o-1"))
-        .when(new PaymentCommand.RefundPayment("pay-1", "Saga compensation"))
-        .expectEvents(new PaymentEvent.PaymentRefunded("pay-1", "Saga compensation"))
+        .given(historyOf(PaymentStatus.PENDING))
+        .when(new PaymentCommand.CapturePayment("pay-1"))
+        .expectEvents(captured())
+        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.CAPTURED));
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = PaymentStatus.class,
+      names = {"CAPTURED", "REFUNDED"})
+  void capturePayment_capturedOrRefunded_storesNothing(PaymentStatus status) {
+    fixture
+        .given(historyOf(status))
+        .when(new PaymentCommand.CapturePayment("pay-1"))
+        .expectNoEvents();
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = PaymentStatus.class,
+      names = {"VOIDED", "FAILED"})
+  void capturePayment_voidedOrFailed_recordsTheCaptureAndRefundsItInOneAppend(
+      PaymentStatus status) {
+    fixture
+        .given(historyOf(status))
+        .when(new PaymentCommand.CapturePayment("pay-1"))
+        .expectEvents(
+            captured(),
+            new PaymentEvent.PaymentRefunded(
+                "pay-1", "o-1", HUNDRED, PaymentDecider.LATE_CAPTURE_REASON))
         .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.REFUNDED));
   }
 
+  // FailPayment
+
   @Test
-  void failPayment() {
+  void failPayment_withoutAStream_isRefused() {
     fixture
-        .given(initiated())
+        .given()
         .when(new PaymentCommand.FailPayment("pay-1", "Gateway timeout"))
-        .expectEvents(new PaymentEvent.PaymentFailed("pay-1", "Gateway timeout"))
+        .expectException(DomainException.class);
+  }
+
+  @Test
+  void failPayment_pending_failsIt() {
+    fixture
+        .given(historyOf(PaymentStatus.PENDING))
+        .when(new PaymentCommand.FailPayment("pay-1", "Gateway timeout"))
+        .expectEvents(new PaymentEvent.PaymentFailed("pay-1", "o-1", "Gateway timeout"))
         .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.FAILED));
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = PaymentStatus.class,
+      mode = Mode.EXCLUDE,
+      names = {"PENDING"})
+  void failPayment_notPending_storesNothing(PaymentStatus status) {
+    fixture
+        .given(historyOf(status))
+        .when(new PaymentCommand.FailPayment("pay-1", "Gateway timeout"))
+        .expectNoEvents();
+  }
+
+  // CancelPayment
+
+  @Test
+  void cancelPayment_withoutAStream_storesNothing() {
+    fixture.given().when(new PaymentCommand.CancelPayment("pay-1", "why")).expectNoEvents();
+  }
+
+  @Test
+  void cancelPayment_pending_voidsIt() {
+    fixture
+        .given(historyOf(PaymentStatus.PENDING))
+        .when(new PaymentCommand.CancelPayment("pay-1", "why"))
+        .expectEvents(new PaymentEvent.PaymentVoided("pay-1", "o-1", "why"))
+        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.VOIDED));
+  }
+
+  @Test
+  void cancelPayment_captured_refundsTheFullAmount() {
+    fixture
+        .given(historyOf(PaymentStatus.CAPTURED))
+        .when(new PaymentCommand.CancelPayment("pay-1", "why"))
+        .expectEvents(new PaymentEvent.PaymentRefunded("pay-1", "o-1", HUNDRED, "why"))
+        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.REFUNDED));
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = PaymentStatus.class,
+      names = {"REFUNDED", "VOIDED", "FAILED"})
+  void cancelPayment_settledOtherwise_storesNothing(PaymentStatus status) {
+    fixture
+        .given(historyOf(status))
+        .when(new PaymentCommand.CancelPayment("pay-1", "why"))
+        .expectNoEvents();
+  }
+
+  // RefundPayment
+
+  @Test
+  void refundPayment_fromCaptured() {
+    fixture
+        .given(historyOf(PaymentStatus.CAPTURED))
+        .when(new PaymentCommand.RefundPayment("pay-1", "Saga compensation"))
+        .expectEvents(
+            new PaymentEvent.PaymentRefunded("pay-1", "o-1", HUNDRED, "Saga compensation"))
+        .expectState(s -> assertThat(s.status()).isEqualTo(PaymentStatus.REFUNDED));
   }
 }
 ```
@@ -233,35 +373,78 @@ import org.streamrune.ecommerce.domain.payment.*;
 
 public class PaymentDecider implements Decider<PaymentCommand, PaymentState, PaymentEvent> {
 
+  /** The reason of the refund recorded with a capture of a payment that was voided or failed. */
+  public static final String LATE_CAPTURE_REASON = "captured after the payment was cancelled";
+
   @Override
   public PaymentState initialState() {
     return new PaymentState();
   }
 
+  /**
+   * {@code CapturePayment} is sent only after the gateway took the money, so it is never refused
+   * for a status the money cannot undo: on a voided or failed payment the capture is recorded and
+   * refunded in one append. {@code FailPayment} and {@code CancelPayment} store nothing for a
+   * payment they do not apply to, so a redelivered or late command settles nothing twice.
+   */
   @Override
   public List<PaymentEvent> decide(PaymentCommand cmd, PaymentState state) {
     return switch (cmd) {
-      case PaymentCommand.InitiatePayment c ->
-          List.of(new PaymentEvent.PaymentInitiated(c.paymentId(), c.orderId(), c.amount()));
+      case PaymentCommand.InitiatePayment c -> {
+        if (exists(state)) throw new DomainException("Payment already exists: " + c.paymentId());
+        yield List.of(new PaymentEvent.PaymentInitiated(c.paymentId(), c.orderId(), c.amount()));
+      }
 
       case PaymentCommand.CapturePayment c -> {
-        if (state.status() != PaymentStatus.PENDING)
-          throw new DomainException("Can only capture PENDING payments");
-        yield List.of(new PaymentEvent.PaymentCaptured(c.paymentId(), state.orderId()));
+        requireExists(state, c.paymentId());
+        yield switch (state.status()) {
+          case PENDING -> List.of(new PaymentEvent.PaymentCaptured(c.paymentId(), state.orderId()));
+          case CAPTURED, REFUNDED -> List.of();
+          case VOIDED, FAILED ->
+              List.of(
+                  new PaymentEvent.PaymentCaptured(c.paymentId(), state.orderId()),
+                  new PaymentEvent.PaymentRefunded(
+                      c.paymentId(), state.orderId(), state.amount(), LATE_CAPTURE_REASON));
+        };
+      }
+
+      case PaymentCommand.FailPayment c -> {
+        requireExists(state, c.paymentId());
+        yield state.status() == PaymentStatus.PENDING
+            ? List.of(new PaymentEvent.PaymentFailed(c.paymentId(), state.orderId(), c.reason()))
+            : List.of();
+      }
+
+      case PaymentCommand.CancelPayment c -> {
+        if (!exists(state)) yield List.of();
+        yield switch (state.status()) {
+          case PENDING ->
+              List.of(new PaymentEvent.PaymentVoided(c.paymentId(), state.orderId(), c.reason()));
+          case CAPTURED ->
+              List.of(
+                  new PaymentEvent.PaymentRefunded(
+                      c.paymentId(), state.orderId(), state.amount(), c.reason()));
+          case REFUNDED, VOIDED, FAILED -> List.of();
+        };
       }
 
       case PaymentCommand.RefundPayment c -> {
         if (state.status() != PaymentStatus.CAPTURED)
           throw new DomainException("Can only refund CAPTURED payments");
-        yield List.of(new PaymentEvent.PaymentRefunded(c.paymentId(), c.reason()));
-      }
-
-      case PaymentCommand.FailPayment c -> {
-        if (state.status() != PaymentStatus.PENDING)
-          throw new DomainException("Can only fail PENDING payments");
-        yield List.of(new PaymentEvent.PaymentFailed(c.paymentId(), c.reason()));
+        yield List.of(
+            new PaymentEvent.PaymentRefunded(
+                c.paymentId(), state.orderId(), state.amount(), c.reason()));
       }
     };
+  }
+
+  /** A payment that was never initiated has no id: its empty state reads {@code PENDING}. */
+  private static boolean exists(PaymentState state) {
+    return state.paymentId() != null;
+  }
+
+  private static void requireExists(PaymentState state, String paymentId) {
+    if (!exists(state)) throw new DomainException("Payment not found: " + paymentId);
   }
 
   @Override
@@ -269,23 +452,32 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
     return switch (evt) {
       case PaymentEvent.PaymentInitiated e ->
           new PaymentState(e.paymentId(), e.orderId(), e.amount(), PaymentStatus.PENDING);
-      case PaymentEvent.PaymentCaptured e ->
-          new PaymentState(
-              state.paymentId(), state.orderId(), state.amount(), PaymentStatus.CAPTURED);
-      case PaymentEvent.PaymentRefunded e ->
-          new PaymentState(
-              state.paymentId(), state.orderId(), state.amount(), PaymentStatus.REFUNDED);
-      case PaymentEvent.PaymentFailed e ->
-          new PaymentState(
-              state.paymentId(), state.orderId(), state.amount(), PaymentStatus.FAILED);
+      case PaymentEvent.PaymentCaptured e -> state.withStatus(PaymentStatus.CAPTURED);
+      case PaymentEvent.PaymentRefunded e -> state.withStatus(PaymentStatus.REFUNDED);
+      case PaymentEvent.PaymentFailed e -> state.withStatus(PaymentStatus.FAILED);
+      case PaymentEvent.PaymentVoided e -> state.withStatus(PaymentStatus.VOIDED);
     };
   }
 }
 ```
 
-The `decide()` method enforces state invariants: you cannot capture a payment that is already captured, you cannot refund one that was never captured, and you cannot fail one that has already moved on. The `evolve()` method is a pure function — no branches beyond the exhaustive sealed-interface pattern match.
+The `decide()` method is a table of command against status (`[]` means no event and no exception):
 
-Run the tests again: all five should pass.
+| Command \ status | no stream | `PENDING` | `CAPTURED` | `REFUNDED` | `VOIDED` | `FAILED` |
+|---|---|---|---|---|---|---|
+| `InitiatePayment` | `PaymentInitiated` | refused | refused | refused | refused | refused |
+| `CapturePayment` | refused | `PaymentCaptured` | `[]` | `[]` | `PaymentCaptured`, `PaymentRefunded` | `PaymentCaptured`, `PaymentRefunded` |
+| `FailPayment` | refused | `PaymentFailed` | `[]` | `[]` | `[]` | `[]` |
+| `CancelPayment` | `[]` | `PaymentVoided` | `PaymentRefunded` | `[]` | `[]` | `[]` |
+
+- **`InitiatePayment`** opens a payment once. A second initiation of an existing payment would reset it, so it is refused.
+- **`CapturePayment`** is sent only after the gateway took the money, so it is never refused for a status the money cannot undo. A capture of a payment that was voided or failed in the meantime is recorded and refunded in the same append (`PaymentDecider.LATE_CAPTURE_REASON`), in one transaction: the books show the capture and its reversal, and no step has to find the payment later. A capture of a captured or refunded payment is a redelivery and stores nothing.
+- **`FailPayment`** fails a pending payment. On any other status it stores nothing, so a gateway failure that arrives after a void, or a redelivered failure, never leaves the process that sent it with a refusal to retry.
+- **`CancelPayment`** voids a pending payment, refunds a captured one for its full amount, and stores nothing for a payment that does not exist or is already settled, so it can run twice or run before the payment ever started.
+
+The `evolve()` method is a pure function — no branches beyond the exhaustive sealed-interface pattern match.
+
+Run the tests again: they should all pass.
 
 ### Step 2 — Saga state types
 
@@ -395,6 +587,7 @@ import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentIds;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 
 /**
@@ -500,9 +693,6 @@ public class OrderFulfillmentSaga
 
   /** The deadline of a fulfillment when the application names none: fifteen minutes. */
   public static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(15);
-
-  /** A fulfillment's payment id is this prefix and the order id. */
-  private static final String PAYMENT_ID_PREFIX = "pay-";
 
   private final Duration timeout;
 
@@ -627,7 +817,7 @@ public class OrderFulfillmentSaga
               state.sagaId(),
               e.orderId(),
               e.customerId(),
-              PAYMENT_ID_PREFIX + e.orderId(),
+              PaymentIds.forOrder(e.orderId()),
               e.total(),
               e.lines(),
               OrderFulfillmentStatus.AWAITING_PAYMENT);
@@ -786,8 +976,7 @@ public class OrderFulfillmentSaga
           var line = state.lines().get(0);
           commands.add(
               new SagaCommand(
-                  new InventoryCommand.ReleaseStock(
-                      line.productId(), state.orderId(), line.quantity()),
+                  new InventoryCommand.ReleaseStock(line.productId(), state.orderId()),
                   new AggregateId(line.productId())));
         }
         commands.add(
@@ -1068,7 +1257,7 @@ class OrderFulfillmentSagaTest {
         .contains(new SagaId("fulfillment-o-1"));
     assertThat(
             saga.correlateByEventData(
-                orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind")))
+                orderStream, new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of())))
         .contains(new SagaId("fulfillment-o-1"));
   }
 
@@ -1080,7 +1269,8 @@ class OrderFulfillmentSagaTest {
     var orderStream = StreamId.of(OrderState.TYPE, new AggregateId(orderId));
 
     assertThat(
-            saga.correlateByEventData(orderStream, new OrderEvent.OrderCancelled(orderId, "why")))
+            saga.correlateByEventData(
+                orderStream, new OrderEvent.OrderCancelled(orderId, "why", List.of())))
         .isEmpty();
     assertThat(saga.correlateByEventData(orderStream, new OrderEvent.OrderConfirmed(orderId)))
         .isEmpty();
@@ -1100,12 +1290,14 @@ class OrderFulfillmentSagaTest {
     var stock = StreamId.of(InventoryState.TYPE, new AggregateId("prod-1"));
     Map<DomainEvent, StreamId> others = new LinkedHashMap<>();
     others.put(new OrderEvent.OrderPlaced("o-1", "c-1", List.of(), money), order);
-    others.put(new OrderEvent.OrderShipped("o-1"), order);
+    others.put(new OrderEvent.OrderShipped("o-1", List.of()), order);
     others.put(new OrderEvent.OrderDelivered("o-1"), order);
     others.put(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", money), payment);
     others.put(new PaymentEvent.PaymentCaptured("pay-o-1", "o-1"), payment);
-    others.put(new PaymentEvent.PaymentFailed("pay-o-1", "declined"), payment);
-    others.put(new PaymentEvent.PaymentRefunded("pay-o-1", "why"), payment);
+    others.put(new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"), payment);
+    others.put(
+        new PaymentEvent.PaymentRefunded("pay-o-1", "o-1", new Money(BigDecimal.TEN, "USD"), "why"),
+        payment);
     others.put(new InventoryEvent.StockReserved("prod-1", "o-1", 2, 8), stock);
     others.put(new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10), stock);
     others.put(new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2), stock);
@@ -1157,7 +1349,7 @@ class OrderFulfillmentSagaTest {
     var foreignFailure =
         causedBySagaOf(
             "o-2",
-            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"),
             PaymentState.TYPE,
             "pay-o-1");
     assertThat(misrouting.evolve(awaitingPayment, foreignFailure)).isEqualTo(awaitingPayment);
@@ -1177,7 +1369,7 @@ class OrderFulfillmentSagaTest {
     var foreignFailure =
         causedBySagaOf(
             "o-2",
-            new PaymentEvent.PaymentFailed("pay-o-1", "declined"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "declined"),
             PaymentState.TYPE,
             "pay-o-1");
     assertThat(saga.evolve(awaitingPayment, foreignCapture)).isEqualTo(awaitingPayment);
@@ -1198,7 +1390,7 @@ class OrderFulfillmentSagaTest {
     var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
     var foreignCancel =
         envelope(
-            new OrderEvent.OrderCancelled("o-1", "changed my mind"),
+            new OrderEvent.OrderCancelled("o-1", "changed my mind", List.of()),
             OrderState.TYPE,
             "o-1",
             "fulfillment-o-2");
@@ -1320,7 +1512,7 @@ class OrderFulfillmentSagaTest {
     var failed =
         causedBySagaOf(
             "o-1",
-            new PaymentEvent.PaymentFailed("pay-o-1", "insufficient funds"),
+            new PaymentEvent.PaymentFailed("pay-o-1", "o-1", "insufficient funds"),
             PaymentState.TYPE,
             "pay-o-1");
 
@@ -1348,7 +1540,10 @@ class OrderFulfillmentSagaTest {
             OrderFulfillmentStatus.CANCELLING);
     var cancelled =
         causedBySagaOf(
-            "o-1", new OrderEvent.OrderCancelled("o-1", "Payment failed"), OrderState.TYPE, "o-1");
+            "o-1",
+            new OrderEvent.OrderCancelled("o-1", "Payment failed", List.of()),
+            OrderState.TYPE,
+            "o-1");
 
     state = saga.evolve(state, cancelled);
 
@@ -1441,7 +1636,6 @@ class OrderFulfillmentSagaTest {
     var cancel = (OrderCommand.CancelOrder) commands.get(2).command();
     assertThat(release.productId()).isEqualTo("prod-1");
     assertThat(release.orderId()).isEqualTo("o-1");
-    assertThat(release.quantity()).isEqualTo(2);
     assertThat(refund.paymentId()).isEqualTo("pay-o-1");
     assertThat(cancel.orderId()).isEqualTo("o-1");
   }
@@ -1921,6 +2115,7 @@ public VirtualThreadCommandBus commandBus(
                     case PaymentCommand.CapturePayment c -> c.paymentId();
                     case PaymentCommand.RefundPayment c -> c.paymentId();
                     case PaymentCommand.FailPayment c -> c.paymentId();
+                    case PaymentCommand.CancelPayment c -> c.paymentId();
                   }),
           new PaymentDecider())
       .build();
@@ -2132,6 +2327,9 @@ Register payment events in the `SimpleEventTypeRegistry` inside the `eventTypeRe
 .registerEvent(
     "PaymentFailed",
     org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+.registerEvent(
+    "PaymentVoided",
+    org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
 ```
 
 Start the application and place an order:
@@ -2191,7 +2389,7 @@ curl -i -X POST http://localhost:8080/api/orders/o-100/confirm \
 
 > The above assumes the `Inventory` aggregate and its events are wired in. If you are reading this before Chapter 13 — where `InventoryDecider` is registered on the command bus and `StockReserved`/`ReservationConfirmed`/etc. are added to the event-type registry — the saga will reach `AWAITING_INVENTORY` and the `ReserveStock` command will fail because no decider is registered for it, tripping `compensate()`. With Chapter 13 in place the inventory leg runs end-to-end and the saga reaches `COMPLETED`.
 
-**What a cancel after the confirmation leaves behind.** The saga compensates while it runs. Once it is `COMPLETED` it is done with the order and ignores every later event. An order that its customer or an `ADMIN` cancels after that (`POST /api/orders/{id}/cancel`, which the decider accepts for any order that is not delivered, because `CancelOrder` is also the last step of every compensation) is cancelled as it is: the order's stream gets `OrderCancelled`, the payment's stream still ends with `PaymentCaptured`, and the inventory still holds the reservation. Nothing dispatches `RefundPayment` or `ReleaseStock`. The demo stops there on purpose: undoing a fulfilled order is a process of its own, a return with a refund and a restock, and a real shop either builds that or has the decider refuse the cancel of a confirmed order. The frontend of Chapter 16 offers the cancel on a confirmed order and says in its dialog what it leaves behind, and its end-to-end test asserts these three streams.
+**What a cancel after the confirmation leaves behind.** The saga compensates while it runs. Once it is `COMPLETED` it is done with the order and ignores every later event. An order that its customer or an `ADMIN` cancels after that (`POST /api/orders/{id}/cancel`, which the decider accepts for any order that is not shipped or delivered, because `CancelOrder` is also the last step of every compensation) is cancelled as it is: the order's stream gets `OrderCancelled`, the payment's stream still ends with `PaymentCaptured`, and the inventory still holds the reservation. Nothing dispatches `RefundPayment` or `ReleaseStock`. The demo stops there on purpose: undoing a fulfilled order is a process of its own, a return with a refund and a restock, and a real shop either builds that or has the decider refuse the cancel of a confirmed order. The frontend of Chapter 16 offers the cancel on a confirmed order and says in its dialog what it leaves behind, and its end-to-end test asserts these three streams.
 
 To watch the failure/compensation path instead, flip the gateway failure flag on before placing the order (see the toggle below). The manager then calls `processPayment`, the gateway throws, the manager dispatches `FailPayment`, and the saga moves to `FAILED` and cancels the order:
 
