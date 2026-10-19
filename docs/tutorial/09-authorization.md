@@ -91,6 +91,10 @@ public sealed interface OrderCommand extends Command {
     }
   }
 
+  /**
+   * Confirms a placed order. The fulfillment saga sends it once the payment is captured and every
+   * line reserved; the order decider's guard refuses it from anybody else.
+   */
   record ConfirmOrder(String orderId) implements OrderCommand {}
 
   @RequireRole("ADMIN")
@@ -109,6 +113,9 @@ public sealed interface OrderCommand extends Command {
    * character or an id longer than 255 characters. Refused only there, the order would already be
    * placed and paid for, and the saga would cancel it and the cancellation refund it. Refused here,
    * the order endpoint answers {@code 400} and nothing is written. The message never echoes the id.
+   *
+   * <p>The order endpoints take a product and a quantity from the client and the unit price from
+   * the product catalogue.
    *
    * <p>{@link OrderEvent.OrderLine}, the line an {@code OrderPlaced} event records, has no such
    * rule: it is rebuilt from the event log and from saga state, where a rule would make a stored
@@ -358,7 +365,7 @@ Start the application:
 ./gradlew :spring-app:bootRun
 ```
 
-**Place an order as a customer and confirm it:**
+**Place an order as a customer:**
 
 ```bash
 curl -X POST http://localhost:8080/api/orders \
@@ -368,15 +375,11 @@ curl -X POST http://localhost:8080/api/orders \
   -d '{
     "orderId": "order-auth-test",
     "customerId": "customer-1",
-    "lines": [{"productId": "p-1", "quantity": 1, "unitPrice": 19.99}]
+    "lines": [{"productId": "p-1", "quantity": 1}]
   }'
-
-curl -X POST http://localhost:8080/api/orders/order-auth-test/confirm \
-  -H 'X-User-Id: customer-1' \
-  -H 'X-User-Role: CUSTOMER'
 ```
 
-Both succeed: `PlaceOrder` and `ConfirmOrder` have no `@RequireRole` annotation, so the interceptor is a no-op for those commands.
+It succeeds: `PlaceOrder` has no `@RequireRole` annotation, so the interceptor is a no-op for it. The order stays `CREATED`, because nobody but the fulfillment saga of Chapter 11 confirms an order. That rule is not about a role: an `ADMIN` may not confirm by hand either. It is a rule about the sender, and it lives in the order decider's `guard` (Chapter 8, Step 2), which refuses a `ConfirmOrder` unless `StreamRuneContext.isSagaDispatch()` is `true`. `@RequireRole` asks *which role* the caller has; `guard` sees the loaded state and the dispatch context, so it can ask *who sends* the command, a saga or anybody else. There is no confirm endpoint, and a `ConfirmOrder` that reached the bus by another door would be refused with an `AuthorizationException`.
 
 **First decide what a refusal looks like over HTTP.** `AuthorizationException` extends `DomainException`, and the `GlobalExceptionHandler` from Chapter 1 maps every `DomainException` to `400 Bad Request`: the status of a broken business rule, which a refusal is not. Give the exception a handler of its own in `GlobalExceptionHandler` (import `org.streamrune.core.AuthorizationException`); Spring picks the most specific handler, so the one for `DomainException` keeps every other case:
 
@@ -405,31 +408,36 @@ The filter bound `role=CUSTOMER` in the `ScopedValue` (and `userId=customer-1` f
 
 > **`403` without an identity too.** A request with no `X-User-Id` is refused with the body `Authentication required`, and the same handler answers it with `403`: the demo has no login to send a `401` to. Without the handler both refusals would be a `400`, indistinguishable from an order that cannot be shipped in its current state.
 
-**Ship as an ADMIN — expect success:**
+**Ship as an ADMIN — the role check passes:**
 
 ```bash
-curl -X POST http://localhost:8080/api/orders/order-auth-test/ship \
+curl -i -X POST http://localhost:8080/api/orders/order-auth-test/ship \
   -H 'X-User-Id: admin-1' \
   -H 'X-User-Role: ADMIN'
 ```
 
-This returns `200 OK`. The filter bound `role=ADMIN`, the resolver returned `UserAuthority` containing `ADMIN`, and `authority.hasAnyRole("ADMIN")` returned `true`.
+The filter bound `role=ADMIN`, the resolver returned `UserAuthority` containing `ADMIN`, and `authority.hasAnyRole("ADMIN")` returned `true`: the command reached `OrderDecider`. The answer is `400 Bad Request` with `Can only ship CONFIRMED orders, current status: CREATED`, the state machine's rule, because nobody has confirmed the order yet. Once the saga of Chapter 11 confirms orders, the same call answers `200 OK`.
 
 Notice what made you an admin: two headers you typed. The identity half is the trusted-gateway mode (Step 3) — in production a gateway sets `X-User-Id`, not the client. The role half is the demo shortcut from Step 2 — in production the role comes from the authenticated identity, never from a header.
 
 **Verify the discontinue guard on products:**
 
-Discontinuing a product is a `POST` to `/api/products/{id}/discontinue` (see `ProductCommandController`), and like the order commands it needs `X-User-Id` so the interceptor can resolve a caller:
+Discontinuing a product is a `POST` to `/api/products/{id}/discontinue` (see `ProductCommandController`), and like the order commands it needs `X-User-Id` so the interceptor can resolve a caller. Discontinue a product of its own, not `p-1`: the catalogue prices every order, and a discontinued product cannot be ordered (`400 Product is discontinued`), and Step 7 orders `p-1`.
 
 ```bash
+# A product to retire
+curl -X POST http://localhost:8080/api/products \
+  -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
+  -d '{"productId":"p-retired","name":"Old widget","description":"Retired","category":"Gadgets","price":9.99,"initialStock":0}'
+
 # Attempt as CUSTOMER
-curl -v -X POST http://localhost:8080/api/products/p-1/discontinue \
+curl -v -X POST http://localhost:8080/api/products/p-retired/discontinue \
   -H 'X-User-Id: customer-1' \
   -H 'X-User-Role: CUSTOMER'
 # → 403 Forbidden — "Required role: ADMIN"
 
 # Attempt as ADMIN
-curl -X POST http://localhost:8080/api/products/p-1/discontinue \
+curl -X POST http://localhost:8080/api/products/p-retired/discontinue \
   -H 'X-User-Id: admin-1' \
   -H 'X-User-Role: ADMIN'
 # → 200 OK
@@ -771,20 +779,13 @@ public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
 }
 ```
 
-`OrderCommandController` takes the `OwnerOrAdminQueries` bean as a second constructor argument (field `queries`; imports `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` and `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`). Placing an order names its customer in the body; confirming and cancelling name an order, whose owner the read model knows:
+`OrderCommandController` takes the `OwnerOrAdminQueries` bean as a second constructor argument (field `queries`; imports `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` and `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`). Placing an order names its customer in the body; cancelling names an order, whose owner the read model knows:
 
 ```java
 @PostMapping
 public ResponseEntity<Void> placeOrder(@Valid @RequestBody PlaceOrderRequest req) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
     // ... the rest as in Chapter 8
-}
-
-@PostMapping("/{id}/confirm")
-public ResponseEntity<Void> confirmOrder(@PathVariable String id) {
-    queries.requireOrderAccess(RequestCaller.current(), id);
-    commandBus.execute(new OrderCommand.ConfirmOrder(id));
-    return ResponseEntity.ok().build();
 }
 
 @PostMapping("/{id}/cancel")
@@ -838,7 +839,7 @@ public ResponseEntity<Void> updatePrice(
 | `GET /api/orders` | `403` | `200`: their own orders only | `200`: their own orders only | `200`: every order |
 | `GET /api/orders?customerId=X` | `403` | `403` when `X` is not the caller | `200`: their own orders | `200`: the orders of `X` |
 | `POST /api/orders` | `403` | `403` | `200` | `200` |
-| `POST /api/orders/{id}/confirm`, `…/cancel` | `403` | `403` | `200` | `200` |
+| `POST /api/orders/{id}/cancel` | `403` | `403` | `200` | `200` |
 
 The endpoints that are for an `ADMIN` alone have no owner. Their four callers are a request without any header, the role without an identity, an authenticated customer, and an `ADMIN`:
 
@@ -911,13 +912,13 @@ Orders follow the same lines:
 # Dave may not place an order in Carol's name
 curl -i -X POST http://localhost:8080/api/orders \
   -H 'Content-Type: application/json' -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER' \
-  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1,"unitPrice":19.99}]}'
+  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1}]}'
 # → 403 Forbidden
 
 # Carol places it herself and reads it; Dave gets 403 for it, and his own list is empty
 curl -s -X POST http://localhost:8080/api/orders \
   -H 'Content-Type: application/json' -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER' \
-  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1,"unitPrice":19.99}]}'
+  -d '{"orderId":"order-acl-1","customerId":"c-carol","lines":[{"productId":"p-1","quantity":1}]}'
 curl -s http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-carol' -H 'X-User-Role: CUSTOMER'
 curl -i http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
 # → 403 Forbidden

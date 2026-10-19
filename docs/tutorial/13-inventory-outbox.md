@@ -1133,7 +1133,7 @@ Wait for all services to be healthy. `SeedDataRunner` issues `ReceiveShipment` a
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"prod-widget","quantity":1,"unitPrice":29.99}]}'
+  -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"prod-widget","quantity":1}]}'
 
 # The saga automatically progresses through payment and inventory;
 # once PaymentCaptured fires, OrderConfirmed follows automatically.

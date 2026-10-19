@@ -93,6 +93,10 @@ public sealed interface OrderCommand extends Command {
     }
   }
 
+  /**
+   * Confirms a placed order. The fulfillment saga sends it once the payment is captured and every
+   * line reserved; the order decider's guard refuses it from anybody else.
+   */
   record ConfirmOrder(String orderId) implements OrderCommand {}
 
   @RequireRole("ADMIN")
@@ -111,6 +115,9 @@ public sealed interface OrderCommand extends Command {
    * character or an id longer than 255 characters. Refused only there, the order would already be
    * placed and paid for, and the saga would cancel it and the cancellation refund it. Refused here,
    * the order endpoint answers {@code 400} and nothing is written. The message never echoes the id.
+   *
+   * <p>The order endpoints take a product and a quantity from the client and the unit price from
+   * the product catalogue.
    *
    * <p>{@link OrderEvent.OrderLine}, the line an {@code OrderPlaced} event records, has no such
    * rule: it is rebuilt from the event log and from saga state, where a rule would make a stored
@@ -347,23 +354,20 @@ curl -X POST http://localhost:8080/api/orders \
   -d '{
     "orderId": "order-audit-1",
     "customerId": "customer-1",
-    "lines": [{"productId": "p-1", "quantity": 2, "unitPrice": 29.99}]
+    "lines": [{"productId": "p-1", "quantity": 2}]
   }'
-
-# Confirm it
-curl -X POST http://localhost:8080/api/orders/order-audit-1/confirm \
-  -H 'X-User-Id: customer-1' \
-  -H 'X-User-Role: CUSTOMER'
 
 # Attempt to ship as CUSTOMER (will fail authorization)
 curl -v -X POST http://localhost:8080/api/orders/order-audit-1/ship \
   -H 'X-User-Id: customer-1' \
   -H 'X-User-Role: CUSTOMER'
 
-# Ship as ADMIN
-curl -X POST http://localhost:8080/api/orders/order-audit-1/ship \
-  -H 'X-User-Id: admin-1' \
-  -H 'X-User-Role: ADMIN'
+# Cancel it
+curl -X POST http://localhost:8080/api/orders/order-audit-1/cancel \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Id: customer-1' \
+  -H 'X-User-Role: CUSTOMER' \
+  -d '{"reason": "changed my mind"}'
 ```
 
 **Query the audit log:**
@@ -373,15 +377,15 @@ curl -s http://localhost:8080/api/audit/commands \
   -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' | jq .
 ```
 
-You should see four entries, newest first. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:
+You should see three entries, newest first. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:
 
 ```json
 [
   {
     "commandId": "...",
-    "commandType": "ShipOrder",
+    "commandType": "CancelOrder",
     "aggregateId": "order-audit-1",
-    "userId": "admin-1",
+    "userId": "customer-1",
     "occurredAt": "2026-04-25T...",
     "outcome": "SUCCESS",
     "eventCount": 1
@@ -394,15 +398,6 @@ You should see four entries, newest first. The refused ship attempt is one of th
     "occurredAt": "2026-04-25T...",
     "outcome": "FAILURE",
     "eventCount": 0
-  },
-  {
-    "commandId": "...",
-    "commandType": "ConfirmOrder",
-    "aggregateId": "order-audit-1",
-    "userId": "customer-1",
-    "occurredAt": "2026-04-25T...",
-    "outcome": "SUCCESS",
-    "eventCount": 1
   },
   {
     "commandId": "...",

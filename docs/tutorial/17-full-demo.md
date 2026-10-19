@@ -381,12 +381,12 @@ curl -s -X POST http://localhost:8080/api/orders \
     "orderId": "ord-1",
     "customerId": "cust-walkthrough",
     "lines": [
-      {"productId": "prod-widget", "quantity": 2, "unitPrice": 9.99}
+      {"productId": "prod-widget", "quantity": 2}
     ]
   }' | jq .
 ```
 
-The Orders page's **Place Order** dialog sends the same request for the persona it acts as: it generates the `orderId` (`order-` and eight hex digits) and takes each line's `unitPrice` from the product picked.
+A line names a product and a quantity; the price is the catalogue's. `OrderPricing` (Chapter 8) reads `product:prod-widget` from the event store and prices the line at `19.99`, the seeded widget's price, so the order's total is `39.98`. A product nobody created, or a discontinued one, answers `400`. The Orders page's **Place Order** dialog sends the same request for the persona it acts as: it generates the `orderId` (`order-` and eight hex digits) and sends each product picked with its quantity.
 
 The `OrderDecider` appends `OrderPlaced`. From there the order-fulfillment saga (Chapter 11) runs all the way to completion, driven by three polling subscriptions, each reacting to the events of the one before:
 
@@ -407,16 +407,54 @@ Expected output: `"COMPLETED"`
 
 A fulfillment saga is read by whoever may read its order (Chapter 11): an `ADMIN`, or the order's customer. `cust-walkthrough` gets the same answer with `-H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER"`; any other customer, and a caller without an identity, gets `403`. In the browser, switch to `ADMIN` and open the Fulfillment page. The card `fulfillment-ord-1` moves from Started through In Progress to Completed; the tracker updates via SSE — no page refresh needed. As a `CUSTOMER` the same page lists the sagas of that persona's own orders (the role switcher offers the two seeded customers, so `cust-walkthrough`'s saga is not among them).
 
-Confirm the order state — the saga's final `ConfirmOrder` emitted `OrderConfirmed`, so the projection reports:
+Check the order state — the saga's final `ConfirmOrder` emitted `OrderConfirmed`, and the saga is the only sender of that command (the order decider's guard refuses it from anybody else, and there is no endpoint for it), so the projection reports:
 
 ```bash
 curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
-  http://localhost:8080/api/orders/ord-1 | jq .status
+  http://localhost:8080/api/orders/ord-1 | jq '{status, paymentStatus, total}'
 ```
 
-Expected output: `"CONFIRMED"`
+Expected output: `"status": "CONFIRMED"`, `"paymentStatus": "CAPTURED"` and a total of `39.98`. The Orders page shows the payment status as a second badge beside the order's.
 
 The order is read by the customer it belongs to. Leave the two headers out, or send another customer's id, and the answer is `403`: an order is for its customer or an `ADMIN` (Chapter 9), and so is the list — `GET /api/orders` with these headers returns the walkthrough customer's orders and nobody else's.
+
+#### Cancel a confirmed order and watch the refund and the release
+
+Place a second order and cancel it as its customer once the saga has confirmed it:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -H "X-User-Role: CUSTOMER" \
+  -H "X-User-Id: cust-walkthrough" \
+  -d '{"orderId": "ord-2", "customerId": "cust-walkthrough", "lines": [{"productId": "prod-widget", "quantity": 1}]}'
+
+# a few seconds later, once GET /api/orders/ord-2 reads CONFIRMED
+curl -s -X POST http://localhost:8080/api/orders/ord-2/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Role: CUSTOMER" \
+  -H "X-User-Id: cust-walkthrough" \
+  -d '{"reason": "changed my mind"}'
+```
+
+The cancellation is one `OrderCancelled`, and every `OrderCancelled` is undone by the order cancellation process manager (Chapter 11): it releases the stock of each line and cancels the payment, which refunds a captured payment in full. Watch both in the payment stream and in the inventory stream (the Event Explorer page shows the same streams):
+
+```bash
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/events/payment/pay-ord-2 | jq '[.[].eventType]'
+# ["PaymentInitiated", "PaymentCaptured", "PaymentRefunded"]
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/events/inventory/prod-widget \
+  | jq '[.[] | select(.payload.orderId == "ord-2") | .eventType]'
+# ["StockReserved", "StockReleased"]
+
+curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
+  http://localhost:8080/api/orders/ord-2 | jq '{status, paymentStatus}'
+# {"status": "CANCELLED", "paymentStatus": "REFUNDED"}
+```
+
+The saga of `ord-2` completed before the cancel and stays `COMPLETED`; the undo runs through the cancellation's event, not through the saga. A shipped order is not cancelled: ship `ord-1` as an `ADMIN` (`POST /api/orders/ord-1/ship`), and a cancel of it afterwards answers `400 Cannot cancel SHIPPED orders`. Shipping commits the order's reservation instead (`ReservationConfirmed` in the inventory stream).
 
 The order snapshot is stored after every 5 events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). If you have placed enough orders, you can verify that the next load of the aggregate reads from the snapshot store rather than replaying from offset 0.
 
@@ -429,7 +467,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
   "http://localhost:8080/api/audit/commands?limit=20" | jq '.[] | {commandType, aggregateId, userId, occurredAt, outcome}'
 ```
 
-You should see entries for `RegisterCustomer`, `CreateProduct` (twice, and a third with outcome `FAILURE` if you sent the duplicate request in Step 4), and `PlaceOrder` — plus the commands the saga dispatched while fulfilling `ord-1` in Step 5 (`InitiatePayment`, `CapturePayment`, `ReserveStock`, `ConfirmOrder`), since every command goes through the same audited bus. The audit log stores the `user_id` taken from the `X-User-Id` request header (trusted-gateway mode, Chapter 9), so the customer and product commands from Steps 3 and 4 carry `admin-1` and the order command (Step 5 sent `X-User-Id: cust-walkthrough`) carries `cust-walkthrough`; the saga-dispatched commands and the process manager's `CapturePayment` run under the saga's correlation id (`streamrune:saga:fulfillment-ord-1`) rather than for a user, so their `userId` is empty. The role itself is used by the authorization interceptor but is not persisted in the audit row. Open the Audit page in the frontend to browse the log; a **Show** selector at the top chooses how many rows to load (25 / 50 / 100).
+You should see entries for `RegisterCustomer`, `CreateProduct` (twice, and a third with outcome `FAILURE` if you sent the duplicate request in Step 4), and `PlaceOrder` — plus the commands the saga dispatched while fulfilling `ord-1` in Step 5 (`InitiatePayment`, `CapturePayment`, `ReserveStock`, `ConfirmOrder`), and for `ord-2` the customer's `CancelOrder` and the process manager's `ReleaseStock` and `CancelPayment`, since every command goes through the same audited bus. The audit log stores the `user_id` taken from the `X-User-Id` request header (trusted-gateway mode, Chapter 9), so the customer and product commands from Steps 3 and 4 carry `admin-1` and the order command (Step 5 sent `X-User-Id: cust-walkthrough`) carries `cust-walkthrough`; the saga-dispatched commands and the process manager's `CapturePayment` run under the saga's correlation id (`streamrune:saga:fulfillment-ord-1`) rather than for a user, so their `userId` is empty. The role itself is used by the authorization interceptor but is not persisted in the audit row. Open the Audit page in the frontend to browse the log; a **Show** selector at the top chooses how many rows to load (25 / 50 / 100).
 
 ### Step 7: Trip the Payment-Gateway Circuit Breaker
 
@@ -452,7 +490,7 @@ curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost
 for i in 1 2 3; do
   curl -s -X POST http://localhost:8080/api/orders \
     -H "Content-Type: application/json" -H "X-User-Role: CUSTOMER" -H "X-User-Id: cust-walkthrough" \
-    -d "{\"orderId\":\"walk-cb-$i\",\"customerId\":\"cust-walkthrough\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1,\"unitPrice\":9.99}]}"
+    -d "{\"orderId\":\"walk-cb-$i\",\"customerId\":\"cust-walkthrough\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1}]}"
 done
 ```
 
