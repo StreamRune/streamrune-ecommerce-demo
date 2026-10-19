@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -27,8 +28,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.IntStream;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.postgresql.ds.PGSimpleDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -41,8 +44,9 @@ import org.streamrune.runtime.PollingEventSubscription;
 
 /**
  * Two backends on one database: one leads the fulfillment saga, the other stands by and takes over
- * when the leader stops, and no forward command of a fulfillment saga is stored after that saga's
- * compensation, whichever backend runs the step and whichever claims the deadline.
+ * when the leader stops, no forward command of a fulfillment saga is stored after that saga's
+ * compensation, whichever backend runs the step and whichever claims the deadline, and the money
+ * and the stock end consistent with every order.
  *
  * <p>Two Spring contexts of the app run in this JVM against a database of their own, {@code
  * two_instances}, on the shared PostgreSQL container. They are built with {@link
@@ -52,8 +56,9 @@ import org.streamrune.runtime.PollingEventSubscription;
  * lease {@code "saga:" + saga type} over the single-active-consumer leadership, and the saga
  * subscription built with {@code sagaRunner(...)} takes it: one backend delivers the saga's events
  * and claims its deadlines, the other reads nothing and reports {@link LeaseRole#STANDBY}. The
- * lease lives 3 s here ({@code streamrune.subscription.single-active-consumer.lease-ttl}) instead
- * of 15 s.
+ * payment process manager and the order cancellation and order shipment process managers each hold
+ * a lease of their own, on whichever backend takes it. The lease lives 3 s here ({@code
+ * streamrune.subscription.single-active-consumer.lease-ttl}) instead of 15 s.
  *
  * <p>The deadline is short ({@code app.saga.fulfillment-timeout=2s}), the timeout runners poll
  * every 200 ms, and every saga command waits a random 0 to 300 ms first ({@code
@@ -72,10 +77,22 @@ import org.streamrune.runtime.PollingEventSubscription;
  * two-node tests hold a command at its commit on purpose and prove the refusal deterministically;
  * this test checks the outcome under load.
  *
+ * <p>Besides placing, the clients' orders get follow-ups, sent by a second set of threads to
+ * whichever backend answers: every third order has two lines; every fourth is cancelled by its
+ * customer as soon as the read model knows it (a {@code 403} is asked again for up to ten seconds);
+ * every fifth is cancelled once it reads {@code CONFIRMED}; every seventh is shipped by an {@code
+ * ADMIN} once it reads {@code CONFIRMED}, and its customer's cancellation then answers {@code 400}.
+ * Each follow-up request holds the read lock, like a placing request.
+ *
  * <p>Then every fulfillment saga ends ({@code COMPLETED}, {@code COMPENSATED} or {@code FAILED};
- * none {@code FAULTED}), and the command inbox holds no forward command of a saga stored after the
- * first compensation command of that saga. The run must have exercised both outcomes: at least one
- * saga compensated by a timeout claim (its episode has no cause event) and at least one completed.
+ * none {@code FAULTED}), the order-flow subscriptions catch up with the event store, and {@code
+ * scripts/money-and-stock-invariants.sql} returns no row for the test's orders: no forward command
+ * of a saga stored after the first compensation command of that saga, no cancelled order with its
+ * payment captured and not refunded or with stock held, no stock or payment settled twice, no
+ * shipped order cancelled, no confirmed order without its stock and its captured payment. The run
+ * must have exercised both outcomes of the deadline (at least one saga compensated by a timeout
+ * claim, whose episode has no cause event, and at least one completed), a refund of a confirmed
+ * order and a shipment.
  */
 class TwoInstanceSagaIT {
 
@@ -91,6 +108,17 @@ class TwoInstanceSagaIT {
 
   private static final int PRODUCTS = 4;
 
+  /** Every product has stock for the whole run, with two-line orders in it. */
+  private static final int STOCK = 2000;
+
+  /** How long a follow-up waits for its order to read {@code CONFIRMED}. */
+  private static final Duration CONFIRMATION_WAIT = Duration.ofSeconds(60);
+
+  /** How long a customer's request is asked again while the read model has no row for the order. */
+  private static final Duration READ_MODEL_WAIT = Duration.ofSeconds(10);
+
+  private static final String ORDER_PREFIX = "two-order-";
+
   /** Each client pauses a random time between these two between two orders. */
   private static final Duration CLIENT_PAUSE_MIN = Duration.ofSeconds(4);
 
@@ -100,20 +128,6 @@ class TwoInstanceSagaIT {
   private static final String SAGA_COMMAND_DELAY_MAX = "300ms";
 
   private static final String SAGA_TYPE = SagaType.fromClass(OrderFulfillmentState.class).value();
-
-  /** A forward command stored after the first compensation command of its saga. */
-  private static final String INVARIANT_QUERY =
-      """
-      SELECT f.idempotency_key, c.idempotency_key
-        FROM command_inbox f
-        JOIN command_inbox c
-          ON split_part(c.idempotency_key, ':', 2) = split_part(f.idempotency_key, ':', 2)
-       WHERE c.idempotency_key LIKE 'saga:%:episode:%:comp:%'
-         AND f.idempotency_key LIKE 'saga:%'
-         AND f.idempotency_key NOT LIKE 'saga:%:episode:%'
-         AND (SELECT max(o) FROM unnest(f.global_offsets) o)
-           > (SELECT min(o) FROM unnest(c.global_offsets) o)
-      """;
 
   private final HttpClient http =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -127,7 +141,7 @@ class TwoInstanceSagaIT {
   }
 
   @Test
-  void twoInstancesUnderLoad_storeNoForwardCommandAfterItsSagasCompensation() throws Exception {
+  void twoInstancesUnderLoad_keepMoneyAndStockConsistentWithEveryOrder() throws Exception {
     createDatabase();
     ConfigurableApplicationContext[] slots = {start(), start()};
     int[] ports = {port(slots[0]), port(slots[1])};
@@ -148,7 +162,7 @@ class TwoInstanceSagaIT {
           "/api/inventory/two-prod-" + p + "/receive",
           "ADMIN",
           "admin-1",
-          "{\"quantity\":1000}");
+          "{\"quantity\":" + STOCK + "}");
     }
 
     // Every client holds the read lock around its request; the restart holds the write lock, so
@@ -163,6 +177,8 @@ class TwoInstanceSagaIT {
     Duration[] closing = {null};
     Duration[] takeover = {null};
     ExecutorService clients = Executors.newFixedThreadPool(CLIENTS);
+    ExecutorService followUps = Executors.newFixedThreadPool(CLIENTS);
+    List<Future<?>> followUpWork = new CopyOnWriteArrayList<>();
     // A client that fails stops the others, so that none posts to a context being closed.
     try {
       List<Future<?>> work = new ArrayList<>();
@@ -172,17 +188,21 @@ class TwoInstanceSagaIT {
                 () -> {
                   for (int i = next.getAndIncrement(); i < ORDERS; i = next.getAndIncrement()) {
                     String customer = "two-cust-" + (i % 10);
-                    String body =
-                        """
-                        {"orderId":"two-order-%d","customerId":"%s",
-                         "lines":[{"productId":"two-prod-%d","quantity":1}]}
-                        """
-                            .formatted(i, customer, i % PRODUCTS);
+                    String body = orderBody(i, customer);
                     backends.readLock().lock();
                     try {
                       post(ports[i % 2], "/api/orders", "CUSTOMER", customer, body);
                     } finally {
                       backends.readLock().unlock();
+                    }
+                    if (i % 4 == 0 || i % 5 == 0 || i % 7 == 0) {
+                      int placedAt = i;
+                      followUpWork.add(
+                          followUps.submit(
+                              () -> {
+                                followUp(placedAt, customer, backends, ports);
+                                return null;
+                              }));
                     }
                     // Each client pauses CLIENT_PAUSE_MIN to CLIENT_PAUSE_MAX between two orders,
                     // about one order a second over the eight. The leading backend's saga
@@ -231,8 +251,12 @@ class TwoInstanceSagaIT {
       for (Future<?> f : work) {
         f.get(5, TimeUnit.MINUTES);
       }
+      for (Future<?> f : followUpWork) {
+        f.get(5, TimeUnit.MINUTES);
+      }
     } finally {
       clients.shutdownNow();
+      followUps.shutdownNow();
     }
     assertThat(placed).hasValue(ORDERS);
     assertThat(restarted).hasValue(1);
@@ -250,7 +274,9 @@ class TwoInstanceSagaIT {
                       queryInt(
                           "SELECT count(*) FROM saga_state WHERE saga_type = '"
                               + SAGA_TYPE
-                              + "' AND saga_id LIKE 'fulfillment-two-order-%'"))
+                              + "' AND saga_id LIKE 'fulfillment-"
+                              + ORDER_PREFIX
+                              + "%'"))
                   .as("one fulfillment saga per order")
                   .isEqualTo(ORDERS);
             });
@@ -260,13 +286,17 @@ class TwoInstanceSagaIT {
         queryInt(
             "SELECT count(*) FROM saga_state WHERE saga_type = '"
                 + SAGA_TYPE
-                + "' AND saga_id LIKE 'fulfillment-two-order-%'"
+                + "' AND saga_id LIKE 'fulfillment-"
+                + ORDER_PREFIX
+                + "%'"
                 + " AND status = 'COMPENSATED' AND episode_cause_event_id IS NULL");
     int completed =
         queryInt(
             "SELECT count(*) FROM saga_state WHERE saga_type = '"
                 + SAGA_TYPE
-                + "' AND saga_id LIKE 'fulfillment-two-order-%' AND status = 'COMPLETED'");
+                + "' AND saga_id LIKE 'fulfillment-"
+                + ORDER_PREFIX
+                + "%' AND status = 'COMPLETED'");
     long fencedSurvivor = fenced(slots[1 - closedSlot[0]]);
     long fencedRestarted = fenced(slots[closedSlot[0]]);
     LOG.info(
@@ -286,13 +316,195 @@ class TwoInstanceSagaIT {
         fencedSurvivor,
         fencedRestarted);
 
-    assertThat(invariantViolations())
-        .as("forward commands stored after the first compensation command of their saga")
+    // The undo of every cancellation is the order cancellation process manager's, the commit of a
+    // shipment the order shipment process manager's: wait until they and the other order-flow
+    // subscriptions have caught up with the event store, then look.
+    MoneyAndStockInvariants.awaitQuiet(dataSource(), ORDER_PREFIX, Duration.ofMinutes(3));
+    int refundsOfConfirmedOrders =
+        queryInt(
+            """
+            SELECT count(*) FROM event_stream p
+             WHERE p.aggregate_type = 'payment' AND p.event_type = 'PaymentRefunded'
+               AND p.aggregate_id LIKE 'pay-two-order-%'
+               AND EXISTS (SELECT 1 FROM event_stream c
+                            WHERE c.aggregate_type = 'order'
+                              AND c.aggregate_id = substr(p.aggregate_id, 5)
+                              AND c.event_type = 'OrderConfirmed')
+            """);
+    int shipments =
+        queryInt(
+            "SELECT count(*) FROM event_stream WHERE aggregate_type = 'order'"
+                + " AND event_type = 'OrderShipped' AND aggregate_id LIKE 'two-order-%'");
+    LOG.info(
+        "Two-instance run: refunds of confirmed orders {}, shipments {}",
+        refundsOfConfirmedOrders,
+        shipments);
+
+    assertThat(MoneyAndStockInvariants.violations(dataSource(), ORDER_PREFIX))
+        .as("rows of the money and stock checks for the orders of this test")
         .isEmpty();
     assertThat(timeoutCompensations)
         .as("sagas compensated by a timeout claim (non-vacuity)")
         .isPositive();
     assertThat(completed).as("sagas completed (non-vacuity)").isPositive();
+    assertThat(refundsOfConfirmedOrders)
+        .as("refunds of confirmed orders (non-vacuity)")
+        .isPositive();
+    assertThat(shipments).as("shipments (non-vacuity)").isPositive();
+  }
+
+  /**
+   * The body of order {@code i}: one line, or two when {@code i} is a multiple of three, at the
+   * products {@code i} and {@code i + 1} modulo the number of products.
+   */
+  private static String orderBody(int i, String customer) {
+    String line = "{\"productId\":\"two-prod-%d\",\"quantity\":1}";
+    String lines =
+        i % 3 == 0
+            ? line.formatted(i % PRODUCTS) + "," + line.formatted((i + 1) % PRODUCTS)
+            : line.formatted(i % PRODUCTS);
+    return "{\"orderId\":\"%s%d\",\"customerId\":\"%s\",\"lines\":[%s]}"
+        .formatted(ORDER_PREFIX, i, customer, lines);
+  }
+
+  /**
+   * What happens to order {@code i} after it was placed: a cancellation by its customer at once
+   * (every fourth), once confirmed (every fifth), or a shipment by an {@code ADMIN} once confirmed
+   * and the refusal of the customer's cancellation after it (every seventh). Each request goes to
+   * whichever backend answers and holds the read lock, so that the restart waits for it. An order
+   * that its deadline cancelled before it read {@code CONFIRMED} gets no follow-up.
+   */
+  private void followUp(int i, String customer, ReentrantReadWriteLock backends, int[] ports)
+      throws Exception {
+    String orderId = ORDER_PREFIX + i;
+    if (i % 4 == 0) {
+      assertThat(cancelAsCustomer(orderId, customer, backends, ports))
+          .as("cancel of %s right after placing it", orderId)
+          .isEqualTo(200);
+      return;
+    }
+    if (!awaitConfirmed(orderId, customer, backends, ports)) {
+      return;
+    }
+    if (i % 5 == 0) {
+      assertThat(cancelAsCustomer(orderId, customer, backends, ports))
+          .as("cancel of the confirmed %s", orderId)
+          .isEqualTo(200);
+    } else {
+      int shipped =
+          send(
+                  backends,
+                  ports,
+                  "POST",
+                  "/api/orders/" + orderId + "/ship",
+                  "ADMIN",
+                  "admin-1",
+                  null)
+              .statusCode();
+      // A 400 is the order's deadline cancelling it between the read and the shipment.
+      assertThat(shipped).as("shipment of %s", orderId).isIn(200, 400);
+      if (shipped == 200) {
+        assertThat(cancelAsCustomer(orderId, customer, backends, ports))
+            .as("cancel of the shipped %s", orderId)
+            .isEqualTo(400);
+      }
+    }
+  }
+
+  /**
+   * The customer's cancellation. Its access check reads the order's read model, which has no row
+   * for a moment after the order was placed, so a {@code 403} or {@code 404} is asked again for up
+   * to ten seconds.
+   */
+  private int cancelAsCustomer(
+      String orderId, String customer, ReentrantReadWriteLock backends, int[] ports)
+      throws InterruptedException {
+    long until = System.nanoTime() + READ_MODEL_WAIT.toNanos();
+    while (true) {
+      int status =
+          send(
+                  backends,
+                  ports,
+                  "POST",
+                  "/api/orders/" + orderId + "/cancel",
+                  "CUSTOMER",
+                  customer,
+                  "{\"reason\":\"changed my mind\"}")
+              .statusCode();
+      if ((status != 403 && status != 404) || System.nanoTime() > until) {
+        return status;
+      }
+      Thread.sleep(200);
+    }
+  }
+
+  /**
+   * Waits until the order reads {@code CONFIRMED}; returns {@code false} when it reads {@code
+   * CANCELLED} first (its deadline cancelled it).
+   */
+  private boolean awaitConfirmed(
+      String orderId, String customer, ReentrantReadWriteLock backends, int[] ports)
+      throws InterruptedException {
+    long until = System.nanoTime() + CONFIRMATION_WAIT.toNanos();
+    while (System.nanoTime() < until) {
+      HttpResponse<String> response =
+          send(backends, ports, "GET", "/api/orders/" + orderId, "CUSTOMER", customer, null);
+      String body = response.statusCode() == 200 ? response.body() : "";
+      if (body.contains("\"status\":\"CONFIRMED\"")) {
+        return true;
+      }
+      if (body.contains("\"status\":\"CANCELLED\"")) {
+        return false;
+      }
+      Thread.sleep(300);
+    }
+    throw new AssertionError(orderId + " read neither CONFIRMED nor CANCELLED within the wait");
+  }
+
+  /**
+   * One request to a backend, under the read lock; the backend is the one the request's turn picks
+   * and, when it does not answer, the other.
+   */
+  private HttpResponse<String> send(
+      ReentrantReadWriteLock backends,
+      int[] ports,
+      String method,
+      String path,
+      String role,
+      String userId,
+      String json) {
+    backends.readLock().lock();
+    try {
+      int first = ThreadLocalRandom.current().nextInt(2);
+      try {
+        return request(ports[first], method, path, role, userId, json);
+      } catch (RuntimeException unreachable) {
+        return request(ports[1 - first], method, path, role, userId, json);
+      }
+    } finally {
+      backends.readLock().unlock();
+    }
+  }
+
+  private HttpResponse<String> request(
+      int port, String method, String path, String role, String userId, String json) {
+    try {
+      return http.send(
+          HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+              .timeout(Duration.ofSeconds(30))
+              .header("Content-Type", "application/json")
+              .header("X-User-Role", role)
+              .header("X-User-Id", userId)
+              .method(
+                  method,
+                  json == null
+                      ? HttpRequest.BodyPublishers.noBody()
+                      : HttpRequest.BodyPublishers.ofString(json))
+              .build(),
+          HttpResponse.BodyHandlers.ofString());
+    } catch (Exception e) {
+      throw new IllegalStateException(method + " " + path + " on port " + port + " failed", e);
+    }
   }
 
   /**
@@ -367,21 +579,7 @@ class TwoInstanceSagaIT {
   }
 
   private void post(int port, String path, String role, String userId, String json) {
-    HttpResponse<String> response;
-    try {
-      response =
-          http.send(
-              HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
-                  .timeout(Duration.ofSeconds(30))
-                  .header("Content-Type", "application/json")
-                  .header("X-User-Role", role)
-                  .header("X-User-Id", userId)
-                  .POST(HttpRequest.BodyPublishers.ofString(json))
-                  .build(),
-              HttpResponse.BodyHandlers.ofString());
-    } catch (Exception e) {
-      throw new IllegalStateException("POST " + path + " on port " + port + " failed", e);
-    }
+    HttpResponse<String> response = request(port, "POST", path, role, userId, json);
     assertThat(response.statusCode())
         .as("POST %s on port %d: %s", path, port, response.body())
         .isBetween(200, 299);
@@ -439,15 +637,13 @@ class TwoInstanceSagaIT {
     }
   }
 
-  private static List<String> invariantViolations() throws Exception {
-    List<String> rows = new ArrayList<>();
-    try (Connection conn = connect();
-        Statement st = conn.createStatement();
-        ResultSet rs = st.executeQuery(INVARIANT_QUERY)) {
-      while (rs.next()) {
-        rows.add(rs.getString(1) + " after " + rs.getString(2));
-      }
-    }
-    return rows;
+  /** A data source on the two-instance database. */
+  private static DataSource dataSource() {
+    var postgres = AbstractIntegrationTest.POSTGRES;
+    var source = new PGSimpleDataSource();
+    source.setUrl(databaseUrl());
+    source.setUser(postgres.getUsername());
+    source.setPassword(postgres.getPassword());
+    return source;
   }
 }
