@@ -576,7 +576,7 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 ### Two Backends on One Database
 
-Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The payment process manager's subscription has a lease of its own, `payment-process-manager`. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
+Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The three process managers' subscriptions have a lease each — `payment-process-manager`, `order-cancellation` and `order-shipment` — so each of the four leases sits on one backend, and not necessarily the same one: after a restart the saga may lead on one backend and the cancellation process manager on the other. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
 
 **The profile.** `docker-compose.yml` defines a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
 
@@ -696,11 +696,11 @@ The interceptor sleeps on the thread that dispatches the saga's command, after t
 
 **The script.** `scripts/two-backends-invariant.sh` drives the run against the two backends:
 
-1. It waits until both answer `/actuator/health` and checks that both health answers show the saga subscription's role; without `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always` it stops there and says so. Then it creates two products of its own with stock for every order.
-2. It places `ORDERS` orders (60 by default), one a second, alternating `http://localhost:8080` and `http://localhost:8091` — the `POST /api/orders` of Step 5.
+1. It waits until both answer `/actuator/health` and checks that both health answers show the saga subscription's role; without `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always` it stops there and says so. Then it creates two products of its own with stock for three times as many units as there are orders.
+2. It places `ORDERS` orders (60 by default), one a second, alternating `http://localhost:8080` and `http://localhost:8091` — the `POST /api/orders` of Step 5. Every third order has two lines, one of each product, the second of two units. Right after placing it, the script starts a follow-up in the background for some of the orders: one in four is cancelled by its customer as soon as the order's read model has a row (the order answers `403` for a moment before that, and the script asks again for up to ten seconds); of the others, one in five is cancelled once it reads `CONFIRMED`, and one in seven is shipped by `admin-1` once it reads `CONFIRMED`, after which its customer's cancellation must answer `400`. A follow-up goes to whichever backend answers, because the leader may be dead at that moment. An order whose deadline cancelled it first needs no follow-up, and a shipment answered `400` means that happened between the read and the shipment.
 3. Halfway it reads both roles, exits `1` unless exactly one backend reads `LEADING`, and kills that one with `docker compose kill -s SIGKILL`. Whatever the leader had in flight — a saga step between two forward commands, a claim, a compensation — stops without a shutdown, and it does not give its lease back. The script waits until the other backend reads `LEADING` (at most 60 seconds; the lease expires 15 seconds after its last renewal), prints how long that took, starts the killed container again with `docker compose start` (so it keeps the settings above) and waits until it answers; it comes back as the standby.
-4. It waits until no `saga_state` row of the fulfillment saga is outside `COMPLETED`, `COMPENSATED` and `FAILED` (at most five minutes; a `FAULTED` saga counts as not ended).
-5. It prints the sagas by status, the number compensated at their deadline (an episode with no cause event) and each backend's count of fenced forward commands, then runs the invariant query below and exits `1` if it returns a row.
+4. After the last order it waits for the follow-ups and exits `1` if any request was answered with a status other than the one expected. Then it waits until the run is quiet (at most five minutes): no `saga_state` row of this run's fulfillment sagas is outside `COMPLETED`, `COMPENSATED` and `FAILED` (a `FAULTED` saga counts as not ended), and the checkpoints of the four subscriptions that react to orders — `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — are at or past the last global offset of the event store. One statement reads the sagas, the four checkpoints and the head together, so a subscription that saves its checkpoint after its page, and the appends of that page, cannot slip between two reads. On a timeout it prints the open sagas and the four checkpoints against the head and exits `1`.
+5. It prints this run's sagas by status, the number compensated at their deadline (an episode with no cause event), how many orders were cancelled and shipped and how many payments were refunded and voided, and each backend's count of fenced forward commands, then runs `scripts/money-and-stock-invariants.sql` (below) and exits `1` if it returns a row for this run's orders.
 
 ```bash
 scripts/two-backends-invariant.sh
@@ -710,16 +710,16 @@ A run printed:
 
 ```text
 Waiting for http://localhost:8080/actuator/health (180s) …
-  ✓ answered after 2s.
+  ✓ answered after 1s.
 Waiting for http://localhost:8091/actuator/health (180s) …
   ✓ answered after 1s.
 Placing 60 orders, alternating http://localhost:8080 and http://localhost:8091 …
 Killing the leader, backend-2 (http://localhost:8091), with SIGKILL after 30 orders …
  Container streamrune-ecommerce-demo-backend-2-1 Killing 
  Container streamrune-ecommerce-demo-backend-2-1 Killed 
-  ✓ http://localhost:8080 leads the saga 13 s after the kill.
- Container streamrune-ecommerce-demo-postgres-1 Waiting 
+  ✓ http://localhost:8080 leads the saga 14 s after the kill.
  Container streamrune-ecommerce-demo-rabbitmq-1 Waiting 
+ Container streamrune-ecommerce-demo-postgres-1 Waiting 
  Container streamrune-ecommerce-demo-postgres-1 Healthy 
  Container streamrune-ecommerce-demo-rabbitmq-1 Healthy 
  Container streamrune-ecommerce-demo-backend-2-1 Starting 
@@ -727,49 +727,37 @@ Killing the leader, backend-2 (http://localhost:8091), with SIGKILL after 30 ord
 Waiting for http://localhost:8091/actuator/health (180s) …
   ✓ answered after 4s.
   ✓ backend-2 is back, as standby: STANDBY.
-Waiting until every order-fulfillment saga has ended (at most 5 minutes) …
-Order-fulfillment sagas by status:
-COMPENSATED|6
-COMPLETED|55
+Waiting until every order-fulfillment saga has ended and the order-flow subscriptions are at the head of the event store (at most 5 minutes) …
+Order-fulfillment sagas of this run by status:
+COMPENSATED|8
+COMPLETED|52
 Compensated at their deadline (an episode with no cause event):
-6
+4
+Orders of this run cancelled, shipped, with their payment refunded and with their payment voided:
+26 | 5 | 26 | 0
 Forward commands refused at their commit on http://localhost:8080 since it started: 0
 Forward commands refused at their commit on http://localhost:8091 since it started: 0
-✓ No forward command was stored after its saga's compensation.
+Checking money and stock (scripts/money-and-stock-invariants.sql) …
+✓ Money and stock end consistent with every order, and no forward command came after its saga's compensation.
 ```
 
-The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many forward commands a claim catches in flight — the last line does not.
+The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many orders end cancelled, how many forward commands a claim catches in flight — the last line does not. (Sixty orders a second apart leave the leader time to confirm most of them; with `PAUSE_SECONDS=0 ORDERS=120` the leader falls behind its deadline, nearly every saga is compensated and every one of those orders is cancelled, with its payment refunded or voided and its stock released, which is the heavier test of the undo.)
 
-**Orders the run leaves to put right.** The check says that no forward command came after a compensation; the undo is the cancellation's: every compensation cancels the order, and the order cancellation process manager (Chapter 11, Step 5c) releases the stock and voids or refunds the payment of every cancelled order, whatever the saga row recorded, so once every saga has ended and the process managers have caught up, these two queries return no row:
+**What the invariant queries check.** `scripts/money-and-stock-invariants.sql` holds eight `SELECT` statements. Each returns one row per inconsistency — the columns `violation` (what it checks, in words), `order_id` and `detail` — and none once the run is quiet. The script pipes the file to `psql`, and the three apps' integration tests and `TwoInstanceSagaIT` run the same file over their databases, keeping the rows whose `order_id` starts with the test's own prefix, because a shared test database also holds orders other test classes left inconsistent on purpose. Each statement reads the event log (`event_stream`) and, for the last, the command inbox:
 
-```sql
--- Orders cancelled with their payment captured and not refunded
-SELECT c.payload->>'orderId' AS order_id
-  FROM event_stream c
- WHERE c.aggregate_type = 'payment' AND c.event_type = 'PaymentCaptured'
-   AND NOT EXISTS (SELECT 1 FROM event_stream r
-                    WHERE r.aggregate_type = 'payment' AND r.aggregate_id = c.aggregate_id
-                      AND r.event_type = 'PaymentRefunded')
-   AND EXISTS (SELECT 1 FROM event_stream o
-                WHERE o.aggregate_type = 'order' AND o.aggregate_id = c.payload->>'orderId'
-                  AND o.event_type = 'OrderCancelled');
-
--- Orders cancelled with their stock reserved and not released
-SELECT s.payload->>'orderId' AS order_id
-  FROM event_stream s
- WHERE s.aggregate_type = 'inventory' AND s.event_type = 'StockReserved'
-   AND NOT EXISTS (SELECT 1 FROM event_stream r
-                    WHERE r.aggregate_type = 'inventory' AND r.event_type = 'StockReleased'
-                      AND r.payload->>'orderId' = s.payload->>'orderId')
-   AND EXISTS (SELECT 1 FROM event_stream o
-                WHERE o.aggregate_type = 'order' AND o.aggregate_id = s.payload->>'orderId'
-                  AND o.event_type = 'OrderCancelled');
-```
-
-**What the invariant query checks.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The query joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
+1. **A cancelled order with its payment captured and not refunded.** It counts the `PaymentCaptured` and the `PaymentRefunded` events of the order's payment, `pay-<orderId>`, for every order with an `OrderCancelled`. It is empty because every `OrderCancelled` — a customer's, an `ADMIN`'s or the saga's compensation — starts the undo of the order (Chapter 11, Step 5c), whose `CancelPayment` refunds a captured payment, and a capture that is recorded after a void or a failure is refunded in the same append.
+2. **A cancelled order still holding stock.** For every order with an `OrderCancelled` it adds up, per product, what the inventory stream reserved for the order and subtracts what it released or committed; a sum other than zero is a row. It is empty because the undo sends `ReleaseStock` for every line, and a reservation stored after an earlier cancellation's undo ran is released by the undo of the next `OrderCancelled`, which the saga's compensation always produces.
+3. **Stock reserved twice for one order at one product, or released or committed beyond its reservation.** It groups the order's stock events per product. It is empty because the inventory aggregate holds one reservation per order and product, and a release or a confirmation acts only on that reservation and stores nothing when it is not there — a second release, or a release after the shipment, changes nothing.
+4. **A payment captured twice, or refunded beyond its capture.** It groups a payment's events. It is empty because of what `PaymentDecider` does with each command in each status (Chapter 11, Step 1): a capture is recorded once, `CancelPayment` voids a pending payment, refunds a captured one and stores nothing for a payment that is already refunded, voided or failed.
+5. **An order both shipped and cancelled.** It is empty because the order aggregate refuses a cancellation of a shipped or delivered order, and a shipment of a cancelled one.
+6. **A confirmed order with a line that was never reserved in the line's quantity, or a shipped order with a line whose reservation was never committed in the line's quantity.** The first half compares the lines of `OrderPlaced` with the `StockReserved` events of the order, product and quantity; the second compares the lines of `OrderShipped` with its `ReservationConfirmed` events. A reservation of 1 for a line of 3 is a row. It is empty because the saga confirms an order only after every line is reserved, and the order shipment process manager (Chapter 11, Step 5c) sends `ConfirmReservation` for every line of `OrderShipped`.
+7. **A confirmed order that is not cancelled and whose payment is not captured, or is refunded or voided.** It is empty because the saga confirms after the capture, and a payment is voided or refunded only by a cancellation of its order.
+8. **A forward command stored after its saga's compensation.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The statement joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
 
 ```sql
-SELECT f.idempotency_key, c.idempotency_key
+SELECT 'forward command stored after its saga''s compensation' AS violation,
+       substr(split_part(f.idempotency_key, ':', 2), 13) AS order_id,
+       f.idempotency_key || ' after ' || c.idempotency_key AS detail
   FROM command_inbox f
   JOIN command_inbox c
     ON split_part(c.idempotency_key, ':', 2) = split_part(f.idempotency_key, ':', 2)
@@ -780,7 +768,16 @@ SELECT f.idempotency_key, c.idempotency_key
      > (SELECT min(o) FROM unnest(c.global_offsets) o);
 ```
 
-Such a row is a forward command — `InitiatePayment`, `ReserveStock` or `ConfirmOrder` — stored after the saga began to undo the order: a payment initiated, stock reserved or an order confirmed after the compensation that was to cancel it. The fence makes the query return nothing: a forward command that reaches its commit after the claim is refused there, and stores no event and no inbox row. A command that stored no event has no offset, and the query cannot place it; every command of the fulfillment saga stores one.
+   Such a row is a forward command — `InitiatePayment`, `ReserveStock` or `ConfirmOrder` — stored after the saga began to undo the order: a payment initiated, stock reserved or an order confirmed after the compensation that was to cancel it. The statement is proven on crafted histories only: a saga whose compensation episode has begun is resumed, never advanced, so a forward command can reach the log after the compensation only when it was held at its commit while the claim landed, which the framework's own fence tests hold deterministically and the demo has no seam to reproduce. The fence makes the statement return nothing: a forward command that reaches its commit after the claim is refused there, and stores no event and no inbox row. A command that stored no event has no offset, and the statement cannot place it; every command of the fulfillment saga stores one.
+
+"Once the run is quiet" matters: while a saga is open, or while the cancellation process manager has not yet delivered an `OrderCancelled`, an order is legitimately between two steps, and checks 1, 2 and 6 would report it. That is why the script, and the tests, wait for the sagas to end and for the four subscriptions to reach the head of the event store before they run the file. Each statement was run against crafted histories that contain the one inconsistency it names (`MoneyAndStockInvariantsQueriesIT` in `spring-app/src/test`), so a statement that returns nothing is a statement that found nothing. Run the file by hand against the Compose stack when you want to look at the database yourself:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce \
+  -v ON_ERROR_STOP=1 -tA -F ' | ' < scripts/money-and-stock-invariants.sql
+```
+
+An empty answer means every check holds for every order in the database; a row names the check, the order and, for stock, the product. `-tA -F ' | '` prints one line per row; do not add `-e` or `-a`, which echo the statements.
 
 **The meter.** Each refused forward command counts one `streamrune.saga.forward_commands_fenced` sample on the backend whose step dispatched it (Chapter 15):
 
@@ -793,7 +790,9 @@ A backend that has refused none answers `404`: the counter is registered on its 
 
 **What a handover logs.** Little. The saga subscription of the standby asks for the lease every polling interval and gets nothing while the dead leader's lease is live; once it has expired, the next attempt takes it, and the subscription starts to deliver from the shared checkpoint — no line marks the moment, and `role` turns `LEADING` in that backend's health. A leader stopped cleanly gives the lease back first, and the other backend takes over within one polling interval. The restarted backend logs one `INFO` line from its timeout runner at startup, `Saga type …OrderFulfillmentState: no subscription of this saga type is anchored in this process; …`, because on Spring the timeout runner bean starts before the saga subscription bean; after that it stands by without a word. The pages the dead leader had delivered but not yet checkpointed are delivered again by the new leader: whatever the dead leader had already applied is skipped on the row's last applied offset, and whatever it had dispatched is answered from the command inbox. A write of a saga row the new leader loses — to a deadline claim, or to the dead leader's last transaction if the database committed it — is run again in place and logged at `DEBUG` only, counted by `streamrune.saga.delivery_retried` (Chapter 15); only a third conflict in a row would reach the subscription and log a `Poll loop 'subscription 'order-fulfillment-saga'' failed` `ERROR`. A deadline claim on a saga whose forward command the dead leader left open in the database waits for that transaction to end, at most the event store's statement timeout. The `ERROR` lines `Snapshot save failed after commit on stream inventory:…` that both backends log with this profile are the inventory aggregate's snapshot, not the saga: the events are committed, and the next command on the stream snapshots again. Each refusal of a forward command logs an `INFO` line naming the saga, the refused command and the event's offset (`docker compose logs backend backend-2`).
 
-`TwoInstanceSagaIT` in `spring-app/src/test` runs the same check in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, a deadline of two seconds, timeout runners polling every 200 ms, the same delay, and a lease of 3 seconds (`streamrune.subscription.single-active-consumer.lease-ttl=3s`). After 50 orders it reads each context's role in-process (`leaseRole()` of the `orderFulfillmentSagaSubscription` bean), closes the context that leads, waits for the other to lead and starts a new context in the closed one's place. A closed context gives its leases back, so the survivor takes over within a polling interval of the close. It asserts that exactly one context leads before the restart, that the survivor leads after it and that exactly one leads once the new context is up; that every saga ends, that the invariant query returns nothing, and that the run compensated at least one saga at its deadline and completed at least one.
+`TwoInstanceSagaIT` in `spring-app/src/test` runs the same checks in the test suite: two contexts of the app in one JVM on a database of their own, 100 orders from eight client threads, a deadline of two seconds, timeout runners polling every 200 ms, the same delay, and a lease of 3 seconds (`streamrune.subscription.single-active-consumer.lease-ttl=3s`). After 50 orders it reads each context's role in-process (`leaseRole()` of the `orderFulfillmentSagaSubscription` bean), closes the context that leads, waits for the other to lead and starts a new context in the closed one's place. A closed context gives its leases back, so the survivor takes over within a polling interval of the close. Every third order has two lines (the second of two units), and a second set of threads follows up some of the orders as the script does — one in four cancelled at once (a `403` is asked again for up to twenty seconds), one in five cancelled once it reads `CONFIRMED`, one in seven shipped once it reads `CONFIRMED` and then refused its customer's cancellation with `400` — each request to whichever backend answers, under the same read lock the placing requests hold, so that the restart waits for them. It asserts that exactly one context leads before the restart, that the survivor leads after it and that exactly one leads once the new context is up; that every saga ends; that, once the four subscriptions have caught up with the event store, the file of checks returns no row for the test's orders; and that the run compensated at least one saga at its deadline, completed at least one, refunded the payment of at least one confirmed order and shipped at least one.
+
+Each app's own suite has a `MoneyAndStockInvariantsIT` with a mix of its own on a single backend: 24 orders from eight threads — every third with two lines (the second of two units), every fourth cancelled at once, every fifth cancelled once confirmed, every seventh shipped and refused its cancellation — and one order placed while the payment-failure switch of Step 7 is on. It waits until the test's sagas have ended and the four subscriptions are at the head, then runs the file over the test's orders, checks that each product's stock equals what was received less the open reservations and the committed quantity, and, in the Spring app, that the simulated gateway refunded every payment the event store shows refunded.
 
 Stop the stack and remove its volume when you are done:
 
