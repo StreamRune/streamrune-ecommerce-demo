@@ -5,10 +5,14 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.audit.AuditEntry;
+import org.streamrune.core.audit.AuditOutcome;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -24,7 +28,9 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewaySimulator;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
+import org.streamrune.quarkus.StreamRuneRequestFilter;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.OutboxFailedReplayer;
@@ -58,6 +64,8 @@ public class AdminController {
    */
   @Inject StreamRuneRequestContextHolder requestContext;
 
+  @Inject PostgresAuditStore auditStore;
+
   @GET
   @Path("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
@@ -80,8 +88,18 @@ public class AdminController {
   public Response retryDeadLetter(
       @PathParam("id") String id, @QueryParam("force") @DefaultValue("false") boolean force) {
     requireAdmin();
-    // A replay the inbox cannot deduplicate waits for the operator's ?force=true.
-    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    // A replay the inbox cannot deduplicate waits for the operator's ?force=true, and a forced
+    // replay is audited. The call runs inside the request's context, so the runner's WARN about a
+    // forced replay names the operator.
+    var commandId = new CommandId(id);
+    var result = new AtomicReference<DeadLetterRetryRunner.RetryOutcome>();
+    StreamRuneRequestFilter.withContext(
+        RequestCaller.of(requestContext),
+        () -> result.set(deadLetterRetryRunner.retry(commandId, force)));
+    var outcome = result.get();
+    if (force && outcome != DeadLetterRetryRunner.RetryOutcome.NOT_FOUND) {
+      auditForcedReplay(commandId, outcome);
+    }
     return switch (outcome) {
       case REPLAYED -> Response.ok(Map.of("outcome", outcome.name())).build();
       case NOT_FOUND -> Response.status(Response.Status.NOT_FOUND).build();
@@ -113,6 +131,30 @@ public class AdminController {
               .entity(Map.of("outcome", outcome.name()))
               .build();
     };
+  }
+
+  /**
+   * Records a forced replay in the audit log ({@code audit_log}, command type {@code
+   * DLQ_FORCED_REPLAY}): the entry's command id, the operator who forced it, {@code SUCCESS} when
+   * the command ran, otherwise {@code FAILURE} with the outcome. A forced replay overrides the
+   * runner's refusal to run a command the inbox cannot deduplicate, so the decision is the
+   * operator's and is kept beside the command's own audit rows.
+   */
+  private void auditForcedReplay(CommandId commandId, DeadLetterRetryRunner.RetryOutcome outcome) {
+    var caller = RequestCaller.of(requestContext);
+    boolean replayed = outcome == DeadLetterRetryRunner.RetryOutcome.REPLAYED;
+    auditStore.save(
+        new AuditEntry(
+            commandId,
+            "DLQ_FORCED_REPLAY",
+            null,
+            null,
+            caller.userId(),
+            Instant.now(),
+            replayed ? AuditOutcome.SUCCESS : AuditOutcome.FAILURE,
+            replayed ? null : outcome.name(),
+            0,
+            caller.correlationId()));
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */
