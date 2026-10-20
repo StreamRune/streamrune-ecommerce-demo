@@ -142,7 +142,7 @@ if (frameworkDir.isDirectory) {
 }
 ```
 
-With this block in place, Gradle resolves all `org.streamrune:*` coordinates directly from the framework source tree. No version number in the dependency declaration is required — the substitution rule handles it.
+With this block in place, Gradle resolves all `org.streamrune:*` coordinates directly from the framework source tree. No version number in the dependency declaration is required — the substitution rule handles it. The real file follows this block with a second one that prints which framework a build compiles against; Step 1 below shows the whole file.
 
 ### Path B — Publish to Maven Local
 
@@ -273,6 +273,41 @@ if (frameworkDir.isDirectory) {
     }
 }
 
+// Every build says which framework it compiles against: the sibling checkout and its revision, or
+// the published artifacts (a warning). -PrequireFrameworkSibling turns the second case into a
+// failure, for a run that must test the local framework source rather than a published build.
+// The notice is printed while this script runs. With the configuration cache on, a build that
+// reuses a cache entry runs no settings script and prints nothing; the guard still holds, because
+// the sibling directory and the property are inputs of the cache entry.
+val frameworkVersion: String? =
+    file("gradle/libs.versions.toml").takeIf { it.isFile }?.readLines()
+        ?.firstNotNullOfOrNull { Regex("""^streamrune\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+if (frameworkDir.isDirectory) {
+    val revision =
+        runCatching {
+            providers.exec {
+                commandLine("git", "-C", frameworkDir.path, "rev-parse", "--short", "HEAD")
+                isIgnoreExitValue = true
+            }.standardOutput.asText.get().trim()
+        }.getOrNull()
+    logger.lifecycle(
+        "StreamRune framework: composite ../streamrune @ ${revision?.ifEmpty { null } ?: "unknown revision"}")
+} else {
+    val published =
+        when {
+            frameworkVersion == null -> "the published artifacts"
+            frameworkVersion.endsWith("-SNAPSHOT") -> "Central snapshot $frameworkVersion"
+            else -> "Maven Central $frameworkVersion"
+        }
+    val message = "StreamRune framework: $published (no ../streamrune sibling)"
+    if (providers.gradleProperty("requireFrameworkSibling").map { it != "false" }.getOrElse(false)) {
+        throw GradleException(
+            "$message. -PrequireFrameworkSibling needs a framework checkout in ../streamrune: " +
+                "git clone https://github.com/StreamRune/streamrune.git ../streamrune")
+    }
+    logger.warn(message)
+}
+
 include(
     "domain",
     "commands",
@@ -282,11 +317,11 @@ include(
 )
 ```
 
-> **Directory placement (composite build):** The `file("../streamrune")` path in `settings.gradle.kts` is resolved relative to the project root. Your project directory must therefore sit **beside** the `streamrune/` checkout, not inside it or elsewhere. For example, if StreamRune is at `~/projects/streamrune`, create this project at `~/projects/ecommerce`. If you placed it somewhere else, either move the project or change the path in `settings.gradle.kts` to an absolute path pointing at your StreamRune checkout. If the directory check (`frameworkDir.isDirectory`) is false, Gradle silently skips the composite build and falls back to the published preview artifacts on the Maven Central snapshot repository (and to `mavenLocal()` only when you pass `-PuseMavenLocal=true`) — with no warning. If you then see compile errors for types that are present in the StreamRune source (e.g. `SubjectForgottenException`), the composite build failed to activate; check the path first.
+> **Directory placement (composite build):** The `file("../streamrune")` path in `settings.gradle.kts` is resolved relative to the project root. Your project directory must therefore sit **beside** the `streamrune/` checkout, not inside it or elsewhere. For example, if StreamRune is at `~/projects/streamrune`, create this project at `~/projects/ecommerce`. If you placed it somewhere else, either move the project or change the path in `settings.gradle.kts` to an absolute path pointing at your StreamRune checkout. If the directory check (`frameworkDir.isDirectory`) is false, Gradle skips the composite build and falls back to the published preview artifacts on the Maven Central snapshot repository (and to `mavenLocal()` only when you pass `-PuseMavenLocal=true`). Every build says which one it uses: `StreamRune framework: composite ../streamrune @ <revision>` with the checkout in place, the warning `StreamRune framework: Central snapshot 1.0.0-alpha-SNAPSHOT (no ../streamrune sibling)` without it. Pass `-PrequireFrameworkSibling` to make the second case fail the build. If you see compile errors for types that are present in the StreamRune source (e.g. `SubjectForgottenException`), look for that warning and check the path first.
 >
 > **Note:** `rootProject.name` does not affect composite build resolution. Gradle matches the included build by the directory path passed to `includeBuild(...)`, not by the project name. You may name the root project whatever you like.
 
-> The real demo's `settings.gradle.kts` also includes `"quarkus-app"` and `"micronaut-app"`, since it ships all three runtime apps. This tutorial targets Spring Boot, so those two modules are omitted here. Everything else in the file is identical.
+> The real demo's `settings.gradle.kts` also includes `"quarkus-app"` and `"micronaut-app"`, since it ships all three runtime apps, and `"notifications-service"`, which Chapter 13 adds. This tutorial targets Spring Boot, so the two runtime apps are omitted here. Everything else in the file is identical.
 
 Create the module directories:
 
