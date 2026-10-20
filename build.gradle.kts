@@ -50,11 +50,71 @@ subprojects {
         testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     }
 
+    // `check` runs spotlessCheck (Spotless's default), so `build` fails on a formatting violation.
     configure<com.diffplug.gradle.spotless.SpotlessExtension> {
-        setEnforceCheck(false)
         java {
             googleJavaFormat("1.34.1")
             removeUnusedImports()
+        }
+    }
+}
+
+// ── quickCheck — the fast lane ───────────────────────────────────────────────────────────────
+//
+// Compiles the main and test sources of every module, runs spotlessCheck and the tests of the shared
+// modules whose tests need no Docker and, when frontend/node_modules exists, type-checks and lints
+// the frontend. The suites of the three apps and the notifications service start Testcontainers and
+// are left to `build`. A green quickCheck is a fast signal, not a substitute for `./gradlew build`.
+val dockerFreeModules = listOf(":domain", ":commands", ":queries", ":projections")
+val frontendDir = file("frontend")
+val frontendDependencies = file("frontend/node_modules")
+val npm = if (System.getProperty("os.name").startsWith("Windows")) "npm.cmd" else "npm"
+
+val frontendChecks =
+    listOf("typecheck" to "Type-checks", "lint" to "Lints").map { (script, verb) ->
+        tasks.register<Exec>("frontend${script.replaceFirstChar { it.uppercase() }}") {
+            group = "verification"
+            description =
+                "$verb the frontend (npm run $script); skipped without frontend/node_modules, " +
+                    "needs npm on the PATH."
+            workingDir = frontendDir
+            commandLine(npm, "run", "-s", script)
+            val installed = frontendDependencies
+            onlyIf("frontend/node_modules exists") { installed.exists() }
+            // Exec resolves the command on the PATH Gradle runs with, which can lack npm (a daemon
+            // started from an IDE): say so instead of failing to start an unnamed process.
+            val command = npm
+            doFirst {
+                val onPath =
+                    System.getenv("PATH").orEmpty().split(File.pathSeparator)
+                        .any { File(it, command).canExecute() }
+                if (!onPath) {
+                    throw GradleException(
+                        "frontend/node_modules exists but `$command` is not on the PATH of this " +
+                            "Gradle build: install Node.js, or start Gradle from a shell where " +
+                            "`$command --version` works.")
+                }
+            }
+        }
+    }
+
+tasks.register("quickCheck") {
+    group = "verification"
+    description =
+        "Compiles every module, runs spotlessCheck and the tests of domain, commands, queries and " +
+            "projections, and type-checks and lints the frontend when frontend/node_modules exists."
+    dependsOn(
+        subprojects.map { "${it.path}:compileJava" },
+        subprojects.map { "${it.path}:compileTestJava" })
+    dependsOn(subprojects.map { "${it.path}:spotlessCheck" })
+    dependsOn(dockerFreeModules.map { "$it:test" })
+    dependsOn(frontendChecks)
+    val installed = frontendDependencies
+    doLast {
+        if (!installed.exists()) {
+            logger.lifecycle(
+                "quickCheck: the frontend was not checked (no frontend/node_modules; " +
+                    "run `npm ci` in frontend/ to include it)")
         }
     }
 }

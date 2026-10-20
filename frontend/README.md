@@ -104,6 +104,7 @@ the page is fulfilled once a shipment for it is received; without one the saga c
 
 ```bash
 npm run lint
+npm run typecheck    # tsc --noEmit; ./gradlew quickCheck in the repository root runs it and lint
 npm run build
 npm test             # Playwright; install the browser once with: npx playwright install chromium
 npm run test:live    # the same suite against a running backend, which it requires

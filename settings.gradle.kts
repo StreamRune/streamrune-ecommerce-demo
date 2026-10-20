@@ -23,6 +23,41 @@ if (frameworkDir.isDirectory) {
     }
 }
 
+// Every build says which framework it compiles against: the sibling checkout and its revision, or
+// the published artifacts (a warning). -PrequireFrameworkSibling turns the second case into a
+// failure, for a run that must test the local framework source rather than a published build.
+// The notice is printed while this script runs. With the configuration cache on, a build that
+// reuses a cache entry runs no settings script and prints nothing; the guard still holds, because
+// the sibling directory and the property are inputs of the cache entry.
+val frameworkVersion: String? =
+    file("gradle/libs.versions.toml").takeIf { it.isFile }?.readLines()
+        ?.firstNotNullOfOrNull { Regex("""^streamrune\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+if (frameworkDir.isDirectory) {
+    val revision =
+        runCatching {
+            providers.exec {
+                commandLine("git", "-C", frameworkDir.path, "rev-parse", "--short", "HEAD")
+                isIgnoreExitValue = true
+            }.standardOutput.asText.get().trim()
+        }.getOrNull()
+    logger.lifecycle(
+        "StreamRune framework: composite ../streamrune @ ${revision?.ifEmpty { null } ?: "unknown revision"}")
+} else {
+    val published =
+        when {
+            frameworkVersion == null -> "the published artifacts"
+            frameworkVersion.endsWith("-SNAPSHOT") -> "Central snapshot $frameworkVersion"
+            else -> "Maven Central $frameworkVersion"
+        }
+    val message = "StreamRune framework: $published (no ../streamrune sibling)"
+    if (providers.gradleProperty("requireFrameworkSibling").map { it != "false" }.getOrElse(false)) {
+        throw GradleException(
+            "$message. -PrequireFrameworkSibling needs a framework checkout in ../streamrune: " +
+                "git clone https://github.com/StreamRune/streamrune.git ../streamrune")
+    }
+    logger.warn(message)
+}
+
 include(
     "domain",
     "commands",
