@@ -1,10 +1,11 @@
 /**
  * Admin page: the page renders for every role (GUEST sees a "read-only"
  * notice, ADMIN the action buttons), and the dead-letter Retry button handles
- * each answer of `POST /api/admin/dead-letters/{id}/retry`.
+ * each answer of `POST /api/admin/dead-letters/{id}/retry`, and the discard
+ * (`DELETE /api/admin/dead-letters/{id}`) the confirm dialog offers.
  *
- * Uses mocked backend so the tests always run. `dead-letters.live.spec.ts`
- * drives the same Retry against a running backend.
+ * Uses mocked backend so the tests always run. `replay-safety.live.spec.ts`
+ * drives the same Retry and discard against a running backend.
  */
 
 import { test, expect, type Page, type Route } from "@playwright/test";
@@ -41,7 +42,7 @@ const ENTRY = {
 };
 
 const NOT_DEDUPLICATED =
-  "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry.";
+  "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check whether its effect is present: if it is missing, retry with ?force=true; if it is present, discard the entry (DELETE /api/admin/dead-letters/{id}).";
 
 /** One dead-letter entry listed, and every retry request answered by `answer` and recorded. */
 async function deadLetterRetries(
@@ -59,6 +60,20 @@ async function deadLetterRetries(
     return answer(route, url.searchParams.get("force") === "true");
   });
   await actAs(page, "ADMIN");
+  return sent;
+}
+
+/** Answers every discard of the entry with `answer` and records it. */
+async function deadLetterDiscards(
+  page: Page,
+  answer: (route: Route) => Promise<void>
+): Promise<string[]> {
+  const sent: string[] = [];
+  await page.route(`${BACKEND_URL}/api/admin/dead-letters/${ENTRY.commandId}`, (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    sent.push(new URL(route.request().url()).pathname);
+    return answer(route);
+  });
   return sent;
 }
 
@@ -99,7 +114,7 @@ test.describe("Admin page — dead-letter Retry", () => {
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByRole("heading", { name: "Replay AdjustStock anyway?" })).toBeVisible();
     await expect(dialog.getByText(NOT_DEDUPLICATED)).toBeVisible();
-    await expect(dialog.getByText(/checked that its effect is absent/)).toBeVisible();
+    await expect(dialog.getByText(/If the effect is absent, replay the entry/)).toBeVisible();
     expect(sent, "nothing is forced before the admin confirms").toEqual([RETRY]);
 
     await dialog.getByRole("button", { name: "The effect is absent: replay" }).click();
@@ -143,5 +158,62 @@ test.describe("Admin page — dead-letter Retry", () => {
     await page.getByRole("button", { name: "Retry" }).click();
 
     await expect(page.getByText(/This entry is gone/)).toBeVisible();
+  });
+
+  test("a 409 whose effect is present is discarded, and nothing is replayed", async ({ page }) => {
+    const retried = await deadLetterRetries(page, (route) =>
+      json(route, 409, { outcome: "NOT_DEDUPLICATED", message: NOT_DEDUPLICATED })
+    );
+    const discarded = await deadLetterDiscards(page, (route) =>
+      json(route, 200, { outcome: "DISCARDED" })
+    );
+
+    await page.goto("/admin");
+    await page.getByRole("button", { name: "Retry" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "The effect is present: discard" }).click();
+
+    await expect(page.getByText("Dead letter discarded: its command already ran")).toBeVisible();
+    await expect(dialog).toBeHidden();
+    expect(retried, "the discard is not a replay").toEqual([RETRY]);
+    expect(discarded).toEqual([`/api/admin/dead-letters/${ENTRY.commandId}`]);
+  });
+
+  test("a discard of an entry that is gone says so", async ({ page }) => {
+    await deadLetterRetries(page, (route) =>
+      json(route, 409, { outcome: "NOT_DEDUPLICATED", message: NOT_DEDUPLICATED })
+    );
+    await deadLetterDiscards(page, (route) => route.fulfill({ status: 404, body: "" }));
+
+    await page.goto("/admin");
+    await page.getByRole("button", { name: "Retry" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "The effect is present: discard" }).click();
+
+    await expect(page.getByText(/This entry is gone/)).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  test("while a decision is on its way, neither decision can be sent again", async ({ page }) => {
+    const retried = await deadLetterRetries(page, (route) =>
+      json(route, 409, { outcome: "NOT_DEDUPLICATED", message: NOT_DEDUPLICATED })
+    );
+    let answer: () => void = () => {};
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const discarded = await deadLetterDiscards(page, async (route) => {
+      await answered;
+      await json(route, 200, { outcome: "DISCARDED" });
+    });
+
+    await page.goto("/admin");
+    await page.getByRole("button", { name: "Retry" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "The effect is present: discard" }).click();
+
+    await expect(dialog.getByRole("button", { name: "Discarding…" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "The effect is absent: replay" })).toBeDisabled();
+    answer();
+    await expect(page.getByText("Dead letter discarded: its command already ran")).toBeVisible();
+    expect(discarded).toHaveLength(1);
+    expect(retried).toEqual([RETRY]);
   });
 });

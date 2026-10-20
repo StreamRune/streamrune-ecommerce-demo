@@ -3,9 +3,10 @@
  *
  * Retry on the Admin page: a dead-lettered command that ran without an
  * idempotency key is not replayed on a plain Retry. The backend answers `409`
- * with its reason, the page shows it and asks the admin to confirm that the
- * command's effect is absent, and only the confirmed replay (`?force=true`)
- * runs the command — once, with an audit row naming the admin.
+ * with its reason, and the page asks the admin to check the command's effect.
+ * When it is absent, the confirmed replay (`?force=true`) runs the command
+ * once; when it is present, the discard removes the entry and runs nothing.
+ * Either decision leaves an audit row naming the admin.
  *
  * The `Idempotency-Key` of a stock adjustment: the backend applies a request
  * sent twice with one key once.
@@ -24,8 +25,8 @@
  * Compose database the dead-letter test is skipped, and with
  * E2E_REQUIRE_BACKEND=1 it fails instead.
  *
- * What a run leaves behind: two products of its own with their stock
- * adjustments, and one DLQ_FORCED_REPLAY row in the audit log.
+ * What a run leaves behind: three products of its own with their stock
+ * adjustments, and a DLQ_FORCED_REPLAY and a DLQ_DISCARDED row in the audit log.
  */
 
 import { execFileSync } from "node:child_process";
@@ -88,6 +89,34 @@ async function createProduct(api: APIRequestContext, productId: string, stock: n
   expect(created.status(), await created.text()).toBe(200);
 }
 
+/** The entry of an adjustment by `quantity` whose event the store refused: no idempotency key. */
+function deadLetterAnAdjustment(
+  productId: string,
+  commandId: string,
+  quantity: number,
+  marker: string
+): void {
+  sql(
+    `INSERT INTO dead_letter_queue (command_id, command_type, payload, aggregate_type,
+       aggregate_id, error_type, error_message, attempts, first_attempt_at, user_id)
+     VALUES ('${commandId}',
+       'org.streamrune.ecommerce.domain.product.ProductCommand$AdjustStock',
+       '{"productId":"${productId}","quantityChange":${quantity},"reason":"replayed"}', 'product',
+       '${productId}', 'java.lang.IllegalStateException', '${marker}', 3, NOW(), 'admin-1')`
+  );
+}
+
+/** Skips the test unless the Compose stack's database answers; fails instead under E2E_REQUIRE_BACKEND. */
+function requireComposeDatabase(): void {
+  const database = composeDatabaseAnswers();
+  if (!database && process.env.E2E_REQUIRE_BACKEND === "1") {
+    throw new Error(
+      `E2E_REQUIRE_BACKEND=1, but the database of ${COMPOSE_FILE} does not answer (docker compose exec postgres)`
+    );
+  }
+  test.skip(!database, "the Compose stack's database is not reachable");
+}
+
 async function stockOf(api: APIRequestContext, productId: string): Promise<number | null> {
   const res = await api.get(`${BACKEND_URL}/api/products/${productId}`);
   return res.ok() ? ((await res.json()) as { stock: number }).stock : null;
@@ -121,13 +150,7 @@ test.describe("Replay safety against a running backend", () => {
   test("Retry of an unkeyed dead letter asks the admin first, and the confirmed replay runs it once", async ({
     page,
   }) => {
-    const database = composeDatabaseAnswers();
-    if (!database && process.env.E2E_REQUIRE_BACKEND === "1") {
-      throw new Error(
-        `E2E_REQUIRE_BACKEND=1, but the database of ${COMPOSE_FILE} does not answer (docker compose exec postgres)`
-      );
-    }
-    test.skip(!database, "the Compose stack's database is not reachable");
+    requireComposeDatabase();
 
     const suffix = Date.now().toString(36);
     const productId = `prod-dlq-${suffix}`;
@@ -136,15 +159,7 @@ test.describe("Replay safety against a running backend", () => {
     await createProduct(api, productId, 10);
     await expect.poll(() => stockOf(api, productId), SETTLED).toBe(10);
 
-    // The entry of an adjustment by +4 whose event the store refused: no idempotency key.
-    sql(
-      `INSERT INTO dead_letter_queue (command_id, command_type, payload, aggregate_type,
-         aggregate_id, error_type, error_message, attempts, first_attempt_at, user_id)
-       VALUES ('${commandId}',
-         'org.streamrune.ecommerce.domain.product.ProductCommand$AdjustStock',
-         '{"productId":"${productId}","quantityChange":4,"reason":"replayed"}', 'product',
-         '${productId}', 'java.lang.IllegalStateException', '${marker}', 3, NOW(), 'admin-1')`
-    );
+    deadLetterAnAdjustment(productId, commandId, 4, marker);
 
     await actAs(page, "ADMIN");
     await page.goto("/admin");
@@ -181,6 +196,48 @@ test.describe("Replay safety against a running backend", () => {
           WHERE command_id = '${commandId}' AND command_type = 'DLQ_FORCED_REPLAY'`
       ),
       "the forced replay is audited with the admin who confirmed it"
+    ).toBe("admin-1 SUCCESS");
+  });
+
+  test("Retry of an unkeyed dead letter whose effect is present discards it, and nothing runs", async ({
+    page,
+  }) => {
+    requireComposeDatabase();
+
+    const suffix = Date.now().toString(36);
+    const productId = `prod-dlq-discard-${suffix}`;
+    const commandId = randomUUID();
+    const marker = `replay-safety discard probe ${suffix}`;
+    await createProduct(api, productId, 10);
+    await expect.poll(() => stockOf(api, productId), SETTLED).toBe(10);
+    deadLetterAnAdjustment(productId, commandId, 4, marker);
+
+    await actAs(page, "ADMIN");
+    await page.goto("/admin");
+    const entry = page.getByRole("row").filter({ hasText: marker });
+    await expect(entry).toBeVisible(SETTLED);
+    await entry.getByRole("button", { name: "Retry" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(/if it is present, discard the entry/)).toBeVisible();
+
+    const discarded = page.waitForResponse(
+      (r) =>
+        new URL(r.url()).pathname === `/api/admin/dead-letters/${commandId}` &&
+        r.request().method() === "DELETE"
+    );
+    await dialog.getByRole("button", { name: "The effect is present: discard" }).click();
+    expect((await discarded).status()).toBe(200);
+    await expect(page.getByText("Dead letter discarded: its command already ran")).toBeVisible();
+    await expect(entry).toBeHidden(SETTLED);
+
+    expect(sql(`SELECT count(*) FROM dead_letter_queue WHERE command_id = '${commandId}'`)).toBe("0");
+    expect(await stockOf(api, productId), "a discard runs nothing").toBe(10);
+    expect(
+      sql(
+        `SELECT user_id || ' ' || outcome FROM audit_log
+          WHERE command_id = '${commandId}' AND command_type = 'DLQ_DISCARDED'`
+      ),
+      "the discard is audited with the admin who decided it"
     ).toBe("admin-1 SUCCESS");
   });
 

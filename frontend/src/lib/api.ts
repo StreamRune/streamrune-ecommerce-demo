@@ -341,7 +341,8 @@ export function fetchDeadLetters(): Promise<DeadLetterEntry[]> {
  * `REPLAYED` once the command ran. A refusal arrives as an ApiError: `409` when
  * the backend cannot tell a replay from a second execution (the command ran
  * without an idempotency key, or its key may already be gone from the inbox) —
- * its `detail` says what to check, and `force` replays the entry anyway; `404`
+ * its `detail` says what to check, and `force` replays the entry anyway
+ * (`discardDeadLetter` removes it instead); `404`
  * when the entry is gone; `503` while the command bus admits nothing more.
  */
 export function retryDeadLetter(
@@ -352,6 +353,15 @@ export function retryDeadLetter(
   return apiFetch(`/api/admin/dead-letters/${segment(commandId)}/retry${query}`, {
     method: "POST",
   });
+}
+
+/**
+ * `DELETE /api/admin/dead-letters/{commandId}`: removes an entry whose command
+ * already ran (its effect is present), so that it is never replayed. `200` with
+ * the outcome `DISCARDED`; `404` when the entry is gone.
+ */
+export function discardDeadLetter(commandId: string): Promise<DeadLetterRetryAnswer> {
+  return apiFetch(`/api/admin/dead-letters/${segment(commandId)}`, { method: "DELETE" });
 }
 
 export function fetchOutbox(): Promise<OutboxEntry[]> {

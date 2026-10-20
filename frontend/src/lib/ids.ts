@@ -17,8 +17,9 @@ export function newId(kind: IdKind): string {
 
 /**
  * A fresh `Idempotency-Key` for one user action: a stock adjustment or a
- * received shipment. The page's own retry of that action sends it again, so the
- * backend applies the change once.
+ * received shipment. A dialog takes one when it opens and another when its
+ * fields change; the page's own retry and a resubmit of the unchanged dialog
+ * send it again, so the backend applies the change once.
  */
 export function newIdempotencyKey(): string {
   return crypto.randomUUID();

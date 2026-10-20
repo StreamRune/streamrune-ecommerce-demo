@@ -15,6 +15,7 @@ import {
   exportData,
   forgetCustomer,
   retryDeadLetter,
+  discardDeadLetter,
   togglePaymentFailure,
   injectSagaFailure,
   ApiError,
@@ -57,7 +58,7 @@ export function useCreateProduct() {
   return useInvalidatingMutation(createProduct, [["products"]]);
 }
 
-/** The caller picks `idempotencyKey` once per user action (`newIdempotencyKey`). */
+/** The caller picks `idempotencyKey` per user action (`newIdempotencyKey`) and resends it unchanged. */
 export function useAdjustStock() {
   return useInvalidatingMutation(
     ({
@@ -91,7 +92,7 @@ export function useDiscontinueProduct() {
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
-/** The caller picks `idempotencyKey` once per user action (`newIdempotencyKey`). */
+/** The caller picks `idempotencyKey` per user action (`newIdempotencyKey`) and resends it unchanged. */
 export function useReceiveShipment() {
   return useInvalidatingMutation(
     ({
@@ -174,6 +175,14 @@ export function useForgetCustomer() {
 export function useRetryDeadLetter() {
   return useInvalidatingMutation(
     ({ id, force }: { id: string; force: boolean }) => retryDeadLetter(id, force),
+    [["admin", "dead-letters"]]
+  );
+}
+
+/** Removes an entry whose effect is present, once the admin has checked it. */
+export function useDiscardDeadLetter() {
+  return useInvalidatingMutation(
+    (id: string) => discardDeadLetter(id),
     [["admin", "dead-letters"]]
   );
 }

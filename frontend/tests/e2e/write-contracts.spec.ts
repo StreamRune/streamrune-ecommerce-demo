@@ -528,6 +528,48 @@ test.describe("Products — the commands the page sends", () => {
     expect(received[0].idempotencyKey).toMatch(uuid);
     expect(received[0].idempotencyKey).not.toBe(keys[0]);
   });
+
+  test("after the page gives up, a resubmit of the unchanged Adjust Stock dialog sends the same Idempotency-Key, an edited one a new key", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    // The first submit and the page's two retries of it get no answer; then the backend answers.
+    let lost = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      lost++ < 3 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    await pickRowAction(page, "Adjust Stock");
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText(/Failed to fetch|API error/).first()).toBeVisible({ timeout: 15_000 });
+    expect(adjusted).toHaveLength(3);
+
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible();
+
+    await pickRowAction(page, "Adjust Stock");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByLabel(/Delta/).fill("6");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted").first()).toBeVisible();
+
+    const keys = adjusted.map((c) => c.idempotencyKey);
+    expect(keys).toHaveLength(5);
+    expect(new Set(keys.slice(0, 4)).size, "one adjustment, one key").toBe(1);
+    expect(keys[4], "an edited dialog is another adjustment").not.toBe(keys[0]);
+    expect(adjusted.map((c) => c.body)).toEqual([
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 6 },
+    ]);
+  });
 });
 
 test.describe("Admin and Fulfillment — what the page reads and sends", () => {

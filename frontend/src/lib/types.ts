@@ -153,7 +153,7 @@ export interface DeadLetterEntry {
   lastAttemptAt: string | null;
 }
 
-/** What `POST /api/admin/dead-letters/{commandId}/retry` answers: the runner's outcome, and why when it refused. */
+/** What the retry and discard of a dead-letter entry answer: the outcome, and why when the backend refused. */
 export interface DeadLetterRetryAnswer {
   outcome: string;
   message?: string;
