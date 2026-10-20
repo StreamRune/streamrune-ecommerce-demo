@@ -561,7 +561,8 @@ public class StreamRuneConfig {
       PostgresDeadLetterQueue dlq,
       VirtualThreadCommandBus commandBus,
       PostgresCryptoEngine cryptoEngine,
-      BackgroundRelayHealthContributor relayHealth) {
+      BackgroundRelayHealthContributor relayHealth,
+      org.streamrune.spring.StreamRuneProperties properties) {
     var runner =
         DeadLetterRetryRunner.builder()
             .deadLetterQueue(dlq)
@@ -572,6 +573,8 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .build();
     relayHealth.registerDlqRetryRunner(runner);
     runner.start();

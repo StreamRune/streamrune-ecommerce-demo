@@ -263,12 +263,30 @@ public class AdminController {
   }
 
   @PostMapping("/dead-letters/{id}/retry")
-  public ResponseEntity<Void> retryDeadLetter(@PathVariable String id) {
+  public ResponseEntity<Map<String, String>> retryDeadLetter(
+      @PathVariable String id, @RequestParam(defaultValue = "false") boolean force) {
     requireAdmin();
     // Re-dispatch the dead-lettered command through the bus (under DLQ_REPLAY + its original
-    // request context); discarded on success, attempt count bumped on failure. 404 if no entry.
-    boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
-    return retried ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
+    // request context); discarded on success, attempt count bumped on failure. A replay the inbox
+    // cannot deduplicate waits for the operator's ?force=true.
+    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    return switch (outcome) {
+      case REPLAYED -> ResponseEntity.ok(Map.of("outcome", outcome.name()));
+      case NOT_FOUND -> ResponseEntity.notFound().build();
+      case NOT_DEDUPLICATED ->
+          ResponseEntity.status(HttpStatus.CONFLICT)
+              .body(Map.of("outcome", outcome.name(), "message", "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case STALE_REPLAY_BLOCKED ->
+          ResponseEntity.status(HttpStatus.CONFLICT)
+              .body(Map.of("outcome", outcome.name(), "message", "The entry is older than the command-inbox retention window, so a replay may not be deduplicated. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case ADMISSION_REFUSED ->
+          ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+              .header("Retry-After", "5")
+              .body(Map.of("outcome", outcome.name()));
+      case FAILED ->
+          ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+              .body(Map.of("outcome", outcome.name()));
+    };
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */
@@ -503,7 +521,7 @@ public class AdminController {
 
 > The constructor now also injects `PaymentGatewayCircuitBreaker` (from Chapter 12), so `/circuit-breaker` reports both the command-bus breaker (`state`) and the payment-gateway breaker (`paymentGateway`). It takes the outbox replayer as an `ObjectProvider<OutboxFailedReplayer>` rather than the replayer itself: the framework auto-configures `OutboxFailedReplayer` only while `streamrune.outbox.enabled` is `true`, so with the outbox switched off the controller still starts and the two outbox operations answer `503`.
 
-`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id))`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The method returns `200 OK` when an entry was found and retried, or `404 Not Found` when no entry exists for that id. This is the same `retry(CommandId)` operation the background `DeadLetterRetryRunner` performs on its own schedule — the endpoint just lets an operator trigger a single entry immediately.
+`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id))`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint maps the runner's `RetryOutcome`: `200 OK` for `REPLAYED`, `404 Not Found` when no entry exists for that id, `409 Conflict` with a message for `NOT_DEDUPLICATED` (the command carries no idempotency key, so if its caller already retried it a replay applies it twice — the operator checks, then retries with `?force=true` or discards the entry) and for `STALE_REPLAY_BLOCKED` (a keyed entry older than the inbox window), `503` with `Retry-After` for `ADMISSION_REFUSED` and `500` for `FAILED`. This is the same `retry(CommandId)` operation the background `DeadLetterRetryRunner` performs on its own schedule — the endpoint just lets an operator trigger a single entry immediately.
 
 The `/outbox` endpoint lists `PENDING` entries with `outboxStore.findByStatus(OutboxStatus.PENDING, limit)`. It deliberately does **not** call `loadPending`: that method *claims* — it moves every returned row to `IN_PROGRESS` under the caller's lease, so an admin page refreshing the list would stall delivery of every listed aggregate for two minutes. `findByStatus` is read-only and safe while the relay polls.
 

@@ -605,7 +605,10 @@ public class StreamRuneProducer {
   @Produces
   @Singleton
   public DeadLetterRetryRunner deadLetterRetryRunner(
-      DeadLetterQueue dlq, CommandBus commandBus, PostgresCryptoEngine cryptoEngine) {
+      DeadLetterQueue dlq,
+      CommandBus commandBus,
+      PostgresCryptoEngine cryptoEngine,
+      StreamRuneQuarkusProperties properties) {
     return DeadLetterRetryRunner.builder()
         .deadLetterQueue(dlq)
         .commandBus(commandBus)
@@ -615,7 +618,15 @@ public class StreamRuneProducer {
         .registerCommand(CustomerCommand.class)
         .registerCommand(PaymentCommand.class)
         .registerCommand(InventoryCommand.class)
-        .policy(new DeadLetterRetryPolicy(5, Duration.ofSeconds(60), 2.0, false))
+        .policy(
+            new DeadLetterRetryPolicy(
+                5,
+                Duration.ofSeconds(60),
+                2.0,
+                false,
+                DeadLetterRetryPolicy.UnkeyedReplay.OPERATOR_ONLY))
+        // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
+        .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
         .pollInterval(Duration.ofSeconds(60))
         .build();
   }

@@ -79,10 +79,38 @@ public class AdminController {
   }
 
   @Post("/dead-letters/{id}/retry")
-  public HttpResponse<Void> retryDeadLetter(@PathVariable String id) {
+  public HttpResponse<Map<String, String>> retryDeadLetter(
+      @PathVariable String id, @QueryValue(defaultValue = "false") boolean force) {
     requireAdmin();
-    boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
-    return retried ? HttpResponse.ok() : HttpResponse.notFound();
+    // A replay the inbox cannot deduplicate waits for the operator's ?force=true.
+    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    return switch (outcome) {
+      case REPLAYED -> HttpResponse.ok(Map.of("outcome", outcome.name()));
+      case NOT_FOUND -> HttpResponse.notFound();
+      case NOT_DEDUPLICATED ->
+          HttpResponse.<Map<String, String>>status(HttpStatus.CONFLICT)
+              .body(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case STALE_REPLAY_BLOCKED ->
+          HttpResponse.<Map<String, String>>status(HttpStatus.CONFLICT)
+              .body(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The entry is older than the command-inbox retention window, so a replay may not be deduplicated. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case ADMISSION_REFUSED ->
+          HttpResponse.<Map<String, String>>status(HttpStatus.SERVICE_UNAVAILABLE)
+              .header("Retry-After", "5")
+              .body(Map.of("outcome", outcome.name()));
+      case FAILED ->
+          HttpResponse.<Map<String, String>>status(HttpStatus.INTERNAL_SERVER_ERROR)
+              .body(Map.of("outcome", outcome.name()));
+    };
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */

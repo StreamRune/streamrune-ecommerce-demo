@@ -77,10 +77,42 @@ public class AdminController {
 
   @POST
   @Path("/dead-letters/{id}/retry")
-  public Response retryDeadLetter(@PathParam("id") String id) {
+  public Response retryDeadLetter(
+      @PathParam("id") String id, @QueryParam("force") @DefaultValue("false") boolean force) {
     requireAdmin();
-    boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
-    return retried ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();
+    // A replay the inbox cannot deduplicate waits for the operator's ?force=true.
+    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    return switch (outcome) {
+      case REPLAYED -> Response.ok(Map.of("outcome", outcome.name())).build();
+      case NOT_FOUND -> Response.status(Response.Status.NOT_FOUND).build();
+      case NOT_DEDUPLICATED ->
+          Response.status(Response.Status.CONFLICT)
+              .entity(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry."))
+              .build();
+      case STALE_REPLAY_BLOCKED ->
+          Response.status(Response.Status.CONFLICT)
+              .entity(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The entry is older than the command-inbox retention window, so a replay may not be deduplicated. Check that its effect is missing, then retry with ?force=true, or discard the entry."))
+              .build();
+      case ADMISSION_REFUSED ->
+          Response.status(Response.Status.SERVICE_UNAVAILABLE)
+              .header("Retry-After", "5")
+              .entity(Map.of("outcome", outcome.name()))
+              .build();
+      case FAILED ->
+          Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+              .entity(Map.of("outcome", outcome.name()))
+              .build();
+    };
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */

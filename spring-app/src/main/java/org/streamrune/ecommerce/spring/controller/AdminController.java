@@ -85,12 +85,40 @@ public class AdminController {
   }
 
   @PostMapping("/dead-letters/{id}/retry")
-  public ResponseEntity<Void> retryDeadLetter(@PathVariable String id) {
+  public ResponseEntity<Map<String, String>> retryDeadLetter(
+      @PathVariable String id, @RequestParam(defaultValue = "false") boolean force) {
     requireAdmin();
     // Re-dispatch the dead-lettered command through the bus (under DLQ_REPLAY + its original
-    // request context); discarded on success, attempt count bumped on failure. 404 if no entry.
-    boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
-    return retried ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
+    // request context); discarded on success, attempt count bumped on failure. A replay the inbox
+    // cannot deduplicate waits for the operator's ?force=true.
+    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    return switch (outcome) {
+      case REPLAYED -> ResponseEntity.ok(Map.of("outcome", outcome.name()));
+      case NOT_FOUND -> ResponseEntity.notFound().build();
+      case NOT_DEDUPLICATED ->
+          ResponseEntity.status(HttpStatus.CONFLICT)
+              .body(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case STALE_REPLAY_BLOCKED ->
+          ResponseEntity.status(HttpStatus.CONFLICT)
+              .body(
+                  Map.of(
+                      "outcome",
+                      outcome.name(),
+                      "message",
+                      "The entry is older than the command-inbox retention window, so a replay may not be deduplicated. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+      case ADMISSION_REFUSED ->
+          ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+              .header("Retry-After", "5")
+              .body(Map.of("outcome", outcome.name()));
+      case FAILED ->
+          ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+              .body(Map.of("outcome", outcome.name()));
+    };
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */

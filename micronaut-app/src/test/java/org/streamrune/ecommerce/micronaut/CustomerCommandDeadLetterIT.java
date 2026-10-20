@@ -75,7 +75,9 @@ class CustomerCommandDeadLetterIT extends AbstractIntegrationTest {
         .contains(cid)
         .doesNotContain(NAME, email, ADDRESS, PHONE);
 
-    assertThat(deadLetterRetryRunner.retry(row.commandId())).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(row.commandId(), true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.REPLAYED);
 
     assertThat(deadLetterQueue.find(row.commandId()))
         .as("the replay succeeded and discarded the entry")
@@ -139,7 +141,9 @@ class CustomerCommandDeadLetterIT extends AbstractIntegrationTest {
                 CryptoShreddingModule.REDACTED,
                 CryptoShreddingModule.REDACTED));
 
-    assertThat(deadLetterRetryRunner.retry(row.commandId())).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(row.commandId(), true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.FAILED);
     var entry = deadLetterQueue.find(row.commandId());
     assertThat(entry).as("a redacted command is never replayed; the entry ages out").isPresent();
     assertThat(entry.get().dlqAttempts()).isPositive();

@@ -169,8 +169,9 @@ class AdminControllerIT extends AbstractIntegrationTest {
 
   @Test
   void retryDeadLetterWithUnknownIdReturns404() {
-    // DeadLetterRetryRunner.retry() returns false when no entry is found, and the controller maps
-    // that to 404 NOT FOUND. A valid UUID format is required because the DLQ table stores UUIDs.
+    // DeadLetterRetryRunner.retry() returns NOT_FOUND when no entry is found, and the controller
+    // maps that to 404 NOT FOUND. A valid UUID format is required because the DLQ table stores
+    // UUIDs.
     String unknownUuid = java.util.UUID.randomUUID().toString();
     client
         .post()
