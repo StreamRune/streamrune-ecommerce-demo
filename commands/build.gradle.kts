@@ -14,5 +14,7 @@ dependencies {
     implementation(libs.slf4j.api)
 
     testImplementation("org.streamrune:streamrune-test:$sr")
+    // CommandRefusalTest: LockAcquisitionException, the striped locker's LockException.
+    testImplementation("org.streamrune:streamrune-runtime:$sr")
     testImplementation(libs.assertj.core)
 }
