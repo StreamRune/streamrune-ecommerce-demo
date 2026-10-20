@@ -676,9 +676,9 @@ public class AdminController {
    * Discards a quarantined saga dead-letter entry without replaying it (e.g. an operator has
    * manually resolved it out-of-band) via {@link SagaDeadLetterReplayer#discard}: the removal is
    * scoped to the order-fulfillment saga type, and once the saga's backlog is empty the replayer
-   * releases its dead-letter shield, so the saga's live events are not held. Omit {@code
-   * sagaId} for an entry whose saga could never be identified (a routing method threw); a {@code
-   * null} saga id matches only such entries.
+   * releases its dead-letter shield, so the saga's live events are not held. Omit {@code sagaId}
+   * for an entry whose saga could never be identified (a routing method threw); a {@code null} saga
+   * id matches only such entries.
    */
   @DeleteMapping("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
