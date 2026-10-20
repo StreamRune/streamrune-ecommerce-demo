@@ -82,8 +82,7 @@ public class StreamRuneConfig {
 
   /**
    * Exposes the 21-event registry for the auto-configured {@code postgresEventStoreFactory} to pick
-   * up via {@code ObjectProvider<EventTypeRegistry>}. Replaces the inline registry that was
-   * previously embedded inside the hand-rolled {@code eventStore} bean.
+   * up via {@code ObjectProvider<EventTypeRegistry>}.
    */
   @Bean
   public EventTypeRegistry eventTypeRegistry() {
