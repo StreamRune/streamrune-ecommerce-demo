@@ -175,7 +175,7 @@ test.describe("Replay safety against a running backend", () => {
     );
 
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("heading", { name: "Replay AdjustStock anyway?" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustStock?" })).toBeVisible();
     await expect(dialog.getByText(/without an idempotency key/)).toBeVisible();
     expect(await stockOf(api, productId), "the refused Retry ran nothing").toBe(10);
 

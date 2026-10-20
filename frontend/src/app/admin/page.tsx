@@ -212,7 +212,7 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
         {pending && (
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Replay {pending.commandType.split(/[.$]/).pop()} anyway?</DialogTitle>
+              <DialogTitle>Replay or discard {pending.commandType.split(/[.$]/).pop()}?</DialogTitle>
               <DialogDescription>The backend did not replay this entry.</DialogDescription>
             </DialogHeader>
             <p className="text-sm">{pending.reason}</p>

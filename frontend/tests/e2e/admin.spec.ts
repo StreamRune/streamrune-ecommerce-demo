@@ -112,7 +112,7 @@ test.describe("Admin page — dead-letter Retry", () => {
     await page.getByRole("button", { name: "Retry" }).click();
 
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("heading", { name: "Replay AdjustStock anyway?" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustStock?" })).toBeVisible();
     await expect(dialog.getByText(NOT_DEDUPLICATED)).toBeVisible();
     await expect(dialog.getByText(/If the effect is absent, replay the entry/)).toBeVisible();
     expect(sent, "nothing is forced before the admin confirms").toEqual([RETRY]);
