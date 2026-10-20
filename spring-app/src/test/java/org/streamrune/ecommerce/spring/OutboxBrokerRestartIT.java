@@ -10,6 +10,7 @@ import java.time.Duration;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 import org.testcontainers.containers.Container.ExecResult;
 
 /**
@@ -22,20 +23,40 @@ import org.testcontainers.containers.Container.ExecResult;
  * publisher whose channel came back without confirm mode would still put the message on the queue,
  * but the confirm would never arrive: the entry would time out, stay claimed for the lease and be
  * published again, over and over, without ever reaching {@code DELIVERED}.
+ *
+ * <p>The publisher connects on its first publish, so the test first delivers an entry of its own
+ * and checks that the publisher is connected: the broker then closes an established connection,
+ * which the client's automatic recovery reopens, whatever the test classes before this one did.
  */
 class OutboxBrokerRestartIT extends AbstractIntegrationTest {
 
   @Autowired private DataSource dataSource;
 
+  @Autowired private LazyRabbitMqOutboxPublisher publisher;
+
   @Test
   void anEntryWrittenWhileTheBrokerIsDownIsConfirmedAndDeliveredAfterTheRestart() throws Exception {
     String orderId = "restart-ord-" + System.nanoTime();
     String entryId = "restart-entry-" + System.nanoTime();
+    String firstEntryId = "restart-first-" + System.nanoTime();
 
+    seedPendingOrderConfirmed(firstEntryId, "restart-first-ord-" + System.nanoTime());
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .pollInterval(Duration.ofMillis(300))
+        .untilAsserted(
+            () ->
+                assertThat(statusOf(firstEntryId))
+                    .as("an entry delivered before the restart")
+                    .isEqualTo("DELIVERED"));
+    assertThat(publisher.isConnected())
+        .as("the publisher has an established connection for the broker to close")
+        .isTrue();
     rabbitmqctl("stop_app");
     try {
       // Give the clients time to see the closed connections before the entry exists, so the
-      // relay's first attempt meets a closed channel and nothing is handed to the broker.
+      // relay's first attempt meets the publisher's closed channel, while the client recovers the
+      // connection, and nothing is handed to the broker.
       Thread.sleep(2_000);
       seedPendingOrderConfirmed(entryId, orderId);
       // Longer than the demo's 5-second outbox poll interval, so the relay attempts the entry
