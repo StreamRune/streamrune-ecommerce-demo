@@ -1,6 +1,8 @@
 "use client";
 
+import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
 import { Settings, RefreshCw } from "lucide-react";
 import {
   useCircuitBreaker,
@@ -9,7 +11,12 @@ import {
   usePaymentFailure,
   useHealth,
 } from "@/lib/queries";
-import { useRetryDeadLetter, useTogglePaymentFailure } from "@/lib/mutations";
+import {
+  useDiscardDeadLetter,
+  useRetryDeadLetter,
+  useTogglePaymentFailure,
+} from "@/lib/mutations";
+import { ApiError } from "@/lib/api";
 import { useRole } from "@/providers/role-provider";
 import {
   Card,
@@ -26,6 +33,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -68,16 +83,83 @@ function CircuitBreakerCard({ locked }: { locked: boolean }) {
 
 // ─── Dead Letter Queue Card ───────────────────────────────────────────────────
 
+/** An entry the backend refused to replay with `409`, waiting for the admin's decision. */
+interface PendingConfirmation {
+  commandId: string;
+  commandType: string;
+  /** The backend's reason: what the admin has to check before deciding. */
+  reason: string;
+}
+
+/**
+ * The command dead-letter queue. Retry asks the backend to replay one entry. The
+ * backend refuses (`409`) an entry it cannot tell from a second execution — a
+ * command that ran without an idempotency key, whose caller may already have
+ * retried it — and the card then shows the backend's reason and asks the admin
+ * to check the command's effect: when it is absent, the entry is replayed with
+ * `force`; when it is present, the entry is discarded. The backend records
+ * either decision in the audit log before it acts on it. Keyed entries the
+ * backend replays on its own schedule.
+ */
 function DeadLetterCard({ locked }: { locked: boolean }) {
   const { data: entries = [], isLoading } = useDeadLetters(!locked);
-  const { mutateAsync: retry, isPending } = useRetryDeadLetter();
+  const { mutateAsync: retry, isPending: isRetrying } = useRetryDeadLetter();
+  const { mutateAsync: discard, isPending: isDiscarding } = useDiscardDeadLetter();
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState<PendingConfirmation | null>(null);
+  // One request at a time: a second click lands before the pending state disables the buttons.
+  const inFlight = useRef(false);
+  const busy = isRetrying || isDiscarding;
 
-  async function handleRetry(id: string) {
+  /** What every answer but the expected ones means; `true` when it was handled. */
+  async function handleCommonRefusal(err: unknown): Promise<boolean> {
+    if (err instanceof ApiError && err.status === 503) {
+      toast.error("The backend is busy and admits no more commands: try again in a few seconds");
+      return true;
+    }
+    if (err instanceof ApiError && err.status === 404) {
+      toast.error("This entry is gone: it was replayed or removed in the meantime");
+      await queryClient.invalidateQueries({ queryKey: ["admin", "dead-letters"] });
+      return true;
+    }
+    return false;
+  }
+
+  async function handleRetry(entry: { commandId: string; commandType: string }, force: boolean) {
+    if (inFlight.current) return;
+    inFlight.current = true;
     try {
-      await retry(id);
-      toast.success("Dead letter retried");
+      await retry({ id: entry.commandId, force });
+      setPending(null);
+      toast.success(force ? "Dead letter replayed after your confirmation" : "Dead letter replayed");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to retry");
+      if (err instanceof ApiError && err.status === 409 && !force) {
+        setPending({ ...entry, reason: err.detail });
+        return;
+      }
+      setPending(null);
+      if (!(await handleCommonRefusal(err))) {
+        toast.error(err instanceof Error ? err.message : "Failed to retry");
+      }
+    } finally {
+      inFlight.current = false;
+    }
+  }
+
+  async function handleDiscard(entry: { commandId: string }) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    try {
+      await discard(entry.commandId);
+      setPending(null);
+      toast.success("Dead letter discarded: its command already ran");
+    } catch (err) {
+      setPending(null);
+      if (!(await handleCommonRefusal(err))) {
+        toast.error(err instanceof Error ? err.message : "Failed to discard");
+      }
+    } finally {
+      inFlight.current = false;
     }
   }
 
@@ -113,8 +195,8 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
                     <Button
                       variant="outline"
                       size="xs"
-                      onClick={() => handleRetry(entry.commandId)}
-                      disabled={isPending || locked}
+                      onClick={() => handleRetry(entry, false)}
+                      disabled={busy || locked}
                     >
                       <RefreshCw className="size-3" />
                       Retry
@@ -126,6 +208,31 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
           </Table>
         )}
       </CardContent>
+      <Dialog open={pending !== null} onOpenChange={(open) => { if (!open) setPending(null); }}>
+        {pending && (
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Replay or discard {pending.commandType.split(/[.$]/).pop()}?</DialogTitle>
+              <DialogDescription>The backend did not replay this entry.</DialogDescription>
+            </DialogHeader>
+            <p className="text-sm">{pending.reason}</p>
+            <p className="text-sm text-muted-foreground">
+              Check the command&apos;s effect first — for a stock adjustment, whether the
+              product&apos;s stock changed. If the effect is absent, replay the entry. If it is
+              present, the command already ran and a replay applies it a second time: discard the
+              entry. Either decision is recorded in the audit log under your id.
+            </p>
+            <DialogFooter showCloseButton>
+              <Button variant="outline" onClick={() => handleDiscard(pending)} disabled={busy}>
+                {isDiscarding ? "Discarding…" : "The effect is present: discard"}
+              </Button>
+              <Button onClick={() => handleRetry(pending, true)} disabled={busy}>
+                {isRetrying ? "Replaying…" : "The effect is absent: replay"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
+      </Dialog>
     </Card>
   );
 }

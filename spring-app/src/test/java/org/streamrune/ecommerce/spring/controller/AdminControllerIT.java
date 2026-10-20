@@ -169,8 +169,9 @@ class AdminControllerIT extends AbstractIntegrationTest {
 
   @Test
   void retryDeadLetterWithUnknownIdReturns404() {
-    // DeadLetterRetryRunner.retry() returns false when no entry is found, and the controller maps
-    // that to 404 NOT FOUND. A valid UUID format is required because the DLQ table stores UUIDs.
+    // DeadLetterRetryRunner.retry() returns NOT_FOUND when no entry is found, and the controller
+    // maps that to 404 NOT FOUND. A valid UUID format is required because the DLQ table stores
+    // UUIDs.
     String unknownUuid = java.util.UUID.randomUUID().toString();
     client
         .post()
@@ -233,6 +234,23 @@ class AdminControllerIT extends AbstractIntegrationTest {
     client
         .post()
         .uri("/api/admin/dead-letters/" + java.util.UUID.randomUUID() + "/retry")
+        .exchange()
+        .expectStatus()
+        .isForbidden();
+    // A forced replay and a discard are decisions of an ADMIN: the role check comes first.
+    client
+        .post()
+        .uri("/api/admin/dead-letters/" + java.util.UUID.randomUUID() + "/retry?force=true")
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
+        .exchange()
+        .expectStatus()
+        .isForbidden();
+    client
+        .delete()
+        .uri("/api/admin/dead-letters/" + java.util.UUID.randomUUID())
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
         .exchange()
         .expectStatus()
         .isForbidden();

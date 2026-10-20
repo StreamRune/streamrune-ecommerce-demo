@@ -80,6 +80,11 @@ app:
     # timeout-poll-interval. The same keys and defaults hold in the Quarkus and Micronaut apps.
     fulfillment-timeout: 15m
     timeout-poll-interval: 10s
+  dead-letter:
+    # How often the dead-letter retry runner (StreamRuneConfig#deadLetterRetryRunner) looks for
+    # entries due for a replay. It replays only entries of keyed commands on its own; an unkeyed
+    # entry waits for an operator. The same key and default hold in the Quarkus and Micronaut apps.
+    poll-interval: 60s
   chaos:
     # Demo-only: when above zero, every command a saga dispatches waits a random 0..max first
     # (SagaCommandDelayInterceptor), so a saga's deadline can pass while its forward command is in

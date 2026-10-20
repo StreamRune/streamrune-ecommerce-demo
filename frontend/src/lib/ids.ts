@@ -14,3 +14,13 @@ export type IdKind = "order" | "cust" | "prod";
 export function newId(kind: IdKind): string {
   return `${kind}-${crypto.randomUUID().slice(0, 8)}`;
 }
+
+/**
+ * A fresh `Idempotency-Key` for one user action: a stock adjustment or a
+ * received shipment. A dialog takes one when it opens and another when its
+ * fields change; the page's own retry and a resubmit of the unchanged dialog
+ * send it again, so the backend applies the change once.
+ */
+export function newIdempotencyKey(): string {
+  return crypto.randomUUID();
+}

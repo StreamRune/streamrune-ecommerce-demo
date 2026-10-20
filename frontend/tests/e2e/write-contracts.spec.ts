@@ -486,6 +486,90 @@ test.describe("Products — the commands the page sends", () => {
       ["POST", "/api/products/prod-widget/discontinue", "admin-1", null],
     ]);
   });
+
+  test("Adjust Stock and Receive Shipment send a fresh Idempotency-Key per submit, and the page's retry of a lost answer sends the same one", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    // The first adjustment's first request gets no answer (the connection fails); the page sends
+    // it again. Every later request is answered 200.
+    let lost = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      lost++ === 0 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
+    );
+    const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    for (const delta of ["5", "2"]) {
+      await pickRowAction(page, "Adjust Stock");
+      await page.getByRole("dialog").getByLabel(/Delta/).fill(delta);
+      await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
+      await expect(page.getByText("Stock adjusted").first()).toBeVisible();
+      await expect(page.getByRole("dialog")).toBeHidden();
+    }
+    await pickRowAction(page, "Receive Shipment");
+    await page.getByRole("dialog").getByLabel("Quantity").fill("5");
+    await page.getByRole("dialog").getByRole("button", { name: "Receive" }).click();
+    await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
+
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const keys = adjusted.map((c) => c.idempotencyKey);
+    expect(adjusted.map((c) => c.body)).toEqual([
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 2 },
+    ]);
+    keys.forEach((key) => expect(key).toMatch(uuid));
+    expect(keys[1], "the retry of the lost request carries its key").toBe(keys[0]);
+    expect(keys[2], "a new submit is a new adjustment").not.toBe(keys[0]);
+    expect(received).toHaveLength(1);
+    expect(received[0].idempotencyKey).toMatch(uuid);
+    expect(received[0].idempotencyKey).not.toBe(keys[0]);
+  });
+
+  test("after the page gives up, a resubmit of the unchanged Adjust Stock dialog sends the same Idempotency-Key, an edited one a new key", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    // The first submit and the page's two retries of it get no answer; then the backend answers.
+    let lost = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      lost++ < 3 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    await pickRowAction(page, "Adjust Stock");
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText(/Failed to fetch|API error/).first()).toBeVisible({ timeout: 15_000 });
+    expect(adjusted).toHaveLength(3);
+
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible();
+
+    await pickRowAction(page, "Adjust Stock");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByLabel(/Delta/).fill("6");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted").first()).toBeVisible();
+
+    const keys = adjusted.map((c) => c.idempotencyKey);
+    expect(keys).toHaveLength(5);
+    expect(new Set(keys.slice(0, 4)).size, "one adjustment, one key").toBe(1);
+    expect(keys[4], "an edited dialog is another adjustment").not.toBe(keys[0]);
+    expect(adjusted.map((c) => c.body)).toEqual([
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 6 },
+    ]);
+  });
 });
 
 test.describe("Admin and Fulfillment — what the page reads and sends", () => {
@@ -563,7 +647,13 @@ test.describe("Admin and Fulfillment — what the page reads and sends", () => {
         processedAt: null,
       },
     ]);
-    const retried = await answerCommands(page, "/api/admin/dead-letters/*/retry");
+    const retried = await answerCommands(page, "/api/admin/dead-letters/*/retry", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "REPLAYED" }),
+      })
+    );
     await actAs(page, "ADMIN");
 
     await page.goto("/admin");
@@ -579,7 +669,7 @@ test.describe("Admin and Fulfillment — what the page reads and sends", () => {
     await expect(page.getByText("out_01")).toBeVisible();
 
     await page.getByRole("button", { name: "Retry" }).click();
-    await expect(page.getByText("Dead letter retried")).toBeVisible();
+    await expect(page.getByText("Dead letter replayed")).toBeVisible();
     expect(retried.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
       ["POST", "/api/admin/dead-letters/cmd_0149t5g0p6KunF1kBsysAVmeg/retry", "admin-1", null],
     ]);

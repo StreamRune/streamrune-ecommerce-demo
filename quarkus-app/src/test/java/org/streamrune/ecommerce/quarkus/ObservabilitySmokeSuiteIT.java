@@ -196,6 +196,28 @@ class ObservabilitySmokeSuiteIT {
         .post("/api/admin/dead-letters/no-such-command/retry")
         .then()
         .statusCode(404);
+    // A forced replay and a discard are decisions of an ADMIN: the role check comes first.
+    given()
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
+        .when()
+        .post("/api/admin/dead-letters/no-such-command/retry?force=true")
+        .then()
+        .statusCode(403);
+    given()
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
+        .when()
+        .delete("/api/admin/dead-letters/no-such-command")
+        .then()
+        .statusCode(403);
+    given()
+        .header("X-User-Id", "admin-1")
+        .header("X-User-Role", "ADMIN")
+        .when()
+        .delete("/api/admin/dead-letters/no-such-command")
+        .then()
+        .statusCode(404);
 
     // The FAILED listing is a read: no role needed.
     given()

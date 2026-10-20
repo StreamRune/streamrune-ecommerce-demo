@@ -14,7 +14,7 @@ import {
   useReceiveShipment,
 } from "@/lib/mutations";
 import type { ProductView, ProductStatus } from "@/lib/types";
-import { newId } from "@/lib/ids";
+import { newId, newIdempotencyKey } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import {
   Table,
@@ -134,13 +134,20 @@ function CreateProductDialog() {
 function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: () => void }) {
   const [delta, setDelta] = useState("0");
   const [reason, setReason] = useState("");
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const { mutateAsync, isPending } = useAdjustStock();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
       // The backend's field is `quantity`: the change to apply, negative to remove.
-      await mutateAsync({ productId: product.productId, body: { quantity: parseInt(delta, 10), reason: reason || undefined } });
+      await mutateAsync({
+        productId: product.productId,
+        body: { quantity: parseInt(delta, 10), reason: reason || undefined },
+        // One key per adjustment: the page's own retry and a resubmit of the unchanged form send
+        // it again, so a change sent twice is applied once. Editing the form makes it a new one.
+        idempotencyKey,
+      });
       toast.success("Stock adjusted");
       onClose();
     } catch (err) {
@@ -156,11 +163,27 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
       <p className="text-sm text-muted-foreground">Current stock: {product.stock}</p>
       <div className="space-y-1">
         <Label htmlFor="as-delta">Delta (positive = add, negative = remove)</Label>
-        <Input id="as-delta" type="number" value={delta} onChange={(e) => setDelta(e.target.value)} required />
+        <Input
+          id="as-delta"
+          type="number"
+          value={delta}
+          onChange={(e) => {
+            setDelta(e.target.value);
+            setIdempotencyKey(newIdempotencyKey());
+          }}
+          required
+        />
       </div>
       <div className="space-y-1">
         <Label htmlFor="as-reason">Reason (optional)</Label>
-        <Input id="as-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
+        <Input
+          id="as-reason"
+          value={reason}
+          onChange={(e) => {
+            setReason(e.target.value);
+            setIdempotencyKey(newIdempotencyKey());
+          }}
+        />
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Adjust"}</Button>
@@ -203,12 +226,17 @@ function UpdatePriceForm({ product, onClose }: { product: ProductView; onClose: 
 
 function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClose: () => void }) {
   const [quantity, setQuantity] = useState("1");
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const { mutateAsync, isPending } = useReceiveShipment();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      await mutateAsync({ productId: product.productId, body: { quantity: parseInt(quantity, 10) } });
+      await mutateAsync({
+        productId: product.productId,
+        body: { quantity: parseInt(quantity, 10) },
+        idempotencyKey,
+      });
       toast.success("Shipment received into the inventory");
       onClose();
     } catch (err) {
@@ -227,7 +255,17 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
       </p>
       <div className="space-y-1">
         <Label htmlFor="rs-qty">Quantity</Label>
-        <Input id="rs-qty" type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+        <Input
+          id="rs-qty"
+          type="number"
+          min="1"
+          value={quantity}
+          onChange={(e) => {
+            setQuantity(e.target.value);
+            setIdempotencyKey(newIdempotencyKey());
+          }}
+          required
+        />
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Receive"}</Button>

@@ -601,11 +601,25 @@ public class StreamRuneProducer {
    * The application's {@code ObjectMapper} has no crypto module: it would read the ciphertext into
    * the command and replay it as the customer's data. If the customer was forgotten while the entry
    * waited, the fields decrypt to {@code [REDACTED]} and the runner does not replay the command.
+   *
+   * <p>{@code OPERATOR_ONLY}: on its schedule the runner replays only the entries the command inbox
+   * can deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
+   * command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}), because its
+   * caller may already have retried it successfully. {@code metrics} counts those entries ({@code
+   * streamrune.dlq.awaiting_operator}) and the operator retries refused as older than the inbox
+   * window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} ({@code PT60S} unless configured).
    */
   @Produces
   @Singleton
   public DeadLetterRetryRunner deadLetterRetryRunner(
-      DeadLetterQueue dlq, CommandBus commandBus, PostgresCryptoEngine cryptoEngine) {
+      DeadLetterQueue dlq,
+      CommandBus commandBus,
+      PostgresCryptoEngine cryptoEngine,
+      StreamRuneQuarkusProperties properties,
+      Instance<StreamRuneMetrics> metrics,
+      @ConfigProperty(name = "app.dead-letter.poll-interval", defaultValue = "PT60S")
+          Duration pollInterval) {
     return DeadLetterRetryRunner.builder()
         .deadLetterQueue(dlq)
         .commandBus(commandBus)
@@ -615,8 +629,17 @@ public class StreamRuneProducer {
         .registerCommand(CustomerCommand.class)
         .registerCommand(PaymentCommand.class)
         .registerCommand(InventoryCommand.class)
-        .policy(new DeadLetterRetryPolicy(5, Duration.ofSeconds(60), 2.0, false))
-        .pollInterval(Duration.ofSeconds(60))
+        .policy(
+            new DeadLetterRetryPolicy(
+                5,
+                Duration.ofSeconds(60),
+                2.0,
+                false,
+                DeadLetterRetryPolicy.UnkeyedReplay.OPERATOR_ONLY))
+        // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
+        .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+        .metrics(metrics.isResolvable() ? metrics.get() : null)
+        .pollInterval(pollInterval)
         .build();
   }
 

@@ -1,8 +1,10 @@
 package org.streamrune.ecommerce.micronaut.controller;
 
+import io.micronaut.core.annotation.Nullable;
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.*;
 import java.math.BigDecimal;
+import org.streamrune.ecommerce.commands.IdempotentDispatch;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
@@ -41,10 +43,23 @@ public class ProductCommandController {
     return HttpResponse.ok();
   }
 
+  /**
+   * A change of the stock by {@code quantity}: sent twice, it is applied twice, unless the client
+   * sends an {@code Idempotency-Key}. With the header the bus runs the command once per key and
+   * answers a repeat with the recorded result, and a dead-lettered adjustment is replayed under the
+   * same key, so the retry runner replays it on its schedule.
+   */
   @Put("/{id}/stock")
-  public HttpResponse<Void> adjustStock(@PathVariable String id, @Body AdjustStockRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
+  public HttpResponse<Void> adjustStock(
+      @PathVariable String id,
+      @Header(IdempotentDispatch.HEADER) @Nullable String idempotencyKey,
+      @Body AdjustStockRequest req) {
+    var caller = RequestCaller.current();
+    OwnerOrAdminAccess.requireAdmin(caller);
+    IdempotentDispatch.execute(
+        commandBus,
+        new ProductCommand.AdjustStock(id, req.quantity(), req.reason()),
+        IdempotentDispatch.keyFor(idempotencyKey, caller.userId()));
     return HttpResponse.ok();
   }
 

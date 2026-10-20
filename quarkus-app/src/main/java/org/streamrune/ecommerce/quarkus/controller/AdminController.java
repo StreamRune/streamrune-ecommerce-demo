@@ -5,10 +5,14 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.audit.AuditEntry;
+import org.streamrune.core.audit.AuditOutcome;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -24,7 +28,9 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.quarkus.config.PaymentGatewaySimulator;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
+import org.streamrune.quarkus.StreamRuneRequestFilter;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.OutboxFailedReplayer;
@@ -33,6 +39,24 @@ import org.streamrune.runtime.SagaDeadLetterReplayer;
 @Path("/api/admin")
 @Produces(MediaType.APPLICATION_JSON)
 public class AdminController {
+
+  /**
+   * What the operator does with an entry the runner refused: look at the command's effect, then
+   * replay it ({@code ?force=true}) or discard it ({@code DELETE /api/admin/dead-letters/{id}}).
+   */
+  private static final String REMEDY =
+      " Check whether its effect is present: if it is missing, retry with ?force=true; if it is"
+          + " present, discard the entry (DELETE /api/admin/dead-letters/{id}).";
+
+  private static final String NOT_DEDUPLICATED_MESSAGE =
+      "The command ran without an idempotency key: if its caller already retried it, a replay"
+          + " applies it twice."
+          + REMEDY;
+
+  private static final String STALE_REPLAY_MESSAGE =
+      "The entry is older than the command-inbox retention window, so a replay may not be"
+          + " deduplicated."
+          + REMEDY;
 
   @Inject CircuitBreakerCommandInterceptor circuitBreaker;
   @Inject PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker;
@@ -58,6 +82,8 @@ public class AdminController {
    */
   @Inject StreamRuneRequestContextHolder requestContext;
 
+  @Inject PostgresAuditStore auditStore;
+
   @GET
   @Path("/circuit-breaker")
   public Map<String, Object> circuitBreakerState() {
@@ -77,10 +103,90 @@ public class AdminController {
 
   @POST
   @Path("/dead-letters/{id}/retry")
-  public Response retryDeadLetter(@PathParam("id") String id) {
+  public Response retryDeadLetter(
+      @PathParam("id") String id, @QueryParam("force") @DefaultValue("false") boolean force) {
     requireAdmin();
-    boolean retried = deadLetterRetryRunner.retry(new CommandId(id));
-    return retried ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();
+    // A replay the inbox cannot deduplicate waits for the operator's ?force=true. A forced replay
+    // is audited first: if the audit write fails, nothing is replayed. The retry runs inside the
+    // request's context, so the runner's WARN about a forced replay names the operator.
+    var commandId = new CommandId(id);
+    if (force) {
+      var entry = deadLetterQueue.find(commandId);
+      if (entry.isEmpty()) {
+        return Response.status(Response.Status.NOT_FOUND).build();
+      }
+      auditOperatorDecision("DLQ_FORCED_REPLAY", entry.get());
+    }
+    var result = new AtomicReference<DeadLetterRetryRunner.RetryOutcome>();
+    StreamRuneRequestFilter.withContext(
+        RequestCaller.of(requestContext),
+        () -> result.set(deadLetterRetryRunner.retry(commandId, force)));
+    var outcome = result.get();
+    return switch (outcome) {
+      case REPLAYED -> Response.ok(Map.of("outcome", outcome.name())).build();
+      case NOT_FOUND -> Response.status(Response.Status.NOT_FOUND).build();
+      case NOT_DEDUPLICATED ->
+          Response.status(Response.Status.CONFLICT)
+              .entity(Map.of("outcome", outcome.name(), "message", NOT_DEDUPLICATED_MESSAGE))
+              .build();
+      case STALE_REPLAY_BLOCKED ->
+          Response.status(Response.Status.CONFLICT)
+              .entity(Map.of("outcome", outcome.name(), "message", STALE_REPLAY_MESSAGE))
+              .build();
+      case ADMISSION_REFUSED ->
+          Response.status(Response.Status.SERVICE_UNAVAILABLE)
+              .header("Retry-After", "5")
+              .entity(Map.of("outcome", outcome.name()))
+              .build();
+      case FAILED ->
+          Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+              .entity(Map.of("outcome", outcome.name()))
+              .build();
+    };
+  }
+
+  /**
+   * Discards a dead-letter entry whose effect is present: the command already ran (its caller
+   * retried it), so a replay would apply it a second time. {@code 404} when no entry exists. The
+   * decision is audited ({@code DLQ_DISCARDED}) before the entry is removed.
+   */
+  @DELETE
+  @Path("/dead-letters/{id}")
+  public Response discardDeadLetter(@PathParam("id") String id) {
+    requireAdmin();
+    var commandId = new CommandId(id);
+    var entry = deadLetterQueue.find(commandId);
+    if (entry.isEmpty()) {
+      return Response.status(Response.Status.NOT_FOUND).build();
+    }
+    auditOperatorDecision("DLQ_DISCARDED", entry.get());
+    deadLetterQueue.discard(commandId);
+    return Response.ok(Map.of("outcome", "DISCARDED")).build();
+  }
+
+  /**
+   * Records an operator's decision about a dead-letter entry in the audit log ({@code audit_log},
+   * beside the command's own rows): {@code DLQ_FORCED_REPLAY} or {@code DLQ_DISCARDED}, the entry's
+   * command id and stream, and the operator. The row is written before the decision is acted on, so
+   * it is the durable record of it: an audit write that fails throws, and nothing is replayed or
+   * discarded. The outcome of a forced replay shows elsewhere — a replayed entry is gone and its
+   * command has an audit row of its own, a failed one is still listed.
+   */
+  private void auditOperatorDecision(String decision, DeadLetterQueue.DeadLetterEntry entry) {
+    var caller = RequestCaller.of(requestContext);
+    var stream = entry.streamId();
+    auditStore.save(
+        new AuditEntry(
+            entry.commandId(),
+            decision,
+            stream == null ? null : stream.aggregateType(),
+            stream == null ? null : stream.aggregateId(),
+            caller.userId(),
+            Instant.now(),
+            AuditOutcome.SUCCESS,
+            null,
+            0,
+            caller.correlationId()));
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */

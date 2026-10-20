@@ -56,7 +56,9 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     assertThat(StreamRuneContext.CURRENT.isBound())
         .as("the replay runs where the retry runner's poll thread runs it: with no request at all")
         .isFalse();
-    assertThat(deadLetterRetryRunner.retry(commandId)).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(commandId, true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.REPLAYED);
 
     assertThat(deadLetterQueue.find(commandId))
         .as("a successful replay discards the entry")
@@ -71,9 +73,24 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     createProduct(pid);
     CommandId commandId = deadLetterDiscontinue(pid, UserId.of("admin-1"));
 
+    // Unkeyed: nothing deduplicates the replay against a retry by its caller, so a plain click
+    // is refused until the operator confirms with force.
     client
         .post()
         .uri("/api/admin/dead-letters/" + commandId.value() + "/retry")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "ops-1")
+        .exchange()
+        .expectStatus()
+        .isEqualTo(409)
+        .expectBody()
+        .jsonPath("$.outcome")
+        .isEqualTo("NOT_DEDUPLICATED");
+    assertThat(discontinuedEvents(pid)).isZero();
+
+    client
+        .post()
+        .uri("/api/admin/dead-letters/" + commandId.value() + "/retry?force=true")
         .header("X-User-Role", "ADMIN")
         .header("X-User-Id", "ops-1")
         .exchange()
@@ -92,7 +109,9 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     createProduct(pid);
     CommandId commandId = deadLetterDiscontinue(pid, null);
 
-    assertThat(deadLetterRetryRunner.retry(commandId)).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(commandId, true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.FAILED);
 
     var entry = deadLetterQueue.find(commandId);
     assertThat(entry)

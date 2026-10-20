@@ -212,18 +212,22 @@ dlq_sealed_root_replay_smoke() {
   # ReceiveShipment (registered only through its root, InventoryCommand), replay it through the
   # admin endpoint, and require the replay to have run — the entry is discarded and the inventory
   # stream holds the ShipmentReceived event. An unresolved type would answer 200 too, but leave the
-  # entry in place with a failed attempt and no event.
+  # entry in place with a failed attempt and no event. The entry carries an idempotency key, as one
+  # the bus writes for a keyed request does: the inbox deduplicates its replay, so a plain retry
+  # replays it (an unkeyed entry answers 409 until the operator adds ?force=true).
   local base="$1"
   local pid="dlq-smoke-$$-$(date +%s)"
   local cid="$pid-cmd"
   echo "  Running sealed-root DLQ replay probe (command $cid) …"
 
   if ! pg_sql "INSERT INTO dead_letter_queue (command_id, command_type, payload, aggregate_type,
-        aggregate_id, error_type, error_message, attempts, first_attempt_at, user_id)
+        aggregate_id, error_type, error_message, attempts, first_attempt_at, user_id,
+        idempotency_key)
       VALUES ('$cid',
         'org.streamrune.ecommerce.domain.inventory.InventoryCommand\$ReceiveShipment',
         '{\"productId\":\"$pid\",\"quantity\":7}', 'inventory', '$pid',
-        'java.lang.IllegalStateException', 'native smoke probe', 3, NOW(), 'smoke')" >/dev/null; then
+        'java.lang.IllegalStateException', 'native smoke probe', 3, NOW(), 'smoke',
+        'smoke|$cid')" >/dev/null; then
     echo "  ✗ Could not insert the dead-letter entry."
     return 1
   fi

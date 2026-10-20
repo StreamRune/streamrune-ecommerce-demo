@@ -204,6 +204,8 @@ export interface SentCommand {
   role: string | undefined;
   userId: string | undefined;
   contentType: string | undefined;
+  /** The `Idempotency-Key` header, which the stock and shipment writes send. */
+  idempotencyKey: string | undefined;
   /** The parsed JSON body, or null for a request without one. */
   body: Record<string, unknown> | null;
 }
@@ -233,6 +235,7 @@ export async function answerCommands(
       role: headers["x-user-role"],
       userId: headers["x-user-id"],
       contentType: headers["content-type"],
+      idempotencyKey: headers["idempotency-key"],
       body: data ? (JSON.parse(data) as Record<string, unknown>) : null,
     });
     return answer(route);

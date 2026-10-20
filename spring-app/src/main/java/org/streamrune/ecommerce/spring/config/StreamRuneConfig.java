@@ -555,13 +555,24 @@ public class StreamRuneConfig {
    * {@code streamRune} health component then reports it as {@code relay.dead-letter-retry} and
    * turns {@code DOWN} if the runner's poll thread dies, instead of reporting {@code UP} while
    * dead-letter entries stop being replayed.
+   *
+   * <p>The runner keeps the default policy, which replays on its schedule only the entries the
+   * command inbox can deduplicate: those of commands that ran under an idempotency key. An entry of
+   * an unkeyed command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}),
+   * because its caller may already have retried it successfully. {@code metrics} counts those
+   * entries ({@code streamrune.dlq.awaiting_operator}) and the operator retries refused as older
+   * than the inbox window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries
+   * every {@code app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Bean
   public DeadLetterRetryRunner deadLetterRetryRunner(
       PostgresDeadLetterQueue dlq,
       VirtualThreadCommandBus commandBus,
       PostgresCryptoEngine cryptoEngine,
-      BackgroundRelayHealthContributor relayHealth) {
+      BackgroundRelayHealthContributor relayHealth,
+      org.streamrune.spring.StreamRuneProperties properties,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      @Value("${app.dead-letter.poll-interval:60s}") Duration pollInterval) {
     var runner =
         DeadLetterRetryRunner.builder()
             .deadLetterQueue(dlq)
@@ -572,6 +583,10 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+            .pollInterval(pollInterval)
             .build();
     relayHealth.registerDlqRetryRunner(runner);
     runner.start();

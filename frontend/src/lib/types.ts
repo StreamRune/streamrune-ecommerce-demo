@@ -153,6 +153,12 @@ export interface DeadLetterEntry {
   lastAttemptAt: string | null;
 }
 
+/** What the retry and discard of a dead-letter entry answer: the outcome, and why when the backend refused. */
+export interface DeadLetterRetryAnswer {
+  outcome: string;
+  message?: string;
+}
+
 /**
  * One entry of GET /api/admin/outbox: an integration event waiting for the
  * broker. `payloadType` names the event, e.g. "OrderConfirmed".

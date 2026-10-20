@@ -119,10 +119,10 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
 | `POST` | `/api/products` | Create product | `ADMIN` |
-| `PUT` | `/api/products/{id}/stock` | Adjust stock | `ADMIN` |
+| `PUT` | `/api/products/{id}/stock` | Adjust stock by `quantity`. With an `Idempotency-Key` header the change is applied once per key (a repeat answers the first request's result), and a failed adjustment is replayed by the dead-letter runner on its schedule | `ADMIN` |
 | `PUT` | `/api/products/{id}/price` | Update price | `ADMIN` |
 | `POST` | `/api/products/{id}/discontinue` | Discontinue product | `ADMIN` (`@RequireRole`) |
-| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment into the inventory the fulfillment saga reserves from | `ADMIN` |
+| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment into the inventory the fulfillment saga reserves from; takes an `Idempotency-Key` like the stock adjustment | `ADMIN` |
 | `GET` | `/api/products/{id}` | Get product | anyone: the public catalogue |
 | `GET` | `/api/products` | List products | anyone: the public catalogue |
 
@@ -159,7 +159,9 @@ All of these answer `403` to everyone but an `ADMIN` (the role together with `X-
 | `GET` | `/api/audit/commands?limit=100` | The command audit log: who sent which command to which aggregate |
 | `GET` | `/api/admin/circuit-breaker`, `/api/admin/payment-failure` | Breaker states and the payment-failure flag |
 | `GET` | `/api/admin/dead-letters`, `/api/admin/outbox`, `/api/admin/outbox/failed`, `/api/admin/saga-dead-letters`, `/api/admin/sagas/faulted` | Dead-lettered commands, outbox entries, quarantined saga events, faulted sagas |
-| `POST`, `DELETE` | `/api/admin/…`, `/api/saga/fulfillments/{id}/inject-failure` | The recovery operations and the payment-failure toggle (tutorial chapters 11 to 14) |
+| `POST` | `/api/admin/dead-letters/{id}/retry` | Replays one dead-lettered command: `200` `REPLAYED`. A command that ran without an idempotency key (or whose key may be gone from the inbox) answers `409` with the reason until it is sent with `?force=true`, which the audit log records under the caller (`DLQ_FORCED_REPLAY`) before the replay runs; `404` without an entry, `503` with `Retry-After` while the bus admits nothing more. The dead-letter runner replays keyed entries on its own schedule and leaves unkeyed ones to this endpoint |
+| `DELETE` | `/api/admin/dead-letters/{id}` | Discards a dead-lettered command whose effect is present (its caller already retried it), so that nothing replays it: `200` `DISCARDED`, `404` without an entry. Recorded in the audit log under the caller (`DLQ_DISCARDED`) before the entry is removed |
+| `POST`, `DELETE` | `/api/admin/…`, `/api/saga/fulfillments/{id}/inject-failure` | The other recovery operations and the payment-failure toggle (tutorial chapters 11 to 14) |
 | `GET` | `/api/admin/health` | `{"status":"UP"}`, open to every caller |
 
 ### SSE & Events

@@ -66,7 +66,9 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     assertThat(StreamRuneContext.CURRENT.isBound())
         .as("the replay runs where the retry runner's poll thread runs it: with no request at all")
         .isFalse();
-    assertThat(deadLetterRetryRunner.retry(commandId)).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(commandId, true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.REPLAYED);
 
     assertThat(deadLetterQueue.find(commandId))
         .as("a successful replay discards the entry")
@@ -81,11 +83,29 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     createProduct(pid);
     CommandId commandId = deadLetterDiscontinue(pid, UserId.of("admin-1"));
 
+    // Unkeyed: nothing deduplicates the replay against a retry by its caller, so a plain click
+    // is refused until the operator confirms with force.
+    var refused =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            io.micronaut.http.client.exceptions.HttpClientResponseException.class,
+            () ->
+                client
+                    .toBlocking()
+                    .exchange(
+                        HttpRequest.POST(
+                                "/api/admin/dead-letters/" + commandId.value() + "/retry", null)
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "ops-1")));
+    assertThat(refused.getStatus().getCode()).isEqualTo(409);
+    assertThat(refused.getResponse().getBody(String.class).orElse("")).contains("NOT_DEDUPLICATED");
+    assertThat(discontinuedEvents(pid)).isZero();
+
     var response =
         client
             .toBlocking()
             .exchange(
-                HttpRequest.POST("/api/admin/dead-letters/" + commandId.value() + "/retry", null)
+                HttpRequest.POST(
+                        "/api/admin/dead-letters/" + commandId.value() + "/retry?force=true", null)
                     .header("X-User-Role", "ADMIN")
                     .header("X-User-Id", "ops-1"));
     assertThat(response.getStatus().getCode()).isEqualTo(200);
@@ -102,7 +122,9 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     createProduct(pid);
     CommandId commandId = deadLetterDiscontinue(pid, null);
 
-    assertThat(deadLetterRetryRunner.retry(commandId)).isTrue();
+    // The demo's commands carry no idempotency key: the replay is forced.
+    assertThat(deadLetterRetryRunner.retry(commandId, true))
+        .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.FAILED);
 
     var entry = deadLetterQueue.find(commandId);
     assertThat(entry)
