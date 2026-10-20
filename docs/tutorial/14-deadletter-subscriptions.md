@@ -1,6 +1,6 @@
 # Chapter 14: Dead Letter Queue & Subscriptions
 
-> **What you'll learn:** What to do when a projection fails to process an event, how to configure `ProjectionErrorStrategy.DLQ` per projection inside `MultiProjectionRunner` so that failed batches are durably stored instead of halting the system, and how `DeadLetterRetryRunner` automatically retries failed commands.
+> **What you'll learn:** What to do when a projection fails to process an event, how to configure `ProjectionErrorStrategy.DLQ` per projection inside `MultiProjectionRunner` so that failed batches are durably stored instead of halting the system, and how `DeadLetterRetryRunner` replays failed commands: on its own schedule the commands that carry an idempotency key, and the others only when an operator confirms that their effect is absent — because a replay of an unkeyed command whose caller already retried it is a second execution.
 
 ---
 
@@ -14,7 +14,7 @@ StreamRune gives you three choices when a projection fails to process a batch of
 - **`SKIP`** — log the failure and advance the offset past the failing batch. Guarantees liveness at the cost of potentially missing events silently.
 - **`DLQ`** — write the failed batch to a `ProjectionDeadLetterStore` and continue. The projection stays live; the failed batch is recorded for later inspection and replay. A replay (`ProjectionDeadLetterReplayer`, Step 7) takes the lock a live batch of the projection takes, so the two never run at the same time, and under `TRANSACTIONAL_LOCAL` it applies a range all-or-nothing through the replay transaction's repository. It is still at-least-once, and it applies the range after the events that followed it, so `process` must tolerate re-application and an older event after a newer one. Check both before you replay into a projection: of the demo's read models, products, customers and orders tolerate re-application but not an older event after a newer one (a dead-lettered `OrderPlaced` replayed after the live runner has processed that order's `OrderConfirmed` — a no-op then, because the row did not exist — leaves the order `CREATED`), and `InventoryProjection`'s counters tolerate neither. This is the right choice for production.
 
-In this chapter you will see how to configure `ProjectionErrorStrategy.DLQ` on individual projections inside the `MultiProjectionRunner` with `PostgresProjectionDeadLetterStore` as the persistent store (an optional hardening step: the demo's projections keep the default `HALT`), expose dead letter entries through `AdminController` (together with the outbox's blocked `FAILED` entries and their replay/skip operations, behind an ADMIN role check), look at the command-side `DeadLetterRetryRunner` that automatically retries failed commands, and wire the saga-side dead-letter admin endpoints (list/faulted/replay/discard) built on the `SagaDeadLetterReplayer` introduced in Chapter 11.
+In this chapter you will see how to configure `ProjectionErrorStrategy.DLQ` on individual projections inside the `MultiProjectionRunner` with `PostgresProjectionDeadLetterStore` as the persistent store (an optional hardening step: the demo's projections keep the default `HALT`), expose dead letter entries through `AdminController` (together with the outbox's blocked `FAILED` entries and their replay/skip operations, behind an ADMIN role check), look at the command-side `DeadLetterRetryRunner`, which replays keyed failed commands on its schedule and leaves unkeyed ones to an operator, give the stock adjustment an `Idempotency-Key` so that its failures are replayed safely, and wire the saga-side dead-letter admin endpoints (list/faulted/replay/discard) built on the `SagaDeadLetterReplayer` introduced in Chapter 11.
 
 ---
 
@@ -79,6 +79,8 @@ The bus stores the command as JSON, written by the mapper you pass to `.objectMa
 
 `DeadLetterRetryRunner` polls the `DeadLetterQueue` on a virtual thread, deserializes each stored command, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments a DLQ attempt counter so that poison messages eventually stop being retried.
 
+**Which entries the schedule replays.** A command lands in the queue because its first attempt failed on infrastructure, and the caller saw that failure. The caller may send the request again on its own, and that retry may succeed. A replay of the dead-letter entry afterwards is then a second execution of the same request: for `AdjustStock`, which changes the stock *by* a quantity, a second, silent change of the stock. The runner cannot tell this case from a command that never ran. It can rely on one thing: the command inbox (Chapter 11, Step 6). A command the caller sent with an idempotency key keeps that key in its entry, and the runner replays it under the same key, so if the caller's own retry already ran, the inbox answers the replay with the recorded result and nothing runs twice. The default policy (`DeadLetterRetryPolicy.DEFAULT`, `UnkeyedReplay.OPERATOR_ONLY`) therefore replays on the schedule only the entries of keyed commands. An entry of an unkeyed command waits for an operator, who checks whether its effect is there and then replays it on purpose (Step 5) — or leaves it, and the retention sweeper removes it after `streamrune.dead-letter.retention-max-age` (7 days, the inbox's window). Step 3b gives the demo's stock adjustment and shipment receipt their keys.
+
 You must tell the runner which Java types to use when deserializing each command type. The DLQ entry stores the command's fully-qualified class name (`Class#getName()`) — the **concrete** class, e.g. `InventoryCommand$ReceiveShipment` — and `registerCommand` keys each class by that same name, so the runner resolves a stored entry with one exact lookup. Two commands with the same simple name in different packages never collide. You do not have to list every concrete command: registering a sealed root such as `InventoryCommand.class` also registers every command it permits, recursively. The demo registers the five sealed command roots, the same roots the command bus routes to deciders, so a dead-lettered command of any of the five aggregates resolves.
 
 ```java
@@ -87,7 +89,10 @@ public DeadLetterRetryRunner deadLetterRetryRunner(
     PostgresDeadLetterQueue dlq,
     VirtualThreadCommandBus commandBus,
     PostgresCryptoEngine cryptoEngine,
-    BackgroundRelayHealthContributor relayHealth) {
+    BackgroundRelayHealthContributor relayHealth,
+    org.streamrune.spring.StreamRuneProperties properties,
+    ObjectProvider<StreamRuneMetrics> metrics,
+    @Value("${app.dead-letter.poll-interval:60s}") Duration pollInterval) {
 
   var runner =
       DeadLetterRetryRunner.builder()
@@ -99,6 +104,10 @@ public DeadLetterRetryRunner deadLetterRetryRunner(
           .registerCommand(CustomerCommand.class)
           .registerCommand(PaymentCommand.class)
           .registerCommand(InventoryCommand.class)
+          // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
+          .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+          .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+          .pollInterval(pollInterval)
           .build();
   relayHealth.registerDlqRetryRunner(runner);
   runner.start();
@@ -106,15 +115,92 @@ public DeadLetterRetryRunner deadLetterRetryRunner(
 }
 ```
 
+**`inboxRetentionMaxAge` closes the window in which a key is gone.** The inbox keeps keys for `streamrune.inbox.retention-max-age`, 7 days unless configured, and then prunes them. A keyed entry first received longer ago than that may no longer find its key, so the inbox could not recognise the caller's retry. The runner skips such an entry on the schedule, and the operator's Retry answers `STALE_REPLAY_BLOCKED` (Step 5). `properties.inbox().retentionMaxAge()` is the value the inbox sweeper uses, so the two cannot drift apart. The framework also refuses to start when the dead-letter retention is longer than the inbox's.
+
+**`metrics`** is the framework's `StreamRuneMetrics` bean (Chapter 15). The runner reports `streamrune.dlq.pending` (entries not yet exhausted), `streamrune.dlq.awaiting_operator` (entries the schedule will never replay: unkeyed ones, and keyed ones older than the inbox window) and `streamrune.dlq.stale_replay_blocked` (operator retries refused for that age). Alert on `awaiting_operator` above zero: it is work for a person, not a fault, so it does not turn the health endpoint `DOWN`. **`app.dead-letter.poll-interval`** (60 seconds in `application.yml`) is how often it looks for due entries; the integration tests set it to one second. `ObjectProvider`, `StreamRuneMetrics`, `Value` and `Duration` are imported in `StreamRuneConfig` already.
+
 `BackgroundRelayHealthContributor` (from `org.streamrune.runtime`) is the framework bean that tells the health endpoint whether each background relay is still running. The framework registers the relays it builds; this runner replaces the framework's, so the bean method registers it. The `streamRune` health component (Chapter 15) then turns `DOWN` if the runner's poll thread dies, instead of reporting `UP` while dead-letter entries stop being replayed.
 
 The runner reads the entries with the same kind of mapper the bus wrote them with, so the `@Encrypted` fields decrypt to the original values before the command is replayed. A mapper without the crypto module would read the Base64 ciphertext into the command's `String` fields and replay it as the customer's name and email. If the customer was forgotten while the entry waited, the fields decrypt to `[REDACTED]`; the runner then does not replay the command but counts a failed attempt, so the entry ages out under the retry policy.
 
-The five command interfaces are already imported in `StreamRuneConfig` for the command bus. The expansion reads `Class#getPermittedSubclasses()`, which a GraalVM native image answers only for a sealed type registered for reflection — for any other it reports the type as sealed with no permitted subclasses, and `registerCommand` then refuses to start the application rather than registering the root alone. The demo's `EcommerceNativeHints` registers the roots through `StreamRuneRuntimeHints.registerDomainPackages`, and the native smoke test (`scripts/native-image-smoke-test.sh spring`) replays a dead-lettered `InventoryCommand$ReceiveShipment` through `POST /api/admin/dead-letters/{id}/retry` to prove it (see Chapter 17, *Deploy to production*). The demo's Quarkus app registers the same five roots with its dead-letter runner and lists them in its `reachability-metadata.json`, because Quarkus' `@RegisterForReflection` does not make the image list permitted subclasses; `scripts/native-image-smoke-test.sh quarkus` runs the same replay (see Chapter 17, *Explore Quarkus and Micronaut variants*). The Micronaut app does the same: its runner registers the five roots, they are listed in its own `reachability-metadata.json` (Micronaut's `@TypeHint` does not register permitted subclasses either), and `scripts/native-image-smoke-test.sh micronaut` runs the replay.
+The five command interfaces are already imported in `StreamRuneConfig` for the command bus. The expansion reads `Class#getPermittedSubclasses()`, which a GraalVM native image answers only for a sealed type registered for reflection — for any other it reports the type as sealed with no permitted subclasses, and `registerCommand` then refuses to start the application rather than registering the root alone. The demo's `EcommerceNativeHints` registers the roots through `StreamRuneRuntimeHints.registerDomainPackages`, and the native smoke test (`scripts/native-image-smoke-test.sh spring`) replays a dead-lettered `InventoryCommand$ReceiveShipment` — a keyed entry, which a plain retry replays — through `POST /api/admin/dead-letters/{id}/retry` to prove it (see Chapter 17, *Deploy to production*). The demo's Quarkus app registers the same five roots with its dead-letter runner and lists them in its `reachability-metadata.json`, because Quarkus' `@RegisterForReflection` does not make the image list permitted subclasses; `scripts/native-image-smoke-test.sh quarkus` runs the same replay (see Chapter 17, *Explore Quarkus and Micronaut variants*). The Micronaut app does the same: its runner registers the five roots, they are listed in its own `reachability-metadata.json` (Micronaut's `@TypeHint` does not register permitted subclasses either), and `scripts/native-image-smoke-test.sh micronaut` runs the replay.
 
-A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (5 attempts, 60 s initial backoff, 60 s poll, the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean and the crypto-aware mapper by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed.
+A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (5 attempts, 60 s initial backoff, `OPERATOR_ONLY`, the inbox window, the metrics bean, `app.dead-letter.poll-interval`, the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean and the crypto-aware mapper by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse a `StockAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
 
-The runner polls every minute by default. You can override this with `.pollInterval(Duration.ofSeconds(30))`. The batch size defaults to 10, configurable with `.batchSize(20)`.
+Without `.pollInterval(...)` the runner polls every minute. The batch size defaults to 10, configurable with `.batchSize(20)`.
+
+### Step 3b: Give the stock adjustment an idempotency key
+
+`PUT /api/products/{id}/stock` sends `AdjustStock`, a change *by* a quantity, and `POST /api/inventory/{productId}/receive` sends `ReceiveShipment`, which adds to the inventory. A client that sends either request twice — after a timeout, or from a retry button — changes the stock twice, and so would a replay of its dead-letter entry. The other writes of the demo do not have this problem: a create names the id the client chose, and a second create answers `400 already exists`; a price is set, not changed by an amount; shipping, delivering and cancelling move an order from one state to the next, and the decider refuses the second move.
+
+The two endpoints take an optional `Idempotency-Key` header. With it the command goes through `commandBus.execute(command, key)`: the bus runs the command once per key and answers a repeat with the recorded result. Without it the request runs unkeyed, like every other command of the demo. The value comes from the client, and a key is a bearer token for the result recorded under it, so the key is built inside the caller's namespace with `IdempotencyKey.scopedTo` — two admins who happen to send the same value get two keys. The three apps share the helper, in the `commands` module:
+
+```java
+package org.streamrune.ecommerce.commands;
+
+import java.util.Objects;
+import org.streamrune.core.Command;
+import org.streamrune.core.CommandBus;
+import org.streamrune.core.types.IdempotencyKey;
+import org.streamrune.core.types.UserId;
+
+public final class IdempotentDispatch {
+
+  /** The request header a client puts the key in. */
+  public static final String HEADER = "Idempotency-Key";
+
+  private IdempotentDispatch() {}
+
+  /** The key the bus records the command under, or {@code null} when the request carries none. */
+  public static IdempotencyKey keyFor(String header, UserId caller) {
+    if (header == null) {
+      return null;
+    }
+    if (caller == null) {
+      throw new IllegalArgumentException("An Idempotency-Key needs the caller's X-User-Id");
+    }
+    return IdempotencyKey.scopedTo(caller.value(), header);
+  }
+
+  /** Runs {@code command} under {@code key}, or unkeyed when {@code key} is {@code null}. */
+  public static CommandBus.CommandResult execute(
+      CommandBus commandBus, Command command, IdempotencyKey key) {
+    Objects.requireNonNull(commandBus, "commandBus is required");
+    return key == null ? commandBus.execute(command) : commandBus.execute(command, key);
+  }
+}
+```
+
+The handler of `ProductCommandController` binds the header and dispatches through the helper (import `org.streamrune.ecommerce.commands.IdempotentDispatch`); `InventoryCommandController#receiveShipment` does the same with `ReceiveShipment`:
+
+```java
+@PutMapping("/{id}/stock")
+public ResponseEntity<Void> adjustStock(
+    @PathVariable String id,
+    @RequestHeader(name = IdempotentDispatch.HEADER, required = false) String idempotencyKey,
+    @Valid @RequestBody AdjustStockRequest req) {
+  var caller = RequestCaller.current();
+  OwnerOrAdminAccess.requireAdmin(caller);
+  IdempotentDispatch.execute(
+      commandBus,
+      new ProductCommand.AdjustStock(id, req.quantity(), req.reason()),
+      IdempotentDispatch.keyFor(idempotencyKey, caller.userId()));
+  return ResponseEntity.ok().build();
+}
+```
+
+A key that is blank, longer than 512 characters or holds a control character is refused with `400`, and so is a key presented again for another product: the bus never hands one stream's result to another. Try it — the second request answers `200` and leaves the stock as the first one set it:
+
+```bash
+KEY=$(uuidgen)
+for i in 1 2; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X PUT http://localhost:8080/api/products/prod-widget/stock \
+    -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" -H "Idempotency-Key: $KEY" \
+    -H "Content-Type: application/json" -d '{"quantity": 5, "reason": "restock"}'
+done
+```
+
+The key is what makes a failed adjustment safe to replay: the bus stores it with the dead-letter entry, the runner replays the entry under it, and a caller who already retried with the same key is answered from the inbox. The frontend's Adjust Stock and Receive Shipment dialogs send a fresh key per submit (Chapter 16). `IdempotencyKeyIT` in each app checks the rules above.
 
 ### Step 4: Configure `ProjectionErrorStrategy.DLQ` per projection (optional production hardening)
 
@@ -178,6 +264,7 @@ Replace the existing `AdminController` with the full version:
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -187,6 +274,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.audit.AuditEntry;
+import org.streamrune.core.audit.AuditOutcome;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -202,6 +291,7 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
+import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.OutboxFailedReplayer;
@@ -221,6 +311,7 @@ public class AdminController {
   private final SagaStore sagaStore;
   private final SagaDeadLetterReplayer sagaDeadLetterReplayer;
   private final ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer;
+  private final PostgresAuditStore auditStore;
 
   public AdminController(
       CircuitBreakerCommandInterceptor circuitBreaker,
@@ -232,7 +323,8 @@ public class AdminController {
       SagaDeadLetterStore sagaDeadLetterStore,
       SagaStore sagaStore,
       SagaDeadLetterReplayer sagaDeadLetterReplayer,
-      ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer) {
+      ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer,
+      PostgresAuditStore auditStore) {
     this.circuitBreaker = circuitBreaker;
     this.paymentGatewayCircuitBreaker = paymentGatewayCircuitBreaker;
     this.paymentGateway = paymentGateway;
@@ -243,6 +335,7 @@ public class AdminController {
     this.sagaStore = sagaStore;
     this.sagaDeadLetterReplayer = sagaDeadLetterReplayer;
     this.outboxFailedReplayer = outboxFailedReplayer;
+    this.auditStore = auditStore;
   }
 
   @GetMapping("/circuit-breaker")
@@ -268,8 +361,12 @@ public class AdminController {
     requireAdmin();
     // Re-dispatch the dead-lettered command through the bus (under DLQ_REPLAY + its original
     // request context); discarded on success, attempt count bumped on failure. A replay the inbox
-    // cannot deduplicate waits for the operator's ?force=true.
-    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    // cannot deduplicate waits for the operator's ?force=true, and a forced replay is audited.
+    var commandId = new CommandId(id);
+    var outcome = deadLetterRetryRunner.retry(commandId, force);
+    if (force && outcome != DeadLetterRetryRunner.RetryOutcome.NOT_FOUND) {
+      auditForcedReplay(commandId, outcome);
+    }
     return switch (outcome) {
       case REPLAYED -> ResponseEntity.ok(Map.of("outcome", outcome.name()));
       case NOT_FOUND -> ResponseEntity.notFound().build();
@@ -287,6 +384,24 @@ public class AdminController {
           ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
               .body(Map.of("outcome", outcome.name()));
     };
+  }
+
+  /** A forced replay in the audit log: who overrode the runner's refusal, and what came of it. */
+  private void auditForcedReplay(CommandId commandId, DeadLetterRetryRunner.RetryOutcome outcome) {
+    var caller = RequestCaller.current();
+    boolean replayed = outcome == DeadLetterRetryRunner.RetryOutcome.REPLAYED;
+    auditStore.save(
+        new AuditEntry(
+            commandId,
+            "DLQ_FORCED_REPLAY",
+            null,
+            null,
+            caller.userId(),
+            Instant.now(),
+            replayed ? AuditOutcome.SUCCESS : AuditOutcome.FAILURE,
+            replayed ? null : outcome.name(),
+            0,
+            caller.correlationId()));
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */
@@ -521,7 +636,15 @@ public class AdminController {
 
 > The constructor now also injects `PaymentGatewayCircuitBreaker` (from Chapter 12), so `/circuit-breaker` reports both the command-bus breaker (`state`) and the payment-gateway breaker (`paymentGateway`). It takes the outbox replayer as an `ObjectProvider<OutboxFailedReplayer>` rather than the replayer itself: the framework auto-configures `OutboxFailedReplayer` only while `streamrune.outbox.enabled` is `true`, so with the outbox switched off the controller still starts and the two outbox operations answer `503`.
 
-`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id))`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint maps the runner's `RetryOutcome`: `200 OK` for `REPLAYED`, `404 Not Found` when no entry exists for that id, `409 Conflict` with a message for `NOT_DEDUPLICATED` (the command carries no idempotency key, so if its caller already retried it a replay applies it twice — the operator checks, then retries with `?force=true` or discards the entry) and for `STALE_REPLAY_BLOCKED` (a keyed entry older than the inbox window), `503` with `Retry-After` for `ADMISSION_REFUSED` and `500` for `FAILED`. This is the same `retry(CommandId)` operation the background `DeadLetterRetryRunner` performs on its own schedule — the endpoint just lets an operator trigger a single entry immediately.
+`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id))`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint calls `retry(commandId, force)` and maps the runner's `RetryOutcome`: `200 OK` for `REPLAYED`, `404 Not Found` when no entry exists for that id, `409 Conflict` with a message for `NOT_DEDUPLICATED` (the command carries no idempotency key, so if its caller already retried it a replay applies it twice — the operator checks, then retries with `?force=true` or leaves the entry to the retention sweeper) and for `STALE_REPLAY_BLOCKED` (a keyed entry older than the inbox window), `503` with `Retry-After` for `ADMISSION_REFUSED` (the command bus admits no more work) and `500` for `FAILED`. Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents; `?force=true` is the operator's decision that the effect is absent, and the runner then replays the entry and logs a `WARN` naming the operator. The decision is kept in the audit log too: `auditForcedReplay` writes a `DLQ_FORCED_REPLAY` row (Chapter 10's `audit_log`, beside the command's own rows, shown by `GET /api/audit/commands`) with the entry's command id, the operator, and `SUCCESS` or `FAILURE` with the outcome. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
+
+```bash
+# An unkeyed entry: 409 and the reason, then the confirmed replay
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/admin/dead-letters/<commandId>/retry
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  "http://localhost:8080/api/admin/dead-letters/<commandId>/retry?force=true"
+```
 
 The `/outbox` endpoint lists `PENDING` entries with `outboxStore.findByStatus(OutboxStatus.PENDING, limit)`. It deliberately does **not** call `loadPending`: that method *claims* — it moves every returned row to `IN_PROGRESS` under the caller's lease, so an admin page refreshing the list would stall delivery of every listed aggregate for two minutes. `findByStatus` is read-only and safe while the relay polls.
 
@@ -735,7 +858,9 @@ Start the application again. On startup `MultiProjectionRunner.start()` is calle
 
 **`DeadLetterQueue`** is the interface for storing failed commands. `PostgresDeadLetterQueue` is the Postgres implementation. It is separate from `ProjectionDeadLetterStore` because commands and projection batches are different units of failure: a command lands in the queue because an infrastructure error failed it (a rejection by the aggregate is never recorded); a projection batch fails because the read-side handler threw. The command bus writes to the queue only when it is built with `.deadLetterQueue(...)`, and it stores the command record as JSON through the mapper given to `.objectMapper(...)`. Use `DeadLetterRetryRunner.createObjectMapper(cryptoEngine)` on both the bus and the runner, so a command's `@Encrypted` fields are stored as ciphertext and are erased with the customer.
 
-**`DeadLetterRetryRunner`** polls the `DeadLetterQueue` on a virtual thread. For each retryable entry it deserializes the command using the `commandTypeRegistry`, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments `dlqAttempts`. Once `dlqAttempts` reaches the policy's `maxRetries`, the entry is either discarded (if `discardAfterMaxRetries` is true) or left in place as a permanent record of a poison message. The default policy (`DeadLetterRetryPolicy.DEFAULT`) retries up to five times with exponential backoff and does **not** auto-discard, so an exhausted entry stays in the queue as a permanent record.
+**`DeadLetterRetryRunner`** polls the `DeadLetterQueue` on a virtual thread. For each retryable entry it deserializes the command using the `commandTypeRegistry`, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments `dlqAttempts`. Once `dlqAttempts` reaches the policy's `maxRetries`, the entry is either discarded (if `discardAfterMaxRetries` is true) or left in place as a permanent record of a poison message. The default policy (`DeadLetterRetryPolicy.DEFAULT`) retries up to five times with exponential backoff, does **not** auto-discard, and replays on its schedule only entries whose command ran under an idempotency key (`UnkeyedReplay.OPERATOR_ONLY`): a keyed replay is deduplicated by the command inbox against the caller's own retry, an unkeyed one could be a second execution. An unkeyed entry waits for an operator's `retry(commandId, true)`; a keyed entry older than the inbox window (`inboxRetentionMaxAge`) is refused as `STALE_REPLAY_BLOCKED` until forced. `streamrune.dlq.awaiting_operator` counts the entries waiting for a person.
+
+**`Idempotency-Key`** on `PUT /api/products/{id}/stock` and `POST /api/inventory/{productId}/receive` turns the two relative writes into keyed commands (`IdempotentDispatch`, `commandBus.execute(command, key)`): a repeat of the request is answered with the recorded result, and a failed one is replayed on the schedule. The key is scoped to the caller with `IdempotencyKey.scopedTo`.
 
 **`SagaDeadLetterReplayer`** is the saga-side counterpart introduced in this chapter: manual, operator-triggered recovery of `FAULTED` sagas. Unlike `DeadLetterRetryRunner`, it has no polling loop — poison saga failures are deterministic orchestrator bugs that only resolve once a fix is deployed, so recovery is always explicit. `replayAll` drains a saga's quarantined events oldest first and `replay` feeds one, through the same saga runner; `resumeFaulted` re-runs a compensation the retry sweeper gave up on. It never un-faults a saga itself: only the fed step's own write clears the fault. Built with the deployment's inbox retention window, it refuses a re-drive or a compensation older than that window (`STALE_REDRIVE_BLOCKED`, `STALE_COMPENSATION_BLOCKED`) until an operator who has checked what already ran repeats it with `force`.
 
@@ -745,10 +870,10 @@ Start the application again. On startup `MultiProjectionRunner.start()` is calle
 
 **`ProjectionState`** is the enum returned per projection by `status()`. Its values are `PENDING`, `CATCHING_UP`, `LIVE`, `STANDBY`, `ERROR`, and `STOPPED`.
 
-**Poison message handling** is the scenario where a command or event batch can never succeed, regardless of how many times it is retried. The `DeadLetterRetryRunner` handles this by capping retries at `maxRetries`. A projection registered with `DLQ` strategy writes the batch to the dead letter store and continues — the poison batch is isolated and does not block all subsequent events; once the cause is fixed, `ProjectionDeadLetterReplayer.replay(name, projection, mode, maxEntries)` applies the range under the lock of the processor the runner commits through. Saga poison events follow the same principle via `SagaDeadLetterStore` + `SagaDeadLetterReplayer` (Step 5b), except replay there is always operator-triggered rather than polled.
+**Poison message handling** is the scenario where a command or event batch can never succeed, regardless of how many times it is retried. The `DeadLetterRetryRunner` handles this by capping retries at `maxRetries` for the entries it replays on its schedule. A projection registered with `DLQ` strategy writes the batch to the dead letter store and continues — the poison batch is isolated and does not block all subsequent events; once the cause is fixed, `ProjectionDeadLetterReplayer.replay(name, projection, mode, maxEntries)` applies the range under the lock of the processor the runner commits through. Saga poison events follow the same principle via `SagaDeadLetterStore` + `SagaDeadLetterReplayer` (Step 5b), except replay there is always operator-triggered rather than polled.
 
 ---
 
 ## Next Up
 
-Our system handles failures gracefully — dead letters are stored, projections recover automatically, and command retries are automated. But how do we know what is happening inside at runtime? Next: observability.
+Our system handles failures gracefully — dead letters are stored, projections recover automatically, failed keyed commands are replayed on a schedule, and the unkeyed ones wait for an operator who confirms the replay. But how do we know what is happening inside at runtime? Next: observability.

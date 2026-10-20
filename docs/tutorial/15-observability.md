@@ -80,6 +80,11 @@ The bean registers, among others, these meters (`MetricNames` in `streamrune-cor
 | `streamrune.projections.duration` | Timer | Projection processing latency |
 | `streamrune.subscriptions.events.received` | Counter | Events received by subscriptions |
 | `streamrune.subscriptions.delivery.latency` | Timer | Event delivery latency |
+| `streamrune.dlq.pending` | Gauge | Dead-lettered commands not yet exhausted |
+| `streamrune.dlq.awaiting_operator` | Gauge | Dead-lettered commands the retry runner never replays on its own (unkeyed ones, keyed ones older than the inbox window): alert above zero |
+| `streamrune.dlq.stale_replay_blocked` | Counter | Operator retries refused because the entry is older than the inbox window |
+
+The three dead-letter meters come from the demo's own `DeadLetterRetryRunner`, which the bean of Chapter 14 builds with `.metrics(...)`: a runner without it reports nothing.
 
 If you want to override the auto-configured bean with a custom `MeterRegistry` — for example, to attach tags for the deployment environment — declare the bean explicitly in `StreamRuneConfig.java`:
 
