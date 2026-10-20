@@ -609,6 +609,16 @@ class PaymentProcessManagerTest {
       delegate.saveSnapshot(streamId, version, state, snapshotVersion);
     }
 
+    public boolean saveSnapshot(
+        StreamId streamId,
+        Version version,
+        AggregateState state,
+        int snapshotVersion,
+        long snapshotPurgeGeneration) {
+      saveSnapshot(streamId, version, state, snapshotVersion);
+      return true;
+    }
+
     @Override
     public GlobalOffset lastGlobalOffset() {
       return delegate.lastGlobalOffset();
@@ -722,6 +732,15 @@ class PaymentProcessManagerTest {
     @Override
     public void saveSnapshot(StreamId streamId, Version version, AggregateState state) {
       throw new UnsupportedOperationException();
+    }
+
+    public boolean saveSnapshot(
+        StreamId streamId,
+        Version version,
+        AggregateState state,
+        int snapshotVersion,
+        long snapshotPurgeGeneration) {
+      throw new UnsupportedOperationException("this test store keeps no snapshots");
     }
 
     @Override
