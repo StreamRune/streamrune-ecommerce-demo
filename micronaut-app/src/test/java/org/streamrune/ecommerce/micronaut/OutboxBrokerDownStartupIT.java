@@ -7,6 +7,8 @@ import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.GetResponse;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.MediaType;
@@ -43,10 +45,10 @@ import org.testcontainers.containers.RabbitMQContainer;
  * suite's PostgreSQL, so no entry another class wrote is waiting in its outbox. The app must answer
  * {@code /health} with {@code UP} and accept a command whose event the outbox carries. The entry
  * stays {@code PENDING}: the relay's attempt fails as a transport failure, recorded in {@code
- * last_error} and not counted in {@code attempts}, and the relay stays alive and {@code UP}. Then
- * RabbitMQ starts on that very port, and the entry is delivered and reaches the queue once. The
- * store counts the delivery itself as the entry's one attempt; a refused attempt counted against
- * the entry would show above it.
+ * last_error} and not counted in {@code attempts}, the relay stays alive and {@code UP}, and {@code
+ * streamrune.outbox.pending} counts the entry. Then RabbitMQ starts on that very port, and the
+ * entry is delivered and reaches the queue once. The store counts the delivery itself as the
+ * entry's one attempt; a refused attempt counted against the entry would show above it.
  *
  * <p>The relay retries a transport failure on a backoff that grows towards 60 seconds while the
  * failures last, so the delivery after the broker starts waits for the entry's next attempt, which
@@ -87,6 +89,8 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
   @Inject DataSource dataSource;
 
   @Inject BackgroundRelayHealthContributor relayHealth;
+
+  @Inject MeterRegistry meters;
 
   @AfterAll
   void stopBroker() {
@@ -141,6 +145,16 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
     assertThat(relay.started()).isTrue();
     assertThat(relay.alive()).isTrue();
     assertThat(relay.consecutiveFailures()).isZero();
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .untilAsserted(
+            () -> {
+              Gauge pending = meters.find("streamrune.outbox.pending").gauge();
+              assertThat(pending).as("the backlog gauge").isNotNull();
+              assertThat(pending.value())
+                  .as("the backlog gauge counts the waiting entry")
+                  .isGreaterThanOrEqualTo(1);
+            });
 
     rabbit.start();
 
