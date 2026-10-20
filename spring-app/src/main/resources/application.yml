@@ -97,3 +97,11 @@ management:
     web:
       exposure:
         include: health,metrics
+  health:
+    rabbit:
+      # Off. Spring Boot's RabbitMQ check opens Spring AMQP's connection, which the app does not
+      # publish on (the outbox publisher has its own, RabbitMqConfig#outboxPublisher), and it would
+      # answer DOWN for the whole app while the broker is down. The app serves commands then: their
+      # integration events wait in the outbox. The outage shows in streamrune.outbox.pending, in the
+      # relay's WARN line and in each waiting entry's last_error.
+      enabled: false

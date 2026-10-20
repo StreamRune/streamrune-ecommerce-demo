@@ -55,6 +55,10 @@ dependencies {
     annotationProcessor(libs.micronaut.graal)
     annotationProcessor(libs.micronaut.inject.java)
     annotationProcessor(libs.micronaut.serde.processor)
+    // The micronaut application plugin adds this processor itself once micronaut-micrometer-core is
+    // a dependency; with the platform import off, it is declared here for its version.
+    annotationProcessor(libs.micronaut.micrometer.annotation)
+    testAnnotationProcessor(libs.micronaut.micrometer.annotation)
     testAnnotationProcessor(libs.micronaut.graal)
     testAnnotationProcessor(libs.micronaut.inject.java)
     testAnnotationProcessor(libs.micronaut.serde.processor)
@@ -84,6 +88,9 @@ dependencies {
     implementation(libs.micronaut.serde.jackson)
     implementation(libs.micronaut.jdbc.hikari)
     implementation(libs.micronaut.management)
+    // A MeterRegistry, so the framework's MicrometerStreamRuneMetrics records the StreamRune meters,
+    // and the /metrics endpoint that lists them, as Spring's /actuator/metrics does.
+    implementation(libs.micronaut.micrometer.core)
     implementation(libs.jakarta.annotation.api)
     implementation(libs.snakeyaml)
     implementation(libs.reactor.core)

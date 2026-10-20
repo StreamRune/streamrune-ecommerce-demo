@@ -60,6 +60,193 @@ The circuit breaker goes last, the innermost slot of the framework's canonical o
 
 What keeps those later rejections from tripping the breaker is its default failure predicate, `CircuitBreakerCommandInterceptor.INFRASTRUCTURE_FAILURES`, which is `CommandFailureClassification.BREAKER_ELIGIBLE` from `streamrune-core`. `onError` tests the failure against it before touching the failure counter, and it excludes three families: permanent rejections (`DomainException`, including `ValidationException` and `AuthorizationException`, and a top-level `IllegalArgumentException`), a `SubjectForgottenException` anywhere in the cause chain (a command for a crypto-shredded customer), and failures to read one aggregate's stored data (a corrupt payload or an unregistered event type). Only genuine infrastructure errors (event store failures, locking errors, unexpected runtime exceptions) trip the breaker. To widen or narrow what counts, pass a custom predicate to the four-argument constructor, built from `CommandFailureClassification` rather than retyped — a hand-written copy misses an exclusion the next release adds.
 
+### Step 2b: Answer a Refused Command with `503`
+
+An open breaker throws `CircuitBreakerOpenException` out of `commandBus.execute(...)`, and without a handler of its own Spring answers it `500 Internal Server Error`. That status says the server failed at the request. It did not: the command was refused before anything ran, and the same request succeeds once the breaker closes. The framework refuses a command for five such reasons, and the demo answers every one of them `503 Service Unavailable` with `Retry-After: 5` and a JSON body that names the reason:
+
+| Framework exception | `reason` | What happened |
+|---|---|---|
+| `CircuitBreakerOpenException` | `CIRCUIT_BREAKER_OPEN` | The command bus's breaker is open, or half-open with its probe in flight. Nothing was attempted. |
+| `CommandBusOverloadedException` | `COMMAND_BUS_OVERLOADED` | The bus's budget of in-flight asynchronous commands is used up. Only `executeAsync` has the budget, and the demo's routes call `execute`, so the demo maps it for completeness. |
+| `CommandBusClosedException` | `COMMAND_BUS_CLOSED` | The bus is closing, because the application is shutting down. Nothing was attempted. |
+| `LockException` | `AGGREGATE_LOCK_UNAVAILABLE` | The aggregate's lock could not be taken within `streamrune.lock-timeout` (5 s by default), on every attempt of the bus's retry policy: another command held it, or the locker could not reach its store. The decider never ran. |
+| `OptimisticLockException` | `AGGREGATE_VERSION_CONFLICT` | The aggregate's stream moved past the version the command was decided on, on every attempt of the bus's retry policy: another writer appended to it between the load and the append each time — a second instance whose lock is its own, or a writer outside the command bus. Nothing was written. |
+
+```json
+{"reason": "CIRCUIT_BREAKER_OPEN", "message": "The command bus refuses commands while its circuit breaker is open."}
+```
+
+**Why `503` and not `409` for a lock or a version conflict.** `LockException` is, in its own javadoc, an acquisition failure that the command bus treats as transient and retries — not a conflict with the state of the aggregate. `409 Conflict` tells a client that its request conflicts with the resource and that it may resolve the conflict and resubmit; here nothing in the request is wrong. The aggregate is busy, or the locker's store is out of reach, and the bus has already retried before it gave up: the request will succeed unchanged once the lock is free, which is what `503` with `Retry-After` says. A version conflict is the same answer for the same reason: the bus reloads the aggregate on every attempt, the client sent no version of its own that could conflict, and the identical request succeeds once the other writer is done. Like any infrastructure failure, both commands are also recorded in the dead-letter queue (Chapter 14).
+
+`Retry-After` is a constant five seconds: the breaker does not report how long it stays open, and the other refusals have no natural duration. A genuine failure — the event store refusing the append, say — is none of the five and stays `500`.
+
+The lock timeout is the framework's `streamrune.lock-timeout`. The bus the framework auto-configures reads it; the demo builds its own bus, so it hands the builder the auto-configured `AggregateLocker` and the configured timeout. Add the two parameters and the two calls to the `commandBus` bean (`AggregateLocker` is in `org.streamrune.core`, `StreamRuneProperties` in `org.streamrune.spring`):
+
+```java
+@Bean
+public VirtualThreadCommandBus commandBus(
+    EventStore store,
+    BeanValidationInterceptor validation,
+    AnnotationAuthorizationInterceptor auth,
+    AuditCommandInterceptor audit,
+    CircuitBreakerCommandInterceptor circuitBreaker,
+    AggregateLocker locker,                       // <-- added
+    StreamRuneProperties properties) {            // <-- added
+  return VirtualThreadCommandBus.builder()
+      .eventStore(store)
+      .locker(locker)                             // <-- added
+      .lockTimeout(properties.lockTimeout())      // <-- added
+      .interceptors(audit, auth, validation, circuitBreaker)
+      .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+      // ... aggregate registrations unchanged
+      .build();
+}
+```
+
+The table lives in one place, a small class in the shared `commands` module that the Quarkus and Micronaut apps use too. Create `commands/src/main/java/org/streamrune/ecommerce/commands/CommandRefusal.java`:
+
+```java
+package org.streamrune.ecommerce.commands;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+import org.streamrune.core.CircuitBreakerOpenException;
+import org.streamrune.core.CommandBusClosedException;
+import org.streamrune.core.CommandBusOverloadedException;
+import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
+
+/**
+ * A command the framework refused for a reason that passes, and how the three apps answer it:
+ * {@code 503 Service Unavailable} with {@code Retry-After: 5} and a JSON body that names the reason
+ * and says what happened, {@code {"reason": "CIRCUIT_BREAKER_OPEN", "message": "..."}}. Every other
+ * failure keeps its own answer: a broken business rule is {@code 400}, a refused caller {@code
+ * 403}, and a genuine failure, a store error for one, {@code 500}.
+ *
+ * <p>The five refusals, as the framework reports them:
+ *
+ * <ul>
+ *   <li>{@link CircuitBreakerOpenException} — the command bus's circuit breaker is open (or
+ *       half-open with its probe in flight) after consecutive infrastructure failures, and refuses
+ *       every command until a probe succeeds. Nothing was attempted. The breaker does not say how
+ *       long it stays open, so {@code Retry-After} is the same short wait as for the others.
+ *   <li>{@link CommandBusOverloadedException} — the bus's budget of in-flight asynchronous commands
+ *       is used up. Nothing was attempted. Only {@code executeAsync} has the budget; the demo's
+ *       routes run commands synchronously, so it is mapped for completeness.
+ *   <li>{@link CommandBusClosedException} — the bus is closing (the application is shutting down)
+ *       and admits no new command. Nothing was attempted; another instance, or this one restarted,
+ *       runs the command when it is sent again.
+ *   <li>{@link LockException} — the command's aggregate lock could not be taken within the lock
+ *       timeout ({@code streamrune.lock-timeout}), on every attempt of the bus's retry policy: a
+ *       command on the same aggregate held it all along, or the locker could not reach its store.
+ *       The decider never ran and nothing was written. A later attempt takes the lock once it is
+ *       free; nothing in the request is wrong, so the answer is {@code 503} with {@code
+ *       Retry-After} and not {@code 409 Conflict}, which tells a client its request conflicts with
+ *       the state of the resource. Like any infrastructure failure the bus records the command in
+ *       the dead-letter queue: the retry runner replays a keyed command on its schedule, and an
+ *       unkeyed one waits for an operator.
+ *   <li>{@link OptimisticLockException} — the aggregate's stream had moved past the version the
+ *       command was decided on, on every attempt of the bus's retry policy: another writer appended
+ *       to the stream between the command's load and its append each time (a second instance whose
+ *       lock is its own, a writer outside the command bus). Nothing was written. The bus reloads
+ *       the aggregate on each attempt, and the client sent no version that could conflict, so the
+ *       answer is the lock's: {@code 503} with {@code Retry-After}, the same request succeeding
+ *       later. The bus records the command in the dead-letter queue like the lock's. Only the
+ *       command bus's append conflict reaches a controller; the subtypes the framework raises for
+ *       projections and saga rows are thrown on the threads of subscriptions.
+ * </ul>
+ *
+ * @param reason what refused the command
+ * @param message what the body tells the client
+ */
+public record CommandRefusal(Reason reason, String message) {
+
+  /** How long a client waits before it sends a refused command again, in seconds. */
+  public static final int RETRY_AFTER_SECONDS = 5;
+
+  /** What refused the command; the body's {@code reason}. */
+  public enum Reason {
+    CIRCUIT_BREAKER_OPEN,
+    COMMAND_BUS_OVERLOADED,
+    COMMAND_BUS_CLOSED,
+    AGGREGATE_LOCK_UNAVAILABLE,
+    AGGREGATE_VERSION_CONFLICT
+  }
+
+  /**
+   * The refusal {@code failure} reports, or empty when it is none of the five: a failure the app
+   * answers otherwise.
+   *
+   * @param failure what the command bus threw
+   */
+  public static Optional<CommandRefusal> of(Throwable failure) {
+    return switch (failure) {
+      case CircuitBreakerOpenException _ ->
+          refusal(
+              Reason.CIRCUIT_BREAKER_OPEN,
+              "The command bus refuses commands while its circuit breaker is open.");
+      case CommandBusOverloadedException _ ->
+          refusal(Reason.COMMAND_BUS_OVERLOADED, "The command bus admits no more commands now.");
+      case CommandBusClosedException _ ->
+          refusal(
+              Reason.COMMAND_BUS_CLOSED,
+              "The application is shutting down and admits no more commands.");
+      case LockException _ ->
+          refusal(
+              Reason.AGGREGATE_LOCK_UNAVAILABLE,
+              "The aggregate's lock could not be taken in time.");
+      case OptimisticLockException _ ->
+          refusal(
+              Reason.AGGREGATE_VERSION_CONFLICT,
+              "The aggregate changed while the command ran; nothing was written.");
+      case null, default -> Optional.empty();
+    };
+  }
+
+  /** The JSON body: {@code reason}, then {@code message}. */
+  public Map<String, String> body() {
+    Map<String, String> body = new LinkedHashMap<>();
+    body.put("reason", reason.name());
+    body.put("message", message);
+    return body;
+  }
+
+  private static Optional<CommandRefusal> refusal(Reason reason, String message) {
+    return Optional.of(new CommandRefusal(reason, message));
+  }
+}
+```
+
+Then add one handler to `GlobalExceptionHandler` (imports: `java.util.Map`, `org.streamrune.core.CircuitBreakerOpenException`, `org.streamrune.core.CommandBusClosedException`, `org.streamrune.core.CommandBusOverloadedException`, `org.streamrune.core.LockException`, `org.streamrune.core.OptimisticLockException` and `org.streamrune.ecommerce.commands.CommandRefusal`):
+
+```java
+  /**
+   * A command the framework refused for a reason that passes ({@link CommandRefusal}): an open
+   * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
+   * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
+   * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
+   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
+   */
+  @ExceptionHandler({
+    CircuitBreakerOpenException.class,
+    CommandBusOverloadedException.class,
+    CommandBusClosedException.class,
+    LockException.class,
+    OptimisticLockException.class
+  })
+  public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
+    CommandRefusal refusal =
+        CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(refusal.body());
+  }
+```
+
+The command bus throws each of the five unwrapped, so the handler sees the exception itself. The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a handler by the thrown type, so each app has one per exception type, nested in `CommandRefusalExceptionMappers` (Quarkus) and `CommandRefusalExceptionHandlers` (Micronaut). `CommandRefusalStatusIT` in each app forces four of the refusals on the app's real command bus, in an application of its own with a lock timeout of one second: a price change stopped in its audit write while it holds the product's lock (a trigger on `audit_log` waits for an advisory lock the test holds) makes a stock adjustment of the same product wait out the lock timeout on each of three attempts; a trigger on `event_stream` that raises `unique_violation` for a price change makes the event store report the version conflict it reports when a second writer stored the version first, on every attempt; a store that refuses every price change of a product answers `500` until the breaker opens and `503` after; and a closed bus refuses the next command. Each answer is checked for the status, `Retry-After` and the body. The overloaded bus cannot be reached through the demo's routes, so a unit test in each app checks its answer.
+
 ### Step 3: The gateway call, and why it needs its own breaker
 
 You created `PaymentGatewaySimulator` in Chapter 11 (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`). The class holds an `AtomicBoolean failureInjected` toggle. When `failureInjected` is true, `processPayment` throws a `RuntimeException` — unless the gateway already captured that payment, because the payment id is its idempotency key:
@@ -396,6 +583,8 @@ CircuitBreakerOpenException: Circuit breaker OPEN — rejecting command: Capture
 **`PaymentGatewaySimulator`** models the pattern you will use for any external service: a plain class whose `processPayment` method either succeeds silently or throws. In production you would replace the `AtomicBoolean` check with an HTTP call that sends the payment id as the gateway's idempotency key, so a call repeated after a capture the app could not record charges nothing. The breaker does not know or care whether the failure comes from a network timeout, an HTTP 500, or a thrown exception — it only sees the `recordFailure()` call the `PaymentProcessManager` makes when the call throws.
 
 **`PaymentGatewayCircuitBreaker`** is the second breaker, and the chapter's main lesson is *where* it lives. The command-bus `CircuitBreakerCommandInterceptor` is the right tool for command-dispatch failures (event-store outages, locking errors), but it is the wrong tool for the payment gateway: the gateway failure is converted into successful compensation commands, and the interceptor resets its counter on every success. The reverse holds too: when the command-bus breaker is open, the manager's `CapturePayment` or `FailPayment` is refused, and that refusal says nothing about the gateway — the manager lets it propagate, the subscription delivers `PaymentInitiated` again after a backoff, and the gateway breaker counts nothing. A breaker wrapped directly around the flaky dependency — counting only that dependency's outcomes — is the correct design. Same state machine, different inputs (`recordSuccess()` / `recordFailure()` instead of command outcomes), driven by the single-threaded `PaymentProcessManager`.
+
+**A refusal is `503`, not `500`.** An open breaker, an overloaded or closing command bus, an aggregate lock that could not be taken in time and a version conflict on every attempt all refuse a command before anything is written, and the same request succeeds later. The demo answers each `503` with `Retry-After: 5` and `{"reason": ..., "message": ...}` (`CommandRefusal`); a genuine failure stays `500`.
 
 **`circuitState()`** exposes the command-bus breaker's internal enum as a string, and the gateway breaker's `state()` does the same. The `/api/admin/circuit-breaker` endpoint returns both (`state` and `paymentGateway`). This is enough for a health dashboard or a simple alert rule. If you need richer observability — failure count, time since opened, probe history — you can extend either breaker to populate a metrics counter or publish a custom event.
 

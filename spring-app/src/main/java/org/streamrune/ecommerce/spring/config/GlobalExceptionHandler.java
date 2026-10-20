@@ -1,5 +1,6 @@
 package org.streamrune.ecommerce.spring.config;
 
+import java.util.Map;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -7,8 +8,14 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.streamrune.core.AuthorizationException;
+import org.streamrune.core.CircuitBreakerOpenException;
+import org.streamrune.core.CommandBusClosedException;
+import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.DomainException;
+import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 import org.streamrune.core.crypto.SubjectForgottenException;
+import org.streamrune.ecommerce.commands.CommandRefusal;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
@@ -68,5 +75,28 @@ public class GlobalExceptionHandler {
         .header(HttpHeaders.RETRY_AFTER, String.valueOf(LiveFeed.RETRY_AFTER_SECONDS))
         .contentType(MediaType.TEXT_PLAIN)
         .body(e.getMessage());
+  }
+
+  /**
+   * A command the framework refused for a reason that passes ({@link CommandRefusal}): an open
+   * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
+   * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
+   * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
+   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
+   */
+  @ExceptionHandler({
+    CircuitBreakerOpenException.class,
+    CommandBusOverloadedException.class,
+    CommandBusClosedException.class,
+    LockException.class,
+    OptimisticLockException.class
+  })
+  public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
+    CommandRefusal refusal =
+        CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(refusal.body());
   }
 }

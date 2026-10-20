@@ -62,8 +62,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       rabbitmq:
-        # All three binaries' outbox publishers open their AMQP channel at startup (Spring: AOT
-        # fixes the bean into the image), so the apps need a broker. No health-cmd: a root-run
+        # The binaries start without a broker (their outbox publishers connect on the first
+        # publish); with one, each publisher connects and publishes through the native amqp-client,
+        # which the smoke script's output check covers. No health-cmd: a root-run
         # rabbitmq-diagnostics racing the broker's first start can write an Erlang cookie the
         # broker cannot read; the smoke script waits for the broker's own startup log line instead.
         image: rabbitmq:4-management-alpine

@@ -478,4 +478,26 @@ class ObservabilitySmokeSuiteIT {
     assertThat(first).containsKey("timestamp");
     assertThat(first).containsKey("payload");
   }
+
+  // ── Metrics ────────────────────────────────────────────────────────────────
+
+  /**
+   * The app reports the framework's meters at its Prometheus endpoint, {@code /q/metrics}, as the
+   * Spring and Micronaut apps list them at {@code /actuator/metrics} and {@code /metrics} (their
+   * suites check the same meters). The two dead-letter gauges are the ones the demo's {@code
+   * DeadLetterRetryRunner} samples; {@code saga.faulted_backlog} and {@code projections.processed}
+   * stand for the saga and projection meters. Prometheus writes a dot as {@code _} and gives a
+   * counter the suffix {@code _total}.
+   */
+  @Test
+  void theFrameworksMetersAreListedAtTheMetricsEndpoint() {
+    String scrape = given().when().get("/q/metrics").then().statusCode(200).extract().asString();
+
+    assertThat(scrape)
+        .contains("streamrune_dlq_awaiting_operator")
+        .contains("streamrune_dlq_pending")
+        .contains("streamrune_saga_faulted_backlog")
+        .contains("streamrune_projections_processed_total")
+        .contains("streamrune_commands_dispatched_total");
+  }
 }

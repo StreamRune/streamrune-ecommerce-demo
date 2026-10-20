@@ -14,7 +14,7 @@
  * sends the same actions to a running backend.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type Route } from "@playwright/test";
 import { actAs, answerCommands, mockBackendRoutes, BACKEND_URL } from "./helpers";
 
 const WIDGET = {
@@ -677,6 +677,64 @@ test.describe("Admin and Fulfillment — what the page reads and sends", () => {
 });
 
 test.describe("A refused command is shown", () => {
+  /** The backend's answer to a command it refused for a reason that passes. */
+  function busy(route: Route, reason: string, message: string): Promise<void> {
+    return route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      headers: { "Retry-After": "5" },
+      body: JSON.stringify({ reason, message }),
+    });
+  }
+
+  test("a 503 on the shop page says the backend is busy, with its reason", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/customers", [ALICE]);
+    await answerCommands(page, "/api/orders", (route) =>
+      busy(
+        route,
+        "CIRCUIT_BREAKER_OPEN",
+        "The command bus refuses commands while its circuit breaker is open."
+      )
+    );
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "Place Order" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("combobox").filter({ hasText: "Select product" }).click();
+    await page.getByRole("option", { name: /Widget/ }).click();
+    await dialog.getByRole("button", { name: "Place Order" }).click();
+
+    await expect(
+      page.getByText(
+        "The backend is busy, try again in a few seconds (503): The command bus refuses commands while its circuit breaker is open."
+      )
+    ).toBeVisible();
+    await expect(page.getByText(/Order placed/)).toHaveCount(0);
+  });
+
+  test("a 503 on an admin action says the backend is busy, with its reason", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await answerCommands(page, "/api/products/prod-widget/price", (route) =>
+      busy(route, "AGGREGATE_LOCK_UNAVAILABLE", "The aggregate's lock could not be taken in time.")
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    await pickRowAction(page, "Update Price");
+    await page.getByRole("dialog").getByLabel(/New Price/).fill("24.99");
+    await page.getByRole("dialog").getByRole("button", { name: "Update" }).click();
+
+    await expect(
+      page.getByText(
+        "The backend is busy, try again in a few seconds (503): The aggregate's lock could not be taken in time."
+      )
+    ).toBeVisible();
+  });
+
   test("a 403 says the role may not do it, with the backend's words", async ({ page }) => {
     await mockBackendRoutes(page);
     await mockList(page, "/api/orders", [order("order-a1", "CONFIRMED")]);

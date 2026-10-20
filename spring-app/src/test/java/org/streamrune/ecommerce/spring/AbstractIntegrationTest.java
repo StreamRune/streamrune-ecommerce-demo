@@ -34,9 +34,10 @@ import org.testcontainers.containers.RabbitMQContainer;
  * the event store factory apply the framework's event-store and crypto migration series when the
  * context starts.
  *
- * <p>RabbitMQ is included so {@link
- * org.streamrune.ecommerce.spring.config.RabbitMqConfig#outboxRabbitConnection} can open the outbox
- * publisher's AMQP connection at context startup. Tests that do not exercise the outbox are
+ * <p>RabbitMQ is included so the outbox publisher ({@link
+ * org.streamrune.ecommerce.spring.config.RabbitMqConfig#outboxPublisher}) delivers the entries the
+ * tests' commands write and {@link TestRabbitListener} receives them. The app itself starts without
+ * a broker ({@code OutboxBrokerDownStartupIT}). Tests that do not exercise the outbox are
  * unaffected — the poller runs but finds no outbox entries for the events those tests emit (e.g.
  * {@code CustomerEvent.*} is excluded from the outbox mapper's allowlist).
  *
@@ -93,10 +94,9 @@ public abstract class AbstractIntegrationTest {
   public static final PostgreSQLContainer<?> POSTGRES;
 
   /**
-   * Singleton RabbitMQ container. Required because {@code RabbitMqConfig.outboxRabbitConnection}
-   * opens an AMQP connection eagerly at startup; if no broker is available the context fails to
-   * load. Shared across all subclasses so the Spring context key remains stable (the broker URL is
-   * part of the key).
+   * Singleton RabbitMQ container: the broker the outbox publisher delivers to and {@link
+   * TestRabbitListener} consumes from. Shared across all subclasses so the Spring context key
+   * remains stable (the broker URL is part of the key).
    */
   public static final RabbitMQContainer RABBIT;
 
@@ -134,7 +134,7 @@ public abstract class AbstractIntegrationTest {
     // The dead-letter retry runner looks for due entries every second instead of every minute, so
     // DeadLetterReplayPolicyIT sees a scheduled replay within one short poll.
     registry.add("app.dead-letter.poll-interval", () -> "1s");
-    // RabbitMQ broker for the outbox publisher (opened eagerly at startup by RabbitMqConfig).
+    // RabbitMQ broker for the outbox publisher, which connects on its first publish.
     registry.add("spring.rabbitmq.host", RABBIT::getHost);
     registry.add("spring.rabbitmq.port", RABBIT::getAmqpPort);
     registry.add("spring.rabbitmq.username", RABBIT::getAdminUsername);
