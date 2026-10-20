@@ -26,9 +26,12 @@ if (frameworkDir.isDirectory) {
 // Every build says which framework it compiles against: the sibling checkout and its revision, or
 // the published artifacts (a warning). -PrequireFrameworkSibling turns the second case into a
 // failure, for a run that must test the local framework source rather than a published build.
+// The notice is printed while this script runs. With the configuration cache on, a build that
+// reuses a cache entry runs no settings script and prints nothing; the guard still holds, because
+// the sibling directory and the property are inputs of the cache entry.
 val frameworkVersion: String? =
-    file("gradle/libs.versions.toml").readLines()
-        .firstNotNullOfOrNull { Regex("""^streamrune\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+    file("gradle/libs.versions.toml").takeIf { it.isFile }?.readLines()
+        ?.firstNotNullOfOrNull { Regex("""^streamrune\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
 if (frameworkDir.isDirectory) {
     val revision =
         runCatching {
