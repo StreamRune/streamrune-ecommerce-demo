@@ -136,7 +136,7 @@ In `frontend/`, after `npm ci`:
   review and audit labels, references to private review material, the words that narrate an
   earlier behaviour (outside test sources and code samples; its javadoc lists them), a reviewer
   named by role, work deferred to the project roadmap, and a space before a period, and it reads a
-  phrase on across a line break. Its failure names the rule and the line of every offender.
+  phrase across a line break. Its failure names the rule and the line of every offender.
 
 ## 6. Pitfalls
 
