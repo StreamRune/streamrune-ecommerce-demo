@@ -454,7 +454,7 @@ curl -X POST http://localhost:8080/api/products/p-retired/discontinue \
 
 ### Step 7 — A customer's data: an ADMIN or the customer themself
 
-Chapters 6 to 8 left every customer and order route open, because until now no request carried an identity. Now one does, and the routes need it: `GET /api/customers` returns every customer's name, e-mail, address and phone, `GET /api/orders` every customer's purchases, and `POST /api/customers/{id}/forget` destroys a customer's encryption key, which cannot be undone.
+Chapters 6 to 8 left every customer and order route open, because no request in them carried an identity. Now one does, and the routes need it: `GET /api/customers` returns every customer's name, e-mail, address and phone, `GET /api/orders` every customer's purchases, and `POST /api/customers/{id}/forget` destroys a customer's encryption key, which cannot be undone.
 
 Who may call them depends on *which* customer the request names — an `ADMIN` may read or erase anyone, a customer only themself — and `@RequireRole` cannot express that: it looks at the command's type, never at the id inside it, and it guards commands, not reads. So the demo has one rule of its own, written once and asked everywhere a customer's data is handed out or changed:
 

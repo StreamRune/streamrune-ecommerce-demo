@@ -6,7 +6,7 @@
 
 ## What We're Building and Why
 
-Production event-driven systems fail. A downstream database is temporarily unavailable, a deserialization assumption no longer holds, or a third-party API returns an unexpected error. The question is not whether failures happen — it is how the system behaves when they do.
+Production event-driven systems fail. A downstream database is temporarily unavailable, a deserialization assumption stops holding, or a third-party API returns an unexpected error. The question is not whether failures happen — it is how the system behaves when they do.
 
 StreamRune gives you three choices when a projection fails to process a batch of events. You select one via `ProjectionErrorStrategy`:
 
@@ -119,7 +119,7 @@ public DeadLetterRetryRunner deadLetterRetryRunner(
 }
 ```
 
-**`inboxRetentionMaxAge` closes the window in which a key is gone.** The inbox keeps keys for `streamrune.inbox.retention-max-age`, 7 days unless configured, and then prunes them. A keyed entry first received longer ago than that may no longer find its key, so the inbox could not recognise the caller's retry. The runner skips such an entry on the schedule, and the operator's Retry answers `STALE_REPLAY_BLOCKED` (Step 5). `properties.inbox().retentionMaxAge()` is the value the inbox sweeper uses, so the two cannot drift apart. The framework also refuses to start when the dead-letter retention is longer than the inbox's.
+**`inboxRetentionMaxAge` closes the window in which a key is gone.** The inbox keeps keys for `streamrune.inbox.retention-max-age`, 7 days unless configured, and then prunes them. A keyed entry first received longer ago than that may not find its key, so the inbox could not recognise the caller's retry. The runner skips such an entry on the schedule, and the operator's Retry answers `STALE_REPLAY_BLOCKED` (Step 5). `properties.inbox().retentionMaxAge()` is the value the inbox sweeper uses, so the two cannot drift apart. The framework also refuses to start when the dead-letter retention is longer than the inbox's.
 
 **`metrics`** is the framework's `StreamRuneMetrics` bean (Chapter 15). The runner reports `streamrune.dlq.pending` (entries not yet exhausted), `streamrune.dlq.awaiting_operator` (entries the schedule will never replay: unkeyed ones, and keyed ones older than the inbox window) and `streamrune.dlq.stale_replay_blocked` (operator retries refused for that age). Alert on `awaiting_operator` above zero: it is work for a person, not a fault, so it does not turn the health endpoint `DOWN`, and the person's decision — a forced replay or a discard (Step 5) — brings it down again on the next poll. **`app.dead-letter.poll-interval`** (60 seconds in `application.yml`) is how often it looks for due entries; the integration tests set it to one second. `ObjectProvider`, `StreamRuneMetrics`, `Value` and `Duration` are imported in `StreamRuneConfig` already.
 
@@ -676,9 +676,9 @@ public class AdminController {
    * Discards a quarantined saga dead-letter entry without replaying it (e.g. an operator has
    * manually resolved it out-of-band) via {@link SagaDeadLetterReplayer#discard}: the removal is
    * scoped to the order-fulfillment saga type, and once the saga's backlog is empty the replayer
-   * releases its dead-letter shield, so the saga's live events are no longer held. Omit {@code
-   * sagaId} for an entry whose saga could never be identified (a routing method threw); a {@code
-   * null} saga id matches only such entries.
+   * releases its dead-letter shield, so the saga's live events are not held. Omit {@code sagaId}
+   * for an entry whose saga could never be identified (a routing method threw); a {@code null} saga
+   * id matches only such entries.
    */
   @DeleteMapping("/saga-dead-letters")
   public Map<String, Boolean> discardSagaDeadLetter(
@@ -712,7 +712,7 @@ public class AdminController {
 }
 ```
 
-> The constructor now also injects `PaymentGatewayCircuitBreaker` (from Chapter 12), so `/circuit-breaker` reports both the command-bus breaker (`state`) and the payment-gateway breaker (`paymentGateway`). It takes the outbox replayer as an `ObjectProvider<OutboxFailedReplayer>` rather than the replayer itself: the framework auto-configures `OutboxFailedReplayer` only while `streamrune.outbox.enabled` is `true`, so with the outbox switched off the controller still starts and the two outbox operations answer `503`.
+> The constructor also injects `PaymentGatewayCircuitBreaker` (from Chapter 12), so `/circuit-breaker` reports both the command-bus breaker (`state`) and the payment-gateway breaker (`paymentGateway`). It takes the outbox replayer as an `ObjectProvider<OutboxFailedReplayer>` rather than the replayer itself: the framework auto-configures `OutboxFailedReplayer` only while `streamrune.outbox.enabled` is `true`, so with the outbox switched off the controller still starts and the two outbox operations answer `503`.
 
 `deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id), force)`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint maps the runner's `RetryOutcome`: `200 OK` for `REPLAYED`, `404 Not Found` when no entry exists for that id, `409 Conflict` with a message for `NOT_DEDUPLICATED` (the command carries no idempotency key, so if its caller already retried it a replay applies it twice) and for `STALE_REPLAY_BLOCKED` (a keyed entry older than the inbox window), `503` with `Retry-After` for `ADMISSION_REFUSED` (the command bus admits no more work) and `500` for `FAILED`. Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
 
@@ -753,7 +753,7 @@ curl -s -X POST -H "X-User-Id: ops-1" -H "X-User-Role: ADMIN" -H "Content-Type: 
 
 ### Step 5b: Saga Dead-Letter Admin Endpoints
 
-Chapter 11 introduced the `sagaDeadLetterStore` bean and explained that a poison saga event is quarantined in `saga_dead_letters` with the saga marked `FAULTED`. Until now, the only way to find a `FAULTED` saga or inspect its quarantine reason was a direct database query. The saga endpoints of the controller above close that gap — two listings (`listSagaDeadLetters`, `listFaultedSagas`), three recovery operations (`replayAllSagaDeadLetters`, `replaySagaDeadLetter`, `resumeFaultedSaga`) and `discardSagaDeadLetter` — on top of a new `SagaDeadLetterReplayer` bean added to `StreamRuneConfig` next to `orderFulfillmentSagaRunner`:
+Chapter 11 introduced the `sagaDeadLetterStore` bean and explained that a poison saga event is quarantined in `saga_dead_letters` with the saga marked `FAULTED`. Without them, the only way to find a `FAULTED` saga or inspect its quarantine reason is a direct database query. The saga endpoints of the controller above close that gap — two listings (`listSagaDeadLetters`, `listFaultedSagas`), three recovery operations (`replayAllSagaDeadLetters`, `replaySagaDeadLetter`, `resumeFaultedSaga`) and `discardSagaDeadLetter` — on top of a new `SagaDeadLetterReplayer` bean added to `StreamRuneConfig` next to `orderFulfillmentSagaRunner`:
 
 ```java
 @Bean
@@ -824,7 +824,7 @@ A replay answers with one of nine outcomes — `replay` once, `replay-all` once 
 - `REPLAYED` — the event was fed and the step succeeded, or the feed was moot (the saga is already terminal, or the event was already applied). The entry is discarded.
 - `STILL_POISON` — the step poisoned again (or a resumed compensation made no durable progress). The entry stays and the saga stays `FAULTED`: the fix has not resolved the failure.
 - `ENTRY_NOT_FOUND` — no entry of the order-fulfillment saga type at that `(sagaId, eventOffset)`.
-- `EVENT_NOT_FOUND` — the event store can no longer read that offset. Nothing was fed; `DELETE` the entry.
+- `EVENT_NOT_FOUND` — the event store cannot read that offset. Nothing was fed; `DELETE` the entry.
 - `STALE_REDRIVE_BLOCKED`, `STALE_COMPENSATION_BLOCKED` — the key-age refusals above. Find out which of the saga's commands already executed (the payment, inventory and order streams, the `command_inbox` table), then repeat with `force=true`.
 - `OLDER_ENTRY_PENDING` — a single replay with an older entry of the saga still pending; use `replay-all`.
 - `SAGA_ROW_PENDING` — deferred, not fed: the saga has no row yet, or its start has not been applied. `replay-all` feeds it once the saga's start entry lands in the same drain.
@@ -834,7 +834,7 @@ A resume answers `RESUMED` (the compensation ran to its end: `COMPENSATED`, or `
 
 **`force=true` lifts only the two `STALE_*` refusals.** It never overrides ordering. It is your acknowledgement that a command whose key was already pruned may run a second time, so send it only after you have checked what executed; the framework logs a `WARNING` naming the saga, and counts `streamrune.saga.forced_stale_resume` when a forced compensation passes the runner's own key-age guard. The full outcome tables are in the framework's saga guide (`docs/guide/advanced/saga.md` in the StreamRune repository, sections "Replaying quarantined events" and "Resuming a give-up fault").
 
-`discardSagaDeadLetter` goes through the same `SagaDeadLetterReplayer` bean rather than the store, for two reasons. The removal is scoped to the replayer's saga type (the state class's fully-qualified name), so an id that another saga type happens to share can never lose its quarantine record through this endpoint. And a saga with quarantined entries carries a dead-letter shield (`saga_state.dead_letter_pending`) that makes the live `SagaRunner` hold every later event of that saga in the quarantine instead of applying it out of order; `discard` releases the shield once the saga has no entry left (for an entry whose saga could not be identified, the shield of the saga the replayer resolved it to). Deleting the row with a bare `sagaDeadLetterStore` call would leave that shield set, and the saga's live events would keep being held behind a backlog that no longer exists.
+`discardSagaDeadLetter` goes through the same `SagaDeadLetterReplayer` bean rather than the store, for two reasons. The removal is scoped to the replayer's saga type (the state class's fully-qualified name), so an id that another saga type happens to share can never lose its quarantine record through this endpoint. And a saga with quarantined entries carries a dead-letter shield (`saga_state.dead_letter_pending`) that makes the live `SagaRunner` hold every later event of that saga in the quarantine instead of applying it out of order; `discard` releases the shield once the saga has no entry left (for an entry whose saga could not be identified, the shield of the saga the replayer resolved it to). Deleting the row with a bare `sagaDeadLetterStore` call would leave that shield set, and the saga's live events would keep being held behind a backlog that is gone.
 
 The demo's Quarkus and Micronaut apps are wired the same way. Their `orderFulfillmentSagaRunner` is a bean (`StreamRuneProducer`, `StreamRuneFactory`) that `EcommerceSubscriptionLifecycle` subscribes to the event stream, so their integrations start its sweeper and arm its key-age guard too; their replayer reads the window from `StreamRuneQuarkusProperties.inbox().retentionMaxAge()` and `StreamRuneMicronautProperties.inboxRetentionMaxAge()`; and their `AdminController` exposes the same six saga endpoints. Their `SagaRecoveryAdminIT` also checks that the framework armed the runner's guard with the 7-day window and that the sweeper finishes a compensation left `COMPENSATING`.
 

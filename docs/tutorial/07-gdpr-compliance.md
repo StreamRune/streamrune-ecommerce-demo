@@ -277,7 +277,7 @@ static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource)
 
 This is the bean `CustomerCommandController` injects in Step 2. The wiring is deliberately explicit:
 
-- `.cryptoEngine(cryptoEngine)` — the same `PostgresCryptoEngine` that backs the event store, so `forget(...)` deletes the very key used to encrypt the subject's fields.
+- `.cryptoEngine(cryptoEngine)` — the same `PostgresCryptoEngine` that backs the event store, so `forget(...)` deletes the very key that encrypts the subject's fields.
 - `.auditStore(auditStore)` — each forget and each purge outcome is written to the `audit_log` table.
 - `.purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))` — the purger list `forget(...)` runs after the key is shredded. As you add aggregates in later chapters, register a purger per read model holding PII and add it to this list. The second purger deletes the customer's snapshot: a snapshot (chapter 8) holds the aggregate's *decrypted* state as plain JSON, so `CustomerState` would keep the name, email, address and phone readable in `snapshot_store` after the key is gone. `PostgresSnapshotStorePurger` takes the streams to clear for a subject, here `customer:<subject id>`; the demo wires it in all three apps. The snapshot purger is not a recommendation: `ForgetSubjectService.Builder.build()` refuses a service whose purgers hold no `SnapshotPurger` (`PostgresSnapshotStorePurger` is the PostgreSQL one) unless the application calls `withoutSnapshotPurge()` to say it has never stored a snapshot, and it refuses a purger and `withoutSnapshotPurge()` together. A snapshot keeps every field of the aggregate's state that is not marked `@Encrypted` in the clear, so deleting the key does not reach it, and the framework makes the application decide rather than leave snapshots behind by default.
 - `.queryCache(cachingQueryBus)` — the `CachingQueryBus` from Chapter 5. After the last purger, `forget(...)` evicts every cached query answer, so none taken before the erasure (a decrypted field, or a row the purger just deleted) is served after it. If the eviction fails, `fullyErased()` is `false`, like a failed purge.
@@ -338,7 +338,7 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
 
 The query returns zero rows.
 
-The purger also deleted the plaintext read-model row, so the `customers_view` table no longer holds Alice's data:
+The purger also deleted the plaintext read-model row, so the `customers_view` table holds none of Alice's data:
 
 ```bash
 docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \

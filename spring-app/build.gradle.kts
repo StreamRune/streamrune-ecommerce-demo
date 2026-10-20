@@ -93,14 +93,31 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+// The docs tests read the tutorial, the README and the settings file chapter 1 lists, and
+// InternalTrackerIdRatchetTest reads every public text file of the repository (sources, the
+// READMEs, the tutorial, scripts, build files): a change to any of them re-runs them. Mirrors the
+// ratchet's own walk: the same extensions, pruned directories and excluded files. The internal
+// planning directory's name is built from pieces, as in the test.
+val planningDirectory = "super" + "powers"
+val publicTextSources =
+    fileTree(rootDir) {
+        include("**/*.java", "**/*.md", "**/*.kts", "**/*.gradle", "**/*.toml", "**/*.properties")
+        include("**/*.yml", "**/*.yaml", "**/*.sql", "**/*.sh", "**/*.xml", "**/*.json", "**/*.txt")
+        include("**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.css")
+        include("**/Dockerfile", "**/Dockerfile.*")
+        exclude("**/build/**", "**/out/**", "**/bin/**", "**/.gradle/**", "**/.kotlin/**")
+        exclude("**/.worktrees/**", "**/.idea/**", "**/.vscode/**", "**/.settings/**")
+        exclude("**/node_modules/**", "**/.next/**", "**/coverage/**", "**/test-results/**")
+        exclude("**/playwright-report/**", "**/pgdata/**", "**/.$planningDirectory/**")
+        exclude("**/scratchpad/**", "**/.claude/**", "docs/$planningDirectory/**", ".git/**")
+        exclude("frontend/package-lock.json", "frontend/AGENTS.md", "frontend/CLAUDE.md")
+        exclude("frontend/next-env.d.ts")
+    }
+
 tasks.named<Test>("test") {
     useJUnitPlatform()
     jvmArgs("--enable-preview")
-    // The docs tests read the tutorial and the README: a changed page re-runs them.
-    inputs.dir(rootProject.layout.projectDirectory.dir("docs/tutorial"))
+    inputs.files(publicTextSources)
         .withPathSensitivity(PathSensitivity.RELATIVE)
-        .withPropertyName("tutorial")
-    inputs.file(rootProject.layout.projectDirectory.file("README.md"))
-        .withPathSensitivity(PathSensitivity.RELATIVE)
-        .withPropertyName("readme")
+        .withPropertyName("publicTextSources")
 }

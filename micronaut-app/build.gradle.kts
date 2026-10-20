@@ -77,9 +77,9 @@ dependencies {
     implementation(libs.rabbitmq.client)
     implementation("com.fasterxml.jackson.core:jackson-databind")
     // StreamRuneFactory registers JavaTimeModule on its ObjectMapper, so the module is a direct
-    // dependency. It used to arrive only because flyway-core 10.22 (reached through
-    // streamrune-postgres) declared it at compile scope; flyway-core 13 does not, so the app
-    // must say so itself. Version: managed by the dependency-management plugin, like databind.
+    // dependency. Nothing else brings it: flyway-core (reached through streamrune-postgres) does
+    // not declare it at compile scope, so the app must say so itself. Version: managed by the
+    // dependency-management plugin, like databind.
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
     // Micronaut HTTP

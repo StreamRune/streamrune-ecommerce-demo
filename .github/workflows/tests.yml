@@ -96,6 +96,13 @@ jobs:
       - name: Verify Docker available
         run: docker info
 
+      # The jobs run `test` tasks, and `test` does not run spotlessCheck: this job checks the
+      # formatting of every module, so a required check fails on a formatting violation.
+      - name: Check formatting
+        if: matrix.id == 'shared-modules'
+        working-directory: streamrune-ecommerce-demo
+        run: ./gradlew spotlessCheck --console=plain --no-daemon
+
       - name: Run ${{ matrix.tasks }}
         working-directory: streamrune-ecommerce-demo
         run: ./gradlew ${{ matrix.tasks }} --console=plain --no-daemon

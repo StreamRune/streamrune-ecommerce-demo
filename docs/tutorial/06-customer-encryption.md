@@ -45,7 +45,7 @@ public enum CustomerStatus {
 }
 ```
 
-`FORGOTTEN` is the state a customer enters after a `ForgetCustomer` command succeeds. It records that the customer asked to be erased: the customer can no longer be updated, and the forget endpoint goes on to delete the encryption key so the data reads as redacted (chapter 7).
+`FORGOTTEN` is the state a customer enters after a `ForgetCustomer` command succeeds. It records that the customer asked to be erased: the customer cannot be updated, and the forget endpoint goes on to delete the encryption key so the data reads as redacted (chapter 7).
 
 ### CustomerCommand
 
@@ -805,7 +805,7 @@ Without this step `CustomerProjection` would be a dangling bean — Spring would
 ## What We Learned
 
 - **PII in event-sourced systems** cannot be deleted by updating a row. The standard solution is crypto-shredding: encrypt PII with a per-subject key, then delete the key when the subject exercises their right to erasure.
-- **`@Encrypted(subjectId = "customerId")`** annotates a record component as PII. The `subjectId` attribute names the sibling component that holds the data subject identifier used to look up the encryption key. Annotate the commands that carry personal data too: a command that fails on infrastructure is stored in the dead-letter queue, and only its own annotations keep that copy encrypted.
+- **`@Encrypted(subjectId = "customerId")`** annotates a record component as PII. The `subjectId` attribute names the sibling component that holds the data subject identifier that selects the encryption key. Annotate the commands that carry personal data too: a command that fails on infrastructure is stored in the dead-letter queue, and only its own annotations keep that copy encrypted.
 - **`CryptoShreddingModule`** is a Jackson `SimpleModule` that intercepts serialisation and deserialisation for any record that carries `@Encrypted` components. Domain code never calls `encrypt` or `decrypt` directly.
 - **`PostgresCryptoEngine`** stores per-subject AES-256-GCM keys in an `encryption_keys` table. Keys are created lazily on the first write for a new subject and loaded on every subsequent read. Crypto-shredding is performed by `CryptoEngine.deleteKey` (chapter 7), which deletes the key row and records the tombstone and the destroyed key generation in one transaction — never delete rows from `encryption_keys` by hand: the next write would mint a fresh key, and the old events would fail to decrypt instead of reading as `[REDACTED]`.
 - **Per-subject keys** mean that deleting one customer's key does not affect any other customer. Each `customerId` has its own independent key row.
