@@ -40,6 +40,24 @@ import org.streamrune.runtime.SagaDeadLetterReplayer;
 @Controller("/api/admin")
 public class AdminController {
 
+  /**
+   * What the operator does with an entry the runner refused: look at the command's effect, then
+   * replay it ({@code ?force=true}) or discard it ({@code DELETE /api/admin/dead-letters/{id}}).
+   */
+  private static final String REMEDY =
+      " Check whether its effect is present: if it is missing, retry with ?force=true; if it is"
+          + " present, discard the entry (DELETE /api/admin/dead-letters/{id}).";
+
+  private static final String NOT_DEDUPLICATED_MESSAGE =
+      "The command ran without an idempotency key: if its caller already retried it, a replay"
+          + " applies it twice."
+          + REMEDY;
+
+  private static final String STALE_REPLAY_MESSAGE =
+      "The entry is older than the command-inbox retention window, so a replay may not be"
+          + " deduplicated."
+          + REMEDY;
+
   @Inject CircuitBreakerCommandInterceptor circuitBreaker;
   @Inject PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker;
   @Inject PaymentGatewaySimulator paymentGateway;
@@ -87,32 +105,26 @@ public class AdminController {
   public HttpResponse<Map<String, String>> retryDeadLetter(
       @PathVariable String id, @QueryValue(defaultValue = "false") boolean force) {
     requireAdmin();
-    // A replay the inbox cannot deduplicate waits for the operator's ?force=true, and a forced
-    // replay is audited.
+    // A replay the inbox cannot deduplicate waits for the operator's ?force=true. A forced replay
+    // is audited first: if the audit write fails, nothing is replayed.
     var commandId = new CommandId(id);
-    var outcome = deadLetterRetryRunner.retry(commandId, force);
-    if (force && outcome != DeadLetterRetryRunner.RetryOutcome.NOT_FOUND) {
-      auditForcedReplay(commandId, outcome);
+    if (force) {
+      var entry = deadLetterQueue.find(commandId);
+      if (entry.isEmpty()) {
+        return HttpResponse.notFound();
+      }
+      auditOperatorDecision("DLQ_FORCED_REPLAY", entry.get());
     }
+    var outcome = deadLetterRetryRunner.retry(commandId, force);
     return switch (outcome) {
       case REPLAYED -> HttpResponse.ok(Map.of("outcome", outcome.name()));
       case NOT_FOUND -> HttpResponse.notFound();
       case NOT_DEDUPLICATED ->
           HttpResponse.<Map<String, String>>status(HttpStatus.CONFLICT)
-              .body(
-                  Map.of(
-                      "outcome",
-                      outcome.name(),
-                      "message",
-                      "The command ran without an idempotency key: if its caller already retried it, a replay applies it twice. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+              .body(Map.of("outcome", outcome.name(), "message", NOT_DEDUPLICATED_MESSAGE));
       case STALE_REPLAY_BLOCKED ->
           HttpResponse.<Map<String, String>>status(HttpStatus.CONFLICT)
-              .body(
-                  Map.of(
-                      "outcome",
-                      outcome.name(),
-                      "message",
-                      "The entry is older than the command-inbox retention window, so a replay may not be deduplicated. Check that its effect is missing, then retry with ?force=true, or discard the entry."));
+              .body(Map.of("outcome", outcome.name(), "message", STALE_REPLAY_MESSAGE));
       case ADMISSION_REFUSED ->
           HttpResponse.<Map<String, String>>status(HttpStatus.SERVICE_UNAVAILABLE)
               .header("Retry-After", "5")
@@ -124,25 +136,44 @@ public class AdminController {
   }
 
   /**
-   * Records a forced replay in the audit log ({@code audit_log}, command type {@code
-   * DLQ_FORCED_REPLAY}): the entry's command id, the operator who forced it, {@code SUCCESS} when
-   * the command ran, otherwise {@code FAILURE} with the outcome. A forced replay overrides the
-   * runner's refusal to run a command the inbox cannot deduplicate, so the decision is the
-   * operator's and is kept beside the command's own audit rows.
+   * Discards a dead-letter entry whose effect is present: the command already ran (its caller
+   * retried it), so a replay would apply it a second time. {@code 404} when no entry exists. The
+   * decision is audited ({@code DLQ_DISCARDED}) before the entry is removed.
    */
-  private void auditForcedReplay(CommandId commandId, DeadLetterRetryRunner.RetryOutcome outcome) {
+  @Delete("/dead-letters/{id}")
+  public HttpResponse<Map<String, String>> discardDeadLetter(@PathVariable String id) {
+    requireAdmin();
+    var commandId = new CommandId(id);
+    var entry = deadLetterQueue.find(commandId);
+    if (entry.isEmpty()) {
+      return HttpResponse.notFound();
+    }
+    auditOperatorDecision("DLQ_DISCARDED", entry.get());
+    deadLetterQueue.discard(commandId);
+    return HttpResponse.ok(Map.of("outcome", "DISCARDED"));
+  }
+
+  /**
+   * Records an operator's decision about a dead-letter entry in the audit log ({@code audit_log},
+   * beside the command's own rows): {@code DLQ_FORCED_REPLAY} or {@code DLQ_DISCARDED}, the entry's
+   * command id and stream, and the operator. The row is written before the decision is acted on, so
+   * it is the durable record of it: an audit write that fails throws, and nothing is replayed or
+   * discarded. The outcome of a forced replay shows elsewhere — a replayed entry is gone and its
+   * command has an audit row of its own, a failed one is still listed.
+   */
+  private void auditOperatorDecision(String decision, DeadLetterQueue.DeadLetterEntry entry) {
     var caller = RequestCaller.current();
-    boolean replayed = outcome == DeadLetterRetryRunner.RetryOutcome.REPLAYED;
+    var stream = entry.streamId();
     auditStore.save(
         new AuditEntry(
-            commandId,
-            "DLQ_FORCED_REPLAY",
-            null,
-            null,
+            entry.commandId(),
+            decision,
+            stream == null ? null : stream.aggregateType(),
+            stream == null ? null : stream.aggregateId(),
             caller.userId(),
             Instant.now(),
-            replayed ? AuditOutcome.SUCCESS : AuditOutcome.FAILURE,
-            replayed ? null : outcome.name(),
+            AuditOutcome.SUCCESS,
+            null,
             0,
             caller.correlationId()));
   }

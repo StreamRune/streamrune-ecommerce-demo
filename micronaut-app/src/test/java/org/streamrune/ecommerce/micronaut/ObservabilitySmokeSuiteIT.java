@@ -213,6 +213,25 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                     .header("X-User-Id", "admin-1")
                     .header("X-User-Role", "ADMIN")))
         .isEqualTo(404);
+    // A forced replay and a discard are decisions of an ADMIN: the role check comes first.
+    assertThat(
+            statusOf(
+                HttpRequest.POST("/api/admin/dead-letters/no-such-command/retry?force=true", "")
+                    .header("X-User-Id", "cust-alice")
+                    .header("X-User-Role", "CUSTOMER")))
+        .isEqualTo(403);
+    assertThat(
+            statusOf(
+                HttpRequest.DELETE("/api/admin/dead-letters/no-such-command")
+                    .header("X-User-Id", "cust-alice")
+                    .header("X-User-Role", "CUSTOMER")))
+        .isEqualTo(403);
+    assertThat(
+            statusOf(
+                HttpRequest.DELETE("/api/admin/dead-letters/no-such-command")
+                    .header("X-User-Id", "admin-1")
+                    .header("X-User-Role", "ADMIN")))
+        .isEqualTo(404);
 
     // The FAILED listing is a read: no role needed. Nothing fails delivery here (no poller).
     List<Map<String, Object>> failed =

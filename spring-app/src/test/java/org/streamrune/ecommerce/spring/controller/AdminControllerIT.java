@@ -237,6 +237,23 @@ class AdminControllerIT extends AbstractIntegrationTest {
         .exchange()
         .expectStatus()
         .isForbidden();
+    // A forced replay and a discard are decisions of an ADMIN: the role check comes first.
+    client
+        .post()
+        .uri("/api/admin/dead-letters/" + java.util.UUID.randomUUID() + "/retry?force=true")
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
+        .exchange()
+        .expectStatus()
+        .isForbidden();
+    client
+        .delete()
+        .uri("/api/admin/dead-letters/" + java.util.UUID.randomUUID())
+        .header("X-User-Id", "cust-alice")
+        .header("X-User-Role", "CUSTOMER")
+        .exchange()
+        .expectStatus()
+        .isForbidden();
   }
 
   @Test

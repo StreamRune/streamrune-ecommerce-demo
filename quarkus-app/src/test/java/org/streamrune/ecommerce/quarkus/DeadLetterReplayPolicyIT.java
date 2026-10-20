@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -38,14 +39,16 @@ import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.domain.product.ProductEvent;
 import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.runtime.DeadLetterRetryRunner;
 
 /**
  * Which dead-lettered commands the retry runner replays on its own, and what the operator's Retry
  * does with the rest, as in the Spring and Micronaut apps. A keyed entry is replayed on the
  * schedule, and the command inbox answers it with the recorded result when the caller already
  * retried with the same key. An unkeyed entry waits for an operator; the plain Retry answers {@code
- * 409}, {@code ?force=true} replays it and writes a {@code DLQ_FORCED_REPLAY} audit row naming the
- * operator.
+ * 409}, and the operator then replays it ({@code ?force=true}) or discards it ({@code DELETE}).
+ * Either decision is written into the audit log ({@code DLQ_FORCED_REPLAY}, {@code DLQ_DISCARDED})
+ * before it is acted on, and an audit row that cannot be written stops it.
  *
  * <p>The tests run with {@code %test.app.dead-letter.poll-interval=PT1S}, and move an entry's
  * {@code published_at} past the policy's initial delay (60 s with jitter) where they wait for the
@@ -61,6 +64,7 @@ class DeadLetterReplayPolicyIT {
   @Inject DeadLetterQueue deadLetterQueue;
   @Inject EventStore eventStore;
   @Inject MeterRegistry meterRegistry;
+  @Inject DeadLetterRetryRunner deadLetterRetryRunner;
 
   @Test
   void aKeyedAdjustmentThatFailed_isReplayedOnTheSchedule() throws Exception {
@@ -103,24 +107,30 @@ class DeadLetterReplayPolicyIT {
     assertThat(stockAdjustments(pid)).isOne();
 
     becomeDue(commandId);
-
+    // A keyed entry made due after it: once the schedule has replayed this one, a poll has run
+    // while the unkeyed entry was due.
+    CommandId witness = failedAdjustment(createProduct(), UUID.randomUUID().toString());
+    becomeDue(witness);
     await()
         .atMost(SCHEDULE)
-        .untilAsserted(
-            () ->
-                assertThat(meterRegistry.get(MetricNames.DLQ_AWAITING_OPERATOR).gauge().value())
-                    .as("the runner samples the entries it leaves to an operator")
-                    .isGreaterThanOrEqualTo(1.0));
+        .untilAsserted(() -> assertThat(deadLetterQueue.find(witness)).isEmpty());
+
     var entry = deadLetterQueue.find(commandId);
     assertThat(entry).as("the schedule leaves an unkeyed entry alone").isPresent();
     assertThat(entry.get().dlqAttempts()).isZero();
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(() -> assertThat(awaitingOperatorGauge()).isEqualTo(awaitingOperator()));
+    assertThat(awaitingOperatorGauge())
+        .as("the runner samples the entries it leaves to an operator")
+        .isGreaterThanOrEqualTo(1.0);
 
     retry(commandId, false, "ops-1")
         .statusCode(409)
         .body("outcome", equalTo("NOT_DEDUPLICATED"))
         .body("message", containsString("?force=true"));
     assertThat(stockAdjustments(pid)).as("a plain Retry never runs it a second time").isOne();
-    assertThat(forcedReplayAudits(commandId)).isEmpty();
+    assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
 
   @Test
@@ -132,7 +142,65 @@ class DeadLetterReplayPolicyIT {
 
     assertThat(stockAdjustments(pid)).isOne();
     assertThat(deadLetterQueue.find(commandId)).isEmpty();
-    assertThat(forcedReplayAudits(commandId)).containsExactly("ops-7 SUCCESS");
+    assertThat(decisions(commandId, "DLQ_FORCED_REPLAY"))
+        .containsExactly("ops-7 SUCCESS product:" + pid);
+  }
+
+  @Test
+  void aForcedRetryWhoseAuditRowCannotBeWritten_replaysNothing() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = failedAdjustment(pid, null);
+
+    try (var refused = new AuditFailureInjection(dataSource, commandId)) {
+      retry(commandId, true, "ops-7").statusCode(greaterThanOrEqualTo(500));
+    }
+
+    assertThat(stockAdjustments(pid)).as("an unrecorded decision is not acted on").isZero();
+    assertThat(deadLetterQueue.find(commandId)).isPresent();
+    assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
+  }
+
+  @Test
+  void aDiscardRemovesTheEntry_namesTheOperator_andTheAwaitingGaugeDrops() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = failedAdjustment(pid, null);
+    // The caller's retry succeeded: the effect is present, so the operator discards the entry.
+    adjustStock(pid, null).statusCode(200);
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(() -> assertThat(awaitingOperatorGauge()).isEqualTo(awaitingOperator()));
+    double before = awaitingOperatorGauge();
+
+    discard(commandId, "ops-7").statusCode(200).body("outcome", equalTo("DISCARDED"));
+
+    assertThat(deadLetterQueue.find(commandId)).isEmpty();
+    assertThat(stockAdjustments(pid)).as("a discard runs nothing").isOne();
+    assertThat(decisions(commandId, "DLQ_DISCARDED"))
+        .containsExactly("ops-7 SUCCESS product:" + pid);
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(() -> assertThat(awaitingOperatorGauge()).isEqualTo(before - 1));
+  }
+
+  @Test
+  void aDiscardWhoseAuditRowCannotBeWritten_keepsTheEntry() throws Exception {
+    CommandId commandId = failedAdjustment(createProduct(), null);
+
+    try (var refused = new AuditFailureInjection(dataSource, commandId)) {
+      discard(commandId, "ops-7").statusCode(greaterThanOrEqualTo(500));
+    }
+
+    assertThat(deadLetterQueue.find(commandId)).isPresent();
+    assertThat(decisions(commandId, "DLQ_DISCARDED")).isEmpty();
+  }
+
+  @Test
+  void aDiscardOfAnUnknownEntryIs404_andAuditsNothing() throws Exception {
+    CommandId commandId = CommandId.of(UUID.randomUUID().toString());
+
+    discard(commandId, "ops-7").statusCode(404);
+
+    assertThat(decisions(commandId, "DLQ_DISCARDED")).isEmpty();
   }
 
   @Test
@@ -172,7 +240,7 @@ class DeadLetterReplayPolicyIT {
 
     retry(commandId, true, "ops-1").statusCode(404);
 
-    assertThat(forcedReplayAudits(commandId)).isEmpty();
+    assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
 
   /** {@code PUT /stock} while the store refuses the event: the bus dead-letters the command. */
@@ -214,21 +282,42 @@ class DeadLetterReplayPolicyIT {
     }
   }
 
-  private List<String> forcedReplayAudits(CommandId commandId) throws Exception {
+  /** The audit rows of an operator's decision about the entry: "user outcome type:id". */
+  private List<String> decisions(CommandId commandId, String decision) throws Exception {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps =
             conn.prepareStatement(
-                "SELECT user_id, outcome FROM audit_log"
-                    + " WHERE command_id = ? AND command_type = 'DLQ_FORCED_REPLAY'")) {
+                "SELECT user_id, outcome, aggregate_type, aggregate_id FROM audit_log"
+                    + " WHERE command_id = ? AND command_type = ?")) {
       ps.setString(1, commandId.value());
+      ps.setString(2, decision);
       try (ResultSet rs = ps.executeQuery()) {
         List<String> rows = new ArrayList<>();
         while (rs.next()) {
-          rows.add(rs.getString(1) + " " + rs.getString(2));
+          rows.add(
+              rs.getString(1)
+                  + " "
+                  + rs.getString(2)
+                  + " "
+                  + rs.getString(3)
+                  + ":"
+                  + rs.getString(4));
         }
         return rows;
       }
     }
+  }
+
+  private double awaitingOperatorGauge() {
+    return meterRegistry.get(MetricNames.DLQ_AWAITING_OPERATOR).gauge().value();
+  }
+
+  /** What the gauge counts, read from the queue the way the runner samples it. */
+  private double awaitingOperator() {
+    return deadLetterQueue.countAwaitingOperator(
+        deadLetterRetryRunner.policy().maxRetries(),
+        true,
+        Instant.now().minus(deadLetterRetryRunner.inboxRetentionMaxAge()));
   }
 
   private double staleRefusals() {
@@ -266,6 +355,15 @@ class DeadLetterReplayPolicyIT {
         .body("{\"quantity\": 5, \"reason\": \"restock\"}")
         .when()
         .put("/api/products/" + pid + "/stock")
+        .then();
+  }
+
+  private static ValidatableResponse discard(CommandId commandId, String operator) {
+    return given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", operator)
+        .when()
+        .delete("/api/admin/dead-letters/" + commandId.value())
         .then();
   }
 
