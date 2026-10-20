@@ -467,12 +467,12 @@ public class StreamRuneFactory {
 
   /**
    * Overrides the framework's {@code @Secondary} {@link DeadLetterRetryRunner} with the demo's own
-   * retry policy (5 attempts, 60 s initial backoff, 60 s poll). It registers the same five sealed
-   * command roots the decider registrations above route, so a dead-lettered command of any
-   * aggregate resolves: a dead-letter entry names the CONCRETE command class, and {@code
-   * registerCommand} expands a sealed root into every command it permits. In a GraalVM native image
-   * that expansion reads {@code getPermittedSubclasses()}, which the image answers only for a root
-   * registered for reflection: the roots are {@code {"type": ...}} entries in {@code
+   * retry policy (5 attempts, 60 s initial backoff). It registers the same five sealed command
+   * roots the decider registrations above route, so a dead-lettered command of any aggregate
+   * resolves: a dead-letter entry names the CONCRETE command class, and {@code registerCommand}
+   * expands a sealed root into every command it permits. In a GraalVM native image that expansion
+   * reads {@code getPermittedSubclasses()}, which the image answers only for a root registered for
+   * reflection: the roots are {@code {"type": ...}} entries in {@code
    * META-INF/native-image/org.streamrune.ecommerce/micronaut-app/reachability-metadata.json}
    * (registering their records alone is not enough, and neither is naming the roots in a Micronaut
    * {@code @TypeHint}). A root the image cannot expand makes {@code registerCommand} refuse to
@@ -492,13 +492,24 @@ public class StreamRuneFactory {
    * read the ciphertext into the command and replay it as the customer's data. If the customer was
    * forgotten while the entry waited, the fields decrypt to {@code [REDACTED]} and the runner does
    * not replay the command.
+   *
+   * <p>{@code OPERATOR_ONLY}: on its schedule the runner replays only the entries the command inbox
+   * can deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
+   * command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}), because its
+   * caller may already have retried it successfully. {@code metrics}, when a {@code
+   * StreamRuneMetrics} bean exists, counts those entries ({@code streamrune.dlq.awaiting_operator})
+   * and the operator retries refused as older than the inbox window ({@code
+   * streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Singleton
   public DeadLetterRetryRunner deadLetterRetryRunner(
       DeadLetterQueue dlq,
       org.streamrune.core.CommandBus commandBus,
       PostgresCryptoEngine cryptoEngine,
-      StreamRuneMicronautProperties properties) {
+      StreamRuneMicronautProperties properties,
+      @Nullable StreamRuneMetrics metrics,
+      @Value("${app.dead-letter.poll-interval:60s}") Duration pollInterval) {
     return DeadLetterRetryRunner.builder()
         .deadLetterQueue(dlq)
         .commandBus(commandBus)
@@ -517,7 +528,8 @@ public class StreamRuneFactory {
                 DeadLetterRetryPolicy.UnkeyedReplay.OPERATOR_ONLY))
         // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
-        .pollInterval(Duration.ofSeconds(60))
+        .metrics(metrics)
+        .pollInterval(pollInterval)
         .build();
   }
 

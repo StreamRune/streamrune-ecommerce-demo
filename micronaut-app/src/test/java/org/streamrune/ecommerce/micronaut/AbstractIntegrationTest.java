@@ -65,6 +65,10 @@ public abstract class AbstractIntegrationTest implements TestPropertyProvider {
         // bean re-drives a stuck COMPENSATING saga every second instead of every minute, so
         // SagaRecoveryAdminIT can watch it finish one.
         "streamrune.saga.compensation-retry-interval",
+        "1s",
+        // The dead-letter retry runner looks for due entries every second instead of every
+        // minute, so DeadLetterReplayPolicyIT sees a scheduled replay within one short poll.
+        "app.dead-letter.poll-interval",
         "1s");
   }
 }

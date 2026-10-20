@@ -1,0 +1,326 @@
+package org.streamrune.ecommerce.micronaut;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+
+import io.micronaut.context.annotation.Requires;
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.MediaType;
+import io.micronaut.http.MutableHttpRequest;
+import io.micronaut.http.client.HttpClient;
+import io.micronaut.http.client.annotation.Client;
+import io.micronaut.http.client.exceptions.HttpClientResponseException;
+import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.Test;
+import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.DeadLetterQueue.DeadLetterPublishRequest;
+import org.streamrune.core.EventStore;
+import org.streamrune.core.StreamRuneMetrics;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.CommandId;
+import org.streamrune.core.types.CorrelationId;
+import org.streamrune.core.types.IdempotencyKey;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.types.UserId;
+import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
+import org.streamrune.ecommerce.domain.product.ProductState;
+
+/**
+ * Which dead-lettered commands the retry runner replays on its own, and what the operator's Retry
+ * does with the rest, as in the Spring and Quarkus apps. A keyed entry is replayed on the schedule,
+ * and the command inbox answers it with the recorded result when the caller already retried with
+ * the same key. An unkeyed entry waits for an operator; the plain Retry answers {@code 409}, {@code
+ * ?force=true} replays it and writes a {@code DLQ_FORCED_REPLAY} audit row naming the operator.
+ *
+ * <p>The app has no Micrometer registry, so the test gives it a {@link StreamRuneMetrics} bean of
+ * its own that records the two dead-letter meters, and checks that the runner reports to it. The
+ * tests run with {@code app.dead-letter.poll-interval=1s}, and move an entry's {@code published_at}
+ * past the policy's initial delay (60 s with jitter) where they wait for the schedule.
+ */
+@MicronautTest(transactional = false)
+class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
+
+  private static final Duration SCHEDULE = Duration.ofSeconds(20);
+
+  @Inject
+  @Client("/")
+  HttpClient client;
+
+  @Inject DataSource dataSource;
+  @Inject DeadLetterQueue deadLetterQueue;
+  @Inject EventStore eventStore;
+  @Inject RecordingMetrics metrics;
+
+  @Override
+  public Map<String, String> getProperties() {
+    var properties = new HashMap<>(super.getProperties());
+    properties.put("spec.name", "DeadLetterReplayPolicyIT");
+    return properties;
+  }
+
+  /** The two dead-letter meters the runner reports, as the Micrometer bean would record them. */
+  @Singleton
+  @Requires(property = "spec.name", value = "DeadLetterReplayPolicyIT")
+  static class RecordingMetrics implements StreamRuneMetrics {
+    final AtomicLong awaitingOperator = new AtomicLong();
+    final AtomicInteger staleReplayBlocked = new AtomicInteger();
+
+    @Override
+    public void recordDlqAwaitingOperator(long awaiting) {
+      awaitingOperator.set(awaiting);
+    }
+
+    @Override
+    public void recordDeadLetterStaleReplayBlocked(String commandType) {
+      staleReplayBlocked.incrementAndGet();
+    }
+  }
+
+  @Test
+  void aKeyedAdjustmentThatFailed_isReplayedOnTheSchedule() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = failedAdjustment(pid, UUID.randomUUID().toString());
+
+    becomeDue(commandId);
+
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(() -> assertThat(deadLetterQueue.find(commandId)).isEmpty());
+    assertThat(stockAdjustments(pid)).as("the scheduled replay applied the adjustment").isOne();
+  }
+
+  @Test
+  void aKeyedAdjustmentTheCallerRetried_isNotAppliedAgainByTheSchedule() throws Exception {
+    String pid = createProduct();
+    String key = UUID.randomUUID().toString();
+    CommandId commandId = failedAdjustment(pid, key);
+
+    // The caller saw the 500 and sent the request again, with the same key: it succeeds.
+    assertThat(send(adjustStock(pid, key)).status()).isEqualTo(200);
+    assertThat(stockAdjustments(pid)).isOne();
+
+    becomeDue(commandId);
+
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(() -> assertThat(deadLetterQueue.find(commandId)).isEmpty());
+    assertThat(stockAdjustments(pid))
+        .as("the inbox answered the replay with the result of the caller's retry")
+        .isOne();
+  }
+
+  @Test
+  void anUnkeyedAdjustmentTheCallerRetried_waitsForAnOperator_andIsCounted() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = failedAdjustment(pid, null);
+    assertThat(send(adjustStock(pid, null)).status()).isEqualTo(200);
+    assertThat(stockAdjustments(pid)).isOne();
+
+    becomeDue(commandId);
+
+    await()
+        .atMost(SCHEDULE)
+        .untilAsserted(
+            () ->
+                assertThat(metrics.awaitingOperator.get())
+                    .as("the runner samples the entries it leaves to an operator")
+                    .isPositive());
+    var entry = deadLetterQueue.find(commandId);
+    assertThat(entry).as("the schedule leaves an unkeyed entry alone").isPresent();
+    assertThat(entry.get().dlqAttempts()).isZero();
+
+    var refused = send(retry(commandId, false, "ops-1"));
+    assertThat(refused.status()).isEqualTo(409);
+    assertThat(refused.body()).contains("NOT_DEDUPLICATED").contains("?force=true");
+    assertThat(stockAdjustments(pid)).as("a plain Retry never runs it a second time").isOne();
+    assertThat(forcedReplayAudits(commandId)).isEmpty();
+  }
+
+  @Test
+  void aForcedRetryReplaysTheEntry_andTheAuditLogNamesTheOperator() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = failedAdjustment(pid, null);
+
+    var replayed = send(retry(commandId, true, "ops-7"));
+    assertThat(replayed.status()).isEqualTo(200);
+    assertThat(replayed.body()).contains("REPLAYED");
+
+    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(deadLetterQueue.find(commandId)).isEmpty();
+    assertThat(forcedReplayAudits(commandId)).containsExactly("ops-7 SUCCESS");
+  }
+
+  @Test
+  void aKeyedEntryOlderThanTheInboxWindow_isRefused_counted_andReplayedOnlyWhenForced() {
+    String pid = createProduct();
+    int refusedBefore = metrics.staleReplayBlocked.get();
+    CommandId commandId = CommandId.of(UUID.randomUUID().toString());
+    deadLetterQueue.publish(
+        new DeadLetterPublishRequest(
+            "{\"productId\":\"" + pid + "\",\"quantityChange\":5,\"reason\":\"restock\"}",
+            ProductCommand.AdjustStock.class.getName(),
+            commandId,
+            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            IllegalStateException.class.getName(),
+            "transient downstream failure",
+            3,
+            // First received eight days ago: the inbox (7 days) may have pruned the key.
+            Instant.now().minus(Duration.ofDays(8)),
+            CorrelationId.of("corr-" + UUID.randomUUID()),
+            UserId.of("admin-1"),
+            null,
+            IdempotencyKey.scopedTo("admin-1", UUID.randomUUID().toString())));
+
+    var refused = send(retry(commandId, false, "ops-1"));
+    assertThat(refused.status()).isEqualTo(409);
+    assertThat(refused.body()).contains("STALE_REPLAY_BLOCKED");
+    assertThat(metrics.staleReplayBlocked.get() - refusedBefore).isOne();
+    assertThat(stockAdjustments(pid)).isZero();
+
+    assertThat(send(retry(commandId, true, "ops-1")).status()).isEqualTo(200);
+    assertThat(stockAdjustments(pid)).isOne();
+  }
+
+  @Test
+  void aForcedRetryOfAnUnknownEntryIs404_andAuditsNothing() throws Exception {
+    CommandId commandId = CommandId.of(UUID.randomUUID().toString());
+
+    assertThat(send(retry(commandId, true, "ops-1")).status()).isEqualTo(404);
+
+    assertThat(forcedReplayAudits(commandId)).isEmpty();
+  }
+
+  /** {@code PUT /stock} while the store refuses the event: the bus dead-letters the command. */
+  private CommandId failedAdjustment(String pid, String key) throws Exception {
+    try (var failures = new AppendFailureInjection(dataSource)) {
+      failures.failAppend(ProductState.TYPE, pid, "StockAdjusted");
+      assertThat(send(adjustStock(pid, key)).status()).isEqualTo(500);
+    }
+    try (Connection conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "SELECT command_id, idempotency_key FROM dead_letter_queue WHERE aggregate_id = ?")) {
+      ps.setString(1, pid);
+      try (ResultSet rs = ps.executeQuery()) {
+        assertThat(rs.next()).as("the failed adjustment is dead-lettered").isTrue();
+        CommandId commandId = CommandId.of(rs.getString(1));
+        if (key == null) {
+          assertThat(rs.getString(2)).isNull();
+        } else {
+          assertThat(rs.getString(2)).as("the entry keeps the caller's key").endsWith(key);
+        }
+        return commandId;
+      }
+    }
+  }
+
+  /** Moves the entry past the policy's initial delay, so the next poll finds it due. */
+  private void becomeDue(CommandId commandId) throws Exception {
+    try (Connection conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "UPDATE dead_letter_queue SET published_at = now() - interval '10 minutes'"
+                    + " WHERE command_id = ?")) {
+      ps.setString(1, commandId.value());
+      assertThat(ps.executeUpdate()).isOne();
+      if (!conn.getAutoCommit()) {
+        conn.commit();
+      }
+    }
+  }
+
+  private List<String> forcedReplayAudits(CommandId commandId) throws Exception {
+    try (Connection conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "SELECT user_id, outcome FROM audit_log"
+                    + " WHERE command_id = ? AND command_type = 'DLQ_FORCED_REPLAY'")) {
+      ps.setString(1, commandId.value());
+      try (ResultSet rs = ps.executeQuery()) {
+        List<String> rows = new ArrayList<>();
+        while (rs.next()) {
+          rows.add(rs.getString(1) + " " + rs.getString(2));
+        }
+        return rows;
+      }
+    }
+  }
+
+  private String createProduct() {
+    String pid = "m-dlq-policy-" + System.nanoTime();
+    var created =
+        send(
+            HttpRequest.POST(
+                    "/api/products",
+                    """
+                    {"productId": "%s", "name": "Replayed", "description": "dead-letter policy",
+                     "category": "Test", "price": 5.00, "initialStock": 3}"""
+                        .formatted(pid))
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Role", "ADMIN")
+                .header("X-User-Id", "admin-1"));
+    assertThat(created.status()).isEqualTo(200);
+    return pid;
+  }
+
+  private static MutableHttpRequest<String> adjustStock(String pid, String key) {
+    var request =
+        HttpRequest.PUT(
+                "/api/products/" + pid + "/stock", "{\"quantity\": 5, \"reason\": \"restock\"}")
+            .contentType(MediaType.APPLICATION_JSON)
+            .header("X-User-Role", "ADMIN")
+            .header("X-User-Id", "admin-1");
+    return key == null ? request : request.header("Idempotency-Key", key);
+  }
+
+  private static MutableHttpRequest<String> retry(
+      CommandId commandId, boolean force, String operator) {
+    return HttpRequest.POST(
+            "/api/admin/dead-letters/"
+                + commandId.value()
+                + "/retry"
+                + (force ? "?force=true" : ""),
+            "")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", operator);
+  }
+
+  private record Answer(int status, String body) {}
+
+  private Answer send(MutableHttpRequest<?> request) {
+    try {
+      var response = client.toBlocking().exchange(request, String.class);
+      return new Answer(response.getStatus().getCode(), response.getBody().orElse(""));
+    } catch (HttpClientResponseException e) {
+      return new Answer(e.getStatus().getCode(), e.getResponse().getBody(String.class).orElse(""));
+    }
+  }
+
+  private long stockAdjustments(String pid) {
+    return eventStore
+        .readStream(
+            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            Version.initial(),
+            Integer.MAX_VALUE)
+        .stream()
+        .filter(e -> e.event() instanceof ProductEvent.StockAdjusted)
+        .count();
+  }
+}

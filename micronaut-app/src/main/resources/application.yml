@@ -39,6 +39,11 @@ app:
     # timeout-poll-interval. The same keys and defaults hold in the Spring and Quarkus apps.
     fulfillment-timeout: 15m
     timeout-poll-interval: 10s
+  dead-letter:
+    # How often the dead-letter retry runner (StreamRuneFactory#deadLetterRetryRunner) looks for
+    # entries due for a replay. It replays only entries of keyed commands on its own; an unkeyed
+    # entry waits for an operator. The same key and default hold in the Spring and Quarkus apps.
+    poll-interval: 60s
 
 datasources:
   default:
