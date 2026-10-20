@@ -95,9 +95,10 @@ In `frontend/`, after `npm ci`:
   `.gitmessage`). Sign off every commit with `git commit --signoff`: the `dco` check rejects a
   commit without the trailer.
 - **Pull requests** go to `main` and are squash-merged.
-- **Formatting** is google-java-format through Spotless. `check` runs `spotlessCheck`, so `build`
-  fails on a formatting violation (and so does `quickCheck`); `./gradlew spotlessApply` fixes what
-  it reports.
+- **Formatting** is google-java-format through Spotless, and it is enforced: `check` runs
+  `spotlessCheck`, so `build` fails on a formatting violation (and so does `quickCheck`), and the
+  required `Shared module tests` check runs `spotlessCheck` for every module in CI.
+  `./gradlew spotlessApply` fixes what it reports.
 
 ## 4. Testing conventions
 
@@ -123,8 +124,10 @@ In `frontend/`, after `npm ci`:
   `TutorialListingsCompileTest` compiles every complete listing, chapter by chapter, against the
   framework and the demo modules; `TutorialMetricNamesTest` checks that every meter name the
   tutorial and the README give is one the framework registers; `TutorialInterceptorOrderTest`
-  checks every interceptor chain the tutorial shows against the framework's order. The `spring-app`
-  test task re-runs them whenever a chapter or the README changes.
+  checks every interceptor chain the tutorial shows against the framework's order;
+  `TutorialSettingsListingTest` checks that chapter 1's `settings.gradle.kts` listings are the demo's
+  own file, apart from the `include(...)` modules the chapter names. The `spring-app` test task
+  re-runs them whenever a chapter or the README changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.

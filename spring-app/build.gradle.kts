@@ -96,11 +96,15 @@ dependencies {
 tasks.named<Test>("test") {
     useJUnitPlatform()
     jvmArgs("--enable-preview")
-    // The docs tests read the tutorial and the README: a changed page re-runs them.
+    // The docs tests read the tutorial, the README and the settings file chapter 1 lists: a
+    // changed page or settings file re-runs them.
     inputs.dir(rootProject.layout.projectDirectory.dir("docs/tutorial"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("tutorial")
     inputs.file(rootProject.layout.projectDirectory.file("README.md"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("readme")
+    inputs.file(rootProject.layout.projectDirectory.file("settings.gradle.kts"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("settings")
 }
