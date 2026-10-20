@@ -1,5 +1,6 @@
 package org.streamrune.ecommerce.spring.controller;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -9,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.audit.AuditEntry;
+import org.streamrune.core.audit.AuditOutcome;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxStatus;
@@ -24,6 +27,7 @@ import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.spring.config.PaymentGatewayCircuitBreaker;
 import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
+import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.runtime.CircuitBreakerCommandInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.OutboxFailedReplayer;
@@ -43,6 +47,7 @@ public class AdminController {
   private final SagaStore sagaStore;
   private final SagaDeadLetterReplayer sagaDeadLetterReplayer;
   private final ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer;
+  private final PostgresAuditStore auditStore;
 
   public AdminController(
       CircuitBreakerCommandInterceptor circuitBreaker,
@@ -54,7 +59,8 @@ public class AdminController {
       SagaDeadLetterStore sagaDeadLetterStore,
       SagaStore sagaStore,
       SagaDeadLetterReplayer sagaDeadLetterReplayer,
-      ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer) {
+      ObjectProvider<OutboxFailedReplayer> outboxFailedReplayer,
+      PostgresAuditStore auditStore) {
     this.circuitBreaker = circuitBreaker;
     this.paymentGatewayCircuitBreaker = paymentGatewayCircuitBreaker;
     this.paymentGateway = paymentGateway;
@@ -65,6 +71,7 @@ public class AdminController {
     this.sagaStore = sagaStore;
     this.sagaDeadLetterReplayer = sagaDeadLetterReplayer;
     this.outboxFailedReplayer = outboxFailedReplayer;
+    this.auditStore = auditStore;
   }
 
   @GetMapping("/circuit-breaker")
@@ -90,8 +97,12 @@ public class AdminController {
     requireAdmin();
     // Re-dispatch the dead-lettered command through the bus (under DLQ_REPLAY + its original
     // request context); discarded on success, attempt count bumped on failure. A replay the inbox
-    // cannot deduplicate waits for the operator's ?force=true.
-    var outcome = deadLetterRetryRunner.retry(new CommandId(id), force);
+    // cannot deduplicate waits for the operator's ?force=true, and a forced replay is audited.
+    var commandId = new CommandId(id);
+    var outcome = deadLetterRetryRunner.retry(commandId, force);
+    if (force && outcome != DeadLetterRetryRunner.RetryOutcome.NOT_FOUND) {
+      auditForcedReplay(commandId, outcome);
+    }
     return switch (outcome) {
       case REPLAYED -> ResponseEntity.ok(Map.of("outcome", outcome.name()));
       case NOT_FOUND -> ResponseEntity.notFound().build();
@@ -119,6 +130,30 @@ public class AdminController {
           ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
               .body(Map.of("outcome", outcome.name()));
     };
+  }
+
+  /**
+   * Records a forced replay in the audit log ({@code audit_log}, command type {@code
+   * DLQ_FORCED_REPLAY}): the entry's command id, the operator who forced it, {@code SUCCESS} when
+   * the command ran, otherwise {@code FAILURE} with the outcome. A forced replay overrides the
+   * runner's refusal to run a command the inbox cannot deduplicate, so the decision is the
+   * operator's and is kept beside the command's own audit rows.
+   */
+  private void auditForcedReplay(CommandId commandId, DeadLetterRetryRunner.RetryOutcome outcome) {
+    var caller = RequestCaller.current();
+    boolean replayed = outcome == DeadLetterRetryRunner.RetryOutcome.REPLAYED;
+    auditStore.save(
+        new AuditEntry(
+            commandId,
+            "DLQ_FORCED_REPLAY",
+            null,
+            null,
+            caller.userId(),
+            Instant.now(),
+            replayed ? AuditOutcome.SUCCESS : AuditOutcome.FAILURE,
+            replayed ? null : outcome.name(),
+            0,
+            caller.correlationId()));
   }
 
   /** Read-only listing: findByStatus never claims; loadPending did — it stalled delivery. */

@@ -131,6 +131,9 @@ public abstract class AbstractIntegrationTest {
     // interval beyond any test run, the only ": keepalive" a test can read is the comment a stream
     // opens with, so SseLiveE2EIT and SseStreamAccessIT fail when that comment is missing.
     registry.add("streamrune.sse.keep-alive-interval", () -> "1h");
+    // The dead-letter retry runner looks for due entries every second instead of every minute, so
+    // DeadLetterReplayPolicyIT sees a scheduled replay within one short poll.
+    registry.add("app.dead-letter.poll-interval", () -> "1s");
     // RabbitMQ broker for the outbox publisher (opened eagerly at startup by RabbitMqConfig).
     registry.add("spring.rabbitmq.host", RABBIT::getHost);
     registry.add("spring.rabbitmq.port", RABBIT::getAmqpPort);
