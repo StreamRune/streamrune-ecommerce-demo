@@ -67,7 +67,7 @@ The database needs no schema script. The backend creates the framework's tables 
 
 ### 1. Start PostgreSQL and RabbitMQ
 
-All three apps need both: the database for the event store, and the broker because the outbox publisher opens its AMQP connection at startup.
+All three apps need the database for the event store. The broker receives the transactional outbox's integration events: an app starts and serves commands without it, its outbox entries wait in the database, and the relay delivers them once the broker answers ([Chapter 13](docs/tutorial/13-inventory-outbox.md#step-5b-wire-the-rabbitmq-publisher)).
 
 ```bash
 docker compose up -d postgres rabbitmq

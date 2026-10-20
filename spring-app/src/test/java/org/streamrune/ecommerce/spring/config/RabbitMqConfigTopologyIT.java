@@ -7,13 +7,14 @@ import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.GetResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.amqp.autoconfigure.RabbitProperties;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
-import org.streamrune.core.outbox.OutboxPublisher;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -26,8 +27,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Spring AMQP declares the topology beans only when its own connection is first opened, and the
  * application may publish before anything opens it. A publish to a missing exchange makes the
  * broker close the publisher's channel, and a channel closed that way is never reopened. The test
- * runs the configuration's two bean methods directly against a fresh broker, without a Spring
- * context and therefore without Spring AMQP's declarations.
+ * runs the configuration's publisher bean method directly against a fresh broker, without a Spring
+ * context and therefore without Spring AMQP's declarations. The publisher connects on that first
+ * publish, and its in-flight horizon is the one the outbox relay validated at startup.
  */
 @Testcontainers
 class RabbitMqConfigTopologyIT {
@@ -43,8 +45,9 @@ class RabbitMqConfigTopologyIT {
     rabbit.setPassword(BROKER.getAdminPassword());
     RabbitMqConfig config = new RabbitMqConfig();
 
-    try (Connection publisherConnection = config.outboxRabbitConnection(rabbit)) {
-      OutboxPublisher publisher = config.outboxPublisher(publisherConnection);
+    try (LazyRabbitMqOutboxPublisher publisher = config.outboxPublisher(rabbit)) {
+      Duration horizonBeforeConnecting = publisher.inFlightHorizon();
+      assertThat(publisher.isConnected()).isFalse();
       // Returns only when the broker confirmed the message and routed it to a queue.
       publisher.publish(
           OutboxEntry.pending(
@@ -52,6 +55,8 @@ class RabbitMqConfigTopologyIT {
               "{\"orderId\":\"topology-ord-1\"}",
               "OrderConfirmed",
               StreamId.of(OrderState.TYPE, AggregateId.of("topology-ord-1"))));
+      assertThat(publisher.isConnected()).isTrue();
+      assertThat(horizonBeforeConnecting).isEqualTo(Duration.ofSeconds(60));
     }
 
     ConnectionFactory factory = new ConnectionFactory();

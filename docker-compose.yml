@@ -51,6 +51,8 @@ services:
       # The details of /actuator/health (never unless set): with always, they list each
       # subscription with its role under its lease — LEADING or STANDBY.
       MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
+    # The backend starts without the broker: its outbox publisher connects on the first publish.
+    # Waiting for the broker lets the seed data's integration events go out at once.
     depends_on:
       postgres:
         condition: service_healthy

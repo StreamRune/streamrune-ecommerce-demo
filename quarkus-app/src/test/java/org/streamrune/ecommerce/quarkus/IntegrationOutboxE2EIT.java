@@ -52,9 +52,9 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *
  * <p>A RabbitMQ container is started by {@link RabbitMqTestResource} and its coordinates are
  * injected into the Quarkus config, which causes {@link
- * org.streamrune.ecommerce.quarkus.config.RabbitMqProducer} to open a channel and create an {@link
- * org.streamrune.core.outbox.OutboxPublisher} bean, which the framework's OutboxPoller picks up and
- * starts automatically.
+ * org.streamrune.ecommerce.quarkus.config.RabbitMqProducer} to create an {@link
+ * org.streamrune.core.outbox.OutboxPublisher} bean, which connects on its first publish and which
+ * the framework's OutboxPoller picks up and starts automatically.
  *
  * <p>A dedicated test AMQP consumer subscribes to {@code streamrune.integration} on each test run
  * to collect messages and assert on the full pipeline.
@@ -121,11 +121,9 @@ class IntegrationOutboxE2EIT {
     testConnection = factory.newConnection();
     testChannel = testConnection.createChannel();
 
-    // Ensure the integration topology exists before consuming. RabbitMqProducer declares the same
-    // exchange/queue/binding when the OutboxPoller starts, but under heavy parallel Testcontainers
-    // load (the full build spins Postgres containers for three apps plus this RabbitMQ) that
-    // startup
-    // can lag this @BeforeEach, so a bare basicConsume races it and fails with 404 NOT_FOUND. These
+    // Ensure the integration topology exists before consuming. RabbitMqProducer's publisher
+    // declares the same exchange/queue/binding on its first publish, which may come after this
+    // @BeforeEach, so a bare basicConsume would race it and fail with 404 NOT_FOUND. These
     // declares are idempotent and use identical parameters, so they coexist with the app's own.
     testChannel.exchangeDeclare(RabbitMqProducer.EXCHANGE, "topic", /* durable= */ true);
     testChannel.queueDeclare(

@@ -1,31 +1,32 @@
 package org.streamrune.ecommerce.quarkus.config;
 
 import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.concurrent.TimeoutException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.streamrune.core.outbox.OutboxPublisher;
-import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 
 /**
  * Quarkus CDI producer for the RabbitMQ-backed {@link OutboxPublisher}.
  *
- * <p>Opens a dedicated AMQP channel and declares the {@code streamrune.events} topic exchange, the
- * {@code streamrune.integration} queue, and the {@code integration.#} binding that routes all
- * {@code integration.*} routing keys into that queue — matching the Spring app's topology exactly
- * so the notifications-service consumer works unchanged.
+ * <p>The publisher is a {@link LazyRabbitMqOutboxPublisher}: it opens its own AMQP connection and
+ * channel on its first publish, declares the {@code streamrune.events} topic exchange, the {@code
+ * streamrune.integration} queue, and the {@code integration.#} binding that routes all {@code
+ * integration.*} routing keys into that queue — matching the Spring app's topology exactly so the
+ * notifications-service consumer works unchanged — and then publishes with broker confirms. Nothing
+ * is opened at startup, so the application starts and serves commands while the broker is down; the
+ * relay retries the outbox entries until the broker answers.
  *
  * <p>The producer is gated on {@code streamrune.outbox.enabled=true}. When the outbox is disabled
- * (e.g. in tests that don't supply a RabbitMQ container) the producer returns {@code null} and no
- * AMQP connection is opened. CDI allows {@code null} returns from dependent-scoped producers; the
- * framework's {@link org.streamrune.quarkus.StreamRuneProducers#outboxPoller} guard already skips
- * the poller when no {@link OutboxPublisher} bean resolves.
+ * (e.g. in tests that don't supply a RabbitMQ container) the producer returns {@code null}. CDI
+ * allows {@code null} returns from dependent-scoped producers; the framework's {@link
+ * org.streamrune.quarkus.StreamRuneProducers#outboxPoller} guard already skips the poller when no
+ * {@link OutboxPublisher} bean resolves.
  */
 @ApplicationScoped
 public class RabbitMqProducer {
@@ -42,6 +43,9 @@ public class RabbitMqProducer {
    */
   public static final String ROUTING_KEY = "integration.event";
 
+  /** Client-provided name of the publisher's connection, shown in the RabbitMQ management UI. */
+  public static final String OUTBOX_CONNECTION_NAME = "streamrune-outbox-publisher";
+
   @ConfigProperty(name = "streamrune.outbox.enabled", defaultValue = "false")
   boolean outboxEnabled;
 
@@ -57,34 +61,54 @@ public class RabbitMqProducer {
   @ConfigProperty(name = "rabbitmq.password", defaultValue = "guest")
   String password;
 
-  private Connection connection;
-  private Channel channel;
+  private LazyRabbitMqOutboxPublisher publisher;
 
   /**
-   * Produces the {@link OutboxPublisher} bean backed by {@link RabbitMqOutboxPublisher}.
+   * Produces the {@link OutboxPublisher} bean backed by {@link LazyRabbitMqOutboxPublisher}.
    *
    * <p>Dependent-scoped so CDI permits returning {@code null} when the outbox is disabled.
    * Consumers that use {@code Instance<OutboxPublisher>} (e.g. the framework's {@code outboxPoller}
-   * producer) check {@code isResolvable()} before calling {@code get()}.
+   * producer) check {@code isResolvable()} before calling {@code get()}. Every injection point gets
+   * the same publisher, which {@link #close()} closes on shutdown.
+   *
+   * <p>The connection uses the amqp-client's automatic recovery (its default): after a broker
+   * restart or a network failure the client reconnects and reopens the publisher's channel in
+   * confirm mode with its listeners. The 30-second confirm timeout plus the publisher's default
+   * 30-second publish-block budget give a 60-second in-flight horizon, below the 2-minute claim
+   * lease of {@code StreamRuneProducer#outboxStore}.
    *
    * @return publisher, or {@code null} when {@code streamrune.outbox.enabled=false}
    */
   @Produces
-  public OutboxPublisher outboxPublisher() throws IOException, TimeoutException {
+  public synchronized OutboxPublisher outboxPublisher() {
     if (!outboxEnabled) {
       return null;
     }
+    if (publisher == null) {
+      ConnectionFactory factory = new ConnectionFactory();
+      factory.setHost(host);
+      factory.setPort(port);
+      factory.setUsername(username);
+      factory.setPassword(password);
+      factory.setAutomaticRecoveryEnabled(true);
+      publisher =
+          new LazyRabbitMqOutboxPublisher(
+              factory,
+              OUTBOX_CONNECTION_NAME,
+              RabbitMqProducer::declareTopology,
+              EXCHANGE,
+              ROUTING_KEY,
+              Duration.ofSeconds(30));
+    }
+    return publisher;
+  }
 
-    ConnectionFactory factory = new ConnectionFactory();
-    factory.setHost(host);
-    factory.setPort(port);
-    factory.setUsername(username);
-    factory.setPassword(password);
-
-    connection = factory.newConnection();
-    channel = connection.createChannel();
-
-    // Declare topology idempotently so the app can start standalone (before ops pre-creates it).
+  /**
+   * Declares the topology idempotently on the publisher's channel before its first publish, so the
+   * app can start standalone (before ops pre-creates it). The client's topology recovery repeats
+   * the declarations after a reconnect.
+   */
+  static void declareTopology(Channel channel) throws IOException {
     channel.exchangeDeclare(EXCHANGE, "topic", /* durable= */ true);
     channel.queueDeclare(
         QUEUE,
@@ -93,28 +117,12 @@ public class RabbitMqProducer {
         /* autoDelete= */ false,
         /* arguments= */ null);
     channel.queueBind(QUEUE, EXCHANGE, "integration.#");
-
-    return RabbitMqOutboxPublisher.builder()
-        .channel(channel)
-        .exchange(EXCHANGE)
-        .routingKey(ROUTING_KEY)
-        .confirmTimeout(Duration.ofSeconds(30))
-        .build();
   }
 
   @PreDestroy
-  void close() {
-    if (channel != null) {
-      try {
-        channel.close();
-      } catch (Exception ignored) {
-      }
-    }
-    if (connection != null) {
-      try {
-        connection.close();
-      } catch (Exception ignored) {
-      }
+  synchronized void close() {
+    if (publisher != null) {
+      publisher.close();
     }
   }
 }

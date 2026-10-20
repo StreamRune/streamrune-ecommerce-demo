@@ -1,31 +1,33 @@
 package org.streamrune.ecommerce.micronaut.config;
 
 import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
 import io.micronaut.context.annotation.Requires;
 import io.micronaut.context.annotation.Value;
-import jakarta.annotation.PreDestroy;
 import jakarta.inject.Singleton;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.concurrent.TimeoutException;
 import org.streamrune.core.outbox.OutboxPublisher;
-import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 
 /**
  * Micronaut factory for the RabbitMQ-backed {@link OutboxPublisher}.
  *
- * <p>Opens a dedicated AMQP channel and declares the {@code streamrune.events} topic exchange, the
- * {@code streamrune.integration} queue, and the {@code integration.#} binding — matching the Spring
- * and Quarkus topology exactly so the notifications-service consumer works unchanged.
+ * <p>The publisher is a {@link LazyRabbitMqOutboxPublisher}: it opens its own AMQP connection and
+ * channel on its first publish, declares the {@code streamrune.events} topic exchange, the {@code
+ * streamrune.integration} queue, and the {@code integration.#} binding — matching the Spring and
+ * Quarkus topology exactly so the notifications-service consumer works unchanged — and then
+ * publishes with broker confirms. Nothing is opened at startup, so the application starts and
+ * serves commands while the broker is down; the relay retries the outbox entries until the broker
+ * answers.
  *
  * <p>The publisher bean is gated on {@code streamrune.outbox.enabled=true} via {@link
  * io.micronaut.context.annotation.Requires}, so tests that do not start a RabbitMQ container (and
- * therefore do not set that property) will not create the AMQP connection and the framework's
- * {@link org.streamrune.micronaut.StreamRuneMicronautModule#outboxPoller} won't fire either (it
- * requires an {@link OutboxPublisher} bean to be present).
+ * therefore do not set that property) get no publisher and the framework's {@link
+ * org.streamrune.micronaut.StreamRuneMicronautModule#outboxPoller} won't fire either (it requires
+ * an {@link OutboxPublisher} bean to be present).
  */
 @Factory
 public class RabbitMqFactory {
@@ -42,6 +44,9 @@ public class RabbitMqFactory {
    */
   public static final String ROUTING_KEY = "integration.event";
 
+  /** Client-provided name of the publisher's connection, shown in the RabbitMQ management UI. */
+  public static final String OUTBOX_CONNECTION_NAME = "streamrune-outbox-publisher";
+
   @Value("${rabbitmq.host:localhost}")
   String host;
 
@@ -54,33 +59,43 @@ public class RabbitMqFactory {
   @Value("${rabbitmq.password:guest}")
   String password;
 
-  private Connection connection;
-  private Channel channel;
-
   /**
-   * Provides a raw AMQP {@link Channel} with the integration topology pre-declared.
+   * Provides the {@link OutboxPublisher} bean backed by {@link LazyRabbitMqOutboxPublisher}.
    *
-   * <p>Opening the connection + channel happens here so that other beans (the {@link
-   * OutboxPublisher} and potentially a test consumer) can share the same channel object. The
-   * channel is stored as a field so {@link #close()} can tear it down on context shutdown.
+   * <p>The connection uses the amqp-client's automatic recovery (its default): after a broker
+   * restart or a network failure the client reconnects and reopens the publisher's channel in
+   * confirm mode with its listeners. The 30-second confirm timeout plus the publisher's default
+   * 30-second publish-block budget give a 60-second in-flight horizon, below the 2-minute claim
+   * lease of {@code StreamRuneFactory#outboxStore}. Closed on context shutdown, which closes the
+   * connection if one was opened.
    *
-   * @return a connected, topology-initialised channel
-   * @throws IOException if the AMQP channel cannot be opened or topology declarations fail
-   * @throws TimeoutException if connecting to the broker times out
+   * @return the publisher, not yet connected
    */
   @Singleton
+  @Bean(preDestroy = "close")
   @Requires(property = "streamrune.outbox.enabled", value = "true")
-  public Channel rabbitMqChannel() throws IOException, TimeoutException {
+  public LazyRabbitMqOutboxPublisher outboxPublisher() {
     ConnectionFactory factory = new ConnectionFactory();
     factory.setHost(host);
     factory.setPort(port);
     factory.setUsername(username);
     factory.setPassword(password);
+    factory.setAutomaticRecoveryEnabled(true);
+    return new LazyRabbitMqOutboxPublisher(
+        factory,
+        OUTBOX_CONNECTION_NAME,
+        RabbitMqFactory::declareTopology,
+        EXCHANGE,
+        ROUTING_KEY,
+        Duration.ofSeconds(30));
+  }
 
-    connection = factory.newConnection();
-    channel = connection.createChannel();
-
-    // Declare topology idempotently so the app can start standalone (before ops pre-creates it).
+  /**
+   * Declares the topology idempotently on the publisher's channel before its first publish, so the
+   * app can start standalone (before ops pre-creates it). The client's topology recovery repeats
+   * the declarations after a reconnect.
+   */
+  static void declareTopology(Channel channel) throws IOException {
     channel.exchangeDeclare(EXCHANGE, "topic", /* durable= */ true);
     channel.queueDeclare(
         QUEUE,
@@ -89,45 +104,5 @@ public class RabbitMqFactory {
         /* autoDelete= */ false,
         /* arguments= */ null);
     channel.queueBind(QUEUE, EXCHANGE, "integration.#");
-
-    return channel;
-  }
-
-  /**
-   * Provides the {@link OutboxPublisher} bean backed by {@link RabbitMqOutboxPublisher}.
-   *
-   * <p>Gated on {@code streamrune.outbox.enabled=true} (same as {@link #rabbitMqChannel}) so this
-   * bean is absent when the outbox is disabled. The framework's OutboxPoller factory requires an
-   * {@link OutboxPublisher} bean; when absent the poller is not created and no polling happens.
-   *
-   * @param ch the AMQP channel with topology already declared
-   * @return the publisher
-   */
-  @Singleton
-  @Requires(property = "streamrune.outbox.enabled", value = "true")
-  public OutboxPublisher outboxPublisher(Channel ch) throws IOException {
-    return RabbitMqOutboxPublisher.builder()
-        .channel(ch)
-        .exchange(EXCHANGE)
-        .routingKey(ROUTING_KEY)
-        .confirmTimeout(Duration.ofSeconds(30))
-        .build();
-  }
-
-  /** Closes the AMQP channel and connection on context shutdown. */
-  @PreDestroy
-  void close() {
-    if (channel != null) {
-      try {
-        channel.close();
-      } catch (Exception ignored) {
-      }
-    }
-    if (connection != null) {
-      try {
-        connection.close();
-      } catch (Exception ignored) {
-      }
-    }
   }
 }
