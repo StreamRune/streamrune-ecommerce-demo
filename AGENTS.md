@@ -127,10 +127,16 @@ In `frontend/`, after `npm ci`:
   checks every interceptor chain the tutorial shows against the framework's order;
   `TutorialSettingsListingTest` checks that chapter 1's `settings.gradle.kts` listings are the demo's
   own file, apart from the `include(...)` modules the chapter names. The `spring-app` test task
-  re-runs them whenever a chapter or the README changes.
+  re-runs them whenever a chapter, the README or another file the ratchet below reads changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.
+  `InternalTrackerIdRatchetTest` (same package) holds every source, the READMEs, the tutorial, the
+  scripts and the build files to this, with the framework repository's rules: it rejects tracker,
+  review and audit labels, references to private review material, the words that narrate an
+  earlier behaviour (outside test sources and code samples; its javadoc lists them), a reviewer
+  named by role, work deferred to the project roadmap, and a space before a period, and it reads a
+  phrase on across a line break. Its failure names the rule and the line of every offender.
 
 ## 6. Pitfalls
 
