@@ -153,6 +153,12 @@ export interface DeadLetterEntry {
   lastAttemptAt: string | null;
 }
 
+/** What `POST /api/admin/dead-letters/{commandId}/retry` answers: the runner's outcome, and why when it refused. */
+export interface DeadLetterRetryAnswer {
+  outcome: string;
+  message?: string;
+}
+
 /**
  * One entry of GET /api/admin/outbox: an integration event waiting for the
  * broker. `payloadType` names the event, e.g. "OrderConfirmed".

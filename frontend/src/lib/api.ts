@@ -6,6 +6,7 @@ import type {
   AuditEntry,
   CircuitBreakerState,
   DeadLetterEntry,
+  DeadLetterRetryAnswer,
   ForgetResult,
   HealthState,
   OutboxEntry,
@@ -44,11 +45,14 @@ function buildHeaders(): HeadersInit {
  */
 export class ApiError extends Error {
   readonly status: number;
+  /** The backend's own words, without the status the message starts with. */
+  readonly detail: string;
 
   constructor(status: number, detail: string) {
     super(describeRefusal(status, detail));
     this.name = "ApiError";
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -123,11 +127,28 @@ async function apiFetch<T>(
  * A command: the backend answers `200` with an empty body once the events are
  * stored. What changed is read from the read models, which follow.
  */
-async function apiCommand(path: string, method: "POST" | "PUT", body?: unknown): Promise<void> {
+async function apiCommand(
+  path: string,
+  method: "POST" | "PUT",
+  body?: unknown,
+  headers?: Record<string, string>
+): Promise<void> {
   await apiFetch<string>(path, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),
+    headers,
   });
+}
+
+/**
+ * The header of a command that changes a quantity by an amount. The backend
+ * runs the command once per key: a request sent again with the same key (the
+ * page's own retry after a lost answer) is answered with the first one's
+ * result, and a dead-lettered command keeps its key, so the backend's retry
+ * runner replays it on its schedule. Each user action sends a fresh key.
+ */
+function idempotencyKeyHeader(idempotencyKey: string): Record<string, string> {
+  return { "Idempotency-Key": idempotencyKey };
 }
 
 // ─── Products ────────────────────────────────────────────────────────────────
@@ -152,12 +173,21 @@ export function createProduct(body: {
   return apiCommand("/api/products", "POST", body);
 }
 
-/** `PUT /api/products/{id}/stock`: `quantity` is the change, positive to add, negative to remove. */
+/**
+ * `PUT /api/products/{id}/stock`: `quantity` is the change, positive to add,
+ * negative to remove, applied once per `idempotencyKey`.
+ */
 export function adjustStock(
   productId: string,
-  body: { quantity: number; reason?: string }
+  body: { quantity: number; reason?: string },
+  idempotencyKey: string
 ): Promise<void> {
-  return apiCommand(`/api/products/${segment(productId)}/stock`, "PUT", body);
+  return apiCommand(
+    `/api/products/${segment(productId)}/stock`,
+    "PUT",
+    body,
+    idempotencyKeyHeader(idempotencyKey)
+  );
 }
 
 /** `PUT /api/products/{id}/price`: the new price as a plain USD amount. */
@@ -175,12 +205,19 @@ export function discontinueProduct(productId: string): Promise<void> {
  * `POST /api/inventory/{productId}/receive`: adds to the inventory the
  * fulfillment saga reserves from. The inventory is its own aggregate; the
  * stock column of the catalogue is the product's and does not move with it.
+ * Applied once per `idempotencyKey`, like a stock adjustment.
  */
 export function receiveShipment(
   productId: string,
-  body: { quantity: number }
+  body: { quantity: number },
+  idempotencyKey: string
 ): Promise<void> {
-  return apiCommand(`/api/inventory/${segment(productId)}/receive`, "POST", body);
+  return apiCommand(
+    `/api/inventory/${segment(productId)}/receive`,
+    "POST",
+    body,
+    idempotencyKeyHeader(idempotencyKey)
+  );
 }
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
@@ -299,9 +336,22 @@ export function fetchDeadLetters(): Promise<DeadLetterEntry[]> {
   return apiFetch("/api/admin/dead-letters");
 }
 
-/** `POST /api/admin/dead-letters/{commandId}/retry`: `404` when the entry is gone. */
-export function retryDeadLetter(commandId: string): Promise<void> {
-  return apiCommand(`/api/admin/dead-letters/${segment(commandId)}/retry`, "POST");
+/**
+ * `POST /api/admin/dead-letters/{commandId}/retry`: `200` with the outcome
+ * `REPLAYED` once the command ran. A refusal arrives as an ApiError: `409` when
+ * the backend cannot tell a replay from a second execution (the command ran
+ * without an idempotency key, or its key may already be gone from the inbox) —
+ * its `detail` says what to check, and `force` replays the entry anyway; `404`
+ * when the entry is gone; `503` while the command bus admits nothing more.
+ */
+export function retryDeadLetter(
+  commandId: string,
+  force = false
+): Promise<DeadLetterRetryAnswer> {
+  const query = force ? "?force=true" : "";
+  return apiFetch(`/api/admin/dead-letters/${segment(commandId)}/retry${query}`, {
+    method: "POST",
+  });
 }
 
 export function fetchOutbox(): Promise<OutboxEntry[]> {

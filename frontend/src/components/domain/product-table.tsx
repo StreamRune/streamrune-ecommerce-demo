@@ -14,7 +14,7 @@ import {
   useReceiveShipment,
 } from "@/lib/mutations";
 import type { ProductView, ProductStatus } from "@/lib/types";
-import { newId } from "@/lib/ids";
+import { newId, newIdempotencyKey } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import {
   Table,
@@ -140,7 +140,12 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
     e.preventDefault();
     try {
       // The backend's field is `quantity`: the change to apply, negative to remove.
-      await mutateAsync({ productId: product.productId, body: { quantity: parseInt(delta, 10), reason: reason || undefined } });
+      await mutateAsync({
+        productId: product.productId,
+        body: { quantity: parseInt(delta, 10), reason: reason || undefined },
+        // One key per submit: the page's retry of this submit sends it again, a new submit does not.
+        idempotencyKey: newIdempotencyKey(),
+      });
       toast.success("Stock adjusted");
       onClose();
     } catch (err) {
@@ -208,7 +213,11 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      await mutateAsync({ productId: product.productId, body: { quantity: parseInt(quantity, 10) } });
+      await mutateAsync({
+        productId: product.productId,
+        body: { quantity: parseInt(quantity, 10) },
+        idempotencyKey: newIdempotencyKey(),
+      });
       toast.success("Shipment received into the inventory");
       onClose();
     } catch (err) {

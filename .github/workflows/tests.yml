@@ -152,7 +152,10 @@ jobs:
       # nowhere else in CI. writes.live.spec.ts performs every write action of the pages against
       # the backend container (register a customer, place and cancel an order, ship and deliver,
       # create a product and change its price and stock, the payment-failure switch, edit, export
-      # and forget) and asserts each result through the page. E2E_REQUIRE_BACKEND makes a backend
+      # and forget) and asserts each result through the page. replay-safety.live.spec.ts writes an
+      # unkeyed dead-letter entry into the stack's database (docker compose exec postgres) and
+      # drives the Admin page's Retry through the backend's 409 to the confirmed forced replay, and
+      # sends a stock adjustment twice under one Idempotency-Key. E2E_REQUIRE_BACKEND makes a backend
       # that does not answer a failure instead of a skip; E2E_REUSE_SERVER has Playwright use the
       # frontend that is already up instead of starting its own.
       - uses: actions/setup-node@v7

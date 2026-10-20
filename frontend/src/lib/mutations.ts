@@ -17,6 +17,7 @@ import {
   retryDeadLetter,
   togglePaymentFailure,
   injectSagaFailure,
+  ApiError,
 } from "./api";
 import { readAgainUntilSettled } from "./read-model-sync";
 
@@ -27,13 +28,27 @@ import { readAgainUntilSettled } from "./read-model-sync";
  */
 function useInvalidatingMutation<TData, TVariables>(
   mutationFn: (vars: TVariables) => Promise<TData>,
-  invalidateKeys: QueryKey[]
+  invalidateKeys: QueryKey[],
+  retry: (failureCount: number, error: Error) => boolean = () => false
 ) {
   const queryClient = useQueryClient();
   return useMutation<TData, Error, TVariables>({
     mutationFn,
+    retry,
     onSuccess: () => readAgainUntilSettled(queryClient, invalidateKeys),
   });
+}
+
+/**
+ * The page's own retry of a command sent with an `Idempotency-Key`: twice more
+ * when no answer arrived (the request or its answer was lost) or the backend
+ * failed (`5xx`). A retry sends the same variables, so the same key, and the
+ * backend applies the change once whichever attempt reached it. A refusal
+ * (`4xx`) is the backend's answer and is not sent again.
+ */
+function retryKeyedCommand(failureCount: number, error: Error): boolean {
+  if (failureCount >= 2) return false;
+  return !(error instanceof ApiError) || error.status >= 500;
 }
 
 // ─── Products ────────────────────────────────────────────────────────────────
@@ -42,11 +57,20 @@ export function useCreateProduct() {
   return useInvalidatingMutation(createProduct, [["products"]]);
 }
 
+/** The caller picks `idempotencyKey` once per user action (`newIdempotencyKey`). */
 export function useAdjustStock() {
   return useInvalidatingMutation(
-    ({ productId, body }: { productId: string; body: { quantity: number; reason?: string } }) =>
-      adjustStock(productId, body),
-    [["products"]]
+    ({
+      productId,
+      body,
+      idempotencyKey,
+    }: {
+      productId: string;
+      body: { quantity: number; reason?: string };
+      idempotencyKey: string;
+    }) => adjustStock(productId, body, idempotencyKey),
+    [["products"]],
+    retryKeyedCommand
   );
 }
 
@@ -67,11 +91,20 @@ export function useDiscontinueProduct() {
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
+/** The caller picks `idempotencyKey` once per user action (`newIdempotencyKey`). */
 export function useReceiveShipment() {
   return useInvalidatingMutation(
-    ({ productId, body }: { productId: string; body: { quantity: number } }) =>
-      receiveShipment(productId, body),
-    [["products"]]
+    ({
+      productId,
+      body,
+      idempotencyKey,
+    }: {
+      productId: string;
+      body: { quantity: number };
+      idempotencyKey: string;
+    }) => receiveShipment(productId, body, idempotencyKey),
+    [["products"]],
+    retryKeyedCommand
   );
 }
 
@@ -137,9 +170,10 @@ export function useForgetCustomer() {
 
 // ─── Admin ───────────────────────────────────────────────────────────────────
 
+/** `force` replays an entry the backend refused with `409`, once the admin has confirmed it. */
 export function useRetryDeadLetter() {
   return useInvalidatingMutation(
-    (id: string) => retryDeadLetter(id),
+    ({ id, force }: { id: string; force: boolean }) => retryDeadLetter(id, force),
     [["admin", "dead-letters"]]
   );
 }
