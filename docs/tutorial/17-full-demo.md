@@ -260,7 +260,7 @@ curl -s http://localhost:8080/actuator/health | jq .status
 
 Expected output: `"UP"`
 
-> **Alternative (backend and frontend outside Docker):** Start only the database and the broker with `docker compose up -d postgres rabbitmq` — the backend needs both, because its outbox publisher opens the AMQP connection at startup — then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
+> **Alternative (backend and frontend outside Docker):** Start only the database and the broker with `docker compose up -d postgres rabbitmq` — the backend needs the database to start; the broker receives the outbox's integration events, which wait in the database until it answers (Chapter 13, Step 5b) — then `./gradlew :spring-app:bootRun`, then `cd frontend && npm install && npm run dev`. See the README for details.
 
 ### Step 2: Open the Frontend
 
@@ -674,10 +674,14 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,
     PostgresDeadLetterQueue deadLetterQueue,
     PostgresCryptoEngine cryptoEngine,
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
   var bus =
       VirtualThreadCommandBus.builder()
           .eventStore(store)
+          .locker(locker)
+          .lockTimeout(properties.lockTimeout())
           .commandInbox(commandInbox)
           .interceptors(audit, auth, validation, circuitBreaker)
           .deadLetterQueue(deadLetterQueue)

@@ -7,7 +7,14 @@ dependencies {
     implementation(project(":domain"))
     implementation("org.streamrune:streamrune-core:$sr")
     implementation(libs.jackson.databind)
+    // LazyRabbitMqOutboxPublisher, the outbox publisher the three apps wire: it takes the apps'
+    // amqp-client ConnectionFactory and builds a RabbitMqOutboxPublisher on its first publish.
+    implementation("org.streamrune:streamrune-rabbitmq-outbox:$sr")
+    api(libs.rabbitmq.client)
+    implementation(libs.slf4j.api)
 
     testImplementation("org.streamrune:streamrune-test:$sr")
+    // CommandRefusalTest: LockAcquisitionException, the striped locker's LockException.
+    testImplementation("org.streamrune:streamrune-runtime:$sr")
     testImplementation(libs.assertj.core)
 }

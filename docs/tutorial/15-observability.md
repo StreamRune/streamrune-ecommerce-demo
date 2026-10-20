@@ -84,7 +84,9 @@ The bean registers, among others, these meters (`MetricNames` in `streamrune-cor
 | `streamrune.dlq.awaiting_operator` | Gauge | Dead-lettered commands the retry runner never replays on its own (unkeyed ones, keyed ones older than the inbox window): alert above zero; an operator's forced replay or discard (Chapter 14, Step 5) lowers it |
 | `streamrune.dlq.stale_replay_blocked` | Counter | Operator retries refused because the entry is older than the inbox window |
 
-The three dead-letter meters come from the demo's own `DeadLetterRetryRunner`, which the bean of Chapter 14 builds with `.metrics(...)`: a runner without it reports nothing. The Quarkus app reports them through its Prometheus registry; the Micronaut app has no meter registry, so its runner, wired the same way, reports none.
+The three dead-letter meters come from the demo's own `DeadLetterRetryRunner`, which the bean of Chapter 14 builds with `.metrics(...)`: a runner without it reports nothing.
+
+> **Quarkus and Micronaut.** Both apps report the same meters, the dead-letter ones included: their runners are wired the same way, and each framework integration builds `MicrometerStreamRuneMetrics` once a `MeterRegistry` bean exists. The Quarkus app has `quarkus-micrometer-registry-prometheus`, and its meters are scraped at `/q/metrics` in Prometheus' format (`streamrune_dlq_awaiting_operator`). The Micronaut app has Micronaut Micrometer (`io.micronaut.micrometer:micronaut-micrometer-core`, with its `micronaut-micrometer-annotation` processor): like Actuator, it records into an in-memory `SimpleMeterRegistry` when no other registry is configured, and `/metrics` lists the names, `/metrics/streamrune.dlq.awaiting_operator` one meter's measurements. `StreamRuneMetricsIT` (Spring) and the `ObservabilitySmokeSuiteIT` of the Quarkus and Micronaut apps check that the two dead-letter gauges, a saga meter and a projection meter are listed.
 
 If you want to override the auto-configured bean with a custom `MeterRegistry` — for example, to attach tags for the deployment environment — declare the bean explicitly in `StreamRuneConfig.java`:
 
@@ -133,9 +135,13 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,                // keep
     PostgresDeadLetterQueue deadLetterQueue,          // keep
     PostgresCryptoEngine cryptoEngine,                // keep
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     OpenTelemetryCommandInterceptor otel) {           // <-- added parameter
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
+      .locker(locker)
+      .lockTimeout(properties.lockTimeout())
       .commandInbox(commandInbox)                      // keep
       .interceptors(otel, audit, auth, validation, circuitBreaker)  // <-- otel prepended
       .deadLetterQueue(deadLetterQueue)                // keep
@@ -161,7 +167,7 @@ The indicator performs these checks:
 1. Opens a JDBC connection to the `DataSource` and calls `conn.isValid(3)`. If this fails, the overall status is `DOWN` with an `error` detail.
 2. While that same connection is open and the database is up, it queries the head of the `event_stream` table directly via SQL (`SELECT global_offset, created_at FROM event_stream ORDER BY global_offset DESC LIMIT 1`) and reports `eventStore.lastGlobalOffset` and `eventStore.lastEventTimestamp` in the details. No `EventStore` bean is involved — the read is plain JDBC on the health-check connection. A probe failure (e.g. the table not yet migrated) is reported as an `eventStore.error` detail but does not flip the overall status.
 3. When a `SubscriptionHealthContributor` bean is present, reports each subscription's `state`, `lag`, `errorCount`, and `status`. If any subscription is `DOWN`, the overall health status becomes `DOWN`.
-4. Reports every background relay registered with the `BackgroundRelayHealthContributor` as a `relay.<name>` detail with `status`, `started`, `alive`, and `consecutiveFailures`. A relay that was started but whose poll thread has died is `DOWN`, and that turns the overall status `DOWN`: without this check `/actuator/health` would read `UP` while the outbox stopped publishing or dead-lettered commands stopped being replayed. A relay that is running but whose recent poll cycles failed (its database or broker is unreachable) reads `DEGRADED` in its own block and leaves the overall status alone. The framework registers the relays it builds; in the demo those are the outbox relay (`relay.outbox-relay`), the outbox, inbox, dead-letter and saga dead-letter retention sweepers, and the saga compensation-retry sweeper. A relay you build yourself registers itself: the demo's `deadLetterRetryRunner` bean (Chapter 14) replaces the framework's runner and calls `relayHealth.registerDlqRetryRunner(runner)`, so it appears as `relay.dead-letter-retry`.
+4. Reports every background relay registered with the `BackgroundRelayHealthContributor` as a `relay.<name>` detail with `status`, `started`, `alive`, and `consecutiveFailures`. A relay that was started but whose poll thread has died is `DOWN`, and that turns the overall status `DOWN`: without this check `/actuator/health` would read `UP` while the outbox stopped publishing or dead-lettered commands stopped being replayed. A relay that is running but whose recent poll cycles failed (its database is unreachable, say) reads `DEGRADED` in its own block and leaves the overall status alone. A broker outage is not a failed cycle: the outbox relay records each refused publish on its entry, which stays `PENDING`, and reads `UP`; the backlog shows in `streamrune.outbox.pending` (Chapter 13, Step 5b). The framework registers the relays it builds; in the demo those are the outbox relay (`relay.outbox-relay`), the outbox, inbox, dead-letter and saga dead-letter retention sweepers, and the saga compensation-retry sweeper. A relay you build yourself registers itself: the demo's `deadLetterRetryRunner` bean (Chapter 14) replaces the framework's runner and calls `relayHealth.registerDlqRetryRunner(runner)`, so it appears as `relay.dead-letter-retry`.
 
 The indicator is exposed under the bean name `streamRune` at `/actuator/health/streamRune`. The full health response at `/actuator/health` aggregates it alongside Spring's built-in `db` and `diskSpace` indicators.
 
@@ -1282,10 +1288,14 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,
     PostgresDeadLetterQueue deadLetterQueue,
     PostgresCryptoEngine cryptoEngine,
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     OpenTelemetryCommandInterceptor otel,
     StreamRuneMetrics metrics) {           // <-- inject the auto-configured bean
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
+      .locker(locker)
+      .lockTimeout(properties.lockTimeout())
       .commandInbox(commandInbox)
       .interceptors(otel, audit, auth, validation, circuitBreaker)
       .deadLetterQueue(deadLetterQueue)

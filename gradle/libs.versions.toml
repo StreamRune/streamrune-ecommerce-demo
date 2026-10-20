@@ -14,6 +14,9 @@ micronaut-validation = "5.2.1"
 micronaut-test = "5.2.0"
 micronaut-application = "4.2.1"
 micronaut-sql = "7.2.0"
+# The Micronaut Micrometer module for core 5.2 (the version the micronaut-platform 5.2 BOM pairs with
+# the serde, sql and test versions above).
+micronaut-micrometer = "6.1.0"
 
 # Core
 jackson = "2.18.3"
@@ -136,6 +139,8 @@ micronaut-inject-java = { module = "io.micronaut:micronaut-inject-java", version
 micronaut-runtime = { module = "io.micronaut:micronaut-runtime", version.ref = "micronaut" }
 micronaut-http-server-netty = { module = "io.micronaut:micronaut-http-server-netty", version.ref = "micronaut" }
 micronaut-management = { module = "io.micronaut:micronaut-management", version.ref = "micronaut" }
+micronaut-micrometer-core = { module = "io.micronaut.micrometer:micronaut-micrometer-core", version.ref = "micronaut-micrometer" }
+micronaut-micrometer-annotation = { module = "io.micronaut.micrometer:micronaut-micrometer-annotation", version.ref = "micronaut-micrometer" }
 micronaut-security = { module = "io.micronaut.security:micronaut-security", version.ref = "micronaut-security" }
 micronaut-serde-jackson = { module = "io.micronaut.serde:micronaut-serde-jackson", version.ref = "micronaut-serde" }
 micronaut-serde-processor = { module = "io.micronaut.serde:micronaut-serde-processor", version.ref = "micronaut-serde" }

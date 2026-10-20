@@ -134,7 +134,7 @@ jobs:
       # The README's Quick Start, command for command: build the two JARs the images copy, then
       # start all five services. --wait returns once every service runs (and is healthy where it
       # has a health check) and fails when one exits, e.g. a backend that could not reach the
-      # broker or an image whose JAR was missing from the build context.
+      # database or an image whose JAR was missing from the build context.
       - name: Quick Start - build the JARs
         working-directory: streamrune-ecommerce-demo
         run: ./gradlew :spring-app:bootJar :notifications-service:bootJar --console=plain --no-daemon

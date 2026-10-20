@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.metrics.MetricNames;
 import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.subscription.SubscriptionHealth;
 import org.streamrune.runtime.SubscriptionHealthContributor;
@@ -621,5 +622,65 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
     assertThat(first).containsKey("eventType");
     assertThat(first).containsKey("timestamp");
     assertThat(first).containsKey("payload");
+  }
+
+  // ── Metrics ────────────────────────────────────────────────────────────────
+
+  /**
+   * The app reports the framework's meters: Micronaut Micrometer's registry holds them, and its
+   * {@code /metrics} endpoint lists them by name, as Spring's {@code /actuator/metrics} and
+   * Quarkus's {@code /q/metrics} do (their suites check the same names). The two dead-letter gauges
+   * are the ones the demo's {@code DeadLetterRetryRunner} samples; {@code saga.faulted_backlog} and
+   * {@code projections.processed} stand for the saga and projection meters.
+   */
+  @Test
+  void theFrameworksMetersAreListedAtTheMetricsEndpoint() {
+    Map<String, Object> body =
+        client
+            .toBlocking()
+            .retrieve(HttpRequest.GET("/metrics"), Argument.mapOf(String.class, Object.class));
+
+    assertThat(body.get("names"))
+        .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.list(String.class))
+        .contains(
+            MetricNames.DLQ_AWAITING_OPERATOR,
+            MetricNames.DLQ_PENDING,
+            MetricNames.SAGA_FAULTED_BACKLOG,
+            MetricNames.PROJECTIONS_PROCESSED,
+            MetricNames.COMMANDS_DISPATCHED);
+  }
+
+  /** A command the app runs is counted: the registry records values, not only names. */
+  @Test
+  void aDispatchedCommandIsCounted() {
+    double before = dispatched();
+
+    client
+        .toBlocking()
+        .exchange(
+            HttpRequest.POST(
+                    "/api/products",
+                    """
+                    {"productId": "%s", "name": "Metered Widget", "description": "metrics smoke",
+                     "category": "Test", "price": 5.00, "initialStock": 1}"""
+                        .formatted("smoke-metrics-" + System.nanoTime()))
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Role", "ADMIN")
+                .header("X-User-Id", "smoke-test"));
+
+    assertThat(dispatched()).isGreaterThanOrEqualTo(before + 1);
+  }
+
+  /** The value of {@code streamrune.commands.dispatched}, read from {@code /metrics/{name}}. */
+  @SuppressWarnings("unchecked")
+  private double dispatched() {
+    Map<String, Object> meter =
+        client
+            .toBlocking()
+            .retrieve(
+                HttpRequest.GET("/metrics/" + MetricNames.COMMANDS_DISPATCHED),
+                Argument.mapOf(String.class, Object.class));
+    List<Map<String, Object>> measurements = (List<Map<String, Object>>) meter.get("measurements");
+    return ((Number) measurements.getFirst().get("value")).doubleValue();
   }
 }

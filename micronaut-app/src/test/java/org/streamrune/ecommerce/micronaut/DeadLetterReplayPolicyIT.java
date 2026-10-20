@@ -3,7 +3,8 @@ package org.streamrune.ecommerce.micronaut;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-import io.micronaut.context.annotation.Requires;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.MutableHttpRequest;
@@ -12,25 +13,20 @@ import io.micronaut.http.client.annotation.Client;
 import io.micronaut.http.client.exceptions.HttpClientResponseException;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
 import jakarta.inject.Inject;
-import jakarta.inject.Singleton;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.DeadLetterQueue;
 import org.streamrune.core.DeadLetterQueue.DeadLetterPublishRequest;
 import org.streamrune.core.EventStore;
-import org.streamrune.core.StreamRuneMetrics;
+import org.streamrune.core.metrics.MetricNames;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CommandId;
 import org.streamrune.core.types.CorrelationId;
@@ -52,10 +48,10 @@ import org.streamrune.runtime.DeadLetterRetryRunner;
  * decision is written into the audit log ({@code DLQ_FORCED_REPLAY}, {@code DLQ_DISCARDED}) before
  * it is acted on, and an audit row that cannot be written stops it.
  *
- * <p>The app has no Micrometer registry, so the test gives it a {@link StreamRuneMetrics} bean of
- * its own that records the two dead-letter meters, and checks that the runner reports to it. The
- * tests run with {@code app.dead-letter.poll-interval=1s}, and move an entry's {@code published_at}
- * past the policy's initial delay (60 s with jitter) where they wait for the schedule.
+ * <p>The runner reports the two dead-letter meters to the app's Micrometer registry, which the test
+ * reads, as the Spring and Quarkus tests do. The tests run with {@code
+ * app.dead-letter.poll-interval=1s}, and move an entry's {@code published_at} past the policy's
+ * initial delay (60 s with jitter) where they wait for the schedule.
  */
 @MicronautTest(transactional = false)
 class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
@@ -69,33 +65,8 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
   @Inject DataSource dataSource;
   @Inject DeadLetterQueue deadLetterQueue;
   @Inject EventStore eventStore;
-  @Inject RecordingMetrics metrics;
+  @Inject MeterRegistry meterRegistry;
   @Inject DeadLetterRetryRunner deadLetterRetryRunner;
-
-  @Override
-  public Map<String, String> getProperties() {
-    var properties = new HashMap<>(super.getProperties());
-    properties.put("spec.name", "DeadLetterReplayPolicyIT");
-    return properties;
-  }
-
-  /** The two dead-letter meters the runner reports, as the Micrometer bean would record them. */
-  @Singleton
-  @Requires(property = "spec.name", value = "DeadLetterReplayPolicyIT")
-  static class RecordingMetrics implements StreamRuneMetrics {
-    final AtomicLong awaitingOperator = new AtomicLong();
-    final AtomicInteger staleReplayBlocked = new AtomicInteger();
-
-    @Override
-    public void recordDlqAwaitingOperator(long awaiting) {
-      awaitingOperator.set(awaiting);
-    }
-
-    @Override
-    public void recordDeadLetterStaleReplayBlocked(String commandType) {
-      staleReplayBlocked.incrementAndGet();
-    }
-  }
 
   @Test
   void aKeyedAdjustmentThatFailed_isReplayedOnTheSchedule() throws Exception {
@@ -240,7 +211,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
   @Test
   void aKeyedEntryOlderThanTheInboxWindow_isRefused_counted_andReplayedOnlyWhenForced() {
     String pid = createProduct();
-    int refusedBefore = metrics.staleReplayBlocked.get();
+    double refusedBefore = staleRefusals();
     CommandId commandId = CommandId.of(UUID.randomUUID().toString());
     deadLetterQueue.publish(
         new DeadLetterPublishRequest(
@@ -261,7 +232,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     var refused = send(retry(commandId, false, "ops-1"));
     assertThat(refused.status()).isEqualTo(409);
     assertThat(refused.body()).contains("STALE_REPLAY_BLOCKED");
-    assertThat(metrics.staleReplayBlocked.get() - refusedBefore).isOne();
+    assertThat(staleRefusals() - refusedBefore).isEqualTo(1.0);
     assertThat(stockAdjustments(pid)).isZero();
 
     assertThat(send(retry(commandId, true, "ops-1")).status()).isEqualTo(200);
@@ -343,7 +314,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
   }
 
   private double awaitingOperatorGauge() {
-    return metrics.awaitingOperator.get();
+    return meterRegistry.get(MetricNames.DLQ_AWAITING_OPERATOR).gauge().value();
   }
 
   /** What the gauge counts, read from the queue the way the runner samples it. */
@@ -352,6 +323,12 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
         deadLetterRetryRunner.policy().maxRetries(),
         true,
         Instant.now().minus(deadLetterRetryRunner.inboxRetentionMaxAge()));
+  }
+
+  private double staleRefusals() {
+    return meterRegistry.find(MetricNames.DLQ_STALE_REPLAY_BLOCKED).counters().stream()
+        .mapToDouble(Counter::count)
+        .sum();
   }
 
   private String createProduct() {

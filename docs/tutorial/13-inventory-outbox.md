@@ -629,7 +629,7 @@ streamrune:
     skipped-retention-max-age: 30d
 ```
 
-The publisher's connection (Step 5b) reads the broker address from these `spring.rabbitmq.*` properties. The defaults reach a broker on `localhost`; under Docker Compose (Step 7) the backend sets `RABBITMQ_HOST` to the broker's service name.
+The publisher's connection (Step 5b) reads the broker address from these `spring.rabbitmq.*` properties, and opens on the first publish, not at startup. The defaults reach a broker on `localhost`; under Docker Compose (Step 7) the backend sets `RABBITMQ_HOST` to the broker's service name.
 
 `streamrune.outbox.enabled=true` activates the auto-configured `OutboxPoller`. Without it the poller bean is not created and delivered entries accumulate indefinitely. `retention-max-age: 7d` tells the auto-configured `OutboxRetentionSweeper` to delete `DELIVERED` entries older than seven days, preventing unbounded table growth. `skipped-retention-max-age: 30d` keeps the audit rows of operator skips (Chapter 14) for thirty days; `FAILED` entries are never pruned — they block their aggregate until someone resolves them.
 
@@ -646,19 +646,380 @@ implementation("org.springframework.boot:spring-boot-starter-amqp") // adds Spri
 
 Without `streamrune-rabbitmq-outbox` and `spring-boot-starter-amqp`, Step 5b's `RabbitMqConfig.java` imports will fail to resolve at compile time.
 
+The publisher class of Step 5b lives in the shared `commands` module, next to `EcommerceIntegrationEventMapper`, because the Quarkus and Micronaut apps wire the same class. Add its three dependencies to `commands/build.gradle.kts`. The RabbitMQ Java client is an `api` dependency: the class takes the app's `ConnectionFactory` and hands its topology a `Channel`, so the client is part of what the module offers its users:
+
+```kotlin
+// commands/build.gradle.kts — inside the dependencies { } block
+implementation("org.streamrune:streamrune-rabbitmq-outbox:$sr")
+api(libs.rabbitmq.client)
+implementation(libs.slf4j.api)
+```
+
 ### Step 5b: Wire the RabbitMQ Publisher
 
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/RabbitMqConfig.java`. This declares the RabbitMQ topology and provides the `OutboxPublisher` bean that the auto-configured `OutboxPoller` uses to actually deliver messages:
+The outbox exists so that a command does not depend on the broker: its integration events are written in the command's own transaction, and the relay delivers them later. The application's startup should not depend on the broker either. A `RabbitMqOutboxPublisher` publishes on a channel it is given when it is built — and a channel needs an open connection — so the demo builds it on the first publish, not at startup. Create `commands/src/main/java/org/streamrune/ecommerce/commands/integration/LazyRabbitMqOutboxPublisher.java`:
 
 ```java
-package org.streamrune.ecommerce.spring.config;
+package org.streamrune.ecommerce.commands.integration;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.streamrune.core.outbox.OutboxEntry;
+import org.streamrune.core.outbox.OutboxEntryId;
+import org.streamrune.core.outbox.OutboxPublisher;
+import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+
+/**
+ * The outbox's RabbitMQ publisher, connected on its first publish instead of at startup, so the
+ * application starts and serves commands while the broker is down. The three apps wire it as their
+ * {@link OutboxPublisher}.
+ *
+ * <p>A command's integration events are written to the outbox in the command's own transaction; the
+ * relay ({@code OutboxPoller}) hands them to this publisher later. Nothing about a command depends
+ * on the broker, so neither does the application's startup: the constructor opens nothing. The
+ * first {@link #publishBatch} opens the connection, opens the publisher's channel, declares the
+ * topology on it and builds a {@link RabbitMqOutboxPublisher} on that channel, which publishes this
+ * batch and every later one.
+ *
+ * <p>While the broker cannot be reached, every entry of a batch fails with a {@link
+ * BrokerUnreachableException} and nothing is handed to a broker. {@link #classifyFailure} reports
+ * it as {@link FailureKind#TRANSPORT}: the relay keeps the entries {@code PENDING} with the error
+ * in {@code last_error}, counts no attempt against the retry ladder and tries again on a backoff
+ * that grows towards its 60-second cap. The relay logs one {@code WARN} per poll cycle that names
+ * the error, and {@code streamrune.outbox.pending} holds the backlog. Once the broker answers, the
+ * next attempt connects and the entries are delivered in order, each stream's entries one after the
+ * other. This publisher logs one {@code INFO} line when it connects.
+ *
+ * <p>Once connected, the connection stays open for the life of the application. It is an
+ * amqp-client connection with automatic recovery (the {@link ConnectionFactory}'s default): after a
+ * broker restart or a network failure the client reconnects by itself and reopens the same channel
+ * in confirm mode, with the confirm and return listeners the publisher registered, so a later
+ * outage needs nothing from this class. Automatic recovery covers a connection that was established
+ * once; a first connection that fails is this class's to retry, on the relay's next attempt.
+ *
+ * <p><b>The factory bounds the connect.</b> The relay's publish deadline bounds nothing while the
+ * connection opens: the attempt blocks for the factory's connection timeout plus its handshake
+ * timeout ({@link #connectBound()}). The amqp-client's defaults, 60 s and 10 s, would let a broker
+ * whose packets are dropped (a firewall, a dead address behind a stable name) hold the relay about
+ * 70 s per poll cycle, with the claimed batch {@code IN_PROGRESS} — out of {@code
+ * streamrune.outbox.pending} and the outbox listing of {@code PENDING} entries. The apps therefore
+ * set {@link #CONNECTION_TIMEOUT} and {@link #HANDSHAKE_TIMEOUT}, 10 s each. A refused connection
+ * (no broker listening) fails at once.
+ *
+ * <p>The in-flight horizon is the one the {@link RabbitMqOutboxPublisher} reports once built — its
+ * {@link RabbitMqOutboxPublisher#DEFAULT_PUBLISH_BLOCK_BUDGET default publish-block budget} plus
+ * the confirm timeout — and is known before the first connection, because the relay reads it when
+ * it is built, to check the claim lease against it. The connect is not part of it: nothing is
+ * handed to the broker while the connection opens, and the {@link RabbitMqOutboxPublisher} checks
+ * the relay's deadline before each publish, so a connect that ends past the deadline publishes
+ * nothing and the relay returns the batch to {@code PENDING}; an entry it does publish still has
+ * the whole horizon of its claim lease left.
+ *
+ * <p>The relay calls a publisher from its one poll thread; {@link #close} may come from another
+ * thread, at shutdown.
+ */
+public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoCloseable {
+
+  /** Declares the exchanges, queues and bindings the publisher's channel publishes to. */
+  @FunctionalInterface
+  public interface Topology {
+
+    /**
+     * Declares the topology on {@code channel}, before the first publish. The declarations must be
+     * idempotent: the client's topology recovery repeats them after every reconnect.
+     *
+     * @param channel the publisher's channel
+     * @throws IOException if a declaration fails
+     */
+    void declare(Channel channel) throws IOException;
+  }
+
+  /**
+   * The publisher could not get a channel ready, so nothing of the batch was published: the
+   * connection could not be opened, or, on an open connection, the publisher's channel, a topology
+   * declaration or confirm mode failed; or the publisher is closed. The message names the step that
+   * failed, and the cause is the client's own exception, e.g. {@code java.net.ConnectException:
+   * Connection refused}.
+   */
+  public static final class BrokerUnreachableException extends IOException {
+
+    BrokerUnreachableException(String message, Throwable cause) {
+      super(message, cause);
+    }
+  }
+
+  /**
+   * How long the publisher's connection may take to open, the TCP connect, unless the application
+   * configures its own: what the three apps set on the factory they hand over.
+   */
+  public static final Duration CONNECTION_TIMEOUT = Duration.ofSeconds(10);
+
+  /** How long the AMQP handshake may take once the TCP connection is open; the apps set it too. */
+  public static final Duration HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
+
+  private static final Logger LOG = LoggerFactory.getLogger(LazyRabbitMqOutboxPublisher.class);
+
+  /** The outcome of a batch this publisher did not start: nothing reached a broker. */
+  private static final BatchResult NOTHING_ATTEMPTED = new BatchResult(Set.of(), Map.of());
+
+  private final ConnectionFactory connectionFactory;
+  private final String connectionName;
+  private final Topology topology;
+  private final String exchange;
+  private final String routingKey;
+  private final Duration confirmTimeout;
+
+  /** Held while a connection is opened, so that one poll thread at a time opens one. */
+  private final ReentrantLock connecting = new ReentrantLock();
+
+  private volatile Connection connection;
+  private volatile RabbitMqOutboxPublisher delegate;
+  private volatile boolean closed;
+
+  /**
+   * Creates the publisher; nothing is opened until the first publish.
+   *
+   * @param connectionFactory the factory of the publisher's own connection: host, port, credentials
+   *     and virtual host set, automatic recovery on
+   * @param connectionName the client-provided connection name the broker's management UI shows
+   * @param topology declares, on the publisher's channel, what it publishes to
+   * @param exchange the exchange every entry is published to
+   * @param routingKey the routing key every entry is published with
+   * @param confirmTimeout how long a publish waits for the broker's confirm
+   */
+  public LazyRabbitMqOutboxPublisher(
+      ConnectionFactory connectionFactory,
+      String connectionName,
+      Topology topology,
+      String exchange,
+      String routingKey,
+      Duration confirmTimeout) {
+    this.connectionFactory = Objects.requireNonNull(connectionFactory, "connectionFactory");
+    this.connectionName = Objects.requireNonNull(connectionName, "connectionName");
+    this.topology = Objects.requireNonNull(topology, "topology");
+    this.exchange = Objects.requireNonNull(exchange, "exchange");
+    this.routingKey = Objects.requireNonNull(routingKey, "routingKey");
+    this.confirmTimeout = Objects.requireNonNull(confirmTimeout, "confirmTimeout");
+  }
+
+  @Override
+  public void publish(OutboxEntry entry) throws Exception {
+    connected().publish(entry);
+  }
+
+  @Override
+  public BatchResult publishBatch(List<OutboxEntry> entries) {
+    return publishBatch(entries, null);
+  }
+
+  /**
+   * Publishes the batch through the {@link RabbitMqOutboxPublisher}, connecting first when there is
+   * no connection yet. A connection that cannot be opened fails every entry with the same {@link
+   * BrokerUnreachableException}. When the thread is interrupted (the relay stops) or the deadline
+   * has passed before a connection is opened, no entry is attempted and none is in either bucket,
+   * as the {@link OutboxPublisher} contract asks of entries a batch never reached.
+   */
+  @Override
+  public BatchResult publishBatch(List<OutboxEntry> entries, Instant deadline) {
+    if (entries.isEmpty()) {
+      return NOTHING_ATTEMPTED;
+    }
+    RabbitMqOutboxPublisher publisher = delegate;
+    if (publisher == null) {
+      if (Thread.currentThread().isInterrupted()
+          || (deadline != null && !Instant.now().isBefore(deadline))) {
+        return NOTHING_ATTEMPTED;
+      }
+      try {
+        publisher = connected();
+      } catch (BrokerUnreachableException unreachable) {
+        if (Thread.currentThread().isInterrupted()) {
+          // The relay is stopping: an interrupted connect is no evidence about the broker.
+          return NOTHING_ATTEMPTED;
+        }
+        Map<OutboxEntryId, Exception> failed = LinkedHashMap.newLinkedHashMap(entries.size());
+        for (OutboxEntry entry : entries) {
+          failed.put(entry.id(), unreachable);
+        }
+        return new BatchResult(Set.of(), failed);
+      }
+    }
+    return publisher.publishBatch(entries, deadline);
+  }
+
+  /**
+   * {@link FailureKind#TRANSPORT} for a {@link BrokerUnreachableException} (nothing was handed to a
+   * broker); every other failure comes from the {@link RabbitMqOutboxPublisher} and is classified
+   * by it.
+   */
+  @Override
+  public FailureKind classifyFailure(Exception failure) {
+    Throwable cause = failure;
+    for (int depth = 0; cause != null && depth < 50; depth++, cause = cause.getCause()) {
+      if (cause instanceof BrokerUnreachableException) {
+        return FailureKind.TRANSPORT;
+      }
+    }
+    RabbitMqOutboxPublisher publisher = delegate;
+    return publisher != null ? publisher.classifyFailure(failure) : FailureKind.TRANSPORT;
+  }
+
+  /**
+   * The {@link RabbitMqOutboxPublisher}'s horizon: its default publish-block budget plus the
+   * confirm timeout.
+   */
+  @Override
+  public Duration inFlightHorizon() {
+    return RabbitMqOutboxPublisher.DEFAULT_PUBLISH_BLOCK_BUDGET.plus(confirmTimeout);
+  }
+
+  /**
+   * The longest a connection attempt can hold the relay: the factory's connection timeout plus its
+   * handshake timeout.
+   */
+  public Duration connectBound() {
+    return Duration.ofMillis(connectionFactory.getConnectionTimeout())
+        .plusMillis(connectionFactory.getHandshakeTimeout());
+  }
+
+  /**
+   * Whether the publisher has opened its connection and is not closed. The connection may be
+   * recovering from a broker restart at the moment.
+   */
+  public boolean isConnected() {
+    return delegate != null && !closed;
+  }
+
+  /**
+   * Closes the connection, if one was opened. A publish afterwards hands nothing to the broker:
+   * with no connection opened yet it fails with a {@link BrokerUnreachableException}; on the closed
+   * connection's channel the {@link RabbitMqOutboxPublisher} fails it as a transport failure. The
+   * application calls it at shutdown, after the relay stopped.
+   */
+  @Override
+  public void close() {
+    closed = true;
+    Connection opened = connection;
+    if (opened != null) {
+      closeQuietly(opened);
+    }
+  }
+
+  /** The publisher on an open connection, connecting first when there is none yet. */
+  private RabbitMqOutboxPublisher connected() throws BrokerUnreachableException {
+    RabbitMqOutboxPublisher publisher = delegate;
+    if (publisher != null) {
+      return publisher;
+    }
+    connecting.lock();
+    try {
+      if (delegate != null) {
+        return delegate;
+      }
+      if (closed) {
+        throw new BrokerUnreachableException("the outbox publisher is closed", null);
+      }
+      Connection opened = null;
+      String step = "open a channel";
+      try {
+        opened = connectionFactory.newConnection(connectionName);
+        Channel channel = opened.createChannel();
+        if (channel == null) {
+          throw new IOException("the connection has no channel left for the outbox publisher");
+        }
+        step = "declare the topology";
+        topology.declare(channel);
+        step = "put its channel into confirm mode";
+        publisher =
+            RabbitMqOutboxPublisher.builder()
+                .channel(channel)
+                .exchange(exchange)
+                .routingKey(routingKey)
+                .confirmTimeout(confirmTimeout)
+                .build();
+      } catch (IOException | TimeoutException | RuntimeException e) {
+        if (opened != null) {
+          closeQuietly(opened);
+        }
+        throw new BrokerUnreachableException(
+            opened == null
+                ? "RabbitMQ is not reachable at "
+                    + address()
+                    + ", nothing was published: "
+                    + describe(e)
+                : "RabbitMQ at "
+                    + address()
+                    + " is connected, but the outbox publisher could not "
+                    + step
+                    + ", nothing was published: "
+                    + describe(e),
+            e);
+      }
+      // Published before closed is read, and close() sets closed before it reads the connection:
+      // whichever of the two runs second sees the other's write, so a connection opened while the
+      // publisher was being closed is closed here or there.
+      connection = opened;
+      if (closed) {
+        closeQuietly(opened);
+        throw new BrokerUnreachableException("the outbox publisher is closed", null);
+      }
+      delegate = publisher;
+      LOG.info("Outbox publisher connected to RabbitMQ at {}", address());
+      return publisher;
+    } finally {
+      connecting.unlock();
+    }
+  }
+
+  /** The failure and, when it wraps one, the cause the client reported it for. */
+  private static String describe(Exception failure) {
+    Throwable root = failure;
+    for (int depth = 0; root.getCause() != null && root.getCause() != root && depth < 50; depth++) {
+      root = root.getCause();
+    }
+    return root == failure ? failure.toString() : failure + " (" + root + ")";
+  }
+
+  private String address() {
+    return connectionFactory.getHost() + ":" + connectionFactory.getPort();
+  }
+
+  private static void closeQuietly(Connection opened) {
+    try {
+      opened.close();
+    } catch (IOException | RuntimeException e) {
+      LOG.debug("Closing the outbox publisher's RabbitMQ connection failed", e);
+    }
+  }
+}
+```
+
+Until it has connected, the publisher fails every entry of a batch with its own `BrokerUnreachableException`, before anything reaches a broker — its message says whether the broker could not be reached or answered and refused a step, such as a topology declaration — and `classifyFailure` reports that as `TRANSPORT`: the relay keeps the entries `PENDING`, records the error in `last_error`, counts no attempt against the retry ladder (`streamrune.outbox.retry-max-attempts`) and tries again on a backoff that grows from one second towards the relay's 60-second cap. Once the broker answers, the next attempt connects, declares the topology and delivers the entries. Every later failure comes from the `RabbitMqOutboxPublisher`, which classifies its own. The relay reads `inFlightHorizon()` when it is built, before any connection, to check the claim lease against it, so the class reports the horizon the `RabbitMqOutboxPublisher` would: its default 30-second publish-block budget plus the confirm timeout. The connect is not part of it: nothing is handed to the broker while the connection opens, and the `RabbitMqOutboxPublisher` checks the relay's deadline before each publish, so a connect that ends past the deadline publishes nothing.
+
+The relay's deadline does not bound the connect itself, so the connection factory must: the apps set a 10-second connection timeout and a 10-second handshake timeout (`CONNECTION_TIMEOUT`, `HANDSHAKE_TIMEOUT`; Spring takes `spring.rabbitmq.connection-timeout` when it is set). A refused connection — no broker listening — fails at once. A broker whose packets are dropped, behind a firewall or at a dead address, would otherwise hold the relay for the client's own 60 seconds plus 10 on every poll cycle, with the claimed entries `IN_PROGRESS` and out of the `PENDING` listing and the backlog gauge below.
+
+Then create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/RabbitMqConfig.java`. This declares the RabbitMQ topology and provides the `OutboxPublisher` bean that the auto-configured `OutboxPoller` uses to actually deliver messages:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ConnectionFactory;
+import java.io.IOException;
+import java.time.Duration;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Queue;
@@ -668,47 +1029,114 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.outbox.OutboxPublisher;
+import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
 
+/**
+ * RabbitMQ topology and outbox publisher for the e-commerce demo.
+ *
+ * <p>Declares the {@code streamrune.events} topic exchange, the {@code streamrune.integration}
+ * queue, and a binding with routing key {@code integration.#} so any routing key prefixed with
+ * {@code integration.} (or exactly {@code integration}) lands in the queue. The notifications
+ * service consumer subscribes to {@code streamrune.integration}. Spring AMQP declares these three
+ * beans when its own connection is first opened; the outbox publisher declares the same topology on
+ * its own channel ({@link #declareTopology}), because its first publish may come before that.
+ *
+ * <p>The {@link OutboxPublisher} bean is consumed by the auto-configured {@link
+ * org.streamrune.runtime.OutboxPoller} once {@code streamrune.outbox.enabled=true} is set in
+ * application.yml. It publishes on its own AMQP connection, not on Spring AMQP's (see {@link
+ * #outboxPublisher}), and opens that connection on its first publish: the application starts and
+ * serves commands while the broker is down.
+ */
 @Configuration(proxyBeanMethods = false)
 public class RabbitMqConfig {
 
-  public static final String EXCHANGE   = "streamrune.events";
-  public static final String QUEUE      = "streamrune.integration";
+  /** Integration event exchange. The outbox publisher publishes here. */
+  public static final String EXCHANGE = "streamrune.events";
+
+  /** Queue that notifications-service (and any other consumer) subscribes to. */
+  public static final String QUEUE = "streamrune.integration";
+
+  /**
+   * Routing key used when publishing outbox entries. The topic binding pattern {@code
+   * integration.#} routes this key to the {@link #integrationQueue()}.
+   */
   public static final String ROUTING_KEY = "integration.event";
 
   /** Client-provided name of the publisher's connection, shown in the RabbitMQ management UI. */
   public static final String OUTBOX_CONNECTION_NAME = "streamrune-outbox-publisher";
 
-  /** Integration event exchange. The outbox publisher publishes here. */
   @Bean
   public TopicExchange integrationExchange() {
+    // durable=true, auto-delete=false
     return new TopicExchange(EXCHANGE, true, false);
   }
 
-  /** Queue that notifications-service (and any other consumer) subscribes to. */
   @Bean
   public Queue integrationQueue() {
+    // durable=true so messages survive broker restarts
     return new Queue(QUEUE, true);
   }
 
-  /** Binding: routing key "integration.#" routes to streamrune.integration. */
   @Bean
   public Binding integrationBinding(TopicExchange integrationExchange, Queue integrationQueue) {
+    // "integration.#" matches "integration" and "integration.<anything>"
     return BindingBuilder.bind(integrationQueue).to(integrationExchange).with("integration.#");
   }
 
   /**
-   * The outbox publisher's own AMQP connection: the plain RabbitMQ Java client with automatic
-   * recovery on, not Spring AMQP's ConnectionFactory (see the text below the listing). Host,
-   * port, credentials and virtual host come from the spring.rabbitmq.* properties. Spring closes
-   * the connection on shutdown, after the outbox poller that uses it has stopped. Gated on
-   * streamrune.outbox.enabled=true so no connection is opened when no broker is available.
+   * The outbox publisher: a {@link LazyRabbitMqOutboxPublisher} that opens its own AMQP connection,
+   * with the plain RabbitMQ Java client and automatic recovery switched on, on its first publish,
+   * and then publishes through a {@link RabbitMqOutboxPublisher} on a channel only it uses.
+   *
+   * <p>Nothing is opened at startup, so the application starts and serves commands while the broker
+   * is down. A command's integration events wait in the outbox: each publish attempt fails with a
+   * transport failure, which the relay retries on a growing backoff without counting it against the
+   * entry, and the entries are delivered once the broker answers. The relay's {@code WARN} line and
+   * {@code streamrune.outbox.pending} show the outage, and the publisher logs {@code Outbox
+   * publisher connected to RabbitMQ at <host>:<port>} when it connects.
+   *
+   * <p>The publisher is deliberately not given a channel from Spring AMQP's {@code
+   * ConnectionFactory}. Spring AMQP turns the client's automatic recovery off and, after the
+   * connection drops, hands out a fresh channel behind the same proxy, without confirm mode and
+   * without the publisher's listeners. Publishes on that channel still reach the queue, but no
+   * confirm ever comes back: every entry times out, stays claimed for the lease and is published
+   * again, over and over, until the application restarts.
+   *
+   * <p>With automatic recovery the client reconnects by itself after a broker restart or a network
+   * failure (every 5 seconds by default) and reopens the same channel object with confirm mode and
+   * the confirm and return listeners restored, so the publisher keeps working without a restart.
+   * While the connection is down, a publish fails before anything is handed to the broker and the
+   * relay tries the entry again later. A publish already sent when the connection drops gets no
+   * confirm: it waits out the confirm timeout, stays claimed until the lease expires and is then
+   * published again, so the consumer may receive it twice (it deduplicates by entry id).
+   *
+   * <p>The connection attempt is bounded: {@code spring.rabbitmq.connection-timeout} when it is
+   * set, otherwise {@link LazyRabbitMqOutboxPublisher#CONNECTION_TIMEOUT} (10 s), plus a 10 s
+   * handshake timeout. The relay's publish deadline bounds nothing while the publisher connects,
+   * and the client's own 60-second connection timeout would let a broker whose packets are dropped
+   * hold the relay about 70 seconds per poll cycle, with the claimed entries {@code IN_PROGRESS}.
+   *
+   * <p>The factory takes {@code spring.rabbitmq.host}, {@code port}, {@code username}, {@code
+   * password}, {@code virtual-host} and {@code connection-timeout}, the properties Spring AMQP
+   * uses. TLS settings under {@code spring.rabbitmq.ssl} are not applied here; a TLS deployment
+   * configures the factory itself.
+   *
+   * <p>The 30-second confirm timeout, combined with the publisher's default 30-second {@code
+   * publishBlockBudget}, gives an in-flight horizon (see {@link
+   * RabbitMqOutboxPublisher#inFlightHorizon()}) of 60 seconds; {@link StreamRuneConfig#outboxStore}
+   * sets the outbox claim lease to 2 minutes so it strictly exceeds that horizon plus the
+   * framework's recommended margin. A broker timeout therefore makes the poller retry rather than
+   * lose the message, and a lease reclaim can never race a still-in-flight publish of the same
+   * entry.
+   *
+   * <p>Spring closes the publisher, and with it the connection, on shutdown, after the outbox
+   * poller that uses it has stopped. Gated on {@code streamrune.outbox.enabled=true}, which the
+   * relay needs.
    */
   @Bean(destroyMethod = "close")
   @ConditionalOnProperty(name = "streamrune.outbox.enabled", havingValue = "true")
-  public Connection outboxRabbitConnection(RabbitProperties rabbit)
-      throws IOException, TimeoutException {
+  public LazyRabbitMqOutboxPublisher outboxPublisher(RabbitProperties rabbit) {
     ConnectionFactory factory = new ConnectionFactory();
     factory.setHost(rabbit.determineHost());
     factory.setPort(rabbit.determinePort());
@@ -718,27 +1146,36 @@ public class RabbitMqConfig {
     if (virtualHost != null) {
       factory.setVirtualHost(virtualHost);
     }
+    Duration connectionTimeout = rabbit.getConnectionTimeout();
+    factory.setConnectionTimeout(
+        (int)
+            (connectionTimeout != null
+                    ? connectionTimeout
+                    : LazyRabbitMqOutboxPublisher.CONNECTION_TIMEOUT)
+                .toMillis());
+    factory.setHandshakeTimeout((int) LazyRabbitMqOutboxPublisher.HANDSHAKE_TIMEOUT.toMillis());
     // The client's default, written out because this is the whole point of a separate connection.
     factory.setAutomaticRecoveryEnabled(true);
-    return factory.newConnection(OUTBOX_CONNECTION_NAME);
+    return new LazyRabbitMqOutboxPublisher(
+        factory,
+        OUTBOX_CONNECTION_NAME,
+        RabbitMqConfig::declareTopology,
+        EXCHANGE,
+        ROUTING_KEY,
+        Duration.ofSeconds(30));
   }
 
   /**
-   * OutboxPublisher backed by RabbitMQ, on a channel only it uses; build() puts the channel
-   * into confirm mode. The confirm timeout (30 s) plus the publisher's default 30 s
-   * publish-block budget give a 60 s in-flight horizon, comfortably below the 2-minute claim
-   * lease (see `outboxStore` above), so a broker timeout causes the poller to retry rather than
-   * lose the message and a lease reclaim can never race a still-in-flight publish of the same
-   * entry.
+   * Declares the exchange, the queue and the binding on the publisher's channel, with the same
+   * arguments as the beans above, before its first publish. Spring AMQP declares those beans
+   * lazily, when its own connection is first opened, and nothing in this application opens it
+   * before the outbox's first publish. A publish to an exchange that does not exist makes the
+   * broker close the channel, and a channel closed that way is not reopened by automatic recovery:
+   * every later publish would fail. The declarations are idempotent, and the client's topology
+   * recovery repeats them after a reconnect, so a broker that comes back without its definitions
+   * gets them again. The Quarkus and Micronaut apps declare the topology the same way.
    */
-  @Bean
-  @ConditionalOnProperty(name = "streamrune.outbox.enabled", havingValue = "true")
-  public OutboxPublisher outboxPublisher(Connection outboxRabbitConnection) throws IOException {
-    Channel channel = outboxRabbitConnection.createChannel();
-    // Declared here as well as by the beans above: Spring AMQP declares those only when its own
-    // connection is first opened, which can be after the first publish, and a publish to a
-    // missing exchange makes the broker close this channel for good. The declarations are
-    // idempotent, and the client's topology recovery repeats them after a reconnect.
+  static void declareTopology(Channel channel) throws IOException {
     channel.exchangeDeclare(EXCHANGE, "topic", /* durable= */ true);
     channel.queueDeclare(
         QUEUE,
@@ -747,21 +1184,33 @@ public class RabbitMqConfig {
         /* autoDelete= */ false,
         /* arguments= */ null);
     channel.queueBind(QUEUE, EXCHANGE, "integration.#");
-    return RabbitMqOutboxPublisher.builder()
-        .channel(channel)
-        .exchange(EXCHANGE)
-        .routingKey(ROUTING_KEY)
-        .confirmTimeout(Duration.ofSeconds(30))
-        .build();
   }
 }
 ```
 
-The `TopicExchange` is `streamrune.events` (durable, not auto-delete). The queue is `streamrune.integration` (durable). The binding pattern `integration.#` routes any routing key prefixed with `integration.` (or exactly `integration`) to that queue — so the routing key `integration.event` used by the publisher lands there. The `notifications-service` subscribes to the same queue. Spring AMQP declares the three topology beans, but lazily: only when its own connection is first opened. Nothing in this app opens that connection before the outbox's first publish, and a publish to an exchange that does not exist makes the broker close the publisher's channel for good. So `outboxPublisher` declares the same exchange, queue and binding on its own channel before it builds the publisher — with the same arguments as the beans, so the declarations agree — exactly as the Quarkus and Micronaut apps do. `RabbitMqConfigTopologyIT` runs the two bean methods against a fresh broker and expects the first publish to be confirmed and waiting in the queue.
+The `TopicExchange` is `streamrune.events` (durable, not auto-delete). The queue is `streamrune.integration` (durable). The binding pattern `integration.#` routes any routing key prefixed with `integration.` (or exactly `integration`) to that queue — so the routing key `integration.event` used by the publisher lands there. The `notifications-service` subscribes to the same queue. Spring AMQP declares the three topology beans, but lazily: only when its own connection is first opened. Nothing in this app opens that connection before the outbox's first publish, and a publish to an exchange that does not exist makes the broker close the publisher's channel for good. So the publisher declares the same exchange, queue and binding on its own channel before its first publish (`declareTopology`) — with the same arguments as the beans, so the declarations agree — exactly as the Quarkus and Micronaut apps do. `RabbitMqConfigTopologyIT` runs the bean method against a fresh broker and expects the first publish to be confirmed and waiting in the queue.
 
 **Why the publisher gets its own connection.** It is tempting to write `connectionFactory.createConnection().createChannel(false)` with the Spring AMQP `ConnectionFactory` that `spring-boot-starter-amqp` already provides. Don't. Spring AMQP switches the client's automatic recovery off and hands out channels behind a caching proxy. When the broker restarts or the network drops, the proxy quietly opens a fresh channel on the next call — without confirm mode and without the confirm and return listeners `RabbitMqOutboxPublisher.build()` registered on the old one. Publishes on that channel still reach the queue, but the broker never confirms them: every entry times out, stays claimed for the 2-minute lease and is published again, over and over, and no entry is ever marked `DELIVERED` until the application restarts.
 
-The plain RabbitMQ Java client with automatic recovery (its default, set explicitly above) reconnects by itself every 5 seconds and reopens the *same* channel object with confirm mode and both listeners restored, so the publisher keeps working. While the broker is down a publish fails before anything is handed off, and the relay tries the entry again on its next poll. A publish already sent when the connection drops gets no confirm: it waits out the confirm timeout, stays claimed until the lease expires, and is then published again — the consumer may see it twice, which is why the `notifications-service` deduplicates by entry id. The Quarkus and Micronaut apps open their publisher channel the same way (`RabbitMqProducer`, `RabbitMqFactory`). `OutboxBrokerRestartIT` in `spring-app` proves it: it stops and restarts the broker application, writes an outbox entry while the broker is down, and expects that entry to reach `DELIVERED` — which the relay records only after the broker confirms the publish.
+The plain RabbitMQ Java client with automatic recovery (its default, set explicitly above) reconnects by itself every 5 seconds and reopens the *same* channel object with confirm mode and both listeners restored, so the publisher keeps working. While the broker is down a publish fails before anything is handed off, and the relay tries the entry again on its backoff. A publish already sent when the connection drops gets no confirm: it waits out the confirm timeout, stays claimed until the lease expires, and is then published again — the consumer may see it twice, which is why the `notifications-service` deduplicates by entry id. The Quarkus and Micronaut apps wire the same `LazyRabbitMqOutboxPublisher` (`RabbitMqProducer`, `RabbitMqFactory`). `OutboxBrokerRestartIT` in `spring-app` proves the recovery: it stops and restarts the broker application, writes an outbox entry while the broker is down, and expects that entry to reach `DELIVERED` — which the relay records only after the broker confirms the publish.
+
+**The application starts and serves commands while the broker is down, and drains the outbox when it returns.** Nothing at startup connects to RabbitMQ, so the app comes up without it and accepts every command; the integration events wait in `outbox_events`. You can watch it happen:
+
+- `GET /api/admin/outbox` (as an `ADMIN`) lists the waiting entries: `status` `PENDING`, `attempts` `0`, and `lastError` naming the broker, e.g. `RabbitMQ is not reachable at localhost:5672, nothing was published: java.net.ConnectException: Connection refused`.
+- The relay logs one `WARN` per poll cycle: `Outbox delivery hit a broker-wide TRANSPORT failure for 3 of 3 claimed entries (...) retry deferred by up to ... — escalating toward the 60s cap while the failures last: RabbitMQ is not reachable at ...`.
+- `streamrune.outbox.pending` (`/actuator/metrics/streamrune.outbox.pending`) counts the backlog, and `/actuator/health` stays `UP`: the `relay.outbox-relay` block (Chapter 15) reads `UP`, because a refused publish fails an entry, not the relay's poll cycle.
+- When the broker answers, the publisher logs `Outbox publisher connected to RabbitMQ at localhost:5672`, the entries are delivered in order, and `GET /api/admin/outbox` empties. An entry that waited longest waits up to the 60-second cap for its next attempt.
+
+A broker that goes away after the publisher connected shows the same way, with the client's own error in `lastError` (the client reconnects by itself). `OutboxBrokerDownStartupIT` in each app proves the startup case: it starts the app with a broker port nothing listens on, expects `UP` health, a command answered `200` and its entry `PENDING` with the refusal recorded and no attempt counted, then starts RabbitMQ on that port and expects the entry `DELIVERED` and on the queue once.
+
+Spring Boot adds a health check of its own for RabbitMQ with `spring-boot-starter-amqp`. It opens Spring AMQP's connection, which the app does not publish on, and would answer `DOWN` for the whole app while the broker is down — taking an app that serves out of a load balancer's rotation. Switch it off in `application.yml`; the outbox's own signals above show the outage:
+
+```yaml
+management:
+  health:
+    rabbit:
+      enabled: false
+```
 
 ### Step 6: Wire `InventoryCommandController`
 
@@ -1102,7 +1551,7 @@ notifications-service:
       condition: service_healthy
 ```
 
-Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). The health check is `check_port_connectivity` rather than `ping`: `ping` succeeds as soon as the broker's Erlang node runs, several seconds before port 5672 accepts connections, and the services that wait for `service_healthy` connect the moment the check passes — the backend's outbox publisher would be refused and the container would exit. Update the `backend` service too: add `RABBITMQ_HOST: rabbitmq`, `RABBITMQ_USERNAME: guest` and `RABBITMQ_PASSWORD: guest` to its `environment`, and `rabbitmq: condition: service_healthy` to its `depends_on`. Without `RABBITMQ_HOST` the backend's outbox publisher looks for the broker on `localhost` inside its own container and cannot connect.
+Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). The health check is `check_port_connectivity` rather than `ping`: `ping` succeeds as soon as the broker's Erlang node runs, several seconds before port 5672 accepts connections, and the services that wait for `service_healthy` connect the moment the check passes. Update the `backend` service too: add `RABBITMQ_HOST: rabbitmq`, `RABBITMQ_USERNAME: guest` and `RABBITMQ_PASSWORD: guest` to its `environment`, and `rabbitmq: condition: service_healthy` to its `depends_on`. The backend starts without the broker (Step 5b); waiting for it only lets the seed data's integration events go out at once instead of on the relay's backoff. Without `RABBITMQ_HOST` the backend's outbox publisher looks for the broker on `localhost` inside its own container and never connects: the backend serves, and its entries wait `PENDING`.
 
 Before running `docker compose up`, build the two JARs the images copy — the backend's and the notifications service's:
 
@@ -1163,6 +1612,17 @@ The count does not change. `CustomerRegistered` is excluded by `EcommerceIntegra
 
 **8d. Optional — RabbitMQ management UI.** Visit `http://localhost:15672` (guest/guest). The `streamrune.events` exchange and `streamrune.integration` queue are visible under Exchanges and Queues. The queue's message rate chart shows the delivery spike when orders are confirmed. Under Connections, the one named `streamrune-outbox-publisher` is the outbox publisher's own connection from Step 5b.
 
+**8e. Optional — stop the broker.** The shop keeps working without RabbitMQ:
+
+```bash
+docker compose stop rabbitmq
+# Place and confirm another order as in 8a: the requests answer as before.
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/outbox
+docker compose start rabbitmq
+```
+
+While the broker is stopped, the order's `OrderConfirmed` entry is listed `PENDING` with the client's error in `lastError`, the backend logs the relay's `WARN` each poll cycle, and `/actuator/health` stays `UP` (Step 5b). Once the broker is back, the client reconnects, the relay's next attempt delivers the entry — within its backoff, at most a minute — and `/received` on the notifications service lists it.
+
 ### When delivery fails: replay or skip
 
 An entry that the broker rejects on every attempt (an unroutable message, a payload the consumer's schema refuses) exhausts the retry ladder — `streamrune.outbox.retry-max-attempts`, 10 by default; transport outages never count — and becomes `FAILED`. On this strict channel that entry is still the **head** of its stream: the order's later events stay `PENDING` and are not delivered, the relay logs `stream BLOCKED`, and two gauges show it — `streamrune.outbox.blocked_aggregates` (how many) and `streamrune.outbox.blockage_age_seconds` (for how long; alert on this one).
@@ -1192,7 +1652,9 @@ Nothing else releases a blocked stream: `OutboxStore.delete` refuses a `FAILED` 
 
 **Replay or skip.** A `FAILED` entry blocks its aggregate until replayed (in place) or skipped (audited); a skip is not a delivery.
 
-**`RabbitMqOutboxPublisher`** is the `OutboxPublisher` implementation that sends AMQP messages. It puts its channel into confirm mode at startup; the confirm timeout (30 s) plus its default 30 s publish-block budget give a 60 s in-flight horizon, well below the claim lease (2 min), so a broker timeout causes the poller to retry without losing the entry — and `OutboxPoller` refuses to boot in the first place if the lease does not strictly exceed that horizon. The channel must stay in confirm mode for the publisher's whole life, so it comes from a dedicated, automatically recovering RabbitMQ Java client connection, never from Spring AMQP's caching `ConnectionFactory`, whose recreated channels lose confirm mode after a reconnect.
+**`RabbitMqOutboxPublisher`** is the `OutboxPublisher` implementation that sends AMQP messages. It puts its channel into confirm mode when it is built; the confirm timeout (30 s) plus its default 30 s publish-block budget give a 60 s in-flight horizon, well below the claim lease (2 min), so a broker timeout causes the poller to retry without losing the entry — and `OutboxPoller` refuses to boot in the first place if the lease does not strictly exceed that horizon. The channel must stay in confirm mode for the publisher's whole life, so it comes from a dedicated, automatically recovering RabbitMQ Java client connection, never from Spring AMQP's caching `ConnectionFactory`, whose recreated channels lose confirm mode after a reconnect.
+
+**`LazyRabbitMqOutboxPublisher`** opens that connection and builds the `RabbitMqOutboxPublisher` on the first publish, so the application starts and serves commands while the broker is down. Until the broker answers, every publish fails as a transport failure: the entries stay `PENDING` with the error in `lastError`, no attempt is counted, the relay retries on a backoff capped at 60 s, and the outbox drains once the broker is back. `streamrune.outbox.pending`, the relay's `WARN` line and `GET /api/admin/outbox` show the backlog; health stays `UP`.
 
 **notifications-service** is a separate Spring Boot application. It has no access to the e-shop's database — it only sees what arrives on the `streamrune.integration` queue. This is the key decoupling: the e-shop publishes integration events; downstream consumers are fully independent services. The notifications service deduplicates by `entryId` to handle at-least-once delivery.
 

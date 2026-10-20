@@ -34,6 +34,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
@@ -56,9 +57,10 @@ import org.testcontainers.containers.RabbitMQContainer;
  * <p>This test manages its own containers (both PostgreSQL and RabbitMQ) independently of {@link
  * AbstractIntegrationTest}, which supplies only Postgres and disables the outbox. The test enables
  * {@code streamrune.outbox.enabled=true} and supplies rabbitmq coordinates so that {@link
- * org.streamrune.ecommerce.micronaut.config.RabbitMqFactory} opens a channel and creates an {@link
- * org.streamrune.core.outbox.OutboxPublisher} bean, which the framework's OutboxPoller then picks
- * up and starts automatically via {@link org.streamrune.micronaut.StreamRuneLifecycle}.
+ * org.streamrune.ecommerce.micronaut.config.RabbitMqFactory} creates an {@link
+ * org.streamrune.core.outbox.OutboxPublisher} bean, which connects on its first publish and which
+ * the framework's OutboxPoller then picks up and starts automatically via {@link
+ * org.streamrune.micronaut.StreamRuneLifecycle}.
  */
 @MicronautTest(transactional = false)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -132,7 +134,16 @@ class IntegrationOutboxE2EIT implements TestPropertyProvider {
     testConnection = factory.newConnection();
     testChannel = testConnection.createChannel();
 
-    // Queue is already declared by RabbitMqFactory at app startup; just consume from it.
+    // The publisher declares the integration topology on its first publish, which may come after
+    // this consumer subscribes. The declarations are idempotent and match RabbitMqFactory's.
+    testChannel.exchangeDeclare(RabbitMqFactory.EXCHANGE, "topic", /* durable= */ true);
+    testChannel.queueDeclare(
+        RabbitMqFactory.QUEUE,
+        /* durable= */ true,
+        /* exclusive= */ false,
+        /* autoDelete= */ false,
+        /* arguments= */ null);
+    testChannel.queueBind(RabbitMqFactory.QUEUE, RabbitMqFactory.EXCHANGE, "integration.#");
     DeliverCallback deliverCallback =
         (consumerTag, delivery) -> {
           String type =
