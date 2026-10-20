@@ -48,12 +48,13 @@ runs its tests, with `--enable-preview`.
 
 | Command | What it runs | Typical wall time |
 |---|---|---|
-| `./gradlew quickCheck` | Compiles every module, runs the tests of `domain`, `commands`, `queries` and `projections` and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | under 20 seconds |
-| `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
+| `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck` and the tests of `domain`, `commands`, `queries` and `projections` and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | under 20 seconds |
+| `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
 | `./gradlew :spring-app:test --tests "org.streamrune.ecommerce.spring.docs.*"` | The tutorial tests (section 5), without Docker | |
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
+| the same, then `docker compose --profile two-backends up -d --build` | Adds `backend-2`, a second Spring backend on the same database (port 8091), for the two-backend runs of the README and Chapter 17 | |
 | `scripts/native-image-smoke-test.sh spring` (or `quarkus`, `micronaut`, `all`) | Builds an application as a native image and probes it on an empty database: health, the schema, a command and its read model, a dead-letter replay, a saga, shutdown. Needs Docker and a GraalVM JDK 25 on `PATH`. | |
 
 In `frontend/`, after `npm ci`:
@@ -94,6 +95,9 @@ In `frontend/`, after `npm ci`:
   `.gitmessage`). Sign off every commit with `git commit --signoff`: the `dco` check rejects a
   commit without the trailer.
 - **Pull requests** go to `main` and are squash-merged.
+- **Formatting** is google-java-format through Spotless. `check` runs `spotlessCheck`, so `build`
+  fails on a formatting violation (and so does `quickCheck`); `./gradlew spotlessApply` fixes what
+  it reports.
 
 ## 4. Testing conventions
 
