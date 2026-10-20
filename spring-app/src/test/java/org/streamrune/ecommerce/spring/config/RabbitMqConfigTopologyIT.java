@@ -6,12 +6,16 @@ import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.GetResponse;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.amqp.autoconfigure.RabbitProperties;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
+import org.streamrune.core.outbox.OutboxPublisher;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
@@ -69,6 +73,50 @@ class RabbitMqConfigTopologyIT {
       GetResponse message = channel.basicGet(RabbitMqConfig.QUEUE, true);
       assertThat(message).as("the published entry waits in the integration queue").isNotNull();
       assertThat(new String(message.getBody(), StandardCharsets.UTF_8)).contains("topology-ord-1");
+    }
+  }
+
+  /**
+   * A topology the broker refuses — here a declaration that fails — is reported as what it is: the
+   * broker answered, and the publisher could not prepare its channel. The entry fails as a
+   * transport failure, as an unreachable broker does, and nothing is published.
+   */
+  @Test
+  void aTopologyThatCannotBeDeclaredIsReportedAsSuch() {
+    ConnectionFactory factory = new ConnectionFactory();
+    factory.setHost(BROKER.getHost());
+    factory.setPort(BROKER.getAmqpPort());
+    factory.setUsername(BROKER.getAdminUsername());
+    factory.setPassword(BROKER.getAdminPassword());
+    try (var publisher =
+        new LazyRabbitMqOutboxPublisher(
+            factory,
+            "topology-refused",
+            channel -> {
+              throw new IOException("PRECONDITION_FAILED - inequivalent arg 'durable'");
+            },
+            RabbitMqConfig.EXCHANGE,
+            RabbitMqConfig.ROUTING_KEY,
+            Duration.ofSeconds(30))) {
+      OutboxPublisher.BatchResult result =
+          publisher.publishBatch(
+              List.of(
+                  OutboxEntry.pending(
+                      OutboxEntryId.of("topology-entry-2"),
+                      "{\"orderId\":\"topology-ord-2\"}",
+                      "OrderConfirmed",
+                      StreamId.of(OrderState.TYPE, AggregateId.of("topology-ord-2")))),
+              Instant.now().plusSeconds(30));
+
+      Exception failure = result.failed().get(OutboxEntryId.of("topology-entry-2"));
+      assertThat(failure)
+          .hasMessageContaining(
+              "is connected, but the outbox publisher could not declare the topology")
+          .hasMessageContaining("PRECONDITION_FAILED")
+          .hasMessageNotContaining("not reachable");
+      assertThat(publisher.classifyFailure(failure))
+          .isEqualTo(OutboxPublisher.FailureKind.TRANSPORT);
+      assertThat(publisher.isConnected()).isFalse();
     }
   }
 }

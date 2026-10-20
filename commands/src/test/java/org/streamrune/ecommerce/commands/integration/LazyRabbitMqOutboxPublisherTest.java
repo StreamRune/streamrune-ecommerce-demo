@@ -7,9 +7,11 @@ import com.rabbitmq.client.ConnectionFactory;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -119,14 +121,99 @@ class LazyRabbitMqOutboxPublisherTest {
   }
 
   @Test
+  void aBrokerWhosePacketsAreDroppedFailsWithinTheConnectionTimeout() {
+    // TEST-NET-1 (RFC 5737): nothing answers there, so a connect waits out its timeout (or the
+    // network refuses the route at once).
+    ConnectionFactory factory = new ConnectionFactory();
+    factory.setHost("192.0.2.1");
+    factory.setPort(5672);
+    factory.setConnectionTimeout(300);
+    factory.setHandshakeTimeout(300);
+
+    try (var dropped = publisherFor(factory)) {
+      assertFailsWithinTheBound(dropped);
+    }
+  }
+
+  @Test
+  void aBrokerThatNeverAnswersTheHandshakeFailsWithinTheHandshakeTimeout() throws Exception {
+    try (ServerSocket silent = new ServerSocket(0)) {
+      // Accepts every connection and never writes a byte: the AMQP handshake waits for an answer.
+      List<Socket> held = new CopyOnWriteArrayList<>();
+      Thread.ofVirtual()
+          .start(
+              () -> {
+                while (!silent.isClosed()) {
+                  try {
+                    held.add(silent.accept());
+                  } catch (IOException e) {
+                    return;
+                  }
+                }
+              });
+      ConnectionFactory factory = new ConnectionFactory();
+      factory.setHost("localhost");
+      factory.setPort(silent.getLocalPort());
+      factory.setConnectionTimeout(300);
+      factory.setHandshakeTimeout(300);
+
+      try (var unanswered = publisherFor(factory)) {
+        assertFailsWithinTheBound(unanswered);
+      } finally {
+        for (Socket socket : held) {
+          socket.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  void theConnectBoundIsTheFactorysConnectionAndHandshakeTimeouts() {
+    ConnectionFactory factory = new ConnectionFactory();
+    factory.setConnectionTimeout((int) LazyRabbitMqOutboxPublisher.CONNECTION_TIMEOUT.toMillis());
+    factory.setHandshakeTimeout((int) LazyRabbitMqOutboxPublisher.HANDSHAKE_TIMEOUT.toMillis());
+
+    try (var bounded = publisherFor(factory)) {
+      assertThat(bounded.connectBound()).isEqualTo(Duration.ofSeconds(20));
+    }
+  }
+
+  @Test
   void aClosedPublisherDoesNotConnect() {
     publisher.close();
+    assertThat(publisher.isConnected()).isFalse();
 
     BatchResult result = publisher.publishBatch(List.of(entry("e-1")), null);
 
     assertThat(result.failed().get(OutboxEntryId.of("e-1")))
         .isInstanceOf(BrokerUnreachableException.class)
         .hasMessage("the outbox publisher is closed");
+  }
+
+  /** The attempt fails every entry as a transport failure, well within a bound of 0.6 s. */
+  private static void assertFailsWithinTheBound(LazyRabbitMqOutboxPublisher publisher) {
+    long start = System.nanoTime();
+    BatchResult result =
+        publisher.publishBatch(List.of(entry("e-1")), Instant.now().plusSeconds(60));
+    Duration took = Duration.ofNanos(System.nanoTime() - start);
+
+    assertThat(took)
+        .as("the attempt is bounded by the factory's timeouts")
+        .isLessThan(Duration.ofSeconds(5));
+    Exception failure = result.failed().get(OutboxEntryId.of("e-1"));
+    assertThat(failure).isInstanceOf(BrokerUnreachableException.class);
+    assertThat(publisher.classifyFailure(failure)).isEqualTo(FailureKind.TRANSPORT);
+    assertThat(result.confirmed()).isEmpty();
+  }
+
+  private LazyRabbitMqOutboxPublisher publisherFor(ConnectionFactory factory) {
+    return new LazyRabbitMqOutboxPublisher(
+        factory,
+        "outbox-test",
+        channel -> declarations.incrementAndGet(),
+        "streamrune.events",
+        "integration.event",
+        Duration.ofSeconds(30));
   }
 
   private static OutboxEntry entry(String id) {

@@ -48,10 +48,23 @@ import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
  * outage needs nothing from this class. Automatic recovery covers a connection that was established
  * once; a first connection that fails is this class's to retry, on the relay's next attempt.
  *
+ * <p><b>The factory bounds the connect.</b> The relay's publish deadline bounds nothing while the
+ * connection opens: the attempt blocks for the factory's connection timeout plus its handshake
+ * timeout ({@link #connectBound()}). The amqp-client's defaults, 60 s and 10 s, would let a broker
+ * whose packets are dropped (a firewall, a dead address behind a stable name) hold the relay about
+ * 70 s per poll cycle, with the claimed batch {@code IN_PROGRESS} — out of {@code
+ * streamrune.outbox.pending} and the outbox listing of {@code PENDING} entries. The apps therefore
+ * set {@link #CONNECTION_TIMEOUT} and {@link #HANDSHAKE_TIMEOUT}, 10 s each. A refused connection
+ * (no broker listening) fails at once.
+ *
  * <p>The in-flight horizon is the one the {@link RabbitMqOutboxPublisher} reports once built — its
  * {@link RabbitMqOutboxPublisher#DEFAULT_PUBLISH_BLOCK_BUDGET default publish-block budget} plus
  * the confirm timeout — and is known before the first connection, because the relay reads it when
- * it is built, to check the claim lease against it.
+ * it is built, to check the claim lease against it. The connect is not part of it: nothing is
+ * handed to the broker while the connection opens, and the {@link RabbitMqOutboxPublisher} checks
+ * the relay's deadline before each publish, so a connect that ends past the deadline publishes
+ * nothing and the relay returns the batch to {@code PENDING}; an entry it does publish still has
+ * the whole horizon of its claim lease left.
  *
  * <p>The relay calls a publisher from its one poll thread; {@link #close} may come from another
  * thread, at shutdown.
@@ -73,9 +86,11 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
   }
 
   /**
-   * The broker could not be reached, so nothing of the batch was published: the connection, the
-   * publisher's channel or a topology declaration failed, or the publisher is closed. The cause is
-   * the client's own exception, e.g. {@code java.net.ConnectException: Connection refused}.
+   * The publisher could not get a channel ready, so nothing of the batch was published: the
+   * connection could not be opened, or, on an open connection, the publisher's channel, a topology
+   * declaration or confirm mode failed; or the publisher is closed. The message names the step that
+   * failed, and the cause is the client's own exception, e.g. {@code java.net.ConnectException:
+   * Connection refused}.
    */
   public static final class BrokerUnreachableException extends IOException {
 
@@ -83,6 +98,15 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
       super(message, cause);
     }
   }
+
+  /**
+   * How long the publisher's connection may take to open, the TCP connect, unless the application
+   * configures its own: what the three apps set on the factory they hand over.
+   */
+  public static final Duration CONNECTION_TIMEOUT = Duration.ofSeconds(10);
+
+  /** How long the AMQP handshake may take once the TCP connection is open; the apps set it too. */
+  public static final Duration HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
 
   private static final Logger LOG = LoggerFactory.getLogger(LazyRabbitMqOutboxPublisher.class);
 
@@ -200,14 +224,28 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
     return RabbitMqOutboxPublisher.DEFAULT_PUBLISH_BLOCK_BUDGET.plus(confirmTimeout);
   }
 
-  /** Whether the publisher has connected to the broker. */
-  public boolean isConnected() {
-    return delegate != null;
+  /**
+   * The longest a connection attempt can hold the relay: the factory's connection timeout plus its
+   * handshake timeout.
+   */
+  public Duration connectBound() {
+    return Duration.ofMillis(connectionFactory.getConnectionTimeout())
+        .plusMillis(connectionFactory.getHandshakeTimeout());
   }
 
   /**
-   * Closes the connection, if one was opened; afterwards every publish fails with a {@link
-   * BrokerUnreachableException}. The application calls it at shutdown, after the relay stopped.
+   * Whether the publisher has opened its connection and is not closed. The connection may be
+   * recovering from a broker restart at the moment.
+   */
+  public boolean isConnected() {
+    return delegate != null && !closed;
+  }
+
+  /**
+   * Closes the connection, if one was opened. A publish afterwards hands nothing to the broker:
+   * with no connection opened yet it fails with a {@link BrokerUnreachableException}; on the closed
+   * connection's channel the {@link RabbitMqOutboxPublisher} fails it as a transport failure. The
+   * application calls it at shutdown, after the relay stopped.
    */
   @Override
   public void close() {
@@ -233,13 +271,16 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
         throw new BrokerUnreachableException("the outbox publisher is closed", null);
       }
       Connection opened = null;
+      String step = "open a channel";
       try {
         opened = connectionFactory.newConnection(connectionName);
         Channel channel = opened.createChannel();
         if (channel == null) {
           throw new IOException("the connection has no channel left for the outbox publisher");
         }
+        step = "declare the topology";
         topology.declare(channel);
+        step = "put its channel into confirm mode";
         publisher =
             RabbitMqOutboxPublisher.builder()
                 .channel(channel)
@@ -252,7 +293,17 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
           closeQuietly(opened);
         }
         throw new BrokerUnreachableException(
-            "RabbitMQ is not reachable at " + address() + ", nothing was published: " + describe(e),
+            opened == null
+                ? "RabbitMQ is not reachable at "
+                    + address()
+                    + ", nothing was published: "
+                    + describe(e)
+                : "RabbitMQ at "
+                    + address()
+                    + " is connected, but the outbox publisher could not "
+                    + step
+                    + ", nothing was published: "
+                    + describe(e),
             e);
       }
       // Published before closed is read, and close() sets closed before it reads the connection:

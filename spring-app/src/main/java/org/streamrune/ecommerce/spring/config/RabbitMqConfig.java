@@ -95,9 +95,16 @@ public class RabbitMqConfig {
    * confirm: it waits out the confirm timeout, stays claimed until the lease expires and is then
    * published again, so the consumer may receive it twice (it deduplicates by entry id).
    *
-   * <p>Host, port, credentials and virtual host come from the same {@code spring.rabbitmq.*}
-   * properties Spring AMQP uses. TLS settings under {@code spring.rabbitmq.ssl} are not applied
-   * here; a TLS deployment configures the factory itself.
+   * <p>The connection attempt is bounded: {@code spring.rabbitmq.connection-timeout} when it is
+   * set, otherwise {@link LazyRabbitMqOutboxPublisher#CONNECTION_TIMEOUT} (10 s), plus a 10 s
+   * handshake timeout. The relay's publish deadline bounds nothing while the publisher connects,
+   * and the client's own 60-second connection timeout would let a broker whose packets are dropped
+   * hold the relay about 70 seconds per poll cycle, with the claimed entries {@code IN_PROGRESS}.
+   *
+   * <p>The factory takes {@code spring.rabbitmq.host}, {@code port}, {@code username}, {@code
+   * password}, {@code virtual-host} and {@code connection-timeout}, the properties Spring AMQP
+   * uses. TLS settings under {@code spring.rabbitmq.ssl} are not applied here; a TLS deployment
+   * configures the factory itself.
    *
    * <p>The 30-second confirm timeout, combined with the publisher's default 30-second {@code
    * publishBlockBudget}, gives an in-flight horizon (see {@link
@@ -123,6 +130,14 @@ public class RabbitMqConfig {
     if (virtualHost != null) {
       factory.setVirtualHost(virtualHost);
     }
+    Duration connectionTimeout = rabbit.getConnectionTimeout();
+    factory.setConnectionTimeout(
+        (int)
+            (connectionTimeout != null
+                    ? connectionTimeout
+                    : LazyRabbitMqOutboxPublisher.CONNECTION_TIMEOUT)
+                .toMillis());
+    factory.setHandshakeTimeout((int) LazyRabbitMqOutboxPublisher.HANDSHAKE_TIMEOUT.toMillis());
     // The client's default, written out because this is the whole point of a separate connection.
     factory.setAutomaticRecoveryEnabled(true);
     return new LazyRabbitMqOutboxPublisher(

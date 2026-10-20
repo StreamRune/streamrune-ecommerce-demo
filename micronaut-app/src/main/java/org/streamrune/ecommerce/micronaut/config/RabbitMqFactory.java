@@ -64,10 +64,14 @@ public class RabbitMqFactory {
    *
    * <p>The connection uses the amqp-client's automatic recovery (its default): after a broker
    * restart or a network failure the client reconnects and reopens the publisher's channel in
-   * confirm mode with its listeners. The 30-second confirm timeout plus the publisher's default
-   * 30-second publish-block budget give a 60-second in-flight horizon, below the 2-minute claim
-   * lease of {@code StreamRuneFactory#outboxStore}. Closed on context shutdown, which closes the
-   * connection if one was opened.
+   * confirm mode with its listeners. A connection attempt is bounded to 10 s for the connect and 10
+   * s for the handshake ({@link LazyRabbitMqOutboxPublisher#connectBound()}): the relay's deadline
+   * bounds nothing while the publisher connects, and the client's own 60-second connection timeout
+   * would let a broker whose packets are dropped hold the relay about 70 seconds per cycle. The
+   * 30-second confirm timeout plus the publisher's default 30-second publish-block budget give a
+   * 60-second in-flight horizon, below the 2-minute claim lease of {@code
+   * StreamRuneFactory#outboxStore}. Closed on context shutdown, which closes the connection if one
+   * was opened.
    *
    * @return the publisher, not yet connected
    */
@@ -80,6 +84,9 @@ public class RabbitMqFactory {
     factory.setPort(port);
     factory.setUsername(username);
     factory.setPassword(password);
+    // Bounded: the relay's deadline bounds nothing while the publisher connects.
+    factory.setConnectionTimeout((int) LazyRabbitMqOutboxPublisher.CONNECTION_TIMEOUT.toMillis());
+    factory.setHandshakeTimeout((int) LazyRabbitMqOutboxPublisher.HANDSHAKE_TIMEOUT.toMillis());
     factory.setAutomaticRecoveryEnabled(true);
     return new LazyRabbitMqOutboxPublisher(
         factory,
