@@ -179,6 +179,19 @@ class LazyRabbitMqOutboxPublisherTest {
   }
 
   @Test
+  void theConnectBoundFitsInsideTheInFlightHorizon() {
+    ConnectionFactory factory = new ConnectionFactory();
+    factory.setConnectionTimeout((int) LazyRabbitMqOutboxPublisher.CONNECTION_TIMEOUT.toMillis());
+    factory.setHandshakeTimeout((int) LazyRabbitMqOutboxPublisher.HANDSHAKE_TIMEOUT.toMillis());
+
+    try (var bounded = publisherFor(factory)) {
+      // A connect that fails marks its batch for retry inside the lease the horizon promised, so
+      // the bound must never exceed the horizon.
+      assertThat(bounded.connectBound()).isLessThanOrEqualTo(bounded.inFlightHorizon());
+    }
+  }
+
+  @Test
   void aClosedPublisherDoesNotConnect() {
     publisher.close();
     assertThat(publisher.isConnected()).isFalse();
