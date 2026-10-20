@@ -48,6 +48,11 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       product waits for the product's lock until the lock timeout, on every attempt, and is
  *       refused with {@code AGGREGATE_LOCK_UNAVAILABLE}. Released, the price change completes with
  *       {@code 200}.
+ *   <li><b>A version conflict on every attempt.</b> A trigger on {@code event_stream} raises {@code
+ *       unique_violation} for a price change of a product, which the event store reports as an
+ *       {@code OptimisticLockException}, as it does when a second writer stored the version first.
+ *       The bus tries the command on every attempt of its retry policy and is refused with {@code
+ *       AGGREGATE_VERSION_CONFLICT}; nothing is written.
  *   <li><b>An open circuit breaker.</b> The store refuses every price change of a second product (a
  *       trigger on {@code event_stream}), so each is a genuine failure, {@code 500}, until the
  *       breaker opens; the next command is refused with {@code CIRCUIT_BREAKER_OPEN}.
@@ -102,11 +107,15 @@ class CommandRefusalStatusIT {
             .atMost(Duration.ofSeconds(30))
             .until(() -> eventCount(productId, "PriceUpdated") == 1);
 
+        long waitStart = System.nanoTime();
         HttpResponse<String> adjusted =
             send(
                 "PUT",
                 "/api/products/" + productId + "/stock",
                 "{\"quantity\": 1, \"reason\": \"recount\"}");
+        assertThat(Duration.ofNanos(System.nanoTime() - waitStart))
+            .as("the configured lock timeout, one second, on each of the bus's three attempts")
+            .isLessThan(Duration.ofSeconds(10));
 
         assertRefused(adjusted, "AGGREGATE_LOCK_UNAVAILABLE");
         releaseAdvisoryLock(holder);
@@ -120,6 +129,21 @@ class CommandRefusalStatusIT {
 
   @Test
   @Order(2)
+  void aVersionConflictOnEveryAttemptIsRefusedWithRetryAfter() throws Exception {
+    String productId = "q-refusal-version-" + System.nanoTime();
+    assertThat(createProduct(productId).statusCode()).isEqualTo(200);
+
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "PriceUpdated")) {
+      HttpResponse<String> changed =
+          send("PUT", "/api/products/" + productId + "/price", "{\"price\": 27.00}");
+
+      assertRefused(changed, "AGGREGATE_VERSION_CONFLICT");
+      assertThat(eventCount(productId, "PriceUpdated")).as("nothing was written").isZero();
+    }
+  }
+
+  @Test
+  @Order(3)
   void anOpenCircuitBreakerRefusesWithRetryAfterAfterTheFailuresThatOpenedIt() throws Exception {
     String productId = "q-refusal-breaker-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
@@ -143,7 +167,7 @@ class CommandRefusalStatusIT {
   }
 
   @Test
-  @Order(3)
+  @Order(4)
   void aClosedCommandBusRefusesWithRetryAfter() {
     commandBus.close();
 
@@ -213,6 +237,56 @@ class CommandRefusalStatusIT {
   private static void releaseAdvisoryLock(Connection holder) throws Exception {
     try (Statement st = holder.createStatement()) {
       st.execute("SELECT pg_advisory_unlock_all()");
+    }
+  }
+
+  /**
+   * Makes every append of one event type to one aggregate end in the event store's version
+   * conflict: a trigger on {@code event_stream} raises {@code unique_violation} (SQLSTATE 23505),
+   * which the store reports as an {@code OptimisticLockException}, as it does when a second writer
+   * stored the version first. {@link #close()} drops the trigger and its function.
+   */
+  private static final class VersionConflictInjection implements AutoCloseable {
+
+    private final DataSource dataSource;
+
+    VersionConflictInjection(DataSource dataSource, String aggregateId, String eventType)
+        throws Exception {
+      this.dataSource = dataSource;
+      execute(
+          """
+          CREATE OR REPLACE FUNCTION version_test_conflict() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NEW.aggregate_id = '%s' AND NEW.event_type = '%s' THEN
+              RAISE EXCEPTION 'injected version conflict' USING ERRCODE = 'unique_violation';
+            END IF;
+            RETURN NEW;
+          END $$;
+          DROP TRIGGER IF EXISTS version_test_conflict ON event_stream;
+          CREATE TRIGGER version_test_conflict BEFORE INSERT ON event_stream
+            FOR EACH ROW EXECUTE FUNCTION version_test_conflict();
+          """
+              .formatted(aggregateId, eventType));
+    }
+
+    @Override
+    public void close() throws Exception {
+      execute(
+          """
+          DROP TRIGGER IF EXISTS version_test_conflict ON event_stream;
+          DROP FUNCTION IF EXISTS version_test_conflict();
+          """);
+    }
+
+    private void execute(String sql) throws Exception {
+      try (var conn = dataSource.getConnection();
+          Statement st = conn.createStatement()) {
+        st.execute(sql);
+        if (!conn.getAutoCommit()) {
+          conn.commit();
+        }
+      }
     }
   }
 

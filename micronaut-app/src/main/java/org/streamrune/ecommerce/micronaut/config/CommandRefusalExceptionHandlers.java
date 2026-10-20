@@ -14,6 +14,7 @@ import org.streamrune.core.CircuitBreakerOpenException;
 import org.streamrune.core.CommandBusClosedException;
 import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 import org.streamrune.ecommerce.commands.CommandRefusal;
 
 /**
@@ -21,9 +22,9 @@ import org.streamrune.ecommerce.commands.CommandRefusal;
  * 503 Service Unavailable with {@code Retry-After} and a JSON body naming the reason, as the Spring
  * {@code GlobalExceptionHandler} and the Quarkus {@code CommandRefusalExceptionMappers} do: an open
  * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock that
- * could not be taken in time. Micronaut picks a handler by the thrown type, so there is one per
- * exception type; the command bus throws each of them unwrapped. A genuine failure, such as a store
- * error, is not one of these and stays 500.
+ * could not be taken in time, a version conflict on every attempt. Micronaut picks a handler by the
+ * thrown type, so there is one per exception type; the command bus throws each of them unwrapped. A
+ * genuine failure, such as a store error, is not one of these and stays 500.
  */
 public final class CommandRefusalExceptionHandlers {
 
@@ -88,6 +89,19 @@ public final class CommandRefusalExceptionHandlers {
       implements ExceptionHandler<LockException, HttpResponse<Map<String, String>>> {
     @Override
     public HttpResponse<Map<String, String>> handle(HttpRequest request, LockException exception) {
+      return refused(exception);
+    }
+  }
+
+  /** The aggregate's stream moved past the command's version on every attempt. */
+  @Produces
+  @Singleton
+  @Requires(classes = {OptimisticLockException.class, ExceptionHandler.class})
+  public static class AggregateVersionConflict
+      implements ExceptionHandler<OptimisticLockException, HttpResponse<Map<String, String>>> {
+    @Override
+    public HttpResponse<Map<String, String>> handle(
+        HttpRequest request, OptimisticLockException exception) {
       return refused(exception);
     }
   }

@@ -308,6 +308,11 @@ public class StreamRuneConfig {
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
    * in plaintext.
    *
+   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
+   * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
+   * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
+   *
    * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
    * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays
    * every command a saga dispatches, so that a saga's deadline can pass while its forward command
@@ -323,10 +328,14 @@ public class StreamRuneConfig {
       PostgresCommandInbox commandInbox,
       PostgresDeadLetterQueue deadLetterQueue,
       PostgresCryptoEngine cryptoEngine,
+      AggregateLocker locker,
+      StreamRuneProperties properties,
       @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
     var bus =
         VirtualThreadCommandBus.builder()
             .eventStore(store)
+            .locker(locker)
+            .lockTimeout(properties.lockTimeout())
             // Required for saga command dispatch: SagaCommandDispatch calls
             // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
             // unless the bus has a commandInbox wired in.

@@ -13,6 +13,7 @@ import org.streamrune.core.CommandBusClosedException;
 import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.DomainException;
 import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 import org.streamrune.core.crypto.SubjectForgottenException;
 import org.streamrune.ecommerce.commands.CommandRefusal;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
@@ -79,15 +80,16 @@ public class GlobalExceptionHandler {
   /**
    * A command the framework refused for a reason that passes ({@link CommandRefusal}): an open
    * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
-   * that could not be taken in time. {@code 503} with {@code Retry-After} and a JSON body naming
-   * the reason, the answer the Quarkus and Micronaut apps give too. A genuine failure, such as a
-   * store error, is not one of these and stays {@code 500}.
+   * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
+   * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
+   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
     CommandBusOverloadedException.class,
     CommandBusClosedException.class,
-    LockException.class
+    LockException.class,
+    OptimisticLockException.class
   })
   public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
     CommandRefusal refusal =

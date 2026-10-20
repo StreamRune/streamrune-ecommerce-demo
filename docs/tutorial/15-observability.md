@@ -135,9 +135,13 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,                // keep
     PostgresDeadLetterQueue deadLetterQueue,          // keep
     PostgresCryptoEngine cryptoEngine,                // keep
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     OpenTelemetryCommandInterceptor otel) {           // <-- added parameter
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
+      .locker(locker)
+      .lockTimeout(properties.lockTimeout())
       .commandInbox(commandInbox)                      // keep
       .interceptors(otel, audit, auth, validation, circuitBreaker)  // <-- otel prepended
       .deadLetterQueue(deadLetterQueue)                // keep
@@ -1284,10 +1288,14 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,
     PostgresDeadLetterQueue deadLetterQueue,
     PostgresCryptoEngine cryptoEngine,
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     OpenTelemetryCommandInterceptor otel,
     StreamRuneMetrics metrics) {           // <-- inject the auto-configured bean
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
+      .locker(locker)
+      .lockTimeout(properties.lockTimeout())
       .commandInbox(commandInbox)
       .interceptors(otel, audit, auth, validation, circuitBreaker)
       .deadLetterQueue(deadLetterQueue)

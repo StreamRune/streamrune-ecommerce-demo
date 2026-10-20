@@ -7,6 +7,7 @@ import org.streamrune.core.CircuitBreakerOpenException;
 import org.streamrune.core.CommandBusClosedException;
 import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 
 /**
  * A command the framework refused for a reason that passes, and how the three apps answer it:
@@ -15,7 +16,7 @@ import org.streamrune.core.LockException;
  * failure keeps its own answer: a broken business rule is {@code 400}, a refused caller {@code
  * 403}, and a genuine failure, a store error for one, {@code 500}.
  *
- * <p>The four refusals, as the framework reports them:
+ * <p>The five refusals, as the framework reports them:
  *
  * <ul>
  *   <li>{@link CircuitBreakerOpenException} — the command bus's circuit breaker is open (or
@@ -37,6 +38,15 @@ import org.streamrune.core.LockException;
  *       the state of the resource. Like any infrastructure failure the bus records the command in
  *       the dead-letter queue: the retry runner replays a keyed command on its schedule, and an
  *       unkeyed one waits for an operator.
+ *   <li>{@link OptimisticLockException} — the aggregate's stream had moved past the version the
+ *       command was decided on, on every attempt of the bus's retry policy: another writer appended
+ *       to the stream between the command's load and its append each time (a second instance whose
+ *       lock is its own, a writer outside the command bus). Nothing was written. The bus reloads
+ *       the aggregate on each attempt, and the client sent no version that could conflict, so the
+ *       answer is the lock's: {@code 503} with {@code Retry-After}, the same request succeeding
+ *       later. The bus records the command in the dead-letter queue like the lock's. Only the
+ *       command bus's append conflict reaches a controller; the subtypes the framework raises for
+ *       projections and saga rows are thrown on the threads of subscriptions.
  * </ul>
  *
  * @param reason what refused the command
@@ -52,11 +62,12 @@ public record CommandRefusal(Reason reason, String message) {
     CIRCUIT_BREAKER_OPEN,
     COMMAND_BUS_OVERLOADED,
     COMMAND_BUS_CLOSED,
-    AGGREGATE_LOCK_UNAVAILABLE
+    AGGREGATE_LOCK_UNAVAILABLE,
+    AGGREGATE_VERSION_CONFLICT
   }
 
   /**
-   * The refusal {@code failure} reports, or empty when it is none of the four: a failure the app
+   * The refusal {@code failure} reports, or empty when it is none of the five: a failure the app
    * answers otherwise.
    *
    * @param failure what the command bus threw
@@ -77,6 +88,10 @@ public record CommandRefusal(Reason reason, String message) {
           refusal(
               Reason.AGGREGATE_LOCK_UNAVAILABLE,
               "The aggregate's lock could not be taken in time.");
+      case OptimisticLockException _ ->
+          refusal(
+              Reason.AGGREGATE_VERSION_CONFLICT,
+              "The aggregate changed while the command ran; nothing was written.");
       case null, default -> Optional.empty();
     };
   }

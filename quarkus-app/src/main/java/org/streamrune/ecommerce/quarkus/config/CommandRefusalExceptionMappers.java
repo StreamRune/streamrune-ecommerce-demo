@@ -9,6 +9,7 @@ import org.streamrune.core.CircuitBreakerOpenException;
 import org.streamrune.core.CommandBusClosedException;
 import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 import org.streamrune.ecommerce.commands.CommandRefusal;
 
 /**
@@ -16,9 +17,9 @@ import org.streamrune.ecommerce.commands.CommandRefusal;
  * 503 Service Unavailable with {@code Retry-After} and a JSON body naming the reason, as the Spring
  * {@code GlobalExceptionHandler} and the Micronaut {@code CommandRefusalExceptionHandlers} do: an
  * open circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
- * that could not be taken in time. JAX-RS picks a mapper by the thrown type, so there is one per
- * exception type; the command bus throws each of them unwrapped. A genuine failure, such as a store
- * error, is not one of these and stays 500.
+ * that could not be taken in time, a version conflict on every attempt. JAX-RS picks a mapper by
+ * the thrown type, so there is one per exception type; the command bus throws each of them
+ * unwrapped. A genuine failure, such as a store error, is not one of these and stays 500.
  */
 public final class CommandRefusalExceptionMappers {
 
@@ -69,6 +70,15 @@ public final class CommandRefusalExceptionMappers {
   public static class AggregateLock implements ExceptionMapper<LockException> {
     @Override
     public Response toResponse(LockException e) {
+      return refused(e);
+    }
+  }
+
+  /** The aggregate's stream moved past the command's version on every attempt. */
+  @Provider
+  public static class AggregateVersionConflict implements ExceptionMapper<OptimisticLockException> {
+    @Override
+    public Response toResponse(OptimisticLockException e) {
       return refused(e);
     }
   }

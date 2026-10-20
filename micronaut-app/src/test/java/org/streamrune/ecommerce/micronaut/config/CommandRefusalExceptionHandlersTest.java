@@ -10,6 +10,7 @@ import org.streamrune.core.CircuitBreakerOpenException;
 import org.streamrune.core.CommandBusClosedException;
 import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
 
 /**
  * The answer to each refusal the command bus reports. {@code CommandRefusalStatusIT} forces three
@@ -36,6 +37,10 @@ class CommandRefusalExceptionHandlersTest {
         new CommandRefusalExceptionHandlers.AggregateLock()
             .handle(null, new LockException("timeout")),
         "AGGREGATE_LOCK_UNAVAILABLE");
+    assertRefused(
+        new CommandRefusalExceptionHandlers.AggregateVersionConflict()
+            .handle(null, new OptimisticLockException("conflict")),
+        "AGGREGATE_VERSION_CONFLICT");
   }
 
   private static void assertRefused(HttpResponse<Map<String, String>> answer, String reason) {

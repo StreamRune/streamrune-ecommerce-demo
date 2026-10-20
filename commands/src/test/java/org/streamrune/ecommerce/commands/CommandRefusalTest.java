@@ -16,7 +16,7 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.CommandRefusal.Reason;
 import org.streamrune.runtime.LockAcquisitionException;
 
-/** The four refusals the apps answer {@code 503}, and the failures they do not. */
+/** The refusals the apps answer {@code 503}, and the failures they do not. */
 class CommandRefusalTest {
 
   @Test
@@ -28,6 +28,8 @@ class CommandRefusalTest {
     assertThat(reasonOf(new CommandBusClosedException("closed")))
         .isEqualTo(Reason.COMMAND_BUS_CLOSED);
     assertThat(reasonOf(new LockException("timeout"))).isEqualTo(Reason.AGGREGATE_LOCK_UNAVAILABLE);
+    assertThat(reasonOf(new OptimisticLockException("conflict")))
+        .isEqualTo(Reason.AGGREGATE_VERSION_CONFLICT);
     assertThat(
             reasonOf(
                 new LockAcquisitionException(
@@ -54,7 +56,6 @@ class CommandRefusalTest {
   void aGenuineFailureOrAnotherRejectionIsNoRefusal() {
     assertThat(CommandRefusal.of(new EventStoreException("store down"))).isEmpty();
     assertThat(CommandRefusal.of(new IllegalStateException("misconfigured"))).isEmpty();
-    assertThat(CommandRefusal.of(new OptimisticLockException("conflict"))).isEmpty();
     assertThat(CommandRefusal.of(new IllegalArgumentException("bad request"))).isEmpty();
     assertThat(CommandRefusal.of(null)).isEmpty();
   }

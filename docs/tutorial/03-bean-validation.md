@@ -204,7 +204,7 @@ This is defense in depth, not redundancy:
   | `DomainException` (incl. `ValidationException`), `IllegalArgumentException` | `400` with the message | Chapter 1 |
   | `SubjectForgottenException` | `410` | Chapters 1 and 7 |
   | `AuthorizationException`, `AccessRefusedException` | `403` | Chapter 9 |
-  | `CircuitBreakerOpenException`, `CommandBusOverloadedException`, `CommandBusClosedException`, `LockException` — the command bus's refusals that pass | `503` with `Retry-After: 5` and `{"reason": ..., "message": ...}` | Chapter 12 |
+  | `CircuitBreakerOpenException`, `CommandBusOverloadedException`, `CommandBusClosedException`, `LockException`, `OptimisticLockException` — the command bus's refusals that pass | `503` with `Retry-After: 5` and `{"reason": ..., "message": ...}` | Chapter 12 |
   | `LiveFeedFullException` — the open feed is full | `503` with `Retry-After: 5`, plain text | Chapter 15 |
   | anything else, e.g. an event store failure | `500` | — |
 - The **domain module uses `implementation` for `jakarta.validation-api`** (not `compileOnly`) so that annotation types are present at runtime for the interceptor to read reflectively. The actual validator implementation (`hibernate-validator`) stays in `spring-app` — the domain jar never pulls in the validator engine.

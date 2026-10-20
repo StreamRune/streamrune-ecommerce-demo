@@ -674,10 +674,14 @@ public VirtualThreadCommandBus commandBus(
     PostgresCommandInbox commandInbox,
     PostgresDeadLetterQueue deadLetterQueue,
     PostgresCryptoEngine cryptoEngine,
+    AggregateLocker locker,
+    StreamRuneProperties properties,
     @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
   var bus =
       VirtualThreadCommandBus.builder()
           .eventStore(store)
+          .locker(locker)
+          .lockTimeout(properties.lockTimeout())
           .commandInbox(commandInbox)
           .interceptors(audit, auth, validation, circuitBreaker)
           .deadLetterQueue(deadLetterQueue)
