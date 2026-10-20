@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "playwright test",
     "test:live": "E2E_REQUIRE_BACKEND=1 playwright test"
   },
