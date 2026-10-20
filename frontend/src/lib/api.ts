@@ -40,8 +40,10 @@ function buildHeaders(): HeadersInit {
 /**
  * A request the backend refused. `status` is the HTTP status and `message`
  * what a toast shows: for `403` that the selected role may not do this, for
- * every other status the backend's own words (a `400` carries the decider's or
- * the validation's message, e.g. "Insufficient stock for product: prod-1").
+ * `503` that the backend is busy and the request may be sent again in a few
+ * seconds, for every other status the backend's own words (a `400` carries the
+ * decider's or the validation's message, e.g. "Insufficient stock for product:
+ * prod-1"). The backend's words follow in every case.
  */
 export class ApiError extends Error {
   readonly status: number;
@@ -62,6 +64,11 @@ function describeRefusal(status: number, detail: string): string {
   }
   if (status === 400) {
     return `The backend refused the request (400): ${detail || "Bad Request"}`;
+  }
+  if (status === 503) {
+    // A command the backend refused for a reason that passes (an open circuit breaker, a busy
+    // aggregate, a shutdown): the same request succeeds later. The body names the reason.
+    return `The backend is busy, try again in a few seconds (503): ${detail || "Service Unavailable"}`;
   }
   return `API error ${status}: ${detail}`;
 }
