@@ -57,12 +57,12 @@ cleanup() {
 trap cleanup EXIT
 
 start_rabbitmq() {
-  # The Spring app's outbox publisher (RabbitMqConfig#outboxPublisher) opens its AMQP channel while
-  # the context starts, and AOT fixes that bean into the native image at build time, so the binary
-  # does not start without a broker on localhost:5672. The Quarkus app's publisher
-  # (RabbitMqProducer#outboxPublisher) connects at startup too, when the framework creates the
-  # outbox poller, and so does the Micronaut app's (RabbitMqFactory#rabbitMqChannel, behind the
-  # framework's outbox poller).
+  # The apps start without a broker: each app's outbox publisher (LazyRabbitMqOutboxPublisher, wired
+  # by RabbitMqConfig#outboxPublisher, RabbitMqProducer#outboxPublisher and
+  # RabbitMqFactory#outboxPublisher) connects on its first publish. The smoke test starts one on
+  # localhost:5672 so that the binary's publisher connects and publishes the outbox entries its
+  # checks write: the run fails on any UnsupportedFeatureError in the binary's output, the
+  # amqp-client's included.
   if [ -n "$RABBIT_EXTERNAL" ]; then
     echo "▶ Using the running RabbitMQ container $RABBIT_CONTAINER (port 5672) …"
   else

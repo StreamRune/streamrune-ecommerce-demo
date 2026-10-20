@@ -1144,7 +1144,6 @@ management:
       enabled: false
 ```
 
-
 ### Step 6: Wire `InventoryCommandController`
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryCommandController.java`. This is the REST entry point for the only inventory command that operators trigger directly — receiving a new shipment. Stock reservations and releases are driven by the saga, not by direct HTTP calls.
