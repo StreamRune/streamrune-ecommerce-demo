@@ -19,7 +19,7 @@ micronaut-sql = "7.2.0"
 micronaut-micrometer = "6.1.0"
 
 # Core
-jackson = "2.18.3"
+jackson = "2.22"
 hikaricp = "6.2.1"
 postgresql = "42.7.14"
 # Kept in step with the StreamRune framework build (13.9.0 accepts PostgreSQL 18 without the "Flyway upgrade
