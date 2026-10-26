@@ -21,6 +21,8 @@ micronaut-micrometer = "6.1.0"
 # Core
 # jackson-databind and jackson-datatype-jsr310 release as 2.<minor>.<patch>; jackson-annotations
 # releases as 2.<minor> only, so it has a version of its own.
+# spring-app runs the Jackson that Spring Boot manages (2.21.5); this version reaches the shared
+# modules, quarkus-app and micronaut-app.
 jackson = "2.22.4"
 jackson-annotations = "2.22"
 hikaricp = "6.2.1"
