@@ -219,7 +219,29 @@ import org.streamrune.core.types.UserId;
 
 /**
  * DEMO SHORTCUT, do not copy into a real deployment: the caller's role comes from the
- * client-supplied X-User-Role header (see "Why the role header is a demo shortcut" below).
+ * client-supplied {@code X-User-Role} header.
+ *
+ * <p>The StreamRune request filter copies {@code X-User-Role} into the context baggage under {@code
+ * role} — only in the trusted-gateway mode ({@code streamrune.security.trust-user-id-header=true},
+ * which this app runs in) — and {@link #resolveCurrentRole()} reads it back. So the role is
+ * whatever the client says:
+ *
+ * <ul>
+ *   <li>Any caller becomes {@code ADMIN} by sending {@code X-User-Role: ADMIN}; nothing checks the
+ *       value. The trusted-gateway mode assumes a gateway in front that sets or strips the header,
+ *       exactly as it does {@code X-User-Id}; the demo has none and only stands in for one.
+ *   <li>Outside that mode the framework ignores the header, so this resolver would answer {@code
+ *       GUEST} for everyone. A W3C {@code baggage: role=} header never reaches the entry in any
+ *       mode.
+ *   <li>{@link #resolve(UserId)} ignores its {@code userId}: the authority is not tied to the
+ *       identity, only to whatever the gateway (here: the client) put in {@code X-User-Role}.
+ * </ul>
+ *
+ * <p>The demo accepts this because it has no login: the frontend's role switcher, the tutorial's
+ * curl examples and the integration tests pick a role by header. A real resolver derives the
+ * authority from the authenticated identity: the roles of the Spring Security principal (the
+ * framework's {@code SpringSecurityUserRoleResolver} does this), or a lookup keyed by the {@code
+ * userId} it is given.
  */
 public class HeaderUserRoleResolver implements UserRoleResolver {
 
@@ -229,11 +251,28 @@ public class HeaderUserRoleResolver implements UserRoleResolver {
     return new UserAuthority(Set.of(role), permissionsForRole(role));
   }
 
+  /**
+   * {@code true}: the answer comes from the request (the {@code role} baggage entry), not from the
+   * {@code userId}. The framework's request filter therefore resolves it once, at the request edge,
+   * with {@code StreamRuneContext.CURRENT} bound to that request's context, and every authz-gated
+   * command of the request is decided against that captured answer.
+   *
+   * <p>A dead-letter replay has no request, so the framework never asks this resolver there (it
+   * could only answer {@code GUEST} and deny the command on every attempt). The authorization
+   * interceptor instead completes the already-authorized command under the dead-letter-replay
+   * system principal, as the identity the entry recorded, and logs a WARN naming the command. An
+   * entry with no recorded identity is still refused.
+   */
   @Override
   public boolean requiresRequestContext() {
-    return true; // the answer comes from the request, not from the userId (see below)
+    return true;
   }
 
+  /**
+   * Reads the {@code role} baggage entry, which the request filter copies from {@code X-User-Role}
+   * in the trusted-gateway mode (a demo shortcut, see the class comment); {@code GUEST} when no
+   * request context is bound or the entry is absent.
+   */
   private static String resolveCurrentRole() {
     if (org.streamrune.core.StreamRuneContext.CURRENT.isBound()) {
       var ctx = org.streamrune.core.StreamRuneContext.CURRENT.get();
@@ -293,7 +332,7 @@ Your `HeaderUserRoleResolver` (Step 2) reads exactly this `"role"` baggage entry
 
 > **What `X-Correlation-Id` is, and what the filter refuses.** A correlation id is tracing data. The filter binds the value the client sends (the first one when the header arrives more than once) and generates an id when the header is missing or blank; the id then travels into the metadata of every event and into every audit row the request causes. Nothing is addressed, authorized or deduplicated by it. One form is not the client's to send: an id that starts with `streamrune:` is reserved for the framework, which binds `streamrune:saga:<sagaId>` around the commands a saga dispatches (Chapter 11). The filter answers a request whose correlation id has that prefix with `400 Bad Request`, `Content-Type: text/plain;charset=UTF-8` and the body `The request's correlation id, trace id or user id is not acceptable`, before any command runs. It gives the same answer to a correlation id, trace id or user id that is longer than 255 characters or holds a control character. The Quarkus and Micronaut filters answer alike.
 
-> **`X-User-Id` is required for any annotated command.** Before checking roles, `AnnotationAuthorizationInterceptor` calls `Authorization.currentUserId()` (which returns `ctx.userId()`, populated from the `X-User-Id` header once you enable the trusted-gateway mode below). If it is null — because the request omitted `X-User-Id` — the interceptor throws `AuthorizationException("Authentication required")` rather than the role message. Like every other `AuthorizationException`, this surfaces as `403 Forbidden` once Step 6 has given the exception its handler. So a request to a guarded command always needs `X-User-Id` set; `X-User-Role` then decides whether the caller is authorized.
+> **`X-User-Id` is required for any annotated command.** Before checking roles, `AnnotationAuthorizationInterceptor` reads the caller's id from the request context it captures (`StreamRuneContext`, whose `userId()` the filter populates from the `X-User-Id` header once you enable the trusted-gateway mode below). If it is null — because the request omitted `X-User-Id` — the interceptor throws `AuthorizationException("Authentication required")` rather than the role message. Like every other `AuthorizationException`, this surfaces as `403 Forbidden` once Step 6 has given the exception its handler. So a request to a guarded command always needs `X-User-Id` set; `X-User-Role` then decides whether the caller is authorized.
 
 **Trust `X-User-Id` explicitly.** Out of the box the framework never believes a client-supplied `X-User-Id`: the user is the authenticated Spring Security principal when a resolver is available, and otherwise every request is anonymous. The header becomes the identity — and `X-User-Role` the `"role"` baggage entry — only in the *trusted-gateway* mode, which you switch on in `spring-app/src/main/resources/application.yml`:
 
@@ -314,7 +353,7 @@ Without it, the demo would not authorize anyone. `spring-security-core` is on th
 
 > **The Quarkus app needs the same flag.** The Quarkus integration follows the same rule: its `StreamRuneRequestFilter` and SSE endpoint ignore `X-User-Id` (and the filter `X-User-Role`) unless the trusted-gateway mode is on, and with no `quarkus-security` module a Quarkus REST application whose command bus carries annotation authorization refuses to start. The demo's `quarkus-app` therefore sets `streamrune.security.trust-user-id-header=true` in `quarkus-app/src/main/resources/application.properties`, and its startup log shows the same `Request identity: TRUSTED_GATEWAY …` line.
 
-> **So does the Micronaut app.** The Micronaut integration follows the same rule too: its `StreamRuneContextFilter` and SSE endpoint ignore `X-User-Id` (and the filter `X-User-Role`) unless the trusted-gateway mode is on, and with no Micronaut Security (or with `micronaut.security.enabled=false`) an application whose command bus carries annotation authorization refuses to start. The demo's `micronaut-app` sets `streamrune.security.trust-user-id-header: true` in `micronaut-app/src/main/resources/application.yml` and logs the same `Request identity: TRUSTED_GATEWAY …` line at startup. The same file sets `micronaut.server.netty.server-type: full_content`: the filter binds the request context on the thread it runs the route on, and with Micronaut's default streamed server type a request body that arrives after the headers resumes the route on the Netty event loop instead, where the controller sees no user and no role (an ADMIN call answers `403`).
+> **So does the Micronaut app.** The Micronaut integration follows the same rule too: its `StreamRuneContextFilter` and SSE endpoint ignore `X-User-Id` (and the filter `X-User-Role`) unless the trusted-gateway mode is on, and with no Micronaut Security (or with `micronaut.security.enabled=false`) an application whose command bus carries annotation authorization refuses to start. The demo's `micronaut-app` sets `streamrune.security.trust-user-id-header: true` in `micronaut-app/src/main/resources/application.yml` and logs the same `Request identity: TRUSTED_GATEWAY …` line at startup. The same file sets `micronaut.server.netty.server-type: full_content`. The request context reaches a route under either server type: the filter stores it on the request, and the Micronaut module's command bus and query bus bind it from there on whatever thread the route runs, so authorization and the audit see the caller in both modes. The setting decides where a route runs. With Micronaut's default `streamed` type, a request whose body arrives after its headers resumes the route on a Netty event loop, and the demo's routes block on the command bus, which there would stall every connection that event loop serves; `full_content` reads the whole request before routing, so every route runs on the blocking executor the filter runs on.
 
 `ScopedValue` (finalized in Java 25; a preview API in Java 21–24) is safe to use with virtual threads: the value is visible to the current thread and any threads started within the scope's call block, and it is automatically unbound when the scope exits. This is why it replaced `ThreadLocal` in StreamRune's context propagation.
 
@@ -327,7 +366,11 @@ Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRune
 public HeaderUserRoleResolver userRoleResolver() {
   return new HeaderUserRoleResolver();
 }
+```
 
+and, among the interceptors after `validationInterceptor`:
+
+```java
 @Bean
 public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
   return new AnnotationAuthorizationInterceptor(resolver);
@@ -336,15 +379,11 @@ public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver
 
 `AnnotationAuthorizationInterceptor` comes from `streamrune-runtime`. Its constructor takes a `UserRoleResolver`. In `before()`, it reads `@RequireRole` and `@RequirePermission` from the command class using reflection. If neither annotation is present, it is a no-op. If an annotation is present, it takes the caller's authority (for this resolver, the one the request filter captured at the request edge) and throws `AuthorizationException` if the requirement is not met. The exception is thrown before `decide` is called — no event is ever written.
 
-Add the import:
-
-```java
-import org.streamrune.runtime.AnnotationAuthorizationInterceptor;
-```
+`AnnotationAuthorizationInterceptor` is in `org.streamrune.runtime`, which the file imports whole; `HeaderUserRoleResolver` is in the same package as `StreamRuneConfig`.
 
 ### Step 5 — Add the auth interceptor to the command bus chain
 
-Still in `StreamRuneConfig.java`, wire the auth interceptor into the `VirtualThreadCommandBus` builder, placing it before validation:
+Still in `StreamRuneConfig.java`, wire the auth interceptor into the `VirtualThreadCommandBus` builder, placing it before validation. The bean takes it as a parameter and lists it first in `.interceptors(...)`:
 
 ```java
 @Bean
@@ -352,12 +391,47 @@ public VirtualThreadCommandBus commandBus(
     EventStore store,
     BeanValidationInterceptor validation,
     AnnotationAuthorizationInterceptor auth) {
-  // more interceptors added in later chapters
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
       .interceptors(auth, validation)
       .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-      // ... register deciders
+      .register(
+          ProductState.TYPE,
+          ProductCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case ProductCommand.CreateProduct c -> c.productId();
+                    case ProductCommand.UpdatePrice c -> c.productId();
+                    case ProductCommand.AdjustStock c -> c.productId();
+                    case ProductCommand.DiscontinueProduct c -> c.productId();
+                  }),
+          new ProductDecider())
+      .register(
+          OrderState.TYPE,
+          OrderCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case OrderCommand.PlaceOrder c -> c.orderId();
+                    case OrderCommand.ConfirmOrder c -> c.orderId();
+                    case OrderCommand.ShipOrder c -> c.orderId();
+                    case OrderCommand.DeliverOrder c -> c.orderId();
+                    case OrderCommand.CancelOrder c -> c.orderId();
+                  }),
+          new OrderDecider())
+      .register(
+          CustomerState.TYPE,
+          CustomerCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case CustomerCommand.RegisterCustomer c -> c.customerId();
+                    case CustomerCommand.UpdateProfile c -> c.customerId();
+                    case CustomerCommand.RequestDataExport c -> c.customerId();
+                    case CustomerCommand.ForgetCustomer c -> c.customerId();
+                  }),
+          new CustomerDecider())
       .build();
 }
 ```
@@ -466,8 +540,12 @@ The rule is plain Java with no Spring in it, so it goes into the shared `queries
 package org.streamrune.ecommerce.queries.access;
 
 /**
- * The caller may not read or change what the request names. Each application answers it with 403
- * Forbidden. The message never names the resource.
+ * The caller may not read or change what the request names: thrown by {@link OwnerOrAdminAccess}
+ * and by the guarded reads built on it. Each application answers it with {@code 403 Forbidden},
+ * whether the request carried no identity or the wrong one.
+ *
+ * <p>The message never names the resource: a caller who is refused learns nothing about whether it
+ * exists.
  */
 public final class AccessRefusedException extends RuntimeException {
 
@@ -488,8 +566,39 @@ import org.streamrune.core.StreamRuneContext;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 
 /**
- * The demo's one rule for a customer's data: an authenticated caller who holds the ADMIN role, or
- * the customer the data belongs to. Everyone else is refused.
+ * The demo's one rule for a customer's data: an authenticated caller who holds the {@code ADMIN}
+ * role, or the customer the data belongs to. Everyone else is refused, a caller without an identity
+ * first of all.
+ *
+ * <p>Every place that hands out or changes one customer's data decides here: the REST reads and
+ * writes of customers and orders and the reads of the fulfillment sagas ({@code
+ * OwnerOrAdminQueries} for the reads, the command controllers for the writes) and the per-stream
+ * SSE endpoint ({@link OwnerOrAdminStreamAccess}). The {@code ADMIN}-only endpoints (the admin
+ * panel, the audit log, the event history, the payment-failure switch, the product and inventory
+ * writes) ask {@link #requireAdmin}. Both go through {@link #isAdmin}, the demo's one definition of
+ * an {@code ADMIN}: the role together with an identity.
+ *
+ * <p><b>Who the caller is.</b> The request context the framework's request filter built for the
+ * request. Its {@code userId()} is the caller's identity, {@code null} for a request without one.
+ * The {@code ADMIN} role is the {@code role} entry of its baggage: the entry the request filter
+ * writes from {@code X-User-Role}, and the one each app's {@code HeaderUserRoleResolver} resolves
+ * the caller's authority from. A role without an identity is nobody, on every endpoint.
+ *
+ * <p><b>Who owns what.</b>
+ *
+ * <ul>
+ *   <li>A customer record belongs to the caller whose id equals the customer id.
+ *   <li>An order belongs to the customer its read-model row names. An order without a row has no
+ *       known owner: only an {@code ADMIN} gets past it, and a customer is answered as for an order
+ *       of somebody else. The refusal therefore does not tell a caller whether an order exists.
+ *   <li>A fulfillment saga belongs to the order it fulfils, the order its id names ({@code
+ *       "fulfillment-" + orderId}), and so to that order's customer.
+ * </ul>
+ *
+ * <p>DEMO SHORTCUT, the gateway stand-in ch. 9 of the tutorial describes: the demo runs in the
+ * trusted-gateway mode without a gateway, so the id and the role are whatever the client put in
+ * {@code X-User-Id} and {@code X-User-Role}. The rule is the one a real deployment keeps; the
+ * identity it is handed must then come from real authentication.
  */
 public final class OwnerOrAdminAccess {
 
@@ -500,27 +609,47 @@ public final class OwnerOrAdminAccess {
 
   private OwnerOrAdminAccess() {}
 
-  /** The caller's id, or null when the request has no request context or no identity. */
+  /**
+   * The caller's id.
+   *
+   * @param caller the request context of the request, or {@code null} when none is bound
+   * @return the id, or {@code null} when the request has no request context or no identity
+   */
   public static String identityOf(StreamRuneContext.RequestContext caller) {
     return caller == null || caller.userId() == null ? null : caller.userId().value();
   }
 
   /**
-   * An ADMIN: a caller with an identity whose request carries the ADMIN role. The demo's only
-   * definition of an ADMIN; the role alone, without an identity, is nobody.
+   * Whether the caller is an {@code ADMIN}: a caller with an identity whose request carries the
+   * role, that is, whose {@code role} baggage entry equals {@code ADMIN} exactly. This is the
+   * demo's only definition of an {@code ADMIN}, asked for a customer's data and for the {@code
+   * ADMIN}-only endpoints alike. {@code X-User-Role: ADMIN} without an identity is nobody.
+   *
+   * @param caller the request context of the request, or {@code null} when none is bound
    */
   public static boolean isAdmin(StreamRuneContext.RequestContext caller) {
     return identityOf(caller) != null && ADMIN.equals(caller.baggage().get(ROLE_BAGGAGE_KEY));
   }
 
-  /** Refuses a caller who is not an ADMIN: the guard of the ADMIN-only endpoints. */
+  /**
+   * Refuses a caller who is not an {@code ADMIN}: the guard of the {@code ADMIN}-only endpoints.
+   *
+   * @throws AccessRefusedException unless {@link #isAdmin} holds
+   */
   public static void requireAdmin(StreamRuneContext.RequestContext caller) {
     if (!isAdmin(caller)) {
       throw new AccessRefusedException(ADMIN_REQUIRED);
     }
   }
 
-  /** An ADMIN, or the customer themself. Needs no read model. */
+  /**
+   * Whether the caller may read or change the customer with the given id: an authenticated {@code
+   * ADMIN}, or the customer themself. The answer needs no read model, so it is the same for a
+   * customer that exists and one that does not.
+   *
+   * @param caller the request context of the request, or {@code null} when none is bound
+   * @param customerId the customer the request names; {@code null} is nobody's
+   */
   public static boolean mayAccessCustomer(
       StreamRuneContext.RequestContext caller, String customerId) {
     String identity = identityOf(caller);
@@ -528,8 +657,12 @@ public final class OwnerOrAdminAccess {
   }
 
   /**
-   * An ADMIN, or the customer the order's read-model row names. An order without a row (null) has
-   * no known owner: only an ADMIN may go on.
+   * Whether the caller may read or change an order: an authenticated {@code ADMIN}, or the customer
+   * the order's read-model row names.
+   *
+   * @param caller the request context of the request, or {@code null} when none is bound
+   * @param order the order's read-model row, or {@code null} when the read model has none for the
+   *     requested id; only an {@code ADMIN} may go on then
    */
   public static boolean mayAccessOrder(StreamRuneContext.RequestContext caller, OrderView order) {
     String identity = identityOf(caller);
@@ -539,6 +672,11 @@ public final class OwnerOrAdminAccess {
     return isAdmin(caller) || (order != null && identity.equals(order.customerId()));
   }
 
+  /**
+   * Refuses a caller who may not read or change the customer with the given id.
+   *
+   * @throws AccessRefusedException unless {@link #mayAccessCustomer} holds
+   */
   public static void requireCustomerAccess(
       StreamRuneContext.RequestContext caller, String customerId) {
     if (!mayAccessCustomer(caller, customerId)) {
@@ -546,13 +684,24 @@ public final class OwnerOrAdminAccess {
     }
   }
 
+  /**
+   * Refuses a caller who may not read or change the given order.
+   *
+   * @throws AccessRefusedException unless {@link #mayAccessOrder} holds
+   */
   public static void requireOrderAccess(StreamRuneContext.RequestContext caller, OrderView order) {
     if (!mayAccessOrder(caller, order)) {
       throw new AccessRefusedException(REFUSED);
     }
   }
 
-  /** The caller's id; refuses a request without an identity. */
+  /**
+   * Refuses a request without an identity; what an identified caller sees is then scoped by the
+   * list it asked for.
+   *
+   * @return the caller's id
+   * @throws AccessRefusedException when the request has no request context or no identity
+   */
   public static String requireIdentity(StreamRuneContext.RequestContext caller) {
     String identity = identityOf(caller);
     if (identity == null) {
@@ -574,13 +723,29 @@ import java.util.List;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 
 /**
- * The customer and order read models as one caller may see them: OwnerOrAdminAccess applied to
- * every read. A refusal is an AccessRefusedException.
+ * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
+ * to every read. The three applications answer {@code GET /api/customers}, {@code GET
+ * /api/customers/{id}}, {@code GET /api/orders} and {@code GET /api/orders/{id}} from this class
+ * and hand it the caller's request context; a refusal is an {@link AccessRefusedException}, which
+ * each application answers with {@code 403}.
+ *
+ * <ul>
+ *   <li><b>One customer, one order:</b> an authenticated {@code ADMIN} or the owner; {@code null}
+ *       when the caller may read it and the read model has no row (the application answers {@code
+ *       404}).
+ *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
+ *       rows that are their own, selected by their id before anything is returned; a request
+ *       without an identity is refused.
+ * </ul>
+ *
+ * <p>A forgotten customer has no row: {@code CustomerProjection} deletes it. The customer and an
+ * {@code ADMIN} then read {@code null} for it, and it is on no list.
  */
 public final class OwnerOrAdminQueries {
 
@@ -598,13 +763,25 @@ public final class OwnerOrAdminQueries {
     this.orders = orders;
   }
 
-  /** One customer, or null when the read model has no row. Decided before the read. */
+  /**
+   * One customer, for an {@code ADMIN} or the customer themself. The decision is made on the two
+   * ids alone, before the read model is asked, so a refused caller cannot tell a customer that
+   * exists from one that does not.
+   *
+   * @return the customer, or {@code null} when the read model has no row for the id
+   * @throws AccessRefusedException for everyone else
+   */
   public CustomerView customer(StreamRuneContext.RequestContext caller, String customerId) {
     OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
     return customers.get(customerId);
   }
 
-  /** Every customer for an ADMIN; the caller's own record, read by its id, for anyone else. */
+  /**
+   * The customers the caller may see: all of them for an {@code ADMIN}; for any other authenticated
+   * caller their own record, read by its id, or an empty list when they have none.
+   *
+   * @throws AccessRefusedException for a request without an identity
+   */
   public List<CustomerView> customers(StreamRuneContext.RequestContext caller) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
     if (OwnerOrAdminAccess.isAdmin(caller)) {
@@ -614,7 +791,15 @@ public final class OwnerOrAdminQueries {
     return own == null ? List.of() : List.of(own);
   }
 
-  /** One order; null only for an ADMIN, when the read model has no row for the id. */
+  /**
+   * One order, for an {@code ADMIN} or the customer the order names.
+   *
+   * @return the order; {@code null} only for an {@code ADMIN}, when the read model has no row for
+   *     the id
+   * @throws AccessRefusedException for everyone else, and for a caller who is not an {@code ADMIN}
+   *     when the read model has no row for the id: an order without a row has no known owner, and
+   *     the same answer as for somebody else's order keeps its existence to itself
+   */
   public OrderView order(StreamRuneContext.RequestContext caller, String orderId) {
     OwnerOrAdminAccess.requireIdentity(caller);
     OrderView order = orders.get(orderId);
@@ -623,8 +808,14 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * Every order for an ADMIN, narrowed to one customer when the request names one. The caller's own
-   * orders for anyone else: the filter can repeat the caller's id and cannot name another customer.
+   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
+   * customerId} when the request names one. Any other authenticated caller gets their own orders
+   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer.
+   *
+   * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @throws AccessRefusedException for a request without an identity, and for a caller who is not
+   *     an {@code ADMIN} and asks for another customer's orders
    */
   public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
@@ -638,7 +829,13 @@ public final class OwnerOrAdminQueries {
     return orders.listByCustomer(identity);
   }
 
-  /** The guard of the order commands that act on an existing order. */
+  /**
+   * Refuses a caller who may not change the order with the given id: the guard of the order
+   * commands that act on an existing order. The owner is the customer the order's read-model row
+   * names, as for {@link #order}.
+   *
+   * @throws AccessRefusedException unless the caller is an {@code ADMIN} or that customer
+   */
   public void requireOrderAccess(StreamRuneContext.RequestContext caller, String orderId) {
     order(caller, orderId);
   }
@@ -652,12 +849,16 @@ package org.streamrune.ecommerce.spring.controller;
 
 import org.streamrune.core.StreamRuneContext;
 
-/** The caller of the request being served: the request context the framework's filter bound. */
+/**
+ * The caller of the request being served: the request context the framework's {@code
+ * ScopedValueFilter} bound around the servlet chain. The controllers hand it to {@code
+ * OwnerOrAdminAccess} and {@code OwnerOrAdminQueries}, which decide what the caller may do.
+ */
 final class RequestCaller {
 
   private RequestCaller() {}
 
-  /** The request context of the current request, or null when none is bound. */
+  /** The request context of the current request, or {@code null} when none is bound. */
   static StreamRuneContext.RequestContext current() {
     return StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
   }
@@ -673,7 +874,66 @@ public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
 }
 ```
 
-Third, the bean. Add the import `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` to `StreamRuneConfig` and:
+With the handler of Step 6, `GlobalExceptionHandler` now reads:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.streamrune.core.AuthorizationException;
+import org.streamrune.core.DomainException;
+import org.streamrune.core.crypto.SubjectForgottenException;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+  @ExceptionHandler(DomainException.class)
+  public ResponseEntity<String> handleDomainException(DomainException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * A command the caller's role does not allow ({@code @RequireRole}, checked in the command bus):
+   * {@code 403}, the status {@link #handleAccessRefused} answers with. {@code
+   * AuthorizationException} is a {@code DomainException}; this handler is the more specific one, so
+   * a refusal is not reported as the {@code 400} of a broken business rule.
+   */
+  @ExceptionHandler(AuthorizationException.class)
+  public ResponseEntity<String> handleAuthorization(AuthorizationException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  @ExceptionHandler(IllegalArgumentException.class)
+  public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * Terminal erasure: a command tried to encrypt PII for a crypto-shredded subject (e.g.
+   * re-registering a forgotten customer id). The subject was erased under GDPR Article 17, so the
+   * write is refused — 410 Gone is the honest status for a resource that was deliberately removed.
+   */
+  @ExceptionHandler(SubjectForgottenException.class)
+  public ResponseEntity<String> handleSubjectForgotten(SubjectForgottenException e) {
+    return ResponseEntity.status(HttpStatus.GONE).body(e.getMessage());
+  }
+
+  /**
+   * The caller may not read or change what the request names ({@code OwnerOrAdminAccess}): {@code
+   * 403}, the same answer for a request without an identity and for one with the wrong identity.
+   */
+  @ExceptionHandler(AccessRefusedException.class)
+  public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+}
+```
+
+Third, the bean. `StreamRuneConfig` imports `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` and declares:
 
 ```java
 @Bean
@@ -682,6 +942,363 @@ public OwnerOrAdminQueries ownerOrAdminQueries(
   return new OwnerOrAdminQueries(customerProjection, orderProjection);
 }
 ```
+
+That is the last change to `StreamRuneConfig` in this chapter. The whole class:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 9</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  @Bean
+  public HeaderUserRoleResolver userRoleResolver() {
+    return new HeaderUserRoleResolver();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
+    return new AnnotationAuthorizationInterceptor(resolver);
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store,
+      BeanValidationInterceptor validation,
+      AnnotationAuthorizationInterceptor auth) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(auth, validation)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess}. The customer and order controllers answer
+   * every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+}
+```
+
+</details>
 
 **Now the controllers ask.** The two query controllers hand every read to `OwnerOrAdminQueries`. Replace `CustomerQueryController` from Chapter 6:
 
@@ -694,7 +1311,10 @@ import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 
-/** The customer read model, for an authenticated ADMIN or the customer themself; 403 otherwise. */
+/**
+ * The customer read model, for an authenticated {@code ADMIN} or the customer themself ({@link
+ * OwnerOrAdminQueries}); {@code 403} for everyone else.
+ */
 @RestController
 @RequestMapping("/api/customers")
 public class CustomerQueryController {
@@ -705,14 +1325,14 @@ public class CustomerQueryController {
     this.queries = queries;
   }
 
-  /** One customer: 404 when the caller may read it and the read model has no row. */
+  /** One customer: {@code 404} when the caller may read it and the read model has no row. */
   @GetMapping("/{id}")
   public ResponseEntity<CustomerView> getCustomer(@PathVariable String id) {
     CustomerView customer = queries.customer(RequestCaller.current(), id);
     return customer != null ? ResponseEntity.ok(customer) : ResponseEntity.notFound().build();
   }
 
-  /** Every customer for an ADMIN; the caller's own record for anyone else. */
+  /** Every customer for an {@code ADMIN}; the caller's own record for anyone else. */
   @GetMapping
   public List<CustomerView> listCustomers() {
     return queries.customers(RequestCaller.current());
@@ -731,7 +1351,10 @@ import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 
-/** The order read model, for an authenticated ADMIN or the customer an order names; 403 otherwise. */
+/**
+ * The order read model, for an authenticated {@code ADMIN} or the customer an order names ({@link
+ * OwnerOrAdminQueries}); {@code 403} for everyone else.
+ */
 @RestController
 @RequestMapping("/api/orders")
 public class OrderQueryController {
@@ -742,14 +1365,20 @@ public class OrderQueryController {
     this.queries = queries;
   }
 
-  /** One order. 404 is an ADMIN's answer for an id without a row; a customer gets 403 for it. */
+  /**
+   * One order. {@code 404} is an {@code ADMIN}'s answer for an id without a row; a customer gets
+   * {@code 403} for it, as for another customer's order.
+   */
   @GetMapping("/{id}")
   public ResponseEntity<OrderView> getOrder(@PathVariable String id) {
     OrderView order = queries.order(RequestCaller.current(), id);
     return order != null ? ResponseEntity.ok(order) : ResponseEntity.notFound().build();
   }
 
-  /** Every order for an ADMIN, narrowed by customerId; the caller's own orders for anyone else. */
+  /**
+   * Every order for an {@code ADMIN}, narrowed to one customer by {@code customerId}; the caller's
+   * own orders for anyone else, who may not name another customer.
+   */
   @GetMapping
   public List<OrderView> listOrders(@RequestParam(required = false) String customerId) {
     return queries.orders(RequestCaller.current(), customerId);
@@ -757,80 +1386,333 @@ public class OrderQueryController {
 }
 ```
 
-The command controllers ask as their first line, before anything is written. In `CustomerCommandController` (import `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`) every handler names a customer, by the body for a registration and by the path for the rest:
+The command controllers ask as their first line, before anything is written. In `CustomerCommandController` every handler names a customer, by the body for a registration and by the path for the rest; the requester of a forget comes from the same rule (`OwnerOrAdminAccess.identityOf`). Replace the controller:
 
 ```java
-@PostMapping
-public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
+package org.streamrune.ecommerce.spring.controller;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.core.types.SubjectId;
+import org.streamrune.core.types.UserId;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.runtime.VirtualThreadCommandBus;
+import org.streamrune.runtime.gdpr.ForgetResult;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+
+@RestController
+@RequestMapping("/api/customers")
+public class CustomerCommandController {
+
+  private static final Logger LOG = LoggerFactory.getLogger(CustomerCommandController.class);
+
+  private final VirtualThreadCommandBus commandBus;
+  private final ForgetSubjectService forgetSubjectService;
+
+  public CustomerCommandController(
+      VirtualThreadCommandBus commandBus, ForgetSubjectService forgetSubjectService) {
+    this.commandBus = commandBus;
+    this.forgetSubjectService = forgetSubjectService;
+  }
+
+  /** A customer registers themself; an {@code ADMIN} registers anyone ({@code 403} otherwise). */
+  @PostMapping
+  public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
-    // ... the rest as in Chapter 6
-}
+    commandBus.execute(
+        new CustomerCommand.RegisterCustomer(
+            req.customerId(), req.name(), req.email(), req.address(), req.phone()));
+    return ResponseEntity.ok().build();
+  }
 
-@PutMapping("/{id}")
-public ResponseEntity<Void> updateProfile(
-    @PathVariable String id, @RequestBody UpdateProfileRequest req) {
+  /** For an ADMIN or the customer themself (403 otherwise). */
+  @PutMapping("/{id}")
+  public ResponseEntity<Void> updateProfile(
+      @PathVariable String id, @RequestBody UpdateProfileRequest req) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
-    // ... the rest as in Chapter 6
-}
+    commandBus.execute(
+        new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
+    return ResponseEntity.ok().build();
+  }
 
-@PostMapping("/{id}/export-data")
-public ResponseEntity<Void> exportData(@PathVariable String id) {
+  /** GDPR Article 20 request, for an ADMIN or the customer themself (403 otherwise). */
+  @PostMapping("/{id}/export-data")
+  public ResponseEntity<Void> exportData(@PathVariable String id) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.RequestDataExport(id));
     return ResponseEntity.ok().build();
-}
+  }
 
-@PostMapping("/{id}/forget")
-public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
+  /**
+   * GDPR Article 17 right to erasure, for an ADMIN or the customer themself. Three explicit steps,
+   * in this order:
+   *
+   * <ol>
+   *   <li>{@link OwnerOrAdminAccess#requireCustomerAccess} answers {@code 403} to anyone else,
+   *       before anything is written.
+   *   <li>{@code ForgetCustomer} records the {@code CustomerForgotten} domain event (audited,
+   *       replayable). The decider refuses an id no customer registered ({@code 400}), so nobody
+   *       can erase, and so block for good, an id before its customer exists. For a customer
+   *       already forgotten it records nothing and succeeds.
+   *   <li>{@link ForgetSubjectService#forget} crypto-shreds the subject's encryption key (terminal:
+   *       a later encrypt for this id throws {@code SubjectForgottenException}) and runs the
+   *       registered purgers to delete the customer read-model row.
+   * </ol>
+   *
+   * <p>The answer is {@code 200} only when {@link ForgetResult#fullyErased()} is true. Otherwise it
+   * is {@code 500} with a {@link ForgetResponse} saying what is left: the key is still there
+   * ({@code keyDeleted=false}), or the read models in {@code failedPurgers} may still hold the
+   * customer's data. Repeat the request until it answers {@code 200}; every step converges when
+   * re-run. If the process dies, or the shred fails, after step 2 committed, the repeat records no
+   * second event and reaches the shred again. If the shred committed and a purger failed, the
+   * repeat finds the key already gone ({@code deleteKey} is a no-op then) and runs every purger
+   * again (each is idempotent).
+   *
+   * <p>The requester id for the GDPR audit is taken from the bound request context ({@code
+   * X-User-Id}).
+   */
+  @PostMapping("/{id}/forget")
+  public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
     OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), id);
     commandBus.execute(new CustomerCommand.ForgetCustomer(id));
-    // ... the rest as in Chapter 7
+    SubjectId subjectId = SubjectId.of(id);
+    String requesterId = currentRequesterId();
+    ForgetResult result;
+    try {
+      result =
+          forgetSubjectService.forget(
+              subjectId, requesterId != null ? UserId.of(requesterId) : null);
+    } catch (RuntimeException e) {
+      // forget() throws only when deleteKey failed; it audited the failure and ran no purger.
+      LOG.warn(
+          "GDPR forget for subject-hash={} is incomplete: the key could not be deleted;"
+              + " repeat the request",
+          subjectId.redacted(),
+          e);
+      return ResponseEntity.internalServerError().body(ForgetResponse.keyNotDeleted());
+    }
+    ForgetResponse body = ForgetResponse.of(result);
+    return result.fullyErased()
+        ? ResponseEntity.ok(body)
+        : ResponseEntity.internalServerError().body(body);
+  }
+
+  /**
+   * What a forget did. {@code keyDeleted}: the subject's encryption key is gone. {@code
+   * fullyErased}: the key is gone and every read-model purger succeeded. {@code failedPurgers}: the
+   * read models that may still hold the customer's data.
+   */
+  public record ForgetResponse(
+      boolean keyDeleted, boolean fullyErased, List<String> failedPurgers) {
+
+    static ForgetResponse of(ForgetResult result) {
+      return new ForgetResponse(result.keyDeleted(), result.fullyErased(), result.failedPurgers());
+    }
+
+    static ForgetResponse keyNotDeleted() {
+      return new ForgetResponse(false, false, List.of());
+    }
+  }
+
+  /**
+   * Requester id for the GDPR audit trail: the request identity, or {@code null} when none is
+   * bound.
+   */
+  private static String currentRequesterId() {
+    return OwnerOrAdminAccess.identityOf(RequestCaller.current());
+  }
+
+  public record RegisterRequest(
+      @NotBlank String customerId,
+      @NotBlank String name,
+      @Email @NotBlank String email,
+      String address,
+      String phone) {}
+
+  public record UpdateProfileRequest(String name, String email, String address, String phone) {}
 }
 ```
 
-`OrderCommandController` takes the `OwnerOrAdminQueries` bean as a second constructor argument (field `queries`; imports `org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries` and `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`). Placing an order names its customer in the body; cancelling names an order, whose owner the read model knows:
+`OrderCommandController` takes the `OwnerOrAdminQueries` bean as a second constructor argument (field `queries`). Placing an order names its customer in the body; cancelling names an order, whose owner the read model knows:
 
 ```java
-@PostMapping
-public ResponseEntity<Void> placeOrder(@Valid @RequestBody PlaceOrderRequest req) {
-    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
-    // ... the rest as in Chapter 8
-}
+package org.streamrune.ecommerce.spring.controller;
 
-@PostMapping("/{id}/cancel")
-public ResponseEntity<Void> cancelOrder(
-    @PathVariable String id, @Valid @RequestBody CancelOrderRequest req) {
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Positive;
+import java.util.List;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.runtime.VirtualThreadCommandBus;
+
+/**
+ * The order commands. An order is placed and cancelled by an authenticated {@code ADMIN} or by the
+ * customer the order names ({@link OwnerOrAdminAccess}); {@code 403} for everyone else. The price
+ * of each line comes from the product catalogue ({@link OrderPricing}). The fulfillment saga
+ * confirms an order; there is no endpoint for it. Shipping and delivering are for the {@code ADMIN}
+ * role, which {@code @RequireRole} on the two commands enforces in the command bus. A shipped or
+ * delivered order is not cancelled ({@code 400}).
+ */
+@RestController
+@RequestMapping("/api/orders")
+public class OrderCommandController {
+
+  private final VirtualThreadCommandBus commandBus;
+  private final OwnerOrAdminQueries queries;
+  private final OrderPricing orderPricing;
+
+  public OrderCommandController(
+      VirtualThreadCommandBus commandBus, OwnerOrAdminQueries queries, OrderPricing orderPricing) {
+    this.commandBus = commandBus;
+    this.queries = queries;
+    this.orderPricing = orderPricing;
+  }
+
+  /**
+   * The order's customer is the caller, unless the caller is an {@code ADMIN}. A product nobody
+   * created, or one that is discontinued, answers {@code 400}.
+   */
+  @PostMapping
+  public ResponseEntity<Void> placeOrder(@Valid @RequestBody PlaceOrderRequest req) {
+    OwnerOrAdminAccess.requireCustomerAccess(RequestCaller.current(), req.customerId());
+    commandBus.execute(
+        orderPricing.price(
+            req.orderId(),
+            req.customerId(),
+            req.lines().stream()
+                .map(l -> new OrderPricing.RequestedLine(l.productId(), l.quantity()))
+                .toList()));
+    return ResponseEntity.ok().build();
+  }
+
+  @PostMapping("/{id}/ship")
+  public ResponseEntity<Void> shipOrder(@PathVariable String id) {
+    commandBus.execute(new OrderCommand.ShipOrder(id));
+    return ResponseEntity.ok().build();
+  }
+
+  @PostMapping("/{id}/deliver")
+  public ResponseEntity<Void> deliverOrder(@PathVariable String id) {
+    commandBus.execute(new OrderCommand.DeliverOrder(id));
+    return ResponseEntity.ok().build();
+  }
+
+  @PostMapping("/{id}/cancel")
+  public ResponseEntity<Void> cancelOrder(
+      @PathVariable String id, @Valid @RequestBody CancelOrderRequest req) {
     queries.requireOrderAccess(RequestCaller.current(), id);
     commandBus.execute(new OrderCommand.CancelOrder(id, req.reason()));
     return ResponseEntity.ok().build();
+  }
+
+  public record PlaceOrderRequest(
+      @NotBlank String orderId,
+      @NotBlank String customerId,
+      @NotEmpty List<@Valid OrderLineRequest> lines) {}
+
+  /** One line as a client asks for it: a product and a quantity; the catalogue sets the price. */
+  public record OrderLineRequest(@NotBlank String productId, @Positive int quantity) {}
+
+  public record CancelOrderRequest(String reason) {}
 }
 ```
 
 `ShipOrder` and `DeliverOrder` keep their `@RequireRole("ADMIN")` from Step 1: they are an operator's commands whoever the order belongs to.
 
-**The catalogue's writes are an operator's.** Chapter 2 left `POST /api/products`, `PUT /api/products/{id}/stock` and `PUT /api/products/{id}/price` open, and anyone who can reach the API could set a price of one cent. These routes name no customer, so there is no owner to compare: they are for an `ADMIN`. Each handler of `ProductCommandController` asks as its first line (import `org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess`):
+**The catalogue's writes are an operator's.** Chapter 2 left `POST /api/products`, `PUT /api/products/{id}/stock` and `PUT /api/products/{id}/price` open, and anyone who can reach the API could set a price of one cent. These routes name no customer, so there is no owner to compare: they are for an `ADMIN`. Each write handler of `ProductCommandController` asks as its first line:
 
 ```java
-@PostMapping
-public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    // ... the rest as in Chapter 2
-}
+package org.streamrune.ecommerce.spring.controller;
 
-@PutMapping("/{id}/stock")
-public ResponseEntity<Void> adjustStock(
-    @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import java.math.BigDecimal;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.runtime.VirtualThreadCommandBus;
+
+/**
+ * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
+ * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
+ * ask {@link OwnerOrAdminAccess#requireAdmin} as their first line; discontinuing is guarded in the
+ * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
+ * ({@code ProductQueryController}).
+ */
+@RestController
+@RequestMapping("/api/products")
+public class ProductCommandController {
+
+  private final VirtualThreadCommandBus commandBus;
+
+  public ProductCommandController(VirtualThreadCommandBus commandBus) {
+    this.commandBus = commandBus;
+  }
+
+  @PostMapping
+  public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    commandBus.execute(
+        new ProductCommand.CreateProduct(
+            req.productId(),
+            req.name(),
+            req.description(),
+            req.category(),
+            new Money(req.price(), "USD"),
+            req.initialStock()));
+    return ResponseEntity.ok().build();
+  }
+
+  @PutMapping("/{id}/stock")
+  public ResponseEntity<Void> adjustStock(
+      @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
     OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
     return ResponseEntity.ok().build();
-}
+  }
 
-@PutMapping("/{id}/price")
-public ResponseEntity<Void> updatePrice(
-    @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
+  @PutMapping("/{id}/price")
+  public ResponseEntity<Void> updatePrice(
+      @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
     OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
     return ResponseEntity.ok().build();
+  }
+
+  @PostMapping("/{id}/discontinue")
+  public ResponseEntity<Void> discontinueProduct(@PathVariable String id) {
+    commandBus.execute(new ProductCommand.DiscontinueProduct(id));
+    return ResponseEntity.ok().build();
+  }
+
+  public record CreateProductRequest(
+      @NotBlank String productId,
+      @NotBlank String name,
+      String description,
+      String category,
+      @NotNull @Positive BigDecimal price,
+      int initialStock) {}
+
+  public record AdjustStockRequest(int quantity, String reason) {}
+
+  public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
 }
 ```
 

@@ -48,7 +48,7 @@ The `CommandBus` drives this loop. On the first command for a new aggregate stre
 
 ## Domain Model
 
-We need four building blocks before we can write the `Decider`: a `Money` value object, a `ProductStatus` enum, the `ProductCommand` sealed interface, the `ProductEvent` sealed interface, and the `ProductState` record.
+We need five building blocks before we can write the `Decider`: a `Money` value object, a `ProductStatus` enum, the `ProductCommand` sealed interface, the `ProductEvent` sealed interface, and the `ProductState` record.
 
 ### Money
 
@@ -62,17 +62,17 @@ package org.streamrune.ecommerce.domain.common;
 import java.math.BigDecimal;
 
 public record Money(BigDecimal amount, String currency) {
-    public static Money usd(BigDecimal amount) {
-        return new Money(amount, "USD");
-    }
+  public static Money usd(BigDecimal amount) {
+    return new Money(amount, "USD");
+  }
 
-    public Money add(Money other) {
-        return new Money(this.amount.add(other.amount), this.currency);
-    }
+  public Money add(Money other) {
+    return new Money(this.amount.add(other.amount), this.currency);
+  }
 
-    public Money multiply(int quantity) {
-        return new Money(this.amount.multiply(BigDecimal.valueOf(quantity)), this.currency);
-    }
+  public Money multiply(int quantity) {
+    return new Money(this.amount.multiply(BigDecimal.valueOf(quantity)), this.currency);
+  }
 }
 ```
 
@@ -86,10 +86,10 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/product/ProductStat
 package org.streamrune.ecommerce.domain.product;
 
 public enum ProductStatus {
-    AVAILABLE,
-    LOW_STOCK,
-    OUT_OF_STOCK,
-    DISCONTINUED
+  AVAILABLE,
+  LOW_STOCK,
+  OUT_OF_STOCK,
+  DISCONTINUED
 }
 ```
 
@@ -108,22 +108,21 @@ import org.streamrune.core.Command;
 import org.streamrune.ecommerce.domain.common.Money;
 
 public sealed interface ProductCommand extends Command {
-    record CreateProduct(
-        String productId,
-        String name,
-        String description,
-        String category,
-        Money price,
-        int initialStock)
-        implements ProductCommand {}
+  record CreateProduct(
+      String productId,
+      String name,
+      String description,
+      String category,
+      Money price,
+      int initialStock)
+      implements ProductCommand {}
 
-    record UpdatePrice(String productId, Money newPrice)
-        implements ProductCommand {}
+  record UpdatePrice(String productId, Money newPrice) implements ProductCommand {}
 
-    record AdjustStock(String productId, int quantityChange, String reason)
-        implements ProductCommand {}
+  record AdjustStock(String productId, int quantityChange, String reason)
+      implements ProductCommand {}
 
-    record DiscontinueProduct(String productId) implements ProductCommand {}
+  record DiscontinueProduct(String productId) implements ProductCommand {}
 }
 ```
 
@@ -142,17 +141,17 @@ import org.streamrune.core.DomainEvent;
 import org.streamrune.ecommerce.domain.common.Money;
 
 public sealed interface ProductEvent extends DomainEvent {
-    record ProductCreated(
-        String productId, String name, String description, String category, Money price, int stock)
-        implements ProductEvent {}
+  record ProductCreated(
+      String productId, String name, String description, String category, Money price, int stock)
+      implements ProductEvent {}
 
-    record PriceUpdated(String productId, Money previousPrice, Money newPrice)
-        implements ProductEvent {}
+  record PriceUpdated(String productId, Money previousPrice, Money newPrice)
+      implements ProductEvent {}
 
-    record StockAdjusted(String productId, int previousStock, int newStock, String reason)
-        implements ProductEvent {}
+  record StockAdjusted(String productId, int previousStock, int newStock, String reason)
+      implements ProductEvent {}
 
-    record ProductDiscontinued(String productId) implements ProductEvent {}
+  record ProductDiscontinued(String productId) implements ProductEvent {}
 }
 ```
 
@@ -182,21 +181,22 @@ public record ProductState(
     int stock,
     ProductStatus status)
     implements AggregateState {
+  /**
+   * The aggregate type the product decider is registered under: streams are product:<productId>.
+   */
+  public static final AggregateType TYPE = AggregateType.of("product");
 
-    /** The aggregate type the product decider is registered under: streams are product:<productId>. */
-    public static final AggregateType TYPE = AggregateType.of("product");
+  private static final int LOW_STOCK_THRESHOLD = 10;
 
-    private static final int LOW_STOCK_THRESHOLD = 10;
+  public ProductState() {
+    this(null, null, null, null, null, 0, ProductStatus.AVAILABLE);
+  }
 
-    public ProductState() {
-        this(null, null, null, null, null, 0, ProductStatus.AVAILABLE);
-    }
-
-    public static ProductStatus statusForStock(int stock) {
-        if (stock <= 0) return ProductStatus.OUT_OF_STOCK;
-        if (stock < LOW_STOCK_THRESHOLD) return ProductStatus.LOW_STOCK;
-        return ProductStatus.AVAILABLE;
-    }
+  public static ProductStatus statusForStock(int stock) {
+    if (stock <= 0) return ProductStatus.OUT_OF_STOCK;
+    if (stock < LOW_STOCK_THRESHOLD) return ProductStatus.LOW_STOCK;
+    return ProductStatus.AVAILABLE;
+  }
 }
 ```
 
@@ -236,31 +236,41 @@ package org.streamrune.ecommerce.commands.product;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
-import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.*;
 import org.streamrune.test.DeciderFixture;
 
 class ProductDeciderTest {
 
-    private final DeciderFixture<ProductCommand, ProductState, ProductEvent> fixture =
-        DeciderFixture.of(new ProductDecider());
+  private final DeciderFixture<ProductCommand, ProductState, ProductEvent> fixture =
+      DeciderFixture.of(new ProductDecider());
 
-    @Test
-    void createProduct_emitsProductCreated() {
-        fixture
-            .given()
-            .when(new ProductCommand.CreateProduct(
-                "p-1", "Widget", "A widget", "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"), 100))
-            .expectEvents(new ProductEvent.ProductCreated(
-                "p-1", "Widget", "A widget", "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"), 100))
-            .expectState(s -> {
-                assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
-                assertThat(s.stock()).isEqualTo(100);
+  @Test
+  void createProduct_emitsProductCreated() {
+    fixture
+        .given()
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1",
+                "Widget",
+                "A widget",
+                "Electronics",
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
+                100))
+        .expectEvents(
+            new ProductEvent.ProductCreated(
+                "p-1",
+                "Widget",
+                "A widget",
+                "Electronics",
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
+                100))
+        .expectState(
+            s -> {
+              assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
+              assertThat(s.stock()).isEqualTo(100);
             });
-    }
+  }
 }
 ```
 
@@ -286,83 +296,101 @@ import org.streamrune.ecommerce.domain.product.*;
 
 public class ProductDecider implements Decider<ProductCommand, ProductState, ProductEvent> {
 
-    @Override
-    public ProductState initialState() {
-        return new ProductState();
-    }
+  @Override
+  public ProductState initialState() {
+    return new ProductState();
+  }
 
-    @Override
-    public List<ProductEvent> decide(ProductCommand cmd, ProductState state) {
-        return switch (cmd) {
-            case ProductCommand.CreateProduct c -> {
-                // A product id is created once. Without this check a second CreateProduct would
-                // append another ProductCreated, and evolve would replace the product's name,
-                // price and stock.
-                if (state.productId() != null)
-                    throw new DomainException("Product already exists: " + c.productId());
-                yield List.of(new ProductEvent.ProductCreated(
-                    c.productId(), c.name(), c.description(), c.category(),
-                    c.price(), c.initialStock()));
-            }
+  @Override
+  public List<ProductEvent> decide(ProductCommand cmd, ProductState state) {
+    return switch (cmd) {
+      case ProductCommand.CreateProduct c -> {
+        // A product id is created once. Without this check a second CreateProduct would append
+        // another ProductCreated, and evolve would replace the product's name, price and stock.
+        if (state.productId() != null)
+          throw new DomainException("Product already exists: " + c.productId());
+        yield List.of(
+            new ProductEvent.ProductCreated(
+                c.productId(),
+                c.name(),
+                c.description(),
+                c.category(),
+                c.price(),
+                c.initialStock()));
+      }
 
-            case ProductCommand.UpdatePrice c -> {
-                requireCreated(state, c.productId());
-                yield List.of(
-                    new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
-            }
+      case ProductCommand.UpdatePrice c -> {
+        requireCreated(state, c.productId());
+        yield List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
+      }
 
-            case ProductCommand.AdjustStock c -> {
-                requireCreated(state, c.productId());
-                int newStock = state.stock() + c.quantityChange();
-                if (newStock < 0)
-                    throw new DomainException("Insufficient stock for product: " + c.productId());
-                yield List.of(new ProductEvent.StockAdjusted(
-                    c.productId(), state.stock(), newStock, c.reason()));
-            }
+      case ProductCommand.AdjustStock c -> {
+        requireCreated(state, c.productId());
+        int newStock = state.stock() + c.quantityChange();
+        if (newStock < 0)
+          throw new DomainException("Insufficient stock for product: " + c.productId());
+        yield List.of(
+            new ProductEvent.StockAdjusted(c.productId(), state.stock(), newStock, c.reason()));
+      }
 
-            case ProductCommand.DiscontinueProduct c -> {
-                requireCreated(state, c.productId());
-                if (state.status() == ProductStatus.DISCONTINUED)
-                    throw new DomainException("Product already discontinued: " + c.productId());
-                yield List.of(new ProductEvent.ProductDiscontinued(c.productId()));
-            }
-        };
-    }
+      case ProductCommand.DiscontinueProduct c -> {
+        requireCreated(state, c.productId());
+        if (state.status() == ProductStatus.DISCONTINUED)
+          throw new DomainException("Product already discontinued: " + c.productId());
+        yield List.of(new ProductEvent.ProductDiscontinued(c.productId()));
+      }
+    };
+  }
 
-    /**
-     * A product that was never created takes no command but {@code CreateProduct}: without this
-     * check a price, a stock adjustment or a discontinuation would open a stream for an id nobody
-     * created.
-     */
-    private static void requireCreated(ProductState state, String productId) {
-        if (state.productId() == null)
-            throw new DomainException("Product not found: " + productId);
-    }
+  /**
+   * A product that was never created takes no command but {@code CreateProduct}: without this check
+   * a price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+   */
+  private static void requireCreated(ProductState state, String productId) {
+    if (state.productId() == null) throw new DomainException("Product not found: " + productId);
+  }
 
-    @Override
-    public ProductState evolve(ProductState state, ProductEvent evt) {
-        return switch (evt) {
-            case ProductEvent.ProductCreated e ->
-                new ProductState(
-                    e.productId(), e.name(), e.description(), e.category(),
-                    e.price(), e.stock(), ProductState.statusForStock(e.stock()));
-
-            case ProductEvent.PriceUpdated e ->
-                new ProductState(
-                    state.productId(), state.name(), state.description(), state.category(),
-                    e.newPrice(), state.stock(), state.status());
-
-            case ProductEvent.StockAdjusted e ->
-                new ProductState(
-                    state.productId(), state.name(), state.description(), state.category(),
-                    state.price(), e.newStock(), ProductState.statusForStock(e.newStock()));
-
-            case ProductEvent.ProductDiscontinued e ->
-                new ProductState(
-                    state.productId(), state.name(), state.description(), state.category(),
-                    state.price(), state.stock(), ProductStatus.DISCONTINUED);
-        };
-    }
+  @Override
+  public ProductState evolve(ProductState state, ProductEvent evt) {
+    return switch (evt) {
+      case ProductEvent.ProductCreated e ->
+          new ProductState(
+              e.productId(),
+              e.name(),
+              e.description(),
+              e.category(),
+              e.price(),
+              e.stock(),
+              ProductState.statusForStock(e.stock()));
+      case ProductEvent.PriceUpdated e ->
+          new ProductState(
+              state.productId(),
+              state.name(),
+              state.description(),
+              state.category(),
+              e.newPrice(),
+              state.stock(),
+              state.status());
+      case ProductEvent.StockAdjusted e ->
+          new ProductState(
+              state.productId(),
+              state.name(),
+              state.description(),
+              state.category(),
+              state.price(),
+              e.newStock(),
+              ProductState.statusForStock(e.newStock()));
+      case ProductEvent.ProductDiscontinued e ->
+          new ProductState(
+              state.productId(),
+              state.name(),
+              state.description(),
+              state.category(),
+              state.price(),
+              state.stock(),
+              ProductStatus.DISCONTINUED);
+    };
+  }
 }
 ```
 
@@ -380,103 +408,174 @@ It should pass now. Green phase.
 
 ### Step 4 — Add the remaining tests
 
-Expand `ProductDeciderTest` with tests for every business rule. Add these test methods alongside `createProduct_emitsProductCreated`:
+Expand `ProductDeciderTest` with a test for every business rule: the creation guard, the stock levels that set the status, the stock that may not go below zero, the price change, the discontinuation, and the three commands that need a product that exists (`requireCreated`). Replace the test class with the full version:
 
 ```java
-@Test
-void createProduct_existingProduct_throws() {
+package org.streamrune.ecommerce.commands.product;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.streamrune.core.DomainException;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.product.*;
+import org.streamrune.test.DeciderFixture;
+
+class ProductDeciderTest {
+
+  private final DeciderFixture<ProductCommand, ProductState, ProductEvent> fixture =
+      DeciderFixture.of(new ProductDecider());
+
+  @Test
+  void createProduct_emitsProductCreated() {
     fixture
-        .given(new ProductEvent.ProductCreated(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 100))
-        .when(new ProductCommand.CreateProduct(
-            "p-1", "Other", null, null,
-            new Money(java.math.BigDecimal.ONE, "USD"), 5))
+        .given()
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1",
+                "Widget",
+                "A widget",
+                "Electronics",
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
+                100))
+        .expectEvents(
+            new ProductEvent.ProductCreated(
+                "p-1",
+                "Widget",
+                "A widget",
+                "Electronics",
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
+                100))
+        .expectState(
+            s -> {
+              assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
+              assertThat(s.stock()).isEqualTo(100);
+            });
+  }
+
+  @Test
+  void createProduct_existingProduct_throws() {
+    fixture
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD"), 5))
         .expectFailedWith(DomainException.class, "Product already exists: p-1");
-}
+  }
 
-@Test
-void createProduct_lowStock() {
+  @Test
+  void createProduct_lowStock() {
     fixture
         .given()
-        .when(new ProductCommand.CreateProduct(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 5))
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
         .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
-}
+  }
 
-@Test
-void createProduct_outOfStock() {
+  @Test
+  void createProduct_outOfStock() {
     fixture
         .given()
-        .when(new ProductCommand.CreateProduct(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 0))
+        .when(
+            new ProductCommand.CreateProduct(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 0))
         .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.OUT_OF_STOCK));
-}
+  }
 
-@Test
-void adjustStock_reducesStock() {
+  @Test
+  void adjustStock_reducesStock() {
     fixture
-        .given(new ProductEvent.ProductCreated(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 100))
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
         .when(new ProductCommand.AdjustStock("p-1", -30, "Sold"))
         .expectEvents(new ProductEvent.StockAdjusted("p-1", 100, 70, "Sold"))
         .expectState(s -> assertThat(s.stock()).isEqualTo(70));
-}
+  }
 
-@Test
-void adjustStock_insufficientStock_throws() {
+  @Test
+  void adjustStock_insufficientStock_throws() {
     fixture
-        .given(new ProductEvent.ProductCreated(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 5))
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
         .when(new ProductCommand.AdjustStock("p-1", -10, "Oversold"))
         .expectException(DomainException.class);
-}
+  }
 
-@Test
-void adjustStock_triggersLowStockStatus() {
+  @Test
+  void adjustStock_triggersLowStockStatus() {
     fixture
-        .given(new ProductEvent.ProductCreated(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 15))
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 15))
         .when(new ProductCommand.AdjustStock("p-1", -10, "Sale"))
         .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
-}
+  }
 
-@Test
-void updatePrice() {
+  @Test
+  void updatePrice() {
     var oldPrice = new Money(java.math.BigDecimal.TEN, "USD");
     var newPrice = new Money(java.math.BigDecimal.valueOf(25), "USD");
     fixture
         .given(new ProductEvent.ProductCreated("p-1", "Widget", null, null, oldPrice, 50))
         .when(new ProductCommand.UpdatePrice("p-1", newPrice))
         .expectEvents(new ProductEvent.PriceUpdated("p-1", oldPrice, newPrice));
-}
+  }
 
-@Test
-void discontinueProduct() {
-    fixture
-        .given(new ProductEvent.ProductCreated(
-            "p-1", "Widget", null, null,
-            new Money(java.math.BigDecimal.TEN, "USD"), 50))
-        .when(new ProductCommand.DiscontinueProduct("p-1"))
-        .expectEvents(new ProductEvent.ProductDiscontinued("p-1"))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.DISCONTINUED));
-}
-
-@Test
-void discontinueProduct_alreadyDiscontinued_throws() {
+  @Test
+  void discontinueProduct() {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null,
-                new Money(java.math.BigDecimal.TEN, "USD"), 50),
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50))
+        .when(new ProductCommand.DiscontinueProduct("p-1"))
+        .expectEvents(new ProductEvent.ProductDiscontinued("p-1"))
+        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.DISCONTINUED));
+  }
+
+  @Test
+  void discontinueProduct_alreadyDiscontinued_throws() {
+    fixture
+        .given(
+            new ProductEvent.ProductCreated(
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50),
             new ProductEvent.ProductDiscontinued("p-1"))
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectException(DomainException.class);
+  }
+
+  // A product that was never created takes no command but CreateProduct: without the check a
+  // price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+
+  @Test
+  void updatePrice_neverCreated_throws() {
+    fixture
+        .given()
+        .when(
+            new ProductCommand.UpdatePrice(
+                "p-none", new Money(java.math.BigDecimal.valueOf(25), "USD")))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
+
+  @Test
+  void adjustStock_neverCreated_throws() {
+    fixture
+        .given()
+        .when(new ProductCommand.AdjustStock("p-none", 5, "Restock"))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
+
+  @Test
+  void discontinueProduct_neverCreated_throws() {
+    fixture
+        .given()
+        .when(new ProductCommand.DiscontinueProduct("p-none"))
+        .expectFailedWith(DomainException.class, "Product not found: p-none");
+  }
 }
 ```
 
@@ -486,7 +585,7 @@ Run the full test class:
 ./gradlew :commands:test --tests "*.ProductDeciderTest"
 ```
 
-All ten tests should pass. Notice the `DeciderFixture` API:
+All thirteen tests should pass. Notice the `DeciderFixture` API:
 
 - `.given()` — no prior events; this is a brand-new aggregate.
 - `.given(event1, event2, ...)` — pre-load the aggregate with past events. `evolve` is called for each one before the command is processed.
@@ -502,7 +601,7 @@ There are no Spring mocks, no Mockito, no in-memory databases. The entire aggreg
 
 The `EventStore` serialises events to JSON and needs to map between the wire type name and the Java class. StreamRune's Spring auto-configuration picks this up automatically: expose an `EventTypeRegistry` bean and the `postgresEventStoreFactory` auto-config builds and wires the `EventStore` for you, along with any `EventUpcaster` and `CryptoEngine` beans you declare later (chapters 4 and 6).
 
-You already created `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` in chapter 1 (Step 7c) with the `legacyObjectMapper` bean. **Add the two beans below to that existing file** — do not overwrite it, because the `legacyObjectMapper` bean is still needed (later chapters wire beans that inject a Jackson 2.x `ObjectMapper` by type). The complete file at this point looks like:
+You created `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` in chapter 1 (Step 7c) with the `legacyObjectMapper` bean, which stays: later chapters wire beans that inject a Jackson 2.x `ObjectMapper` by type. This chapter adds two beans, `eventTypeRegistry` and `commandBus`. Replace the file with this version, the whole class as it stands at the end of the chapter:
 
 ```java
 package org.streamrune.ecommerce.spring.config;
@@ -511,69 +610,75 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.streamrune.core.EventStore;
-import org.streamrune.core.EventTypeRegistry;
-import org.streamrune.core.SimpleEventTypeRegistry;
+import org.streamrune.core.*;
 import org.streamrune.core.types.AggregateId;
-import org.streamrune.runtime.VirtualThreadCommandBus;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
-import org.streamrune.ecommerce.domain.product.ProductEvent;
-import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.runtime.*;
 
 @Configuration(proxyBeanMethods = false)
 public class StreamRuneConfig {
 
-    // From chapter 1: Spring Boot 4.0 auto-configures Jackson 3.x. StreamRune
-    // still uses Jackson 2.x, so we expose the legacy ObjectMapper explicitly.
-    @Bean
-    public ObjectMapper legacyObjectMapper() {
-        return JsonMapper.builder().build();
-    }
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
 
-    /**
-     * Exposes the event type registry for the auto-configured event store to pick
-     * up. Later chapters add more event types here as each aggregate is introduced.
-     * The full demo registers 21 event types across all aggregates.
-     */
-    @Bean
-    public EventTypeRegistry eventTypeRegistry() {
-        return SimpleEventTypeRegistry.builder()
-            .registerEvent("ProductCreated", ProductEvent.ProductCreated.class)
-            .registerEvent("PriceUpdated",   ProductEvent.PriceUpdated.class)
-            .registerEvent("StockAdjusted",  ProductEvent.StockAdjusted.class)
-            .registerEvent("ProductDiscontinued", ProductEvent.ProductDiscontinued.class)
-            .build();
-    }
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        .build();
+  }
 
-    @Bean
-    public VirtualThreadCommandBus commandBus(EventStore store) {
-        return VirtualThreadCommandBus.builder()
-            .eventStore(store)
-            .register(
-                ProductState.TYPE,
-                ProductCommand.class,
-                cmd ->
-                    AggregateId.of(
-                        switch (cmd) {
-                          case ProductCommand.CreateProduct c -> c.productId();
-                          case ProductCommand.UpdatePrice c -> c.productId();
-                          case ProductCommand.AdjustStock c -> c.productId();
-                          case ProductCommand.DiscontinueProduct c -> c.productId();
-                        }),
-                new ProductDecider())
-            .build();
-    }
+  @Bean
+  public VirtualThreadCommandBus commandBus(EventStore store) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .build();
+  }
 }
 ```
 
-Three things worth noting here:
+Four things worth noting here:
 
-1. `SimpleEventTypeRegistry` maps the string name used in the JSON payload (e.g. `"ProductCreated"`) to the Java class used for deserialisation. These names become part of your persisted data — choose them deliberately, because renaming them later requires an event upcaster (covered in chapter 4).
+1. The file imports the framework's packages whole — `org.streamrune.core.*` here, `org.streamrune.runtime.*` and later `org.streamrune.postgres.*` — and names the event classes in the registry by their full names, as the demo's own file does. That keeps the import list short while the class grows chapter by chapter; every type the listings use resolves through these imports, and each chapter's listing shows the complete import list.
 
-2. The `EventStore` bean itself is **not** declared here. The `streamrune-spring` auto-configuration provides a `postgresEventStoreFactory` that discovers the `EventTypeRegistry` bean (via `ObjectProvider`) and constructs the `PostgresEventStore` automatically. It also discovers any `EventUpcaster` and `CryptoEngine` beans you declare in later chapters. The same factory created the schema on the application's first start (`streamrune.event-store.schema.auto-initialize: true` in `application.yml`, Chapter 1), so the tables this bean writes to are already there.
+2. `SimpleEventTypeRegistry` maps the string name used in the JSON payload (e.g. `"ProductCreated"`) to the Java class used for deserialisation. These names become part of your persisted data — choose them deliberately, because renaming them later requires an event upcaster (covered in chapter 4).
 
-3. The first argument to `.register(...)` on the command bus is the aggregate type — `ProductState.TYPE`, the name `product`: the stream a product's events live in is `product:p-1`. It is stored as two columns, `aggregate_type` and `aggregate_id`, and is permanent — renaming the type renames every stream. The second argument is the command root, the third the *aggregate ID extractor* — a function that extracts the aggregate ID from any subtype of `ProductCommand`. StreamRune uses this to load the correct event stream from the store before calling `decide`. The `switch` expression is exhaustive because `ProductCommand` is sealed. The extractor returns a typed `AggregateId`, built with `AggregateId.of(...)`. That factory is where a client-supplied id is checked: it throws `IllegalArgumentException` for a blank id, for one longer than 255 characters, or for one containing a control character (C0 `U+0000`–`U+001F` such as CR, LF, TAB and NUL, DEL `U+007F`, or C1 `U+0080`–`U+009F`). The aggregate id is stored verbatim in the `aggregate_id` column, beside the type, and in the audit and dead-letter rows, where a CR/LF would forge a line and a NUL would fail the PostgreSQL write. Those `aggregate_id` columns are `VARCHAR(255)`, so the length check turns an over-long id into a `400` rather than a failed SQL insert. A prefix added to an id counts toward the 255, as the fulfillment saga's `"fulfillment-"` will for an order id in chapter 8. The check runs inside the bus before any interceptor, so nothing is written, and the `IllegalArgumentException` handler from chapter 1 answers `400 Bad Request`. Keep the request fields as `String`s and let `AggregateId.of` build the id. The `AggregateId` constructor skips the control-character and length checks; it is meant for ids rebuilt from stored data (you will use it in the saga in chapter 11).
+3. The `EventStore` bean itself is **not** declared here. The `streamrune-spring` auto-configuration provides a `postgresEventStoreFactory` that discovers the `EventTypeRegistry` bean (via `ObjectProvider`) and constructs the `PostgresEventStore` automatically. It also discovers any `EventUpcaster` and `CryptoEngine` beans you declare in later chapters. The same factory created the schema on the application's first start (`streamrune.event-store.schema.auto-initialize: true` in `application.yml`, Chapter 1), so the tables this bean writes to are already there.
+
+4. The first argument to `.register(...)` on the command bus is the aggregate type — `ProductState.TYPE`, the name `product`: the stream a product's events live in is `product:p-1`. It is stored as two columns, `aggregate_type` and `aggregate_id`, and is permanent — renaming the type renames every stream. The second argument is the command root, the third the *aggregate ID extractor* — a function that extracts the aggregate ID from any subtype of `ProductCommand`. StreamRune uses this to load the correct event stream from the store before calling `decide`. The `switch` expression is exhaustive because `ProductCommand` is sealed. The extractor returns a typed `AggregateId`, built with `AggregateId.of(...)`. That factory is where a client-supplied id is checked: it throws `IllegalArgumentException` for a blank id, for one longer than 255 characters, or for one containing a control character (C0 `U+0000`–`U+001F` such as CR, LF, TAB and NUL, DEL `U+007F`, or C1 `U+0080`–`U+009F`). The aggregate id is stored verbatim in the `aggregate_id` column, beside the type, and in the audit and dead-letter rows, where a CR/LF would forge a line and a NUL would fail the PostgreSQL write. Those `aggregate_id` columns are `VARCHAR(255)`, so the length check turns an over-long id into a `400` rather than a failed SQL insert. A prefix added to an id counts toward the 255, as the fulfillment saga's `"fulfillment-"` will for an order id in chapter 8. The check runs inside the bus before any interceptor, so nothing is written, and the `IllegalArgumentException` handler from chapter 1 answers `400 Bad Request`. Keep the request fields as `String`s and let `AggregateId.of` build the id. The `AggregateId` constructor skips the control-character and length checks; it is meant for ids rebuilt from stored data (you will use it in the saga in chapter 11).
 
 ### Step 6 — Add the command controller
 
@@ -597,51 +702,56 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 @RequestMapping("/api/products")
 public class ProductCommandController {
 
-    private final VirtualThreadCommandBus commandBus;
+  private final VirtualThreadCommandBus commandBus;
 
-    public ProductCommandController(VirtualThreadCommandBus commandBus) {
-        this.commandBus = commandBus;
-    }
+  public ProductCommandController(VirtualThreadCommandBus commandBus) {
+    this.commandBus = commandBus;
+  }
 
-    @PostMapping
-    public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
-        commandBus.execute(new ProductCommand.CreateProduct(
-            req.productId(), req.name(), req.description(), req.category(),
-            new Money(req.price(), "USD"), req.initialStock()));
-        return ResponseEntity.ok().build();
-    }
+  @PostMapping
+  public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
+    commandBus.execute(
+        new ProductCommand.CreateProduct(
+            req.productId(),
+            req.name(),
+            req.description(),
+            req.category(),
+            new Money(req.price(), "USD"),
+            req.initialStock()));
+    return ResponseEntity.ok().build();
+  }
 
-    @PutMapping("/{id}/stock")
-    public ResponseEntity<Void> adjustStock(
-        @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
-        commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
-        return ResponseEntity.ok().build();
-    }
+  @PutMapping("/{id}/stock")
+  public ResponseEntity<Void> adjustStock(
+      @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
+    commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
+    return ResponseEntity.ok().build();
+  }
 
-    @PutMapping("/{id}/price")
-    public ResponseEntity<Void> updatePrice(
-        @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
-        commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
-        return ResponseEntity.ok().build();
-    }
+  @PutMapping("/{id}/price")
+  public ResponseEntity<Void> updatePrice(
+      @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
+    commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
+    return ResponseEntity.ok().build();
+  }
 
-    @PostMapping("/{id}/discontinue")
-    public ResponseEntity<Void> discontinueProduct(@PathVariable String id) {
-        commandBus.execute(new ProductCommand.DiscontinueProduct(id));
-        return ResponseEntity.ok().build();
-    }
+  @PostMapping("/{id}/discontinue")
+  public ResponseEntity<Void> discontinueProduct(@PathVariable String id) {
+    commandBus.execute(new ProductCommand.DiscontinueProduct(id));
+    return ResponseEntity.ok().build();
+  }
 
-    public record CreateProductRequest(
-        @NotBlank String productId,
-        @NotBlank String name,
-        String description,
-        String category,
-        @NotNull @Positive BigDecimal price,
-        int initialStock) {}
+  public record CreateProductRequest(
+      @NotBlank String productId,
+      @NotBlank String name,
+      String description,
+      String category,
+      @NotNull @Positive BigDecimal price,
+      int initialStock) {}
 
-    public record AdjustStockRequest(int quantity, String reason) {}
+  public record AdjustStockRequest(int quantity, String reason) {}
 
-    public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
+  public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
 }
 ```
 
@@ -664,15 +774,15 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/products")
 public class ProductQueryController {
 
-    @GetMapping
-    public List<Object> listProducts() {
-        return List.of();
-    }
+  @GetMapping
+  public List<Object> listProducts() {
+    return List.of();
+  }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<Object> getProduct(@PathVariable String id) {
-        return ResponseEntity.notFound().build();
-    }
+  @GetMapping("/{id}")
+  public ResponseEntity<Object> getProduct(@PathVariable String id) {
+    return ResponseEntity.notFound().build();
+  }
 }
 ```
 
@@ -699,7 +809,7 @@ A `200 OK` response with an empty body means the command was accepted, the `Prod
 Confirm the event was persisted:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, event_type, version FROM event_stream ORDER BY global_offset;"
 ```
 

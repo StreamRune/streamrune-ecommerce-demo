@@ -81,8 +81,8 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Exposes the 21-event registry for the auto-configured {@code postgresEventStoreFactory} to pick
-   * up via {@code ObjectProvider<EventTypeRegistry>}.
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
    */
   @Bean
   public EventTypeRegistry eventTypeRegistry() {
@@ -180,7 +180,7 @@ public class StreamRuneConfig {
    * org.streamrune.rabbitmq.RabbitMqOutboxPublisher}'s in-flight horizon: {@link
    * RabbitMqConfig#outboxPublisher} uses the default 30s {@code publishBlockBudget} plus its own
    * 30s {@code confirmTimeout}, for a 60s horizon, plus the framework's recommended 30s margin —
-   * 90s minimum. {@code OutboxPoller.Builder.build()} now refuses to boot (fails fast rather than
+   * 90s minimum. {@code OutboxPoller.Builder.build()} refuses to boot (fails fast rather than
    * risking a duplicate-and-reorder publish) when the lease does not exceed the horizon.
    *
    * <p>STRICT_PER_AGGREGATE (the default, stated here so the choice is visible): the demo's outbox
@@ -207,7 +207,7 @@ public class StreamRuneConfig {
 
   // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
   // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // the four TRANSACTIONAL_LOCAL projections below must write to THIS object, and they do.
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
   @Bean
   public JdbcProjectionRepository projectionRepository(DataSource ds) {
     return new JdbcProjectionRepository(ds);
@@ -461,10 +461,12 @@ public class StreamRuneConfig {
   }
 
   /**
-   * Deletes the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
    * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
    * clear (the encryption lives on the events), so the key shred alone leaves them readable in
-   * {@code snapshot_store}. The customer's stream is {@code customer:<subject id>}.
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
    */
   static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
     return new PostgresSnapshotStorePurger(

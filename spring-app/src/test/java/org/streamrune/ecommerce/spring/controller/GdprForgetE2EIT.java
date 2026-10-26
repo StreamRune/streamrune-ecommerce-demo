@@ -298,11 +298,12 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
   /**
    * A snapshot holds the customer's state in the clear: {@code CustomerState} has plain fields, the
    * encryption lives on the events. Five events on the customer's stream (a registration and four
-   * profile updates) write the snapshot, and a forget deletes it with the key, so no plaintext of
-   * the customer is left in {@code snapshot_store} and the aggregate still loads as forgotten.
+   * profile updates) write the snapshot, and a forget purges it with the key (its row stays,
+   * without a state), so no plaintext of the customer is left in {@code snapshot_store} and the
+   * aggregate still loads as forgotten.
    */
   @Test
-  void aForgetDeletesTheSnapshotOfTheCustomer() throws Exception {
+  void aForgetPurgesTheSnapshotOfTheCustomer() throws Exception {
     String cid = "gdpr-snap-" + System.nanoTime();
     registerCustomer(cid, "Snapshot Sam", "sam-" + cid + "@example.com");
     for (int i = 1; i <= 4; i++) {
@@ -326,7 +327,9 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
 
     forget(cid, "CUSTOMER", cid).expectStatus().isOk();
 
-    assertThat(snapshotPayload(cid)).as("the forget deleted the snapshot of the customer").isNull();
+    assertThat(snapshotPayload(cid))
+        .as("the forget cleared the state of the customer's snapshot")
+        .isNull();
     var history = eventStore.load(StreamId.of(CustomerState.TYPE, new AggregateId(cid)));
     var decider = new CustomerDecider();
     var state = decider.initialState();

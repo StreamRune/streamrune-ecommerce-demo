@@ -118,16 +118,34 @@ In `frontend/`, after `npm ci`:
 
 - **Every change to the demo updates the tutorial in the same pull request:** the chapter that shows
   the code, and every later chapter that lists or describes the same file, endpoint or behaviour.
-- **A listing of a whole file** (it starts with its `package` declaration) shows the file as it is in
-  the repository.
+- **A listing of a whole file** (it starts with its `package` declaration) shows the file as it
+  stands at the end of its chapter, so a reader's file equals the listing. A chapter that changes a
+  file the tutorial lists lists it again in full: `StreamRuneConfig` once in every chapter that
+  changes it, in a collapsed block at the end of the chapter's configuration steps, and the bean
+  methods the text shows on their own are excerpts of that listing. The last listing of a file is
+  the file in the repository. A class a listing uses is listed in full in that chapter or an earlier
+  one, never later.
+- **Steps use what exists.** Every product, customer or order id, endpoint, port and request header a
+  chapter's `curl` steps and `localhost` addresses use was created or introduced in that chapter or
+  an earlier one. The ledger in `TutorialLedgerTest` says where each was introduced; a step that
+  needs a new one adds its entry.
 - **The tutorial tests** in `spring-app` (`org.streamrune.ecommerce.spring.docs`):
-  `TutorialListingsCompileTest` compiles every complete listing, chapter by chapter, against the
-  framework and the demo modules; `TutorialMetricNamesTest` checks that every meter name the
-  tutorial and the README give is one the framework registers; `TutorialInterceptorOrderTest`
-  checks every interceptor chain the tutorial shows against the framework's order;
-  `TutorialSettingsListingTest` checks that chapter 1's `settings.gradle.kts` listings are the demo's
-  own file, apart from the `include(...)` modules the chapter names. The `spring-app` test task
-  re-runs them whenever a chapter, the README or another file the ratchet below reads changes.
+  `TutorialListingsCompileTest` builds, for every chapter, the project a reader has at its end (the
+  last listing of every file up to it) and compiles it against the framework and the third-party
+  libraries alone, without the demo's own classes; it also checks that the last listing of every
+  file is the repository's file, that a bean method a chapter shows is an excerpt of that chapter's
+  listing of its class, and that the imports the fragments show resolve. `TutorialLedgerTest`
+  checks every step against the ledger and the ledger against the chapters;
+  `TutorialStackFilesListingTest` checks the listings of `docker-compose.yml`, `Dockerfile.backend`
+  and `notifications-service/Dockerfile` against the repository's files (an earlier Compose listing
+  is the file with the later chapters' services left out); `TutorialCatalogListingTest` checks
+  chapter 1's excerpt of `gradle/libs.versions.toml` against the catalog; `TutorialMetricNamesTest`
+  checks that every meter name the tutorial and the README give is one the framework registers;
+  `TutorialInterceptorOrderTest` checks every interceptor chain the tutorial shows against the
+  framework's order; `TutorialSettingsListingTest` checks that chapter 1's `settings.gradle.kts`
+  listings are the demo's own file, apart from the `include(...)` modules the chapter names. The
+  `spring-app` test task re-runs them whenever a chapter, the README or another file the ratchet
+  below reads changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.

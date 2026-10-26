@@ -16,7 +16,7 @@ The application is a Next.js 16 app with React 19. It talks to the single Spring
 | Products | CRUD with role-guarded actions |
 | Orders | Order lifecycle workflow with expandable rows: every order for an `ADMIN`, a customer's own for a `CUSTOMER` |
 | Customers | GDPR features — data export and right to forget: every customer for an `ADMIN`, a customer's own record for a `CUSTOMER` |
-| Fulfillment | Saga step visualizer per order (ADMIN-only) |
+| Fulfillment | Saga step visualizer per order: every saga for an `ADMIN`, the sagas of a customer's own orders for a `CUSTOMER` |
 | Events | Historical event browser plus live SSE feed |
 | Audit | Audit log (ADMIN-only), with a row-count selector |
 | Admin | Circuit breaker state, DLQ, outbox, payment failure toggle |
@@ -27,7 +27,7 @@ The technology choices are minimal on purpose. The stack is Next.js (16.4), Reac
 
 ## Setup
 
-Make sure the backend is running on `http://localhost:8080`, then start the frontend:
+The frontend is the demo's own: copy the demo's `frontend/` directory into the root of your project (beside `spring-app/`). Make sure the backend is running on `http://localhost:8080`, then start the frontend:
 
 ```bash
 cd frontend
@@ -35,6 +35,94 @@ npm install
 npm run dev
 # Open http://localhost:3000
 ```
+
+The frontend also joins the Compose stack, for the full run of Chapter 17. `frontend/Dockerfile` builds it, with the backend's address baked in at build time (`NEXT_PUBLIC_API_URL`). Replace `docker-compose.yml` with the stack of this chapter:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: streamrune_ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      # check_port_connectivity, not ping: ping answers as soon as the Erlang node runs, seconds
+      # before the AMQP listener accepts connections, and the backend and the notifications
+      # service connect the moment this check passes.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/streamrune_ecommerce
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
+      APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+    # The backend starts without the broker: its outbox publisher connects on the first publish.
+    # Waiting for the broker lets the first integration events go out at once.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  notifications-service:
+    build:
+      context: .
+      dockerfile: notifications-service/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+```
+
+The development server above and the `frontend` service both listen on port 3000: run one of them at a time.
 
 The dev server proxies nothing. Every API call goes directly to `http://localhost:8080` (configurable via `NEXT_PUBLIC_API_URL`).
 
@@ -155,7 +243,7 @@ The Customers page (`/customers`) shows what `GET /api/customers` returns for th
 
 ### Fulfillment
 
-The Fulfillment page (`/fulfillment`) has a page-level role guard, like Orders: a saga names the order, the customer and the payment of one purchase, so the backend serves the saga list as it serves orders — every saga to an `ADMIN`, the sagas of their own orders to a `CUSTOMER`, and `403` to a caller without an identity (Chapter 11). A `GUEST` has no `FULFILLMENT_VIEW` and sees "Access Restricted — Requires CUSTOMER or ADMIN role to view fulfillment sagas."; the page sends no request. For an `ADMIN` the page displays a `SagaCard` for every order fulfillment saga; for a `CUSTOMER` the same request, sent with their own `X-User-Id`, returns their own sagas only, and the subtitle reads "Saga-based fulfillment status of your own orders". A card shows the saga id (`fulfillment-<orderId>`), the saga type and the status the list returns: the framework's `SagaStatus` (`STARTED`, `RUNNING`, `COMPLETED`, `COMPENSATING`, `COMPENSATED`, `FAILED` or `FAULTED`), not the domain's `OrderFulfillmentStatus`. Each card renders a three-step tracker — **Started → In Progress → Completed** — where steps before the current status show a green check, the current status shows a spinner (or a red ✗ when the saga is failed, faulted or compensating), and later steps are greyed out.
+The Fulfillment page (`/fulfillment`) has a page-level role guard, like Orders: a saga names the order, the customer and the payment of one purchase, so the backend serves the saga list as it serves orders — every saga to an `ADMIN`, the sagas of their own orders to a `CUSTOMER`, and `403` to a caller without an identity (Chapter 11). A `GUEST` has no `FULFILLMENT_VIEW` and sees "Access Restricted — Requires CUSTOMER or ADMIN role to view fulfillment sagas."; the page sends no request. For an `ADMIN` the page displays a `SagaCard` for every order fulfillment saga; for a `CUSTOMER` the same request, sent with their own `X-User-Id`, returns their own sagas only, and the subtitle reads "Saga-based fulfillment status of your own orders". A card shows the saga id (`fulfillment-<orderId>`), the saga type and the status the list returns: the framework's `SagaStatus` (`STARTED`, `RUNNING`, `COMPLETED`, `COMPENSATING`, `COMPENSATED`, `FAILED` or `FAULTED`), not the domain's `OrderFulfillmentStatus`. Each card renders a three-step tracker — **Started → In Progress → Completed** — where steps before the current status show a green check, the current status shows a spinner (or a red ✗ when the saga is failed, faulted, compensating or compensated), and later steps are greyed out.
 
 This page does **not** have a per-saga inject-failure button. Instead it has a single page-level **Inject Payment Failure** switch in the header, shown to a role with `ADMIN_PANEL` only — a `CUSTOMER` sees neither the switch nor a request for the flag behind it — that calls `useTogglePaymentFailure()` → `POST /api/admin/payment-failure/toggle`. The switch shows the backend's flag: both the toggle and `GET /api/admin/payment-failure` answer `{ "failureInjected": true | false }`, and the page reads that field. Flip it on and a warning banner appears; the next order then fails at the payment step, letting you watch the saga compensate in real time. (The backend's `POST /api/saga/fulfillments/{id}/inject-failure` route exists but is not wired into this page; despite the saga id in its path it flips the same shared flag, behind the same ADMIN check — Chapter 11.)
 

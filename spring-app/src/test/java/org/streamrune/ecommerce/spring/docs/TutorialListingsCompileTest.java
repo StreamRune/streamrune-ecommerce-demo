@@ -2,19 +2,20 @@ package org.streamrune.ecommerce.spring.docs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
@@ -27,22 +28,30 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Every complete Java file the tutorial lists compiles against the framework and the demo modules,
- * together with the files the chapters before it listed. A reader who follows the chapters in order
- * builds exactly that set of files, so a listing that drifted from the API (a command type that
- * does not extend {@code Command}, a parameter that became a value object, a constructor that grew
- * a component) fails here rather than in the reader's first build.
+ * A reader who follows the tutorial in order has, at the end of chapter N, exactly the files that
+ * chapters 1 to N list in full, each in the version of the last chapter that listed it. This test
+ * builds that project for every chapter and compiles it against the framework and the third-party
+ * libraries alone, without the demo's own classes: a listing that uses a type a later chapter
+ * introduces, or a class no chapter lists, fails here instead of in the reader's build.
  *
- * <p>A listing is a complete file when its first line is a {@code package} declaration. A later
- * listing of the same class replaces the earlier one, as it does in the reader's project. Classes
- * the tutorial never lists in full come from the demo's compiled modules on the test classpath. The
- * fragments a chapter asks the reader to paste into an existing file (bean methods, extra test
- * methods) are not compiled, as they need the file around them; the imports they tell the reader to
- * add must still resolve.
+ * <p><b>Which listings count.</b> A listing is a complete file when its first line is a {@code
+ * package} declaration; its first top-level type names the file. A later listing of the same file
+ * replaces the earlier one, as it does in the reader's project. The fragments a chapter shows
+ * inside the prose (a method, a few lines of a builder) are not files: they are not compiled, but
+ * every import they show must resolve against the project of their chapter.
+ *
+ * <p><b>The classpath.</b> The test classpath of {@code spring-app} minus every entry under the
+ * demo's root directory: the framework (the {@code ../streamrune} composite build or the published
+ * artifacts) and the third-party libraries stay, the demo modules' compiled classes go.
+ *
+ * <p><b>The finished project.</b> After the last chapter the reader's files are the repository's:
+ * the last listing of every file the tutorial lists in full is that file, character for character.
  */
 class TutorialListingsCompileTest {
 
   private static final Path TUTORIAL = Path.of("../docs/tutorial");
+
+  private static final Path REPOSITORY = Path.of("..").toAbsolutePath().normalize();
 
   /** A top-level type declaration: the first one in a listing names the file. */
   private static final Pattern TOP_LEVEL_TYPE =
@@ -55,13 +64,20 @@ class TutorialListingsCompileTest {
   private static final Pattern IMPORT =
       Pattern.compile("^import\\s+(?:static\\s+)?[\\w.]+(?:\\.\\*)?\\s*;");
 
+  /** A Spring bean method's annotation. */
+  private static final Pattern BEAN = Pattern.compile("^\\s*@Bean\\b");
+
+  /** The source sets a listed file can live in, in every module of the demo. */
+  private static final List<String> SOURCE_SETS = List.of("src/main/java", "src/test/java");
+
   @Test
-  void everyChapterCompilesOnTopOfTheListingsBeforeIt(@TempDir Path out) throws IOException {
+  void everyChapterCompilesFromTheListingsOfItsChaptersAlone(@TempDir Path out) throws IOException {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     assertThat(javac).as("the tests run on a JDK with a Java compiler").isNotNull();
+    String classpath = frameworkAndLibraries();
 
     Map<String, Listing> project = new LinkedHashMap<>();
-    Set<String> errors = new LinkedHashSet<>();
+    Map<String, String> errors = new LinkedHashMap<>();
     int compiledChapters = 0;
     for (Path chapter : chapters()) {
       List<Listing> listings = completeFiles(chapter);
@@ -69,25 +85,45 @@ class TutorialListingsCompileTest {
         continue;
       }
       listings.forEach(listing -> project.put(listing.className(), listing));
-      Path classes = Files.createDirectories(out.resolve(chapter.getFileName().toString()));
-      errors.addAll(compile(javac, List.copyOf(project.values()), classes));
+      String name = chapter.getFileName().toString();
+      Path classes = Files.createDirectories(out.resolve(name));
+      for (String error : compile(javac, List.copyOf(project.values()), classpath, classes)) {
+        errors.putIfAbsent(error, name);
+      }
       compiledChapters++;
     }
 
     assertThat(compiledChapters).as("chapters with complete Java files").isGreaterThan(10);
     assertThat(project).as("complete Java files the tutorial lists").hasSizeGreaterThan(50);
-    assertThat(errors).as("compile errors in the tutorial's listings").isEmpty();
+    assertThat(
+            errors.entrySet().stream()
+                .map(e -> e.getKey() + " (the project of " + e.getValue() + ")")
+                .toList())
+        .as("compile errors in the project each chapter leaves the reader with")
+        .isEmpty();
   }
 
   @Test
-  void everyImportAFragmentShowsResolves(@TempDir Path out) throws IOException {
+  void everyImportAFragmentShowsResolvesInItsChapter(@TempDir Path out) throws IOException {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     assertThat(javac).as("the tests run on a JDK with a Java compiler").isNotNull();
+    String classpath = frameworkAndLibraries();
 
-    // One compilation unit per import line: two fragments may import different classes that
-    // share a simple name, which one file could not hold.
-    List<Listing> imports = new ArrayList<>();
+    Map<String, Listing> project = new LinkedHashMap<>();
+    List<String> errors = new ArrayList<>();
+    int imports = 0;
+    Path classes = null;
     for (Path chapter : chapters()) {
+      String name = chapter.getFileName().toString();
+      List<Listing> listings = completeFiles(chapter);
+      if (!listings.isEmpty()) {
+        listings.forEach(listing -> project.put(listing.className(), listing));
+        classes = Files.createDirectories(out.resolve(name));
+        compile(javac, List.copyOf(project.values()), classpath, classes);
+      }
+      // One compilation unit per import line: two fragments may import different classes that
+      // share a simple name, which one file could not hold.
+      List<Listing> units = new ArrayList<>();
       for (Block block : blocks(chapter)) {
         if (block.isCompleteFile()) {
           continue;
@@ -95,20 +131,133 @@ class TutorialListingsCompileTest {
         for (int i = 0; i < block.lines().size(); i++) {
           Matcher m = IMPORT.matcher(block.lines().get(i));
           if (m.find()) {
-            String type = "Import" + imports.size();
-            imports.add(
+            String type = "Import" + imports++;
+            units.add(
                 new Listing(
-                    block.chapter(),
+                    name,
                     block.firstLine() + i,
                     "tutorial.fragments." + type,
                     "package tutorial.fragments; " + m.group() + " final class " + type + " {}\n"));
           }
         }
       }
+      if (!units.isEmpty()) {
+        String withChapter = classes == null ? classpath : classpath + File.pathSeparator + classes;
+        Path stubs = Files.createDirectories(out.resolve(name + "-imports"));
+        errors.addAll(compile(javac, units, withChapter, stubs));
+      }
     }
 
-    assertThat(imports).as("imports the tutorial's fragments show").hasSizeGreaterThan(20);
-    assertThat(compile(javac, imports, out)).as("imports that do not resolve").isEmpty();
+    assertThat(imports).as("imports the tutorial's fragments show").isPositive();
+    assertThat(errors).as("imports that do not resolve in their chapter").isEmpty();
+  }
+
+  /**
+   * A chapter that changes the Spring configuration lists the whole class as it stands at the end
+   * of the chapter. The bean methods its text shows on their own are excerpts of that listing, line
+   * for line apart from the indentation: a bean method shown in another shape (an older one, or one
+   * with parts left out) is what a reader pastes into the file, and it replaces the bean the
+   * chapters before built, wiring and all.
+   */
+  @Test
+  void aBeanMethodAChapterShowsIsAnExcerptOfItsListingOfTheClass() throws IOException {
+    List<String> fragments = new ArrayList<>();
+    for (Path chapter : chapters()) {
+      List<Block> blocks = blocks(chapter);
+      List<List<String>> files =
+          blocks.stream().filter(Block::isCompleteFile).map(b -> stripped(b.lines())).toList();
+      for (Block block : blocks) {
+        if (block.isCompleteFile() || block.lines().stream().noneMatch(BEAN.asPredicate())) {
+          continue;
+        }
+        List<String> excerpt = stripped(block.lines());
+        if (files.stream().noneMatch(file -> Collections.indexOfSubList(file, excerpt) >= 0)) {
+          fragments.add(block.chapter() + ":" + block.firstLine());
+        }
+      }
+    }
+
+    assertThat(fragments)
+        .as("bean methods that are not an excerpt of a listing of their class in their chapter")
+        .isEmpty();
+  }
+
+  /** The lines of a block without their indentation, blank lines left out. */
+  private static List<String> stripped(List<String> lines) {
+    return lines.stream().map(String::strip).filter(line -> !line.isEmpty()).toList();
+  }
+
+  @Test
+  void theLastListingOfEveryFileIsTheRepositorysFile() throws IOException {
+    Map<String, Listing> last = new LinkedHashMap<>();
+    for (Path chapter : chapters()) {
+      completeFiles(chapter).forEach(listing -> last.put(listing.className(), listing));
+    }
+
+    List<String> differences = new ArrayList<>();
+    for (Listing listing : last.values()) {
+      List<Path> files = repositoryFiles(listing.className());
+      String where = listing.chapter() + ":" + listing.firstLine() + " " + listing.className();
+      if (files.size() != 1) {
+        differences.add(where + ": the repository has " + files.size() + " such files " + files);
+        continue;
+      }
+      String file = Files.readString(files.getFirst());
+      if (!file.equals(listing.source())) {
+        differences.add(
+            where
+                + " differs from "
+                + REPOSITORY.relativize(files.getFirst())
+                + firstDifference(listing.source(), file));
+      }
+    }
+
+    assertThat(last).as("files the tutorial lists in full").hasSizeGreaterThan(50);
+    assertThat(differences)
+        .as("last listings that are not the repository's file, character for character")
+        .isEmpty();
+  }
+
+  /** The test classpath without the entries under the demo's root: the demo modules' classes. */
+  private static String frameworkAndLibraries() {
+    String kept =
+        Stream.of(System.getProperty("java.class.path").split(File.pathSeparator))
+            .filter(entry -> !entry.isBlank())
+            .filter(entry -> !Path.of(entry).toAbsolutePath().normalize().startsWith(REPOSITORY))
+            .collect(Collectors.joining(File.pathSeparator));
+    assertThat(kept).as("the framework is on the test classpath").contains("streamrune-core");
+    return kept;
+  }
+
+  /** The files of the demo's modules that hold {@code className}. */
+  private static List<Path> repositoryFiles(String className) throws IOException {
+    String relative = className.replace('.', '/') + ".java";
+    List<Path> files = new ArrayList<>();
+    try (Stream<Path> modules = Files.list(REPOSITORY)) {
+      for (Path module : modules.filter(Files::isDirectory).sorted().toList()) {
+        for (String sourceSet : SOURCE_SETS) {
+          Path file = module.resolve(sourceSet).resolve(relative);
+          if (Files.isRegularFile(file)) {
+            files.add(file);
+          }
+        }
+      }
+    }
+    return files;
+  }
+
+  /** Where two texts part, as the line number and both lines, for a failure message. */
+  private static String firstDifference(String listing, String file) {
+    List<String> a = listing.lines().toList();
+    List<String> b = file.lines().toList();
+    for (int i = 0; i < Math.max(a.size(), b.size()); i++) {
+      String left = i < a.size() ? a.get(i) : "<end of listing>";
+      String right = i < b.size() ? b.get(i) : "<end of file>";
+      if (!left.equals(right)) {
+        return " at line " + (i + 1) + ": listing [" + left + "] file [" + right + "]";
+      }
+    }
+    return " in its line endings";
   }
 
   private static List<Path> chapters() throws IOException {
@@ -167,7 +316,8 @@ class TutorialListingsCompileTest {
     return blocks;
   }
 
-  private static List<String> compile(JavaCompiler javac, List<Listing> listings, Path classes)
+  private static List<String> compile(
+      JavaCompiler javac, List<Listing> listings, String classpath, Path classes)
       throws IOException {
     DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
     Map<JavaFileObject, Listing> sources = new LinkedHashMap<>();
@@ -183,7 +333,7 @@ class TutorialListingsCompileTest {
             "-implicit:none",
             "-nowarn",
             "-classpath",
-            System.getProperty("java.class.path"),
+            classpath,
             "-d",
             classes.toString());
     try (StandardJavaFileManager files =

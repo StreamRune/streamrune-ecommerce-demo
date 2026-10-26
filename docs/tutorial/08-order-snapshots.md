@@ -692,7 +692,7 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 }
 ```
 
-`guard` runs before `decide`, on every command the bus executes (chapter 9 uses it for ownership checks). It refuses `ConfirmOrder` unless the command is a saga's: `StreamRuneContext.isSagaDispatch()` is `true` only while a saga dispatches a command, on every attempt of its step, and `false` for a request, a process manager or a test that calls the bus. The refusal is an `AuthorizationException`. It extends `DomainException`, so the `GlobalExceptionHandler` of chapter 1 answers it with `400` until Chapter 9 gives it a handler of its own that answers `403`. The decider stays pure: `decide` and `evolve` read nothing but the command, the state and the event.
+`guard` runs before `decide`, on every command the bus executes. It refuses `ConfirmOrder` unless the command is a saga's: `StreamRuneContext.isSagaDispatch()` is `true` only while a saga dispatches a command, on every attempt of its step, and `false` for a request, a process manager or a test that calls the bus. The refusal is an `AuthorizationException`. It extends `DomainException`, so the `GlobalExceptionHandler` of chapter 1 answers it with `400` until Chapter 9 gives it a handler of its own that answers `403`. The decider stays pure: `decide` and `evolve` read nothing but the command, the state and the event.
 
 The `decide` cases enforce the state machine: each case checks `state.status()` before accepting the command. `PlaceOrder` checks `state.orderId()` instead, the same creation guard as `CreateProduct` (chapter 2) and `RegisterCustomer` (chapter 6): an order id is placed once. Here the guard protects more than the data, because `evolve` for `OrderPlaced` builds a fresh state in `CREATED` — without it, a second `PlaceOrder` for a shipped order would put it back at the start of its lifecycle with other lines and another total. `requirePlaced` is the other half of that guard: the empty state of an id nobody placed reads `CREATED`, so `ConfirmOrder` would pass the status check and open a stream for an order that does not exist. Confirming, shipping and delivering such an id are refused with `Order not found`. `CancelOrder` is deliberately left out of `requirePlaced`: in Chapter 11 it becomes the last step of the fulfillment saga's compensation, and a compensation command the decider refuses ends the saga `FAILED` instead of `COMPENSATED`, so a cancellation of an id nobody placed is recorded (with no lines) and undoes nothing. A shipped or delivered order is the one thing it refuses (`Cannot cancel SHIPPED orders`), and a cancelled order is cancelled again. For the same reason `PlaceOrder` also refuses an id whose stream already says `CANCELLED`: an id cancelled before anybody placed it is not placed afterwards. The `evolve` cases are simpler — they update state unconditionally because a stored event is already a fact; the validity check happened before it was written.
 
@@ -706,14 +706,12 @@ All the tests should pass. If `shipOrder_notConfirmed_throws` fails, check that 
 
 ### Step 3 — Configure SnapshotPolicy in the CommandBus
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and locate the `VirtualThreadCommandBus` builder. Add `.snapshotPolicy(SnapshotPolicy.everyNEvents(5))`:
+Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and locate the `VirtualThreadCommandBus` builder. Add `.snapshotPolicy(SnapshotPolicy.everyNEvents(5))` (`SnapshotPolicy` is in `org.streamrune.core`, which the file imports whole). With the order registration of Step 4 the bean reads:
 
 ```java
 @Bean
 public VirtualThreadCommandBus commandBus(
-    EventStore store,
-    BeanValidationInterceptor validation) {
-  // more interceptors added in later chapters
+    EventStore store, BeanValidationInterceptor validation) {
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
       .interceptors(validation)
@@ -730,7 +728,31 @@ public VirtualThreadCommandBus commandBus(
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
-      // ... other registrations
+      .register(
+          OrderState.TYPE,
+          OrderCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case OrderCommand.PlaceOrder c -> c.orderId();
+                    case OrderCommand.ConfirmOrder c -> c.orderId();
+                    case OrderCommand.ShipOrder c -> c.orderId();
+                    case OrderCommand.DeliverOrder c -> c.orderId();
+                    case OrderCommand.CancelOrder c -> c.orderId();
+                  }),
+          new OrderDecider())
+      .register(
+          CustomerState.TYPE,
+          CustomerCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case CustomerCommand.RegisterCustomer c -> c.customerId();
+                    case CustomerCommand.UpdateProfile c -> c.customerId();
+                    case CustomerCommand.RequestDataExport c -> c.customerId();
+                    case CustomerCommand.ForgetCustomer c -> c.customerId();
+                  }),
+          new CustomerDecider())
       .build();
 }
 ```
@@ -738,12 +760,6 @@ public VirtualThreadCommandBus commandBus(
 `SnapshotPolicy.everyNEvents(5)` tells the `CommandBus` to write a snapshot once an individual aggregate stream reaches five events since its last snapshot. The count is **per stream**, not a global event total. You can tune this number. Lower values mean more snapshot writes but shorter replay windows; higher values reduce write overhead at the cost of longer worst-case replays. Production systems often set this to a larger value; five is a reasonable starting point and aligns with the verification scenario in Step 6.
 
 The snapshot policy is global for the bus — it applies to every registered aggregate. There is currently no per-aggregate override: `register` takes only the aggregate type, the command type, the aggregate id extractor, and the decider.
-
-Add the import at the top of `StreamRuneConfig.java`:
-
-```java
-import org.streamrune.core.SnapshotPolicy;
-```
 
 ### Step 4 — Register the Order decider
 
@@ -772,28 +788,31 @@ The first argument to `register` is the aggregate type `OrderState.TYPE`; the th
 Just as you did for products (chapter 2) and customers (chapter 6, Step 5), add the five Order event types to the `SimpleEventTypeRegistry` inside the `eventTypeRegistry` bean. **This is required** — the auto-configured event store throws `UnknownEventTypeException` when it tries to serialise (write) or deserialise (read) an event type that is not registered, so without these entries the very first `POST /api/orders` fails at runtime even though everything compiles:
 
 ```java
-.registerEvent("OrderPlaced",    OrderEvent.OrderPlaced.class)
-.registerEvent("OrderConfirmed", OrderEvent.OrderConfirmed.class)
-.registerEvent("OrderShipped",   OrderEvent.OrderShipped.class)
-.registerEvent("OrderDelivered", OrderEvent.OrderDelivered.class)
-.registerEvent("OrderCancelled", OrderEvent.OrderCancelled.class)
+.registerEvent(
+    "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+.registerEvent(
+    "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+.registerEvent(
+    "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+.registerEvent(
+    "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+.registerEvent(
+    "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
 ```
 
-Add `import org.streamrune.ecommerce.domain.order.OrderEvent;` to `StreamRuneConfig.java` (or use the fully-qualified form as earlier chapters do).
+The registry names each event class by its full name, as for products and customers, so no import is needed.
 
 Snapshots need one more registration. The event store saves a snapshot under the simple class name of the state, and refuses to write one for a state the registry does not resolve: the bus logs `Snapshot save failed` and the events stay committed, but no snapshot is ever written. Register each aggregate state in the same builder:
 
 ```java
-.registerState("ProductState",   ProductState.class)
-.registerState("OrderState",     OrderState.class)
-.registerState("CustomerState",  CustomerState.class)
-.registerState("PaymentState",   PaymentState.class)
-.registerState("InventoryState", InventoryState.class)
+.registerState("ProductState", ProductState.class)
+.registerState("OrderState", OrderState.class)
+.registerState("CustomerState", CustomerState.class)
 ```
 
-(The payment and inventory states belong to chapters 11 and 13; register them when you add those aggregates.)
+Chapters 11 and 13 add the payment and inventory states as they add those aggregates.
 
-A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, and the demo wires it in all three apps. The framework requires that decision: a `ForgetSubjectService` is not built without a snapshot purger, or without `withoutSnapshotPurge()` for an application that never stores a snapshot (the integrations read it as the property `streamrune.gdpr.snapshot-purge`, `required` by default and `none` for that statement), because a snapshot holds state in the clear that deleting the key does not reach.
+A snapshot holds the aggregate's state as plain JSON, decrypted. For `OrderState` that adds nothing the events do not already hold in the clear, but `CustomerState` carries the customer's name, email, address and phone: once the customer's stream is snapshotted, deleting the key (chapter 7) leaves those fields readable in `snapshot_store`. The forget service of chapter 7 therefore runs a `PostgresSnapshotStorePurger` for the customer's stream, which empties the snapshot's state and raises its purge generation, so a command that loaded the customer before the forget cannot store the old state again; the demo wires it in all three apps. That purger is in place before this chapter turns snapshots on. The framework requires that decision: a `ForgetSubjectService` is not built without a snapshot purger, or without `withoutSnapshotPurge()` for an application that never stores a snapshot (the integrations read it as the property `streamrune.gdpr.snapshot-purge`, `required` by default and `none` for that statement), because a snapshot holds state in the clear that deleting the key does not reach.
 
 ### Step 5 — Add the REST controller
 
@@ -873,7 +892,7 @@ public class OrderCommandController {
 }
 ```
 
-Each endpoint maps a simple HTTP request to an `OrderCommand` and delegates entirely to the `CommandBus`. No business logic belongs here. The `@Valid` annotation on `PlaceOrderRequest` and `CancelOrderRequest` triggers the `BeanValidationInterceptor` wired in chapter 3, so a malformed request is rejected before it reaches `OrderDecider`. There is no `/confirm` endpoint: the fulfillment saga of Chapter 11 confirms an order, and the decider's guard refuses a `ConfirmOrder` from anybody else.
+Each endpoint maps a simple HTTP request to an `OrderCommand` and delegates entirely to the `CommandBus`. No business logic belongs here. The `@Valid` annotation on `PlaceOrderRequest` and `CancelOrderRequest` has Spring MVC validate the request body (chapter 3's web layer), so a malformed request is rejected with `400` before a command is built; the `BeanValidationInterceptor` of chapter 3 then checks the command itself on the bus. There is no `/confirm` endpoint: the fulfillment saga of Chapter 11 confirms an order, and the decider's guard refuses a `ConfirmOrder` from anybody else.
 
 A line of the request names a product and a quantity, and nothing else: `OrderPricing` builds the `PlaceOrder` with each line's unit price taken from the product catalogue. A client that sends a `unitPrice` is not refused; the field is not part of the request record, so it is ignored. Create `commands/src/main/java/org/streamrune/ecommerce/commands/order/OrderPricing.java`:
 
@@ -1102,7 +1121,7 @@ Register the bean in `StreamRuneConfig`:
 ```java
 @Bean
 public OrderProjection orderProjection(ProjectionRepository repo) {
-    return new OrderProjection(repo);
+  return new OrderProjection(repo);
 }
 ```
 
@@ -1116,34 +1135,367 @@ public MultiProjectionRunner projectionRunner(
     JdbcProjectionRepository projectionRepository,
     StreamRuneProperties properties,
     ProductProjection productProjection,
-    CustomerProjection customerProjection,
     OrderProjection orderProjection,
+    CustomerProjection customerProjection,
     CacheInvalidator cacheInvalidator) {
-
   var runner =
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
           .offsetStore(offsetStore)
           .subscriptionConfig(projectionPolling(properties))
+          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+          // checkpoint in ONE transaction.
           .atomicProcessor(projectionRepository)
           .register(
               "products",
               new CacheAwareProjection(productProjection, cacheInvalidator),
               ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
           .register(
-              "customers",
-              new CacheAwareProjection(customerProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          .register(
               "orders",
               new CacheAwareProjection(orderProjection, cacheInvalidator),
               ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch13: .register("inventory", new CacheAwareProjection(inventoryProjection, cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .register(
+              "customers",
+              new CacheAwareProjection(customerProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
           .build();
   runner.start();
   return runner;
 }
 ```
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 8</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(validation)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+}
+```
+
+</details>
 
 ### Step 5c — Create `OrderQueryController`
 
@@ -1286,7 +1638,7 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, version, created_at FROM snapshot_store ORDER BY created_at DESC LIMIT 5;"
 ```
 
-You should see a row `order | order-5 | …` with `version` 5 once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.)
+You should see a row `order | order-5 | …` with `version` 5 once it crosses the threshold. The `version` column records the event offset at which the snapshot was taken. (Orders that stopped below the threshold — like `order-2` above — never appear here, because the threshold is per stream, not a system-wide total.) The table also holds a row `customer | c-alice | 0`: the forget of Chapter 7 purged Alice's snapshot, and the purger leaves a row with version `0` and no state, which keeps a command that loaded the customer before the forget from storing its snapshot again.
 
 To confirm the snapshot is being used on reads:
 

@@ -40,8 +40,8 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/customer/CustomerSt
 package org.streamrune.ecommerce.domain.customer;
 
 public enum CustomerStatus {
-    ACTIVE,
-    FORGOTTEN
+  ACTIVE,
+  FORGOTTEN
 }
 ```
 
@@ -59,30 +59,36 @@ import jakarta.validation.constraints.NotBlank;
 import org.streamrune.core.Command;
 import org.streamrune.core.crypto.Encrypted;
 
+/**
+ * The customer's commands. The personal data carries {@code @Encrypted} here as well as on the
+ * events: a command that fails on infrastructure is stored in the command dead-letter queue for a
+ * later replay, and that stored copy is the command record. Encrypted under the customer's key, it
+ * becomes unreadable when the customer is forgotten, together with the events.
+ */
 public sealed interface CustomerCommand extends Command {
-    record RegisterCustomer(
-        @NotBlank String customerId,
-        @Encrypted(subjectId = "customerId") @NotBlank String name,
-        @Encrypted(subjectId = "customerId") @Email @NotBlank String email,
-        @Encrypted(subjectId = "customerId") String address,
-        @Encrypted(subjectId = "customerId") String phone)
-        implements CustomerCommand {}
+  record RegisterCustomer(
+      @NotBlank String customerId,
+      @Encrypted(subjectId = "customerId") @NotBlank String name,
+      @Encrypted(subjectId = "customerId") @Email @NotBlank String email,
+      @Encrypted(subjectId = "customerId") String address,
+      @Encrypted(subjectId = "customerId") String phone)
+      implements CustomerCommand {}
 
-    record UpdateProfile(
-        String customerId,
-        @Encrypted(subjectId = "customerId") String name,
-        @Encrypted(subjectId = "customerId") String email,
-        @Encrypted(subjectId = "customerId") String address,
-        @Encrypted(subjectId = "customerId") String phone)
-        implements CustomerCommand {}
+  record UpdateProfile(
+      String customerId,
+      @Encrypted(subjectId = "customerId") String name,
+      @Encrypted(subjectId = "customerId") String email,
+      @Encrypted(subjectId = "customerId") String address,
+      @Encrypted(subjectId = "customerId") String phone)
+      implements CustomerCommand {}
 
-    record RequestDataExport(String customerId) implements CustomerCommand {}
+  record RequestDataExport(String customerId) implements CustomerCommand {}
 
-    record ForgetCustomer(String customerId) implements CustomerCommand {}
+  record ForgetCustomer(String customerId) implements CustomerCommand {}
 }
 ```
 
-`address` and `phone` are optional — the validation annotations on the others enforce the minimum required data for registration. Role-based access control will be added in chapter 9; strip any `@RequireRole` annotations if you see them in the reference source.
+`address` and `phone` are optional — the validation annotations on the others enforce the minimum required data for registration. Role-based access control comes in chapter 9.
 
 The personal data carries `@Encrypted` on the commands as well as on the events (the next section explains what the annotation does). A command is normally never stored: the bus hands it to the decider and keeps only the events. The exception is a command that fails on infrastructure — a database or network error, not a business rejection. The command bus records it in its dead-letter queue (chapter 14) so it can be replayed later, and that record is the command itself. Without the annotation, a failed `RegisterCustomer` would leave the customer's name, email, address and phone in plaintext in the `dead_letter_queue` table, where deleting the customer's key (chapter 7) cannot reach them. With it, the stored copy is encrypted under the same per-customer key as the events and is erased together with them.
 
@@ -97,25 +103,25 @@ import org.streamrune.core.DomainEvent;
 import org.streamrune.core.crypto.Encrypted;
 
 public sealed interface CustomerEvent extends DomainEvent {
-    record CustomerRegistered(
-        String customerId,
-        @Encrypted(subjectId = "customerId") String name,
-        @Encrypted(subjectId = "customerId") String email,
-        @Encrypted(subjectId = "customerId") String address,
-        @Encrypted(subjectId = "customerId") String phone)
-        implements CustomerEvent {}
+  record CustomerRegistered(
+      String customerId,
+      @Encrypted(subjectId = "customerId") String name,
+      @Encrypted(subjectId = "customerId") String email,
+      @Encrypted(subjectId = "customerId") String address,
+      @Encrypted(subjectId = "customerId") String phone)
+      implements CustomerEvent {}
 
-    record ProfileUpdated(
-        String customerId,
-        @Encrypted(subjectId = "customerId") String name,
-        @Encrypted(subjectId = "customerId") String email,
-        @Encrypted(subjectId = "customerId") String address,
-        @Encrypted(subjectId = "customerId") String phone)
-        implements CustomerEvent {}
+  record ProfileUpdated(
+      String customerId,
+      @Encrypted(subjectId = "customerId") String name,
+      @Encrypted(subjectId = "customerId") String email,
+      @Encrypted(subjectId = "customerId") String address,
+      @Encrypted(subjectId = "customerId") String phone)
+      implements CustomerEvent {}
 
-    record DataExportRequested(String customerId) implements CustomerEvent {}
+  record DataExportRequested(String customerId) implements CustomerEvent {}
 
-    record CustomerForgotten(String customerId) implements CustomerEvent {}
+  record CustomerForgotten(String customerId) implements CustomerEvent {}
 }
 ```
 
@@ -143,13 +149,14 @@ public record CustomerState(
     String phone,
     CustomerStatus status)
     implements AggregateState {
+  /**
+   * The aggregate type the customer decider is registered under: streams are customer:<customerId>.
+   */
+  public static final AggregateType TYPE = AggregateType.of("customer");
 
-    /** The aggregate type the customer decider is registered under: streams are customer:<customerId>. */
-    public static final AggregateType TYPE = AggregateType.of("customer");
-
-    public CustomerState() {
-        this(null, null, null, null, null, CustomerStatus.ACTIVE);
-    }
+  public CustomerState() {
+    this(null, null, null, null, null, CustomerStatus.ACTIVE);
+  }
 }
 ```
 
@@ -175,128 +182,136 @@ import org.streamrune.test.DeciderFixture;
 
 class CustomerDeciderTest {
 
-    private final DeciderFixture<CustomerCommand, CustomerState, CustomerEvent> fixture =
-        DeciderFixture.of(new CustomerDecider());
+  private final DeciderFixture<CustomerCommand, CustomerState, CustomerEvent> fixture =
+      DeciderFixture.of(new CustomerDecider());
 
-    private CustomerEvent.CustomerRegistered registered() {
-        return new CustomerEvent.CustomerRegistered(
-            "c-1", "Alice", "alice@example.com", "123 Main St", "+1234567890");
-    }
+  private CustomerEvent.CustomerRegistered registered() {
+    return new CustomerEvent.CustomerRegistered(
+        "c-1", "Alice", "alice@example.com", "123 Main St", "+1234567890");
+  }
 
-    @Test
-    void registerCustomer() {
-        fixture
-            .given()
-            .when(new CustomerCommand.RegisterCustomer(
+  @Test
+  void registerCustomer() {
+    fixture
+        .given()
+        .when(
+            new CustomerCommand.RegisterCustomer(
                 "c-1", "Alice", "alice@example.com", "123 Main St", "+1234567890"))
-            .expectEvents(registered())
-            .expectState(s -> {
-                assertThat(s.status()).isEqualTo(CustomerStatus.ACTIVE);
-                assertThat(s.name()).isEqualTo("Alice");
+        .expectEvents(registered())
+        .expectState(
+            s -> {
+              assertThat(s.status()).isEqualTo(CustomerStatus.ACTIVE);
+              assertThat(s.name()).isEqualTo("Alice");
             });
-    }
+  }
 
-    @Test
-    void registerCustomer_existingCustomer_throws() {
-        fixture
-            .given(registered())
-            .when(new CustomerCommand.RegisterCustomer(
+  @Test
+  void registerCustomer_existingCustomer_throws() {
+    fixture
+        .given(registered())
+        .when(
+            new CustomerCommand.RegisterCustomer(
                 "c-1", "Mallory", "mallory@example.com", "1 Other St", "+1999999999"))
-            .expectFailedWith(DomainException.class, "Customer already registered: c-1");
-    }
+        .expectFailedWith(DomainException.class, "Customer already registered: c-1");
+  }
 
-    /**
-     * The decider does not refuse a forgotten customer's id. The key store does, one step later:
-     * it never issues a key for an erased subject again, so the event's encrypted fields cannot
-     * be written and the caller gets 410 Gone.
-     */
-    @Test
-    void registerCustomer_forgottenCustomer_isLeftToTheKeyStore() {
-        fixture
-            .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
-            .when(new CustomerCommand.RegisterCustomer(
+  /**
+   * The decider does not refuse a forgotten customer's id. The key store does, one step later: it
+   * never issues a key for an erased subject again, so the event's encrypted fields cannot be
+   * written and the caller gets 410 Gone (GdprForgetE2EIT in each app).
+   */
+  @Test
+  void registerCustomer_forgottenCustomer_isLeftToTheKeyStore() {
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(
+            new CustomerCommand.RegisterCustomer(
                 "c-1", "Alice", "alice@example.com", "123 Main St", "+1234567890"))
-            .expectEvents(registered());
-    }
+        .expectEvents(registered());
+  }
 
-    @Test
-    void updateProfile() {
-        fixture
-            .given(registered())
-            .when(new CustomerCommand.UpdateProfile("c-1", "Alice Smith", null, null, null))
-            .expectState(s -> assertThat(s.name()).isEqualTo("Alice Smith"));
-    }
+  @Test
+  void updateProfile() {
+    fixture
+        .given(registered())
+        .when(new CustomerCommand.UpdateProfile("c-1", "Alice Smith", null, null, null))
+        .expectState(s -> assertThat(s.name()).isEqualTo("Alice Smith"));
+  }
 
-    @Test
-    void updateProfile_forgotten_throws() {
-        fixture
-            .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
-            .when(new CustomerCommand.UpdateProfile("c-1", "Alice", null, null, null))
-            .expectException(DomainException.class);
-    }
+  @Test
+  void updateProfile_forgotten_throws() {
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(new CustomerCommand.UpdateProfile("c-1", "Alice", null, null, null))
+        .expectException(DomainException.class);
+  }
 
-    @Test
-    void requestDataExport() {
-        fixture
-            .given(registered())
-            .when(new CustomerCommand.RequestDataExport("c-1"))
-            .expectEvents(new CustomerEvent.DataExportRequested("c-1"));
-    }
+  @Test
+  void requestDataExport() {
+    fixture
+        .given(registered())
+        .when(new CustomerCommand.RequestDataExport("c-1"))
+        .expectEvents(new CustomerEvent.DataExportRequested("c-1"));
+  }
 
-    @Test
-    void forgetCustomer() {
-        fixture
-            .given(registered())
-            .when(new CustomerCommand.ForgetCustomer("c-1"))
-            .expectEvents(new CustomerEvent.CustomerForgotten("c-1"))
-            .expectState(s -> assertThat(s.status()).isEqualTo(CustomerStatus.FORGOTTEN));
-    }
+  @Test
+  void forgetCustomer() {
+    fixture
+        .given(registered())
+        .when(new CustomerCommand.ForgetCustomer("c-1"))
+        .expectEvents(new CustomerEvent.CustomerForgotten("c-1"))
+        .expectState(s -> assertThat(s.status()).isEqualTo(CustomerStatus.FORGOTTEN));
+  }
 
-    @Test
-    void forgetCustomer_alreadyForgotten_recordsNothingAndSucceeds() {
-        fixture
-            .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
-            .when(new CustomerCommand.ForgetCustomer("c-1"))
-            .expectNoEvents()
-            .expectState(s -> assertThat(s.status()).isEqualTo(CustomerStatus.FORGOTTEN));
-    }
+  @Test
+  void forgetCustomer_alreadyForgotten_recordsNothingAndSucceeds() {
+    // A repeated forget must not be refused: the controller shreds the key after this command, and
+    // a request that failed after the event was recorded is finished by sending it again.
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(new CustomerCommand.ForgetCustomer("c-1"))
+        .expectNoEvents()
+        .expectState(s -> assertThat(s.status()).isEqualTo(CustomerStatus.FORGOTTEN));
+  }
 
-    @Test
-    void forgetCustomer_neverRegistered_throws() {
-        fixture
-            .given()
-            .when(new CustomerCommand.ForgetCustomer("c-unknown"))
-            .expectException(DomainException.class);
-    }
+  @Test
+  void forgetCustomer_neverRegistered_throws() {
+    // Forgetting an id no customer registered would tombstone it in the key store, so the customer
+    // could never register under it; the decider refuses before the controller reaches the shred.
+    fixture
+        .given()
+        .when(new CustomerCommand.ForgetCustomer("c-unknown"))
+        .expectException(DomainException.class);
+  }
 
-    @Test
-    void updateProfile_neverRegistered_throws() {
-        // Personal data stored under an id no customer registered could never be erased: the
-        // decider refuses a forget for such an id, so it refuses the write that would need one.
-        fixture
-            .given()
-            .when(new CustomerCommand.UpdateProfile(
+  @Test
+  void updateProfile_neverRegistered_throws() {
+    // Personal data stored under an id no customer registered could never be erased: the decider
+    // refuses a forget for such an id, so it refuses the write that would need one too.
+    fixture
+        .given()
+        .when(
+            new CustomerCommand.UpdateProfile(
                 "c-unknown", "Mallory", "mallory@example.com", "1 Other St", null))
-            .expectFailedWith(DomainException.class, "Customer not found");
-    }
+        .expectFailedWith(DomainException.class, "Customer not found");
+  }
 
-    @Test
-    void requestDataExport_neverRegistered_throws() {
-        fixture
-            .given()
-            .when(new CustomerCommand.RequestDataExport("c-unknown"))
-            .expectFailedWith(DomainException.class, "Customer not found");
-    }
+  @Test
+  void requestDataExport_neverRegistered_throws() {
+    fixture
+        .given()
+        .when(new CustomerCommand.RequestDataExport("c-unknown"))
+        .expectFailedWith(DomainException.class, "Customer not found");
+  }
 
-    @Test
-    void requestDataExport_forgotten_throws() {
-        // Nothing is left to export, and the stream of an erased customer takes no further event.
-        fixture
-            .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
-            .when(new CustomerCommand.RequestDataExport("c-1"))
-            .expectFailedWith(
-                DomainException.class, "Cannot export the data of a forgotten customer");
-    }
+  @Test
+  void requestDataExport_forgotten_throws() {
+    // Nothing is left to export, and the stream of an erased customer takes no further event.
+    fixture
+        .given(registered(), new CustomerEvent.CustomerForgotten("c-1"))
+        .when(new CustomerCommand.RequestDataExport("c-1"))
+        .expectFailedWith(DomainException.class, "Cannot export the data of a forgotten customer");
+  }
 }
 ```
 
@@ -322,74 +337,77 @@ import org.streamrune.ecommerce.domain.customer.*;
 
 public class CustomerDecider implements Decider<CustomerCommand, CustomerState, CustomerEvent> {
 
-    @Override
-    public CustomerState initialState() {
-        return new CustomerState();
-    }
+  @Override
+  public CustomerState initialState() {
+    return new CustomerState();
+  }
 
-    @Override
-    public List<CustomerEvent> decide(CustomerCommand cmd, CustomerState state) {
-        return switch (cmd) {
-            case CustomerCommand.RegisterCustomer c -> {
-                // A customer id is registered once. Without this check a second
-                // RegisterCustomer would replace the first customer's profile. A forgotten
-                // customer's id is not refused here but one step later, by the key store: it
-                // never issues a key for an erased subject again, so the event's encrypted
-                // fields cannot be written and the caller gets 410 Gone.
-                if (state.customerId() != null && state.status() != CustomerStatus.FORGOTTEN)
-                    throw new DomainException("Customer already registered: " + c.customerId());
-                yield List.of(new CustomerEvent.CustomerRegistered(
-                    c.customerId(), c.name(), c.email(), c.address(), c.phone()));
-            }
+  @Override
+  public List<CustomerEvent> decide(CustomerCommand cmd, CustomerState state) {
+    return switch (cmd) {
+      case CustomerCommand.RegisterCustomer c -> {
+        // A customer id is registered once. Without this check a second RegisterCustomer would
+        // replace the first customer's profile. A forgotten customer's id is not refused here but
+        // one step later, by the key store: it never issues a key for an erased subject again, so
+        // the event's encrypted fields cannot be written and the caller gets 410 Gone.
+        if (state.customerId() != null && state.status() != CustomerStatus.FORGOTTEN)
+          throw new DomainException("Customer already registered: " + c.customerId());
+        yield List.of(
+            new CustomerEvent.CustomerRegistered(
+                c.customerId(), c.name(), c.email(), c.address(), c.phone()));
+      }
 
-            case CustomerCommand.UpdateProfile c -> {
-                // An id no customer registered is refused, as ForgetCustomer refuses it below:
-                // personal data stored under such an id could never be erased.
-                if (state.customerId() == null) throw new DomainException("Customer not found");
-                if (state.status() == CustomerStatus.FORGOTTEN)
-                    throw new DomainException("Cannot update a forgotten customer");
-                yield List.of(new CustomerEvent.ProfileUpdated(
-                    c.customerId(),
-                    c.name()    != null ? c.name()    : state.name(),
-                    c.email()   != null ? c.email()   : state.email(),
-                    c.address() != null ? c.address() : state.address(),
-                    c.phone()   != null ? c.phone()   : state.phone()));
-            }
+      case CustomerCommand.UpdateProfile c -> {
+        // An id no customer registered is refused, as ForgetCustomer refuses it below: personal
+        // data stored under such an id could never be erased.
+        if (state.customerId() == null) throw new DomainException("Customer not found");
+        if (state.status() == CustomerStatus.FORGOTTEN)
+          throw new DomainException("Cannot update a forgotten customer");
+        yield List.of(
+            new CustomerEvent.ProfileUpdated(
+                c.customerId(),
+                c.name() != null ? c.name() : state.name(),
+                c.email() != null ? c.email() : state.email(),
+                c.address() != null ? c.address() : state.address(),
+                c.phone() != null ? c.phone() : state.phone()));
+      }
 
-            case CustomerCommand.RequestDataExport c -> {
-                if (state.customerId() == null) throw new DomainException("Customer not found");
-                // Nothing is left to export, and the stream of an erased customer takes no
-                // further event.
-                if (state.status() == CustomerStatus.FORGOTTEN)
-                    throw new DomainException("Cannot export the data of a forgotten customer");
-                yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
-            }
+      case CustomerCommand.RequestDataExport c -> {
+        if (state.customerId() == null) throw new DomainException("Customer not found");
+        // Nothing is left to export, and the stream of an erased customer takes no further event.
+        if (state.status() == CustomerStatus.FORGOTTEN)
+          throw new DomainException("Cannot export the data of a forgotten customer");
+        yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+      }
 
-            case CustomerCommand.ForgetCustomer c -> {
-                if (state.customerId() == null) throw new DomainException("Customer not found");
-                if (state.status() == CustomerStatus.FORGOTTEN) yield List.of();
-                yield List.of(new CustomerEvent.CustomerForgotten(c.customerId()));
-            }
-        };
-    }
+      case CustomerCommand.ForgetCustomer c -> {
+        // An id no customer registered is refused: the forget endpoint shreds the key after this
+        // command, and a shred records a permanent tombstone, so a customer could never register
+        // under that id afterwards.
+        if (state.customerId() == null) throw new DomainException("Customer not found");
+        // Already forgotten: record nothing and succeed. The endpoint shreds the key after this
+        // command, so a request that failed after the event was recorded is finished by sending
+        // it again; refusing the repeat would leave the key in place for good.
+        if (state.status() == CustomerStatus.FORGOTTEN) yield List.of();
+        yield List.of(new CustomerEvent.CustomerForgotten(c.customerId()));
+      }
+    };
+  }
 
-    @Override
-    public CustomerState evolve(CustomerState state, CustomerEvent evt) {
-        return switch (evt) {
-            case CustomerEvent.CustomerRegistered e ->
-                new CustomerState(
-                    e.customerId(), e.name(), e.email(), e.address(), e.phone(),
-                    CustomerStatus.ACTIVE);
-            case CustomerEvent.ProfileUpdated e ->
-                new CustomerState(
-                    state.customerId(), e.name(), e.email(), e.address(), e.phone(),
-                    state.status());
-            case CustomerEvent.DataExportRequested e -> state;
-            case CustomerEvent.CustomerForgotten e ->
-                new CustomerState(
-                    state.customerId(), null, null, null, null, CustomerStatus.FORGOTTEN);
-        };
-    }
+  @Override
+  public CustomerState evolve(CustomerState state, CustomerEvent evt) {
+    return switch (evt) {
+      case CustomerEvent.CustomerRegistered e ->
+          new CustomerState(
+              e.customerId(), e.name(), e.email(), e.address(), e.phone(), CustomerStatus.ACTIVE);
+      case CustomerEvent.ProfileUpdated e ->
+          new CustomerState(
+              state.customerId(), e.name(), e.email(), e.address(), e.phone(), state.status());
+      case CustomerEvent.DataExportRequested e -> state;
+      case CustomerEvent.CustomerForgotten e ->
+          new CustomerState(state.customerId(), null, null, null, null, CustomerStatus.FORGOTTEN);
+    };
+  }
 }
 ```
 
@@ -407,7 +425,7 @@ Run the tests:
 ./gradlew :commands:test --tests "*.CustomerDeciderTest"
 ```
 
-All nine tests should pass. Green phase.
+All twelve tests should pass. Green phase.
 
 ### Step 3 — Confirm the crypto dependencies in `domain/build.gradle.kts`
 
@@ -450,29 +468,27 @@ public record CustomerView(
 
 ### Step 4 — Declare the crypto engine bean
 
-This is the step that actually turns encryption on. Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add a `cryptoEngine` bean:
+This is the step that actually turns encryption on. Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add a `cryptoEngine` bean (it needs the import of `org.streamrune.crypto.postgres.PostgresCryptoEngine`; `javax.sql.DataSource` is imported since chapter 5):
 
 ```java
-import javax.sql.DataSource;
-import org.streamrune.crypto.postgres.PostgresCryptoEngine;
-
-/**
- * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on
- * {@code CustomerEvent}. Wired into the event store by the auto-configured
- * {@code postgresEventStoreFactory}; deleting a subject's key crypto-shreds
- * all their PII across every event and projection at once.
- * Its {@code encryption_keys}, {@code forgotten_subjects} and
- * {@code erased_key_generations} tables come from the framework's crypto
- * migration series, which the event store factory applies at startup next to
- * its own ({@code streamrune.event-store.schema.auto-initialize}).
- */
 @Bean
 public PostgresCryptoEngine cryptoEngine(DataSource ds) {
-    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  return PostgresCryptoEngine.builder().dataSource(ds).build();
 }
 ```
 
-`PostgresCryptoEngine` stores per-subject AES-256 keys in the `encryption_keys` table. You do not create it: now that a crypto engine bean exists, the event store factory applies the crypto migration series bundled in `streamrune-postgres-crypto` (`db/crypto-migration/`, recorded in `flyway_schema_history_crypto`) on the next start, next to the event-store series from chapter 1, and `encryption_keys`, `forgotten_subjects` and `erased_key_generations` appear. StreamRune's Spring auto-configuration discovers this bean via `ObjectProvider<CryptoEngine>` alongside the `EventTypeRegistry` and `EventUpcaster` beans from chapters 2 and 4, and builds a single `PostgresEventStore` with encryption active. Every event with `@Encrypted` components is then encrypted before it is written to `event_stream.payload` and decrypted when it is read back — transparently to your domain code. No changes to any other bean in `StreamRuneConfig` are needed.
+`PostgresCryptoEngine` stores per-subject AES-256 keys in the `encryption_keys` table. You do not create it: now that a crypto engine bean exists, the event store factory applies the crypto migration series bundled in `streamrune-postgres-crypto` (`db/crypto-migration/`, recorded in `flyway_schema_history_crypto`) on the next start, next to the event-store series from chapter 1, and `encryption_keys`, `forgotten_subjects` and `erased_key_generations` appear. StreamRune's Spring auto-configuration discovers this bean via `ObjectProvider<CryptoEngine>` alongside the `EventTypeRegistry` and `EventUpcaster` beans from chapters 2 and 4, and builds a single `PostgresEventStore` with encryption active. Every event with `@Encrypted` components is then encrypted before it is written to `event_stream.payload` and decrypted when it is read back — transparently to your domain code.
+
+A crypto engine also brings in the framework's GDPR erasure service, `ForgetSubjectService`, which chapter 7 puts to work: its `forget` deletes a subject's key. The service refuses to start without a purger for the aggregate snapshots (a snapshot keeps the aggregate's state in the clear, chapter 8), unless the application states that it has never stored one. This application has not — its command bus takes no snapshots before chapter 8 — so declare the service with `withoutSnapshotPurge()` for now. Without this bean the auto-configured service stops the application at startup with `The ForgetSubjectService StreamRune configures has no snapshot purger`. Chapter 7 replaces it with the version that runs the purgers, a snapshot purger among them, before chapter 8 turns snapshots on:
+
+```java
+@Bean
+public ForgetSubjectService forgetSubjectService(PostgresCryptoEngine cryptoEngine) {
+  return ForgetSubjectService.builder().cryptoEngine(cryptoEngine).withoutSnapshotPurge().build();
+}
+```
+
+It needs the import of `org.streamrune.runtime.gdpr.ForgetSubjectService`.
 
 ### Step 5 — Register Customer events in the EventTypeRegistry
 
@@ -535,47 +551,48 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 @RequestMapping("/api/customers")
 public class CustomerCommandController {
 
-    private final VirtualThreadCommandBus commandBus;
+  private final VirtualThreadCommandBus commandBus;
 
-    public CustomerCommandController(VirtualThreadCommandBus commandBus) {
-        this.commandBus = commandBus;
-    }
+  public CustomerCommandController(VirtualThreadCommandBus commandBus) {
+    this.commandBus = commandBus;
+  }
 
-    @PostMapping
-    public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
-        commandBus.execute(new CustomerCommand.RegisterCustomer(
+  @PostMapping
+  public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
+    commandBus.execute(
+        new CustomerCommand.RegisterCustomer(
             req.customerId(), req.name(), req.email(), req.address(), req.phone()));
-        return ResponseEntity.ok().build();
-    }
+    return ResponseEntity.ok().build();
+  }
 
-    @PutMapping("/{id}")
-    public ResponseEntity<Void> updateProfile(
-        @PathVariable String id, @RequestBody UpdateProfileRequest req) {
-        commandBus.execute(
-            new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
-        return ResponseEntity.ok().build();
-    }
+  @PutMapping("/{id}")
+  public ResponseEntity<Void> updateProfile(
+      @PathVariable String id, @RequestBody UpdateProfileRequest req) {
+    commandBus.execute(
+        new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
+    return ResponseEntity.ok().build();
+  }
 
-    @PostMapping("/{id}/export-data")
-    public ResponseEntity<Void> exportData(@PathVariable String id) {
-        commandBus.execute(new CustomerCommand.RequestDataExport(id));
-        return ResponseEntity.ok().build();
-    }
+  @PostMapping("/{id}/export-data")
+  public ResponseEntity<Void> exportData(@PathVariable String id) {
+    commandBus.execute(new CustomerCommand.RequestDataExport(id));
+    return ResponseEntity.ok().build();
+  }
 
-    @PostMapping("/{id}/forget")
-    public ResponseEntity<Void> forgetCustomer(@PathVariable String id) {
-        commandBus.execute(new CustomerCommand.ForgetCustomer(id));
-        return ResponseEntity.ok().build();
-    }
+  @PostMapping("/{id}/forget")
+  public ResponseEntity<Void> forgetCustomer(@PathVariable String id) {
+    commandBus.execute(new CustomerCommand.ForgetCustomer(id));
+    return ResponseEntity.ok().build();
+  }
 
-    public record RegisterRequest(
-        @NotBlank String customerId,
-        @NotBlank String name,
-        @Email @NotBlank String email,
-        String address,
-        String phone) {}
+  public record RegisterRequest(
+      @NotBlank String customerId,
+      @NotBlank String name,
+      @Email @NotBlank String email,
+      String address,
+      String phone) {}
 
-    public record UpdateProfileRequest(String name, String email, String address, String phone) {}
+  public record UpdateProfileRequest(String name, String email, String address, String phone) {}
 }
 ```
 
@@ -596,22 +613,22 @@ import org.streamrune.ecommerce.queries.dto.CustomerView;
 @RequestMapping("/api/customers")
 public class CustomerQueryController {
 
-    private final CustomerProjection customerProjection;
+  private final CustomerProjection customerProjection;
 
-    public CustomerQueryController(CustomerProjection customerProjection) {
-        this.customerProjection = customerProjection;
-    }
+  public CustomerQueryController(CustomerProjection customerProjection) {
+    this.customerProjection = customerProjection;
+  }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<CustomerView> getCustomer(@PathVariable String id) {
-        CustomerView customer = customerProjection.get(id);
-        return customer != null ? ResponseEntity.ok(customer) : ResponseEntity.notFound().build();
-    }
+  @GetMapping("/{id}")
+  public ResponseEntity<CustomerView> getCustomer(@PathVariable String id) {
+    CustomerView customer = customerProjection.get(id);
+    return customer != null ? ResponseEntity.ok(customer) : ResponseEntity.notFound().build();
+  }
 
-    @GetMapping
-    public List<CustomerView> listCustomers() {
-        return customerProjection.listAll();
-    }
+  @GetMapping
+  public List<CustomerView> listCustomers() {
+    return customerProjection.listAll();
+  }
 }
 ```
 
@@ -670,12 +687,11 @@ public class CustomerProjection extends BaseProjection {
           }
           case CustomerEvent.CustomerForgotten e ->
               // GDPR Article 17 erasure: drop the read-model row entirely rather than leave a
-              // redacted shell. The SubjectDataPurger run by ForgetSubjectService (chapter 7)
-              // deletes the same row, so projection and purger agree on the terminal state
-              // ("row gone") regardless of which observes the forget first — delete is
-              // idempotent on a missing id. The inherited delete() helper, like save(), writes
-              // inside the batch's transaction; the repository field would run outside it and
-              // miss a row this batch inserted.
+              // redacted shell. The SubjectDataPurger run by ForgetSubjectService deletes the same
+              // row, so projection and purger agree on the terminal state ("row gone") regardless
+              // of which observes the forget first — delete is idempotent on a missing id. The
+              // inherited delete() helper, like save(), writes inside the batch's transaction;
+              // the repository field would run outside it and miss a row this batch inserted.
               delete(e.customerId());
         }
       }
@@ -694,7 +710,294 @@ public class CustomerProjection extends BaseProjection {
 
 Because `CryptoShreddingModule` decrypts `@Encrypted` fields before they reach the projection handler, `CustomerView` always holds plaintext values during normal operation. When `CustomerForgotten` arrives, the projection deletes the read-model row entirely rather than leaving a redacted shell — a subsequent `GET /api/customers/{id}` then returns `404 Not Found`. Chapter 7 wires the GDPR forget flow that also deletes the encryption key and runs a `SubjectDataPurger`; that purger deletes the same row, so projection and purger agree on the terminal state ("row gone").
 
-### Step 8 — Run and verify
+### Step 8 — Register `CustomerProjection` in `MultiProjectionRunner`
+
+`CustomerProjection` becomes a bean of `StreamRuneConfig`, next to `productProjection`, and the `MultiProjectionRunner` you wired in Chapter 5 gets a registration for it. Declare the bean:
+
+```java
+@Bean
+public CustomerProjection customerProjection(ProjectionRepository repo) {
+  return new CustomerProjection(repo);
+}
+```
+
+and give `projectionRunner` the projection as a parameter and a `"customers"` registration:
+
+```java
+@Bean(destroyMethod = "close")
+public MultiProjectionRunner projectionRunner(
+    EventStore eventStore,
+    OffsetStore offsetStore,
+    JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
+    ProductProjection productProjection,
+    CustomerProjection customerProjection,
+    CacheInvalidator cacheInvalidator) {
+  var runner =
+      MultiProjectionRunner.builder()
+          .eventStore(eventStore)
+          .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
+          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+          // checkpoint in ONE transaction.
+          .atomicProcessor(projectionRepository)
+          .register(
+              "products",
+              new CacheAwareProjection(productProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .register(
+              "customers",
+              new CacheAwareProjection(customerProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .build();
+  runner.start();
+  return runner;
+}
+```
+
+Without the registration `CustomerProjection` would be a dangling bean — Spring would create it but no projection runner would ever feed it events. With this change, `MultiProjectionRunner` assigns customers its own virtual thread and its own offset row in `PostgresOffsetStore`, independent of the products projection. `CustomerProjection` writes through the same `projectionRepository` bean as products, so it is `TRANSACTIONAL_LOCAL` too: the forget handler's `delete(customerId)` and the rest of the batch commit with the checkpoint, or not at all.
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 6</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(validation)
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * The GDPR erasure service: {@code forget(subjectId, requester)} deletes the subject's key, which
+   * crypto-shreds the {@code @Encrypted} fields of every event that holds the customer's data. The
+   * builder refuses a service without a snapshot purger unless {@code withoutSnapshotPurge()}
+   * states that no aggregate snapshot exists, and none does: the command bus takes no snapshots.
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(PostgresCryptoEngine cryptoEngine) {
+    return ForgetSubjectService.builder().cryptoEngine(cryptoEngine).withoutSnapshotPurge().build();
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+}
+```
+
+</details>
+
+### Step 9 — Run and verify
 
 Start the application:
 
@@ -713,7 +1016,7 @@ curl -X POST http://localhost:8080/api/customers \
 You should receive `200 OK`. Now inspect the raw event in the database to see the encrypted payload:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, event_type, payload FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'c-1';"
 ```
 
@@ -755,50 +1058,11 @@ The response returns the customer with all fields decrypted:
 You can also confirm that a per-subject key was created:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT subject_id, length(key_bytes) AS key_bytes FROM encryption_keys;"
 ```
 
 You should see one row with a 32-byte key (AES-256). `subject_id` will *not* read `c-1` — `PostgresCryptoEngine` stores the SHA-256 hex hash of the subject id, never the raw value, so PII-shaped ids (emails, usernames) never persist verbatim in this table.
-
-### Step 9 — Register `CustomerProjection` in `MultiProjectionRunner`
-
-`CustomerProjection` is a Spring bean, but the `MultiProjectionRunner` you wired in Chapter 5 does not know about it yet. Open `StreamRuneConfig.java` and replace the `projectionRunner` bean with the expanded version that includes customers:
-
-```java
-@Bean(destroyMethod = "close")
-public MultiProjectionRunner projectionRunner(
-    EventStore eventStore,
-    OffsetStore offsetStore,
-    JdbcProjectionRepository projectionRepository,
-    StreamRuneProperties properties,
-    ProductProjection productProjection,
-    CustomerProjection customerProjection,
-    CacheInvalidator cacheInvalidator) {
-
-  var runner =
-      MultiProjectionRunner.builder()
-          .eventStore(eventStore)
-          .offsetStore(offsetStore)
-          .subscriptionConfig(projectionPolling(properties))
-          .atomicProcessor(projectionRepository)
-          .register(
-              "products",
-              new CacheAwareProjection(productProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          .register(
-              "customers",
-              new CacheAwareProjection(customerProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch08: .register("orders",    new CacheAwareProjection(orderProjection,    cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch13: .register("inventory", new CacheAwareProjection(inventoryProjection, cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          .build();
-  runner.start();
-  return runner;
-}
-```
-
-Without this step `CustomerProjection` would be a dangling bean — Spring would create it but no projection runner would ever feed it events. With this change, `MultiProjectionRunner` assigns customers its own virtual thread and its own offset row in `PostgresOffsetStore`, independent of the products projection. `CustomerProjection` writes through the same `projectionRepository` bean as products, so it is `TRANSACTIONAL_LOCAL` too: the forget handler's `delete(customerId)` and the rest of the batch commit with the checkpoint, or not at all.
 
 ---
 

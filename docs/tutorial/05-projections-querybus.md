@@ -96,7 +96,8 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
       ProductEvent.StockAdjusted.class, ProductEvent.ProductDiscontinued.class
     })
 public record ListProducts()
-    implements org.streamrune.core.Query<java.util.List<org.streamrune.ecommerce.queries.dto.ProductView>> {}
+    implements org.streamrune.core.Query<
+        java.util.List<org.streamrune.ecommerce.queries.dto.ProductView>> {}
 ```
 
 The record implements the framework's `Query<R>` marker, where `R` is the result type the query resolves to — here `List<ProductView>`. This is what makes the `QueryBus` type-safe: `register(ListProducts.class, ...)` binds the handler's return type to `List<ProductView>` at compile time, and `dispatch(new ListProducts())` returns `List<ProductView>` with no cast at the call site. (`ListProducts` carries no fields, so it uses the fully-qualified type names inline rather than adding imports.)
@@ -125,88 +126,88 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
     deliveryMode = ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
 public class ProductProjection extends BaseProjection {
 
-    public ProductProjection(ProjectionRepository repository) {
-        super(repository, "products");
-    }
+  public ProductProjection(ProjectionRepository repository) {
+    super(repository, "products");
+  }
 
-    @Override
-    public void process(List<EventEnvelope> events) {
-        for (var envelope : events) {
-            if (envelope.event() instanceof ProductEvent evt) {
-                switch (evt) {
-                    case ProductEvent.ProductCreated e ->
-                        save(
-                            e.productId(),
-                            new ProductView(
-                                e.productId(),
-                                e.name(),
-                                e.description(),
-                                e.category(),
-                                e.price(),
-                                e.stock(),
-                                ProductState.statusForStock(e.stock()),
-                                envelope.metadata().timestamp(),
-                                envelope.metadata().timestamp()));
-                    case ProductEvent.PriceUpdated e ->
-                        findById(e.productId(), ProductView.class)
-                            .ifPresent(
-                                existing ->
-                                    save(
-                                        e.productId(),
-                                        new ProductView(
-                                            existing.productId(),
-                                            existing.name(),
-                                            existing.description(),
-                                            existing.category(),
-                                            e.newPrice(),
-                                            existing.stock(),
-                                            existing.status(),
-                                            existing.createdAt(),
-                                            envelope.metadata().timestamp())));
-                    case ProductEvent.StockAdjusted e ->
-                        findById(e.productId(), ProductView.class)
-                            .ifPresent(
-                                existing ->
-                                    save(
-                                        e.productId(),
-                                        new ProductView(
-                                            existing.productId(),
-                                            existing.name(),
-                                            existing.description(),
-                                            existing.category(),
-                                            existing.price(),
-                                            e.newStock(),
-                                            ProductState.statusForStock(e.newStock()),
-                                            existing.createdAt(),
-                                            envelope.metadata().timestamp())));
-                    case ProductEvent.ProductDiscontinued e ->
-                        findById(e.productId(), ProductView.class)
-                            .ifPresent(
-                                existing ->
-                                    save(
-                                        e.productId(),
-                                        new ProductView(
-                                            existing.productId(),
-                                            existing.name(),
-                                            existing.description(),
-                                            existing.category(),
-                                            existing.price(),
-                                            existing.stock(),
-                                            ProductStatus.DISCONTINUED,
-                                            existing.createdAt(),
-                                            envelope.metadata().timestamp())));
-                }
-            }
+  @Override
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      if (envelope.event() instanceof ProductEvent evt) {
+        switch (evt) {
+          case ProductEvent.ProductCreated e ->
+              save(
+                  e.productId(),
+                  new ProductView(
+                      e.productId(),
+                      e.name(),
+                      e.description(),
+                      e.category(),
+                      e.price(),
+                      e.stock(),
+                      ProductState.statusForStock(e.stock()),
+                      envelope.metadata().timestamp(),
+                      envelope.metadata().timestamp()));
+          case ProductEvent.PriceUpdated e ->
+              findById(e.productId(), ProductView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new ProductView(
+                                  existing.productId(),
+                                  existing.name(),
+                                  existing.description(),
+                                  existing.category(),
+                                  e.newPrice(),
+                                  existing.stock(),
+                                  existing.status(),
+                                  existing.createdAt(),
+                                  envelope.metadata().timestamp())));
+          case ProductEvent.StockAdjusted e ->
+              findById(e.productId(), ProductView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new ProductView(
+                                  existing.productId(),
+                                  existing.name(),
+                                  existing.description(),
+                                  existing.category(),
+                                  existing.price(),
+                                  e.newStock(),
+                                  ProductState.statusForStock(e.newStock()),
+                                  existing.createdAt(),
+                                  envelope.metadata().timestamp())));
+          case ProductEvent.ProductDiscontinued e ->
+              findById(e.productId(), ProductView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new ProductView(
+                                  existing.productId(),
+                                  existing.name(),
+                                  existing.description(),
+                                  existing.category(),
+                                  existing.price(),
+                                  existing.stock(),
+                                  ProductStatus.DISCONTINUED,
+                                  existing.createdAt(),
+                                  envelope.metadata().timestamp())));
         }
+      }
     }
+  }
 
-    public ProductView get(String productId) {
-        return findById(productId, ProductView.class).orElse(null);
-    }
+  public ProductView get(String productId) {
+    return findById(productId, ProductView.class).orElse(null);
+  }
 
-    public List<ProductView> listAll() {
-        return repository.findAll(projectionName(), ProductView.class);
-    }
+  public List<ProductView> listAll() {
+    return repository.findAll(projectionName(), ProductView.class);
+  }
 }
 ```
 
@@ -220,30 +221,14 @@ A few things to notice:
 
 ### Step 4 — Register the beans
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add the following beans. The new types in this chapter come from four artifacts; add these imports to the top of the file (alongside the ones from chapters 2 and 4):
-
-```java
-import org.streamrune.core.QueryBus;
-import org.streamrune.core.projection.OffsetStore;
-import org.streamrune.core.projection.ProjectionDeliveryMode;
-import org.streamrune.core.projection.ProjectionRepository;
-import org.streamrune.postgres.JdbcProjectionRepository;
-import org.streamrune.postgres.PostgresOffsetStore;
-import org.streamrune.runtime.CacheAwareProjection;
-import org.streamrune.runtime.CacheInvalidator;
-import org.streamrune.runtime.CachingQueryBus;
-import org.streamrune.runtime.MultiProjectionRunner;
-import org.streamrune.runtime.SimpleQueryBus;
-import org.streamrune.ecommerce.projections.ProductProjection;
-import org.streamrune.ecommerce.queries.query.ListProducts;
-```
+Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. This chapter adds the read side's beans: the projection repository and the `ProductProjection` in this step, the query bus and the offset store in Step 5, and the projection runner in Step 7, which ends with the whole class. The new types come from `org.streamrune.core.projection`, `org.streamrune.core.subscription`, `org.streamrune.postgres` and `org.streamrune.runtime` (the last two imported whole), from Spring's `javax.sql.DataSource`, and from the `projections` and `queries` modules.
 
 First, the projection repository — a single shared instance backed by JDBC:
 
 ```java
 @Bean
 public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
+  return new JdbcProjectionRepository(ds);
 }
 ```
 
@@ -254,49 +239,43 @@ Then the `ProductProjection` bean, injecting the repository:
 ```java
 @Bean
 public ProductProjection productProjection(ProjectionRepository repo) {
-    return new ProductProjection(repo);
+  return new ProductProjection(repo);
 }
 ```
 
-The `ProjectionRepository` is shared across all projections; each projection uses a distinct namespace derived from its class name, so there is no collision.
+The `ProjectionRepository` is shared across all projections; each projection writes to a table of its own, named after its projection name (`products_view` for `"products"`), so there is no collision.
 
 ### Step 5 — Wire the QueryBus and register the handler
 
-The `QueryBus` is split into two beans. First, a named `cachingQueryBus` bean that holds handler registrations and honours `@Cacheable`. Second, a `queryBus` bean that controllers inject — it will be upgraded to an `AuditingQueryBus` in Chapter 10. For now the outer bean simply delegates to the caching bus.
+The `QueryBus` the controllers inject is a `cachingQueryBus` bean that holds the handler registrations and honours `@Cacheable`. It is the application's only `QueryBus` until Chapter 10 wraps it in an `AuditingQueryBus`, the bean `queryBus`.
 
 Add to `StreamRuneConfig`:
 
 ```java
 @Bean
 public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
-    var simpleQueryBus = new SimpleQueryBus();
-    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
-    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
-    return cachingBus;
-}
-
-@Bean
-public QueryBus queryBus(CachingQueryBus cachingQueryBus) {
-    // Chapter 10 will replace this with: new AuditingQueryBus(cachingQueryBus, auditStore)
-    return cachingQueryBus;
+  var simpleQueryBus = new SimpleQueryBus();
+  var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+  cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+  return cachingBus;
 }
 ```
 
 A few things to notice:
 
-- The handler is registered on `cachingQueryBus`, not on the outer wrapper. This means handler registrations survive intact when Chapter 10 replaces the outer `queryBus` — no re-registration needed.
+- The handler is registered on `cachingQueryBus`, the bus Chapter 10 wraps. Its registrations survive that change intact — no re-registration needed.
 - `cachingBus.register(...)` delegates down to `SimpleQueryBus`, so dispatched queries flow `QueryBus → CachingQueryBus → SimpleQueryBus → handler`.
 - `CachingQueryBus` inspects the `@Cacheable` annotation on the query class at dispatch time using a memoized annotation lookup — zero reflection on the hot path after the first call.
 - `cachingBus.cacheInvalidator()` returns a `CacheInvalidator` bean that gets wired into `MultiProjectionRunner` (Step 7 below) so the cache is flushed on every relevant event.
 
-> **Two-bean pattern:** Keeping `cachingQueryBus` as a named typed bean makes Chapter 10 a one-line change — replace the `queryBus` body with `new AuditingQueryBus(cachingQueryBus, auditStore)`. The `CachingQueryBus` and all its registrations are untouched.
+> **One `CachingQueryBus` bean.** Several beans take the `CachingQueryBus` by its type — the `CacheInvalidator` below, the forget service of Chapter 7 — so the application declares exactly one bean of that type. A second bean method that returned the same object as a `QueryBus` would be a second bean of type `CachingQueryBus` to Spring, and the context would not start: `expected single matching bean but found 2`. Chapter 10's `queryBus` is an `AuditingQueryBus` around it, a bean of another type.
 
-Also add a dedicated `CacheInvalidator` bean immediately after the `queryBus` bean — `MultiProjectionRunner` will inject it by type:
+Also add a dedicated `CacheInvalidator` bean immediately after the `cachingQueryBus` bean — `MultiProjectionRunner` will inject it by type:
 
 ```java
 @Bean
-public CacheInvalidator cacheInvalidator(CachingQueryBus cachingQueryBus) {
-    return cachingQueryBus.cacheInvalidator();
+public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+  return cachingBus.cacheInvalidator();
 }
 ```
 
@@ -305,7 +284,7 @@ And add the `OffsetStore` bean — this records each projection's read position 
 ```java
 @Bean
 public OffsetStore offsetStore(DataSource ds) {
-    return new PostgresOffsetStore(ds);
+  return new PostgresOffsetStore(ds);
 }
 ```
 
@@ -330,36 +309,273 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
 @RequestMapping("/api/products")
 public class ProductQueryController {
 
-    private final ProductProjection productProjection;
-    private final QueryBus queryBus;
+  private final ProductProjection productProjection;
+  private final QueryBus queryBus;
 
-    public ProductQueryController(ProductProjection productProjection, QueryBus queryBus) {
-        this.productProjection = productProjection;
-        this.queryBus = queryBus;
-    }
+  public ProductQueryController(ProductProjection productProjection, QueryBus queryBus) {
+    this.productProjection = productProjection;
+    this.queryBus = queryBus;
+  }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<ProductView> getProduct(@PathVariable String id) {
-        ProductView product = productProjection.get(id);
-        return product != null ? ResponseEntity.ok(product) : ResponseEntity.notFound().build();
-    }
+  @GetMapping("/{id}")
+  public ResponseEntity<ProductView> getProduct(@PathVariable String id) {
+    ProductView product = productProjection.get(id);
+    return product != null ? ResponseEntity.ok(product) : ResponseEntity.notFound().build();
+  }
 
-    @GetMapping
-    public List<ProductView> listProducts() {
-        return queryBus.dispatch(new ListProducts());
-    }
+  @GetMapping
+  public List<ProductView> listProducts() {
+    return queryBus.dispatch(new ListProducts());
+  }
 }
 ```
 
 `queryBus.dispatch(new ListProducts())` returns the cached list when the cache is warm and a `ProductCreated` / `PriceUpdated` / `StockAdjusted` / `ProductDiscontinued` event has not invalidated it; otherwise it routes to the registered handler, which calls `productProjection.listAll()`.
 
-### Step 7 — Run and verify
+### Step 7 — Run the projection: `MultiProjectionRunner`
 
-Start the PostgreSQL container (if it is not already up), then run the application:
+Rather than creating a separate `ContinuousProjectionRunner` bean for each projection, the demo uses a single `MultiProjectionRunner` that manages all projections as a group.
+
+**At this point in the tutorial only `ProductProjection` exists.** Wire the runner with just that projection now. You will expand it in later chapters as new projections are created — `CustomerProjection` (Ch06), `OrderProjection` (Ch08), `InventoryProjection` (Ch13).
+
+Add the runner to `StreamRuneConfig`:
+
+```java
+@Bean(destroyMethod = "close")
+public MultiProjectionRunner projectionRunner(
+    EventStore eventStore,
+    OffsetStore offsetStore,
+    JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
+    ProductProjection productProjection,
+    CacheInvalidator cacheInvalidator) {
+  var runner =
+      MultiProjectionRunner.builder()
+          .eventStore(eventStore)
+          .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
+          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+          // checkpoint in ONE transaction.
+          .atomicProcessor(projectionRepository)
+          .register(
+              "products",
+              new CacheAwareProjection(productProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .build();
+  runner.start();
+  return runner;
+}
+```
+
+`projectionPolling(properties)` says how often each projection reads the event store for new events. Add the helper next to the bean (it uses `java.time.Duration`, `org.streamrune.core.subscription.SubscriptionConfig` and `org.streamrune.spring.StreamRuneProperties`):
+
+```java
+private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+  return new SubscriptionConfig(
+      true,
+      Duration.ofMillis(properties.pollingIntervalMs()),
+      Duration.ofMillis(properties.pollingJitterMs()));
+}
+```
+
+`StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval-ms` and `streamrune.polling-jitter-ms` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval-ms=500` to keep their waits short.
+
+Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own offset namespace in `PostgresOffsetStore`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
+
+#### Delivery modes — what you are promising
+
+Every `register(...)` call names a `ProjectionDeliveryMode`, and there is no default: the right value depends on where the projection writes. The runner checks each declaration against its processor when it is built, before it reads an event, and refuses with an `IllegalArgumentException` that names the projection, the mode and the fix — for example when a `TRANSACTIONAL_LOCAL` projection writes to a repository other than the one passed to `.atomicProcessor(...)`.
+
+| mode | what the framework guarantees | what the projection promises | typical write target |
+|---|---|---|---|
+| `TRANSACTIONAL_LOCAL` | the batch's read-model writes and the checkpoint are all-or-nothing; a redelivered or split-brain batch is rejected before any write | writes only through the handed repository during `process` | `JdbcProjectionRepository` (`<name>_view` tables) in the framework's database |
+| `AT_LEAST_ONCE_IDEMPOTENT` | the checkpoint advances only after `process` returned; a crash or a rejected checkpoint redelivers the batch from the last checkpoint; the projection is never handed a transaction-scoped repository | applying the same event twice yields the same read model | anything: another `DataSource`, JPA, Redis, memory — or the framework's own `JdbcProjectionRepository`, written autocommit through the projection's captured reference |
+| `EXTERNAL_EFFECT` | as `TRANSACTIONAL_LOCAL`, for the outbox row | no external call in `process`; the receiver dedups by event id | an outbox row through the handed repository, relayed later by the application's relay |
+
+**An at-least-once projection is never handed the checkpoint transaction** — the runner passes `null` to `process(batch, repository)`, so its writes go where it sends them. **No mode makes an external effect exactly-once** — an HTTP call, a Kafka produce or an e-mail inside `process` is at-least-once under every mode and belongs behind the outbox (Chapter 13). The four PostgreSQL read models in this demo are `TRANSACTIONAL_LOCAL`; the in-memory `AuditProjection` of Chapter 10 is `AT_LEAST_ONCE_IDEMPOTENT`.
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 5</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(validation)
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+}
+```
+
+</details>
+
+### Step 8 — Run and verify
+
+Start PostgreSQL (if it is not already up), then run the application:
 
 ```bash
-docker start streamrune-pg   # if the container exists but is stopped
-# or, if starting from scratch, see Chapter 1 Step 5 for the full `docker run` command
+docker compose up -d postgres
 ./gradlew :spring-app:bootRun
 ```
 
@@ -406,91 +622,26 @@ The `price.amount` field should now be `34.99` and `updatedAt` should be later t
 Finally, verify the read model was persisted in PostgreSQL:
 
 ```bash
-docker exec streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT id, data->>'name', data->>'status' FROM products_view;"
 ```
 
-(`streamrune-pg` is the container name set in Chapter 1 Step 5. The table is `products_view` — `JdbcProjectionRepository` derives the table name by appending `_view` to the projection name (`"products"`). The JSONB column is `data`; `->>` extracts a field as text.)
+(The table is `products_view` — `JdbcProjectionRepository` derives the table name by appending `_view` to the projection name (`"products"`). The JSONB column is `data`; `->>` extracts a field as text.)
 
-You should see two rows, one per product.
+You should see one row per product: `p-1` and `p-2`, `p-valid` from chapter 3 and `p-legacy` from chapter 4, the one the upcaster gives the category `Uncategorized`.
 
 ---
 
 ## What We Learned
 
-- **`BaseProjection`** provides the `save`, `findById` and `delete` helpers and derives the projection's storage namespace from the class name. You extend it and implement `process(List<EventEnvelope>)`, writing only through the helpers.
+- **`BaseProjection`** provides the `save`, `findById` and `delete` helpers and stores the read model under the projection's name (`"products"`, passed to its constructor). You extend it and implement `process(List<EventEnvelope>)`, writing only through the helpers.
 - **`ProjectionRepository`** is the persistence abstraction. The default implementation is `JdbcProjectionRepository`, which stores views as JSONB in PostgreSQL. Register it once as a Spring bean, by its concrete type, because the runner also uses it as its batch processor; all projections share the same instance.
 - **`QueryBus`** and **`QueryHandler`** form the read-side routing layer, mirroring `CommandBus` and `Decider` on the write side. `SimpleQueryBus` is the in-process implementation: register handlers at startup with `register(Class, QueryHandler)`, then dispatch queries at runtime with `dispatch(query)`.
 - **`CachingQueryBus`** is a decorator that wraps any `QueryBus`. It caches responses for query types annotated with `@Cacheable` using Caffeine, with TTL and maximum entry count configured by the annotation.
 - **`@Cacheable`** declares caching policy directly on the query record. The `ttlSeconds` attribute controls expiry; `invalidateOn` lists the event types that should flush the cache when they are written to the store. A `scope` attribute (default `Scope.USER`) also partitions cache entries per calling user so one user's results are never served to another; `ListProducts` is an anonymous list endpoint, so it relies on the default and serves a single shared partition — switch to `Scope.GLOBAL` only when you are sure the result is identical for every caller.
 - **`CacheInvalidator`** is obtained from the `CachingQueryBus` and wired into the event pipeline. When the event store emits a batch of new events, `CacheAwareProjection` calls `invalidator.onEventsProcessed(batch)`, which checks each event type against every registered `@Cacheable.invalidateOn` list and evicts matching caches.
+- **`MultiProjectionRunner`** runs every projection on a virtual thread of its own, each with its own checkpoint in `PostgresOffsetStore`; a `TRANSACTIONAL_LOCAL` registration commits the read-model write and the checkpoint in one transaction.
 - The **decoration order** matters: `CachingQueryBus → SimpleQueryBus` in this chapter. In chapter 10 it becomes `AuditingQueryBus → CachingQueryBus → SimpleQueryBus` — the audit bus wraps the caching bus, so cache hits are never logged (only uncached dispatches hit the handler and get audited). Each decorator is independently testable.
-
-### How all projections are wired together: `MultiProjectionRunner`
-
-Rather than creating a separate `ContinuousProjectionRunner` bean for each projection, the demo uses a single `MultiProjectionRunner` that manages all projections as a group.
-
-**At this point in the tutorial only `ProductProjection` exists.** Wire the runner with just that projection now. You will expand it in later chapters as new projections are created — `CustomerProjection` (Ch06), `OrderProjection` (Ch08), `InventoryProjection` (Ch13).
-
-Add to `StreamRuneConfig`:
-
-```java
-@Bean(destroyMethod = "close")
-public MultiProjectionRunner projectionRunner(
-    EventStore eventStore,
-    OffsetStore offsetStore,
-    JdbcProjectionRepository projectionRepository,
-    StreamRuneProperties properties,
-    ProductProjection productProjection,
-    CacheInvalidator cacheInvalidator) {
-
-  var runner =
-      MultiProjectionRunner.builder()
-          .eventStore(eventStore)
-          .offsetStore(offsetStore)
-          .subscriptionConfig(projectionPolling(properties))
-          // Each TRANSACTIONAL_LOCAL registration commits its read-model write and its
-          // checkpoint in ONE transaction, through the repository bean from Step 4.
-          .atomicProcessor(projectionRepository)
-          .register(
-              "products",
-              new CacheAwareProjection(productProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch06: .register("customers", new CacheAwareProjection(customerProjection, cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch08: .register("orders",    new CacheAwareProjection(orderProjection,    cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          // Ch13: .register("inventory", new CacheAwareProjection(inventoryProjection, cacheInvalidator), ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
-          .build();
-  runner.start();
-  return runner;
-}
-```
-
-`projectionPolling(properties)` says how often each projection reads the event store for new events. Add the helper next to the bean (imports `java.time.Duration`, `org.streamrune.core.subscription.SubscriptionConfig` and `org.streamrune.spring.StreamRuneProperties`):
-
-```java
-private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
-  return new SubscriptionConfig(
-      true,
-      Duration.ofMillis(properties.pollingIntervalMs()),
-      Duration.ofMillis(properties.pollingJitterMs()));
-}
-```
-
-`StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval-ms` and `streamrune.polling-jitter-ms` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval-ms=500` to keep their waits short.
-
-Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own offset namespace in `PostgresOffsetStore`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
-
-### Delivery modes — what you are promising
-
-Every `register(...)` call names a `ProjectionDeliveryMode`, and there is no default: the right value depends on where the projection writes. The runner checks each declaration against its processor when it is built, before it reads an event, and refuses with an `IllegalArgumentException` that names the projection, the mode and the fix — for example when a `TRANSACTIONAL_LOCAL` projection writes to a repository other than the one passed to `.atomicProcessor(...)`.
-
-| mode | what the framework guarantees | what the projection promises | typical write target |
-|---|---|---|---|
-| `TRANSACTIONAL_LOCAL` | the batch's read-model writes and the checkpoint are all-or-nothing; a redelivered or split-brain batch is rejected before any write | writes only through the handed repository during `process` | `JdbcProjectionRepository` (`<name>_view` tables) in the framework's database |
-| `AT_LEAST_ONCE_IDEMPOTENT` | the checkpoint advances only after `process` returned; a crash or a rejected checkpoint redelivers the batch from the last checkpoint; the projection is never handed a transaction-scoped repository | applying the same event twice yields the same read model | anything: another `DataSource`, JPA, Redis, memory — or the framework's own `JdbcProjectionRepository`, written autocommit through the projection's captured reference |
-| `EXTERNAL_EFFECT` | as `TRANSACTIONAL_LOCAL`, for the outbox row | no external call in `process`; the receiver dedups by event id | an outbox row through the handed repository, relayed later by the application's relay |
-
-**An at-least-once projection is never handed the checkpoint transaction** — the runner passes `null` to `process(batch, repository)`, so its writes go where it sends them. **No mode makes an external effect exactly-once** — an HTTP call, a Kafka produce or an e-mail inside `process` is at-least-once under every mode and belongs behind the outbox (Chapter 13). The four PostgreSQL read models in this demo are `TRANSACTIONAL_LOCAL`; the in-memory `AuditProjection` of Chapter 10 is `AT_LEAST_ONCE_IDEMPOTENT`.
 
 ---
 

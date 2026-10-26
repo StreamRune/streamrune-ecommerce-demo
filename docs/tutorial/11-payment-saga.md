@@ -48,14 +48,14 @@ stateDiagram-v2
 
 The saga never releases stock or refunds a payment itself. Every cancellation of an order is an `OrderCancelled` event — the customer's, an `ADMIN`'s, the saga's own compensation — and every `OrderCancelled` is undone by the `OrderCancellationProcessManager`: it releases the order's stock at every product of its lines and voids the payment, or refunds it once captured. Each of those commands is safe whether or not the step it undoes ran, so the undo does not need to know how far the fulfillment got.
 
-This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, the `PaymentProcessManager` that drives the capture leg, and the two process managers that undo a cancelled order and commit the stock of a shipped one. The `Inventory` aggregate arrives in Chapter 13; the saga issues `ReserveStock` against it, and once that aggregate and its events are registered the inventory leg runs end-to-end too.
+This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, the `PaymentProcessManager` that drives the capture leg, and the two process managers that undo a cancelled order and commit the stock of a shipped one. The saga issues `ReserveStock` against the `Inventory` aggregate: this chapter creates the inventory's commands, events and state, which the saga needs to compile, and Chapter 13 gives the aggregate its decider, after which the inventory leg runs end-to-end too.
 
 > **What makes the saga complete in the assembled demo.** When you place an order end-to-end, the saga does not stall — it runs all the way to `COMPLETED`. Two pieces make that work:
 >
 > - **The framework routes the saga's own replies; the saga routes one outside event.** With every event of a command a saga dispatched, the command bus stores that saga's *origin* (saga type, saga id, hop count) in the event's metadata, and `SagaRunner` hands such an event to the saga its origin names. `PaymentInitiated`, `StockReserved` and the saga's own `OrderConfirmed` come back this way, with no routing code in the saga. An `OrderCancelled` that a request of the order's customer or an `ADMIN` causes carries no origin; for it `OrderFulfillmentSaga.correlateByEventData()` reads the `orderId` in the event and answers `fulfillment-<orderId>`, the saga of that order. No correlation id takes part (Step 3 says why).
 > - **A `PaymentProcessManager` drives the capture leg.** It is an `EventListener` (fed by its own `PollingEventSubscription`) that reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)`, and dispatches `CapturePayment` when the gateway succeeds or `FailPayment` when the gateway fails — inside `StreamRuneContext.continuing(event)`, so `PaymentCaptured`/`PaymentFailed` carry the origin of the saga that caused `PaymentInitiated` and reach that saga. A command it cannot dispatch is delivered again, never turned into a failed payment.
 >
-> You build the `PaymentProcessManager` in Step 5b and wire it in Step 6. Chapter 12 then wraps its gateway call in a circuit breaker.
+> You build the `PaymentProcessManager` in Step 5b, with the circuit breaker around its gateway call that Chapter 12 explains, and wire it in Step 6.
 
 ---
 
@@ -159,6 +159,145 @@ public record PaymentState(String paymentId, String orderId, Money amount, Payme
 ```
 
 `withStatus` copies the state with another status, the way `evolve` moves a payment on. The no-arg constructor initialises status to `PENDING`, with no payment id: a payment id of `null` is how `decide` tells an id nobody initiated from a pending payment. StreamRune calls this constructor to create a blank state before replaying the event stream for an aggregate that has never been seen before. `TYPE` is the aggregate type the payment decider registers under (Step 6); a payment's stream is `payment:<paymentId>`.
+
+
+### PaymentIds
+
+Create `domain/src/main/java/org/streamrune/ecommerce/domain/payment/PaymentIds.java`, the one place that knows the id of an order's payment:
+
+```java
+package org.streamrune.ecommerce.domain.payment;
+
+/** The payment of an order: one per order, named after it. */
+public final class PaymentIds {
+
+  /** The prefix of an order's payment id. */
+  public static final String PREFIX = "pay-";
+
+  private PaymentIds() {}
+
+  /** The id of the payment that pays for {@code orderId}: {@code "pay-" + orderId}. */
+  public static String forOrder(String orderId) {
+    return PREFIX + orderId;
+  }
+}
+```
+
+## Domain Model: Inventory Types
+
+The saga reserves the stock of every line of the order, and the two process managers of Step 5c release and commit it: they dispatch the inventory's commands and react to its events. Those types come first, so the saga compiles; the inventory's decider, which decides the commands, is Chapter 13's. Until then the command bus has no decider for `ReserveStock`, and the saga of an order compensates at that step (Step 7 shows it).
+
+Inventory tracks stock for a single product across three pools:
+
+- **available** — units that can be sold right now.
+- **reserved** — units held for an order between its payment and its shipment, per order: each order has its own reservation at the product.
+- **committed** — units confirmed for fulfillment; they leave the warehouse when the order ships.
+
+The lifecycle of a unit flows: available → reserved (on `ReserveStock`) → committed (on `ConfirmReservation`) → gone. Cancellations reverse the first step: reserved → available again (on `ReleaseStock`). New stock arrives via `ReceiveShipment`. The lifecycle is per order: a release or a confirmation acts on the reservation of the order it names, at the product it names, and stores nothing when that order holds none. So a release that runs twice releases once, a release after the shipment committed the stock changes nothing, and two orders at one product are released and confirmed apart. The fulfillment saga sends `ReserveStock` for every line of an order; the order cancellation process manager sends `ReleaseStock` for every line of a cancelled order, and the order shipment process manager sends `ConfirmReservation` for every line of a shipped one (Step 5c).
+
+### InventoryCommand
+
+Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryCommand.java`:
+
+```java
+package org.streamrune.ecommerce.domain.inventory;
+
+import org.streamrune.core.Command;
+
+public sealed interface InventoryCommand extends Command {
+  record ReserveStock(String productId, String orderId, int quantity) implements InventoryCommand {}
+
+  record ReleaseStock(String productId, String orderId) implements InventoryCommand {}
+
+  record ConfirmReservation(String productId, String orderId) implements InventoryCommand {}
+
+  record ReceiveShipment(String productId, int quantity) implements InventoryCommand {}
+}
+```
+
+### InventoryEvent
+
+Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryEvent.java`:
+
+```java
+package org.streamrune.ecommerce.domain.inventory;
+
+import org.streamrune.core.DomainEvent;
+
+public sealed interface InventoryEvent extends DomainEvent {
+  record StockReserved(String productId, String orderId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+
+  record StockReleased(String productId, String orderId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+
+  record ReservationConfirmed(String productId, String orderId, int quantity)
+      implements InventoryEvent {}
+
+  record ShipmentReceived(String productId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+}
+```
+
+`ReleaseStock` and `ConfirmReservation` name the order and no quantity: the quantity is the one the order reserved, which the aggregate knows. Each event records the `availableAfter` pool size at the time of the transition. This makes the event self-describing: a consumer can reconstruct the current availability without replaying the entire stream.
+
+### InventoryState
+
+Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryState.java`:
+
+```java
+package org.streamrune.ecommerce.domain.inventory;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.Map;
+import java.util.OptionalInt;
+import org.streamrune.core.AggregateState;
+import org.streamrune.core.types.AggregateType;
+
+public record InventoryState(
+    String productId, int available, int reserved, int committed, Map<String, Integer> reservations)
+    implements AggregateState {
+  /**
+   * The aggregate type the inventory decider is registered under: streams are
+   * inventory:<productId>.
+   */
+  public static final AggregateType TYPE = AggregateType.of("inventory");
+
+  /**
+   * {@code reservations} holds the open reservation of each order at this product, by order id: an
+   * entry is added by {@code StockReserved} and removed by {@code StockReleased} or {@code
+   * ReservationConfirmed}. The state is snapshotted with the map.
+   */
+  @JsonCreator
+  public InventoryState(
+      @JsonProperty("productId") String productId,
+      @JsonProperty("available") int available,
+      @JsonProperty("reserved") int reserved,
+      @JsonProperty("committed") int committed,
+      @JsonProperty("reservations") Map<String, Integer> reservations) {
+    this.productId = productId;
+    this.available = available;
+    this.reserved = reserved;
+    this.committed = committed;
+    this.reservations = reservations == null ? Map.of() : Map.copyOf(reservations);
+  }
+
+  public InventoryState() {
+    this(null, 0, 0, 0, Map.of());
+  }
+
+  /** The quantity the order holds reserved at this product, or none. */
+  public OptionalInt reservationOf(String orderId) {
+    Integer quantity = reservations.get(orderId);
+    return quantity == null ? OptionalInt.empty() : OptionalInt.of(quantity);
+  }
+}
+```
+
+The zero-argument constructor satisfies `AggregateState`; StreamRune calls it when no prior events exist for the stream.
+
+`reservations` holds the open reservation of each order at this product, by order id. `StockReserved` adds an entry; `StockReleased` and `ReservationConfirmed` remove it, so the map holds only the orders in flight for the product. The bus snapshots the state with the map (chapter 8): the canonical constructor is the one Jackson uses (`@JsonCreator`, one `@JsonProperty` per component), and it reads a state written without `reservations` as an empty map. A snapshot that lost the map would make every release and confirmation after it store nothing, with no error, and strand the stock. `reservationOf(orderId)` is the quantity an order holds, or none.
 
 ---
 
@@ -620,6 +759,371 @@ public class OrderProjection extends BaseProjection {
 ```
 
 The projection runs transactionally with its checkpoint (Chapter 5), so a redelivered batch is rejected before it writes, and each payment event sets the status it names: the row follows the payment's last event. `OrderProjectionPaymentStatusTest` in the `projections` module drives the projection through each payment event, a late capture and an order event in between.
+
+### Step 1b — Test and implement InventoryDecider
+
+The saga's `ReserveStock`, and the `ReleaseStock` and `ConfirmReservation` of the two process managers, need a decider on the command bus: a command without one is refused at once, and the process manager that sends it would stop on it. Start with the test.
+
+Create `commands/src/test/java/org/streamrune/ecommerce/commands/inventory/InventoryDeciderTest.java`. `DeciderFixture` from `streamrune-test` removes all boilerplate: `given` supplies prior events, `when` issues a command, and `expectEvents` / `expectState` / `expectException` assert the outcome.
+
+```java
+package org.streamrune.ecommerce.commands.inventory;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.OptionalInt;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.streamrune.core.DomainException;
+import org.streamrune.ecommerce.domain.inventory.*;
+import org.streamrune.test.DeciderFixture;
+
+class InventoryDeciderTest {
+
+  private final DeciderFixture<InventoryCommand, InventoryState, InventoryEvent> fixture =
+      DeciderFixture.of(new InventoryDecider());
+
+  private InventoryEvent.ShipmentReceived received() {
+    return new InventoryEvent.ShipmentReceived("p-1", 10, 10);
+  }
+
+  @Test
+  void receiveShipment() {
+    fixture
+        .given()
+        .when(new InventoryCommand.ReceiveShipment("p-1", 100))
+        .expectEvents(new InventoryEvent.ShipmentReceived("p-1", 100, 100))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(100);
+              assertThat(s.reserved()).isEqualTo(0);
+            });
+  }
+
+  @Test
+  void reserveStock_recordsTheOrdersReservation() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(7);
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+            });
+  }
+
+  @Test
+  void reserveStock_twiceForOneOrder_storesNothingTheSecondTime() {
+    fixture
+        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectNoEvents();
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1})
+  void reserveStock_aNonPositiveQuantity_isRefused(int quantity) {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", quantity))
+        .expectException(DomainException.class);
+  }
+
+  @Test
+  void reserveStock_insufficient_throws() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
+        .expectException(DomainException.class);
+  }
+
+  @Test
+  void releaseStock_releasesWhatTheOrderHolds() {
+    fixture
+        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(10);
+              assertThat(s.reserved()).isEqualTo(0);
+              assertThat(s.reservations()).isEmpty();
+            });
+  }
+
+  @Test
+  void releaseStock_withoutAReservation_storesNothing() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void releaseStock_afterTheReservationWasConfirmed_storesNothing() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void releaseStock_twice_releasesOnce() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void confirmReservation_afterTheReservationWasReleased_storesNothing() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void reserveStock_afterTheOrdersReservationWasReleased_reservesAgain() {
+    fixture
+        .given(
+            received(),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
+            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
+        .expectState(
+            s -> {
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+            });
+  }
+
+  @Test
+  void confirmReservation_commitsTheOrdersQuantity() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
+        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
+        .expectEvents(new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
+        .expectState(
+            s -> {
+              assertThat(s.reserved()).isEqualTo(5);
+              assertThat(s.committed()).isEqualTo(3);
+            });
+  }
+
+  @Test
+  void confirmReservation_withoutAReservation_storesNothing() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
+        .expectNoEvents();
+  }
+
+  @Test
+  void twoOrdersAtOneProduct_areReleasedAndConfirmedApart() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
+        .when(new InventoryCommand.ReleaseStock("p-1", "o-2"))
+        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-2", 5, 17))
+        .expectState(
+            s -> {
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+              assertThat(s.reservationOf("o-2")).isEqualTo(OptionalInt.empty());
+            });
+  }
+}
+```
+
+Run the tests. They will all fail because `InventoryDecider` does not exist yet. That is expected.
+
+Then the decider.
+
+Create `commands/src/main/java/org/streamrune/ecommerce/commands/inventory/InventoryDecider.java`:
+
+```java
+package org.streamrune.ecommerce.commands.inventory;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalInt;
+import org.streamrune.core.Decider;
+import org.streamrune.core.DomainException;
+import org.streamrune.ecommerce.domain.inventory.*;
+
+public class InventoryDecider implements Decider<InventoryCommand, InventoryState, InventoryEvent> {
+
+  @Override
+  public InventoryState initialState() {
+    return new InventoryState();
+  }
+
+  /**
+   * Stock is held per order: a second reservation of one order at one product stores nothing, and a
+   * release or a confirmation acts on this order's reservation alone — nothing when it holds none.
+   */
+  @Override
+  public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
+    return switch (cmd) {
+      case InventoryCommand.ReserveStock c -> {
+        if (c.quantity() <= 0)
+          throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
+        if (state.reservationOf(c.orderId()).isPresent()) yield List.of();
+        if (state.available() < c.quantity())
+          throw new DomainException(
+              "Insufficient stock for "
+                  + c.productId()
+                  + ": available="
+                  + state.available()
+                  + ", requested="
+                  + c.quantity());
+        yield List.of(
+            new InventoryEvent.StockReserved(
+                c.productId(), c.orderId(), c.quantity(), state.available() - c.quantity()));
+      }
+
+      case InventoryCommand.ReleaseStock c -> {
+        OptionalInt held = state.reservationOf(c.orderId());
+        if (held.isEmpty()) yield List.of();
+        yield List.of(
+            new InventoryEvent.StockReleased(
+                c.productId(), c.orderId(), held.getAsInt(), state.available() + held.getAsInt()));
+      }
+
+      case InventoryCommand.ConfirmReservation c -> {
+        OptionalInt held = state.reservationOf(c.orderId());
+        if (held.isEmpty()) yield List.of();
+        yield List.of(
+            new InventoryEvent.ReservationConfirmed(c.productId(), c.orderId(), held.getAsInt()));
+      }
+
+      case InventoryCommand.ReceiveShipment c ->
+          List.of(
+              new InventoryEvent.ShipmentReceived(
+                  c.productId(), c.quantity(), state.available() + c.quantity()));
+    };
+  }
+
+  @Override
+  public InventoryState evolve(InventoryState state, InventoryEvent evt) {
+    return switch (evt) {
+      case InventoryEvent.StockReserved e ->
+          new InventoryState(
+              e.productId(),
+              e.availableAfter(),
+              state.reserved() + e.quantity(),
+              state.committed(),
+              with(state.reservations(), e.orderId(), e.quantity()));
+      case InventoryEvent.StockReleased e ->
+          new InventoryState(
+              e.productId(),
+              e.availableAfter(),
+              state.reserved() - e.quantity(),
+              state.committed(),
+              without(state.reservations(), e.orderId()));
+      case InventoryEvent.ReservationConfirmed e ->
+          new InventoryState(
+              state.productId(),
+              state.available(),
+              state.reserved() - e.quantity(),
+              state.committed() + e.quantity(),
+              without(state.reservations(), e.orderId()));
+      case InventoryEvent.ShipmentReceived e ->
+          new InventoryState(
+              e.productId(),
+              e.availableAfter(),
+              state.reserved(),
+              state.committed(),
+              state.reservations());
+    };
+  }
+
+  private static Map<String, Integer> with(
+      Map<String, Integer> reservations, String orderId, int quantity) {
+    var next = new HashMap<>(reservations);
+    next.put(orderId, quantity);
+    return next;
+  }
+
+  private static Map<String, Integer> without(Map<String, Integer> reservations, String orderId) {
+    var next = new HashMap<>(reservations);
+    next.remove(orderId);
+    return next;
+  }
+}
+```
+
+A few things worth noting. `ReserveStock` is the only command that can fail: it refuses a quantity that is not positive and checks `state.available()` before emitting an event. A second reservation of one order at one product stores nothing, so a redelivered `ReserveStock` reserves once. `ReleaseStock` and `ConfirmReservation` act on `state.reservationOf(orderId)`, the quantity this order reserved at this product: they never take a quantity from the command and never read the pool-wide `reserved` counter, so one order cannot release or commit the units another order holds. Both store nothing when the order holds no reservation, which is what makes them safe to send whether or not the reservation step ran, and safe to send twice.
+
+Run the tests. They should all pass.
+
+### Step 1c — Receive stock: InventoryCommandController
+
+Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryCommandController.java`. This is the REST entry point for the only inventory command that operators trigger directly — receiving a new shipment. Stock reservations and releases are driven by the saga, not by direct HTTP calls.
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.runtime.VirtualThreadCommandBus;
+
+/** Receiving a shipment changes the stock every order reserves from: for an {@code ADMIN} only. */
+@RestController
+@RequestMapping("/api/inventory")
+public class InventoryCommandController {
+  private final VirtualThreadCommandBus commandBus;
+
+  public InventoryCommandController(VirtualThreadCommandBus commandBus) {
+    this.commandBus = commandBus;
+  }
+
+  @PostMapping("/{productId}/receive")
+  public ResponseEntity<Void> receiveShipment(
+      @PathVariable String productId, @Valid @RequestBody ReceiveShipmentRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, req.quantity()));
+    return ResponseEntity.ok().build();
+  }
+
+  public record ReceiveShipmentRequest(@Positive int quantity) {}
+}
+```
+
+The handler's first line is the guard Chapter 9 gave the product writes: `OwnerOrAdminAccess.requireAdmin` answers `403` to everyone but an `ADMIN`, the role together with an identity. The stock a shipment adds is the stock every customer's order reserves from, so the route is an operator's:
+
+```bash
+curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \
+  -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
+  -d '{"quantity": 50}'
+# → 200 OK; 403 without the two headers
+```
+
+`ReceiveShipment` itself carries no `@RequireRole`: the seed data of Chapter 17 and a dead-letter replay (Chapter 14) dispatch it through the command bus without a request. Step 7 sends the request once the application runs, so that `p-1` has stock to reserve.
 
 ### Step 2 — Saga state types
 
@@ -1970,7 +2474,7 @@ Two test scenarios are worth highlighting, plus the regression tests for the can
 
 **Routing:** `correlateByEventData_routesACancellationOnly` pins the one event a request writes, `OrderCancelled`, to the saga of the order it names, and answers "no saga" for an `OrderConfirmed`, which only the saga's own command writes; `correlateByEventData_anOrderIdNoSagaIdCanHold_belongsToNoSaga` shows that an order id too long for a `SagaId`, an empty one and a missing one get "no saga" rather than an exception; `correlateByEventData_everyOtherEvent_belongsToNoSaga` runs the payment and inventory events through the method and gets "no saga" for each, since those reach the saga through their origin. The test builds two kinds of envelope. `envelope(...)` is an event a request caused: no origin, and whatever correlation id the request carried. `causedBySagaOf(...)` is the reply to a saga's own command, built with `SagaEnvelopes.causedBy` from `streamrune-test`, which gives it the metadata the command bus stores: the saga's origin at hop 0 and the saga's `streamrune:saga:` correlation id. The `evolve_anotherOrders*` tests hand the saga of order `o-2` events that name order `o-1` — some with `o-2`'s origin, as the runner would route them, some from a request — and the saga neither evolves nor dispatches.
 
-**The saga id fits every order id `PlaceOrder` accepts:** `extractSagaId_orderIdAtThePlaceOrderBound_buildsTheSagaId` builds the saga id from an order id of `OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH` characters (243) and gets a `fulfillment-` id of exactly 255, and `extractSagaId_orderIdOneOverThePlaceOrderBound_isRefusedByTheSagaId` shows that one character more is refused by `SagaId`. Together they pin the bound chapter 8 puts on `PlaceOrder` to the saga that depends on it: if the prefix or the bound ever changed on one side only, one of the two would fail. Before the check existed, an order id of 244 to 255 characters was placed, `extractSagaId` threw when the saga runner read `OrderPlaced`, the runner quarantined that event as poison, and the order stayed `CREATED` with no payment and no confirmation.
+**The saga id fits every order id `PlaceOrder` accepts:** `extractSagaId_orderIdAtThePlaceOrderBound_buildsTheSagaId` builds the saga id from an order id of `OrderCommand.PlaceOrder.MAX_ORDER_ID_LENGTH` characters (243) and gets a `fulfillment-` id of exactly 255, and `extractSagaId_orderIdOneOverThePlaceOrderBound_isRefusedByTheSagaId` shows that one character more is refused by `SagaId`. Together they pin the bound chapter 8 puts on `PlaceOrder` to the saga that depends on it: if the prefix or the bound ever changed on one side only, one of the two would fail. Without the check, an order id of 244 to 255 characters would be placed, `extractSagaId` would throw when the saga runner reads `OrderPlaced`, the runner would quarantine that event as poison, and the order would stay `CREATED` with no payment and no confirmation.
 
 **Targets from stored state use the constructor:** `awaitingInventory_storedProductIdWithAControlCharacter_stillYieldsReserveStock` seeds the saga with an order line whose product id carries a control character, a value already in the log, and asserts that `handle()` still returns its `ReserveStock`, targeting that id verbatim. With `AggregateId.of` the method would throw `IllegalArgumentException`, and the framework would quarantine the event as poison. The refusal belongs to the bus's id extractor, which turns it into an ordinary failed dispatch that the saga compensates. `awaitingInventory_storedProductIdTooLongForTheIngressBound_stillYieldsReserveStock` does the same for a stored product id of 256 characters, one over the 255-character bound: `handle()` still returns `ReserveStock` for that target, built with the constructor, and the refusal is again left to the bus's extractor.
 
@@ -2072,7 +2576,93 @@ The payment id doubles as the call's **idempotency key**, the way a real gateway
 
 `InitiatePayment` only records that a payment is `PENDING`. Something has to actually talk to the gateway and turn the outcome into a `CapturePayment` or `FailPayment` command — that is the **payment process manager**. It is an `EventListener` that reacts to `PaymentInitiated`, calls the gateway, and dispatches the follow-up command as a *continuation of that event*, inside `StreamRuneContext.continuing(event)`. The resulting `PaymentCaptured`/`PaymentFailed` then carries the origin of the saga that caused `PaymentInitiated`, and `SagaRunner` hands it to that saga.
 
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentProcessManager.java`:
+The manager guards each gateway call with a small circuit breaker of its own, which Chapter 12 explains: after three consecutive gateway failures it opens, and the manager fails the payment without calling the gateway until a cooldown admits a probe. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import java.time.Duration;
+import java.time.Instant;
+
+/**
+ * A small circuit breaker around the payment gateway call.
+ *
+ * <p>The demo also has a {@code CircuitBreakerCommandInterceptor} on the command bus, but that one
+ * guards <em>commands</em> and resets on any successful command — and the order-fulfillment saga
+ * compensates a failed payment with a <em>successful</em> {@code FailPayment}/{@code CancelOrder},
+ * which would keep resetting it. The textbook place for a breaker is around the flaky dependency
+ * itself: this breaker counts only gateway-call outcomes, so consecutive gateway failures open it
+ * regardless of what the saga does on the command bus.
+ *
+ * <p>State machine: CLOSED → OPEN (after {@code failureThreshold} consecutive failures) → HALF_OPEN
+ * (after {@code cooldown}) → CLOSED (probe success) or OPEN (probe failure). While OPEN the {@link
+ * PaymentProcessManager} fast-fails the payment without calling the gateway.
+ *
+ * <p>Single-threaded use (driven by one polling subscription); methods are {@code synchronized} for
+ * safe reads from the admin endpoint.
+ */
+public class PaymentGatewayCircuitBreaker {
+
+  public enum State {
+    CLOSED,
+    OPEN,
+    HALF_OPEN
+  }
+
+  private final int failureThreshold;
+  private final Duration cooldown;
+
+  private State state = State.CLOSED;
+  private int consecutiveFailures = 0;
+  private Instant openedAt = null;
+
+  public PaymentGatewayCircuitBreaker(int failureThreshold, Duration cooldown) {
+    this.failureThreshold = failureThreshold;
+    this.cooldown = cooldown;
+  }
+
+  /**
+   * Whether a gateway call may be attempted now. CLOSED always allows; OPEN allows a single probe
+   * once the cooldown has elapsed (transitioning to HALF_OPEN); HALF_OPEN allows the probe.
+   */
+  public synchronized boolean allowRequest() {
+    if (state == State.OPEN
+        && openedAt != null
+        && !Instant.now().isBefore(openedAt.plus(cooldown))) {
+      state = State.HALF_OPEN;
+    }
+    return state != State.OPEN;
+  }
+
+  /** Records a successful gateway call: closes the breaker and clears the failure count. */
+  public synchronized void recordSuccess() {
+    consecutiveFailures = 0;
+    state = State.CLOSED;
+    openedAt = null;
+  }
+
+  /** Records a failed gateway call: opens the breaker once the threshold is reached. */
+  public synchronized void recordFailure() {
+    consecutiveFailures++;
+    if (consecutiveFailures >= failureThreshold || state == State.HALF_OPEN) {
+      state = State.OPEN;
+      openedAt = Instant.now();
+    }
+  }
+
+  /** Current state, applying the cooldown so a long-open breaker reports HALF_OPEN when due. */
+  public synchronized State state() {
+    if (state == State.OPEN
+        && openedAt != null
+        && !Instant.now().isBefore(openedAt.plus(cooldown))) {
+      state = State.HALF_OPEN;
+    }
+    return state;
+  }
+}
+```
+
+Then create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentProcessManager.java`:
 
 ```java
 package org.streamrune.ecommerce.spring.config;
@@ -2271,8 +2861,6 @@ Five details earn their keep:
 - **A payment cancelled while the gateway charged it.** The gateway may have taken the money in an attempt whose `CapturePayment` could not be recorded, and the order may be cancelled before the next delivery: the cancellation voids the pending payment. That delivery finds a `PaymentVoided` (or a `PaymentFailed`) and no capture, while the gateway holds a capture of the payment, and answers it with `CapturePayment` under the same key. The payment records the capture and refunds it in one append (Step 1), and the books show the money that was taken and given back.
 - **Refunds reach the gateway, and no rejection is swallowed.** On `PaymentRefunded` the manager calls `gateway.refund(paymentId)`; the payment id is the refund's idempotency key, so a redelivery refunds nothing twice. The deciders store nothing for a redelivered capture or failure (Step 1), so no rejection is expected here; one that occurs is a fault, and it propagates out of `onEvents`. The subscription delivers the event again and logs every attempt at `ERROR` until the fault is fixed.
 
-> If you are working through the tutorial strictly in order and have not built `PaymentGatewayCircuitBreaker` yet (Chapter 12), you can drop the `breaker` field and the `allowRequest()`/`recordSuccess()`/`recordFailure()` calls for now and call the gateway directly — the saga still completes. The finished demo includes the breaker, so this chapter shows the final shape.
-
 The demo pins this behaviour in `PaymentProcessManagerTest`: a failed capture or `FailPayment` dispatch makes `onEvents` throw and is applied on the next delivery, a settled payment is never sent to the gateway again, every delivery uses the same keys, and a rejection propagates (`aRejectionPropagates`). `aVoidedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` and `aFailedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` seed a payment that was voided or failed after the gateway charged it: one `CapturePayment` under `payment-capture:<paymentId>`, no second gateway call, and the stream ends with `PaymentCaptured`, `PaymentRefunded`; `aVoidedPaymentTheGatewayNeverCharged_isLeftAlone` sends nothing and charges nothing; `aRefundIsSentToTheGateway` delivers a `PaymentRefunded` twice and finds one refund at the gateway and no command. `theCommandContinuesThePaymentInitiatedEvent` reads the context the command ran under: the saga's origin at hop 1, the id of `PaymentInitiated` as the causation id, the saga's correlation id, no user. `aFailedDispatchPropagatesAndLeavesNoDeadLetter` runs the framework's own command bus over an event store that refuses one append: `onEvents` throws, the dead letter queue stays empty, and the next delivery stores `PaymentCaptured` with that origin. `aFailedDispatchForAnEventNoSagaCausedLeavesNoDeadLetterEither` repeats it for a `PaymentInitiated` without an origin, because the rule belongs to `continuing` and not to sagas: no entry, and a later delivery stores the capture once, with `PaymentInitiated` as its cause. `theSameFailureOutsideAContinuationIsDeadLettered` shows what both rest on: the bus does dead-letter that failure for a command with no continuation around it. `PaymentCaptureRetryIT` does the same against the running app and PostgreSQL. It makes the event store refuse one payment's `PaymentCaptured` after the gateway has charged it: the payment is not failed, no capture is dead-lettered, and once the store accepts the event the capture is recorded with the saga's origin and the saga confirms the order. Its second case, `aCaptureRedeliveredAfterTheOrderWasCancelled_isRecordedAndRefunded`, cancels the order while the capture is held: the payment is voided, the redelivery records the capture, and the payment ends `PaymentInitiated`, `PaymentVoided`, `PaymentCaptured`, `PaymentRefunded`, with the refund at the gateway and no stock reserved.
 
 ### Step 5c — Undo a cancelled order, commit a shipped one
@@ -2448,17 +3036,11 @@ public PostgresSagaStore sagaStore(DataSource ds, ObjectMapper objectMapper) {
 }
 ```
 
-`PostgresSagaStore` requires Jackson's `ObjectMapper` because saga state is serialised as JSON. The `saga_state` table (columns: `saga_id`, `saga_type`, `status`, `state_json`, `version`, `created_at`, `updated_at`, plus `episode_version` and `episode_claimed_at` — internal bookkeeping the framework uses to give a durable compensation-episode identity across fault→replay cycles, not something this tutorial's code touches) is part of the framework's `V001__streamrune_baseline.sql`, which the event store factory applied on the application's first start (`streamrune.event-store.schema.auto-initialize: true`, Chapter 1).
+`PostgresSagaStore` requires Jackson's `ObjectMapper` because saga state is serialised as JSON. The `saga_state` table (columns: `saga_id`, `saga_type`, `status`, `state_json`, `version`, `created_at`, `updated_at`, plus `episode_version`, `episode_claimed_at`, `episode_cause_event_id`, `genesis_applied`, `pre_fault_status`, `dead_letter_pending`, `last_applied_offset` and `last_replayed_offset` — bookkeeping the framework uses for compensation episodes, fault and replay, not something this tutorial's code touches) is part of the framework's `V001__streamrune_baseline.sql`, which the event store factory applied on the application's first start (`streamrune.event-store.schema.auto-initialize: true`, Chapter 1).
 
 **PostgresSagaDeadLetterStore bean** — quarantines poison saga events instead of wedging the subscription:
 
 ```java
-/**
- * Quarantine store for poison saga events (a routing method that throws — {@code extractSagaId},
- * {@code correlateByEventData} — or an exception in the saga's own logic). Required by {@link
- * SagaRunner.Builder#sagaDeadLetterStore} below — without it the saga runner cannot be built.
- * Mirrors {@link #sagaStore}.
- */
 @Bean
 public PostgresSagaDeadLetterStore sagaDeadLetterStore(DataSource ds) {
   return new PostgresSagaDeadLetterStore(ds);
@@ -2470,13 +3052,6 @@ A saga orchestrator's pure-logic methods (`evolve`, `handle`, `correlateByEventD
 **PostgresCommandInbox bean** — makes saga command dispatch effectively-once under redelivery:
 
 ```java
-/**
- * Records commands processed under a caller-supplied {@code IdempotencyKey} so a redelivered
- * saga command (broker at-least-once redelivery) applies its events effectively once. Picked up
- * automatically by the framework's auto-configured {@code postgresEventStoreFactory} (for the
- * atomic keyed append) and wired explicitly into {@link #commandBus} below (saga command dispatch
- * requires a command bus with an inbox — see {@code SagaCommandDispatch}).
- */
 @Bean
 public PostgresCommandInbox commandInbox(DataSource ds) {
   return new PostgresCommandInbox(ds);
@@ -2503,17 +3078,52 @@ public VirtualThreadCommandBus commandBus(
     BeanValidationInterceptor validation,
     AnnotationAuthorizationInterceptor auth,
     AuditCommandInterceptor audit,
-    CircuitBreakerCommandInterceptor circuitBreaker,
     PostgresCommandInbox commandInbox) {
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
       // Required for saga command dispatch: SagaCommandDispatch calls
-      // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException unless
-      // the bus has a commandInbox wired in.
+      // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+      // unless the bus has a commandInbox wired in.
       .commandInbox(commandInbox)
-      .interceptors(audit, auth, validation, circuitBreaker)
+      .interceptors(audit, auth, validation)
       .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-      // ... existing .register(...) calls for Product, Order, Customer ...
+      .register(
+          ProductState.TYPE,
+          ProductCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case ProductCommand.CreateProduct c -> c.productId();
+                    case ProductCommand.UpdatePrice c -> c.productId();
+                    case ProductCommand.AdjustStock c -> c.productId();
+                    case ProductCommand.DiscontinueProduct c -> c.productId();
+                  }),
+          new ProductDecider())
+      .register(
+          OrderState.TYPE,
+          OrderCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case OrderCommand.PlaceOrder c -> c.orderId();
+                    case OrderCommand.ConfirmOrder c -> c.orderId();
+                    case OrderCommand.ShipOrder c -> c.orderId();
+                    case OrderCommand.DeliverOrder c -> c.orderId();
+                    case OrderCommand.CancelOrder c -> c.orderId();
+                  }),
+          new OrderDecider())
+      .register(
+          CustomerState.TYPE,
+          CustomerCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case CustomerCommand.RegisterCustomer c -> c.customerId();
+                    case CustomerCommand.UpdateProfile c -> c.customerId();
+                    case CustomerCommand.RequestDataExport c -> c.customerId();
+                    case CustomerCommand.ForgetCustomer c -> c.customerId();
+                  }),
+          new CustomerDecider())
       .register(
           PaymentState.TYPE,
           PaymentCommand.class,
@@ -2526,6 +3136,18 @@ public VirtualThreadCommandBus commandBus(
                     case PaymentCommand.CancelPayment c -> c.paymentId();
                   }),
           new PaymentDecider())
+      .register(
+          InventoryState.TYPE,
+          InventoryCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case InventoryCommand.ReserveStock c -> c.productId();
+                    case InventoryCommand.ReleaseStock c -> c.productId();
+                    case InventoryCommand.ConfirmReservation c -> c.productId();
+                    case InventoryCommand.ReceiveShipment c -> c.productId();
+                  }),
+          new InventoryDecider())
       .build();
 }
 ```
@@ -2635,9 +3257,9 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
 }
 ```
 
-Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. A poll it skips before the saga subscription of its process has started logs one `INFO` line — here once at every start, since this bean starts before the subscription bean, which depends on it; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
+Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. When the saga subscription of its process has not started by the runner's second poll, the runner logs one `INFO` line — a subscription that starts a moment after the runner, as it does here (the subscription bean depends on this one), opens the lease first and costs no line; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
 
-**PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (you build the class itself in Chapter 12). Three consecutive gateway failures open it; a 30-second cooldown then admits one probe:
+**PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (the class of Step 5b). Three consecutive gateway failures open it; a 30-second cooldown then admits one probe:
 
 ```java
 @Bean
@@ -2659,6 +3281,19 @@ public PaymentProcessManager paymentProcessManager(
       paymentGateway, paymentGatewayCircuitBreaker, commandBus, eventStore);
 }
 
+/**
+ * Feeds the global event stream to the {@link PaymentProcessManager}. Without this subscription
+ * nothing reacts to {@code PaymentInitiated}, so the saga would stall in {@code
+ * AWAITING_PAYMENT}.
+ *
+ * <p>{@code leadership(...)} delivers under a lease named after the subscription, {@code
+ * payment-process-manager}: with more than one backend on the database one of them captures the
+ * payments, and the others stand by. {@code healthContributor(...)} lists it in the health
+ * details with its {@code role}.
+ *
+ * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the payment
+ * capture leg of the saga completes promptly.
+ */
 @Bean(destroyMethod = "close")
 public PollingEventSubscription paymentProcessSubscription(
     EventStore eventStore,
@@ -2686,13 +3321,17 @@ public PollingEventSubscription paymentProcessSubscription(
 **The two process managers of Step 5c and their subscriptions** — the same shape, one lease each, named after the subscription: `order-cancellation` and `order-shipment`. Add them after the payment process manager's subscription, so that Spring closes them before it:
 
 ```java
-/** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
 @Bean
 public OrderCancellationProcessManager orderCancellationProcessManager(
     VirtualThreadCommandBus commandBus) {
   return new OrderCancellationProcessManager(commandBus);
 }
 
+/**
+ * Feeds the global event stream to {@link #orderCancellationProcessManager}: with more than one
+ * backend on the database, the one that holds the lease {@code order-cancellation} delivers.
+ * Listed in the health details with its role.
+ */
 @Bean(destroyMethod = "close")
 public PollingEventSubscription orderCancellationSubscription(
     EventStore eventStore,
@@ -2727,44 +3366,45 @@ streamrune:
 
 The payment process manager and its subscription are what let an order run all the way to `COMPLETED` end-to-end: `OrderPlaced` → (saga) `InitiatePayment` → `PaymentInitiated` → (manager) `CapturePayment` → `PaymentCaptured` → (saga) one `ReserveStock` per line → one `StockReserved` per line → (saga) `ConfirmOrder` → `OrderConfirmed` → `COMPLETED`.
 
-Add the import:
+**Register the inventory.** The four inventory event types go into the `SimpleEventTypeRegistry` of the `eventTypeRegistry` bean, and `.registerState("InventoryState", InventoryState.class)` joins the snapshot registrations:
 
 ```java
-import org.streamrune.runtime.PollingEventSubscription;
+.registerEvent(
+    "StockReserved",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+.registerEvent(
+    "StockReleased",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
+.registerEvent(
+    "ReservationConfirmed",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.ReservationConfirmed.class)
+.registerEvent(
+    "ShipmentReceived",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
 ```
 
-Add the necessary imports:
+The `InventoryCommand` block goes into the `VirtualThreadCommandBus` builder, after the payment's. The inventory decider registers under its own aggregate type, `InventoryState.TYPE` (`inventory`), so `ReserveStock` for `p-1` writes to `inventory:p-1` while the product's events live in `product:p-1` — one stream per product and per type, no hand-made prefix. The framework refuses two registrations of one command type and two overlapping command roots with different types at startup.
 
 ```java
-import java.time.Duration;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.DependsOn;
-import org.streamrune.core.StreamRuneMetrics;
-import org.streamrune.core.subscription.SubscriptionConfig;
-import org.streamrune.core.subscription.SubscriptionLeadership;
-import org.streamrune.core.types.AggregateId;
-import org.streamrune.core.types.SagaType;
-import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
-import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
-import org.streamrune.ecommerce.commands.payment.PaymentDecider;
-import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
-import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
-import org.streamrune.ecommerce.domain.payment.PaymentCommand;
-import org.streamrune.postgres.PostgresCommandInbox;
-import org.streamrune.postgres.PostgresSagaDeadLetterStore;
-import org.streamrune.postgres.PostgresSagaStore;
-import org.streamrune.runtime.SagaRunner;
-import org.streamrune.runtime.SagaTimeoutRunner;
-import org.streamrune.runtime.SubscriptionHealthContributor;
-import org.streamrune.spring.StreamRuneProperties;
+.register(
+    InventoryState.TYPE,
+    InventoryCommand.class,
+    cmd ->
+        AggregateId.of(
+            switch (cmd) {
+              case InventoryCommand.ReserveStock c -> c.productId();
+              case InventoryCommand.ReleaseStock c -> c.productId();
+              case InventoryCommand.ConfirmReservation c -> c.productId();
+              case InventoryCommand.ReceiveShipment c -> c.productId();
+            }),
+    new InventoryDecider())
 ```
 
-(`PaymentProcessManager`, `PaymentGatewaySimulator`, and `PaymentGatewayCircuitBreaker` live in the same `config` package as `StreamRuneConfig`, so they need no import. The shipped `StreamRuneConfig.java` uses wildcard imports — `org.streamrune.core.*`, `org.streamrune.postgres.*`, `org.streamrune.runtime.*` — so in the real file these individual imports collapse into the wildcards already present from earlier chapters.)
+> Two aggregate types may share an id value without sharing a stream: `ReserveStock` for `productId = "p-1"` writes to `inventory:p-1`, and the `ProductCreated`, `PriceUpdated` and `StockAdjusted` events of the product `p-1` stay in `product:p-1`. The type is part of the stream's identity — the event store keeps it in its own `aggregate_type` column, next to `aggregate_id` — so mixing the two kinds of events in one stream cannot happen by construction.
 
-### Step 7 — Verify
+> The inventory id is the product id itself, so `AggregateId.of`'s 255-character bound (chapter 2) applies to it as is: a product id over the bound, or one with a control character, makes an inventory request answer `400`. An order cannot name such a product id: the `OrderCommand.OrderLine` constructor refuses it when the order is placed (chapter 8), with the same bound. If the saga meets such an id anyway, in an `OrderPlaced` event that never crossed that check, its reservation is refused here and the saga compensates the order (chapter 11).
 
-Register payment events in the `SimpleEventTypeRegistry` inside the `eventTypeRegistry` bean:
+The payment's five events go into the `SimpleEventTypeRegistry` of the `eventTypeRegistry` bean, and its state joins the snapshot registrations, `.registerState("PaymentState", PaymentState.class)`:
 
 ```java
 .registerEvent(
@@ -2784,7 +3424,754 @@ Register payment events in the `SimpleEventTypeRegistry` inside the `eventTypeRe
     org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
 ```
 
-Start the application and place an order:
+The new imports name the saga's and the payment's classes (`OrderFulfillmentSaga`, `OrderFulfillmentState`, `PaymentDecider`, `PaymentCommand`, `PaymentState`, the two process managers), Spring's `ObjectProvider`, `@Value` and `@DependsOn`, `java.time.Duration` and the framework's `SubscriptionLeadership` and `SagaType`; the framework's runtime and PostgreSQL types (`SagaRunner`, `SagaTimeoutRunner`, `PollingEventSubscription`, `SubscriptionHealthContributor`, `PostgresSagaStore`, `PostgresSagaDeadLetterStore`, `PostgresCommandInbox`) come with `org.streamrune.runtime.*` and `org.streamrune.postgres.*`. `PaymentProcessManager`, `PaymentGatewaySimulator` and `PaymentGatewayCircuitBreaker` live in the same `config` package as `StreamRuneConfig`, so they need no import. The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 11</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
+import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.payment.PaymentCommand;
+import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Payment events
+        .registerEvent(
+            "PaymentInitiated",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentInitiated.class)
+        .registerEvent(
+            "PaymentCaptured",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentCaptured.class)
+        .registerEvent(
+            "PaymentRefunded",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentRefunded.class)
+        .registerEvent(
+            "PaymentFailed",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+        .registerEvent(
+            "PaymentVoided",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
+        // Inventory events
+        .registerEvent(
+            "StockReserved",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReleased",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
+        .registerEvent(
+            "ReservationConfirmed",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ReservationConfirmed.class)
+        .registerEvent(
+            "ShipmentReceived",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .registerState("PaymentState", PaymentState.class)
+        .registerState("InventoryState", InventoryState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  @Bean
+  public PostgresSagaStore sagaStore(DataSource ds, ObjectMapper objectMapper) {
+    return new PostgresSagaStore(ds, objectMapper);
+  }
+
+  /**
+   * Quarantine store for poison saga events (a routing method that throws — {@code extractSagaId},
+   * {@code correlateByEventData} — or an exception in the saga's own logic). Required by {@link
+   * SagaRunner.Builder#sagaDeadLetterStore} below — without it the saga runner cannot be built.
+   * Mirrors {@link #sagaStore}.
+   */
+  @Bean
+  public PostgresSagaDeadLetterStore sagaDeadLetterStore(DataSource ds) {
+    return new PostgresSagaDeadLetterStore(ds);
+  }
+
+  /**
+   * Records commands processed under a caller-supplied {@code IdempotencyKey} so a redelivered saga
+   * command (broker at-least-once redelivery) applies its events effectively once. Picked up
+   * automatically by the framework's auto-configured {@code postgresEventStoreFactory} (for the
+   * atomic keyed append) and wired explicitly into {@link #commandBus} below (saga command dispatch
+   * requires a command bus with an inbox — see {@code SagaCommandDispatch}).
+   */
+  @Bean
+  public PostgresCommandInbox commandInbox(DataSource ds) {
+    return new PostgresCommandInbox(ds);
+  }
+
+  @Bean
+  public HeaderUserRoleResolver userRoleResolver() {
+    return new HeaderUserRoleResolver();
+  }
+
+  @Bean
+  public PaymentGatewaySimulator paymentGateway() {
+    return new PaymentGatewaySimulator();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
+    return new AnnotationAuthorizationInterceptor(resolver);
+  }
+
+  @Bean
+  public AuditCommandInterceptor auditInterceptor(PostgresAuditStore store) {
+    return new AuditCommandInterceptor(store);
+  }
+
+  /**
+   * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
+   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
+   * recover.
+   */
+  @Bean
+  public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
+    return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store,
+      BeanValidationInterceptor validation,
+      AnnotationAuthorizationInterceptor auth,
+      AuditCommandInterceptor audit,
+      PostgresCommandInbox commandInbox) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        // Required for saga command dispatch: SagaCommandDispatch calls
+        // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+        // unless the bus has a commandInbox wired in.
+        .commandInbox(commandInbox)
+        .interceptors(audit, auth, validation)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .register(
+            PaymentState.TYPE,
+            PaymentCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case PaymentCommand.InitiatePayment c -> c.paymentId();
+                      case PaymentCommand.CapturePayment c -> c.paymentId();
+                      case PaymentCommand.FailPayment c -> c.paymentId();
+                      case PaymentCommand.CancelPayment c -> c.paymentId();
+                    }),
+            new PaymentDecider())
+        .register(
+            InventoryState.TYPE,
+            InventoryCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case InventoryCommand.ReserveStock c -> c.productId();
+                      case InventoryCommand.ReleaseStock c -> c.productId();
+                      case InventoryCommand.ConfirmReservation c -> c.productId();
+                      case InventoryCommand.ReceiveShipment c -> c.productId();
+                    }),
+            new InventoryDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching + auditing
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public QueryBus queryBus(CachingQueryBus cachingBus, PostgresAuditStore auditStore) {
+    return new AuditingQueryBus(cachingBus, auditStore);
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess}. The customer and order controllers answer
+   * every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
+  }
+
+  /**
+   * The order-fulfillment saga, with its deadline: {@code app.saga.fulfillment-timeout} (15 minutes
+   * unless configured). The saga runner and the timeout runner below share this one instance.
+   */
+  @Bean
+  public OrderFulfillmentSaga orderFulfillmentSaga(
+      @Value("${app.saga.fulfillment-timeout:15m}") Duration fulfillmentTimeout) {
+    return new OrderFulfillmentSaga(fulfillmentTimeout);
+  }
+
+  /**
+   * The order-fulfillment saga runner. It is a bean so that the Spring integration finds it: for
+   * every {@code SagaRunner} bean it starts a compensation retry sweeper, which re-drives a
+   * compensation that failed transiently and faults it once {@code
+   * streamrune.saga.compensation-retry-give-up-after} (1 hour by default) has passed, it applies
+   * {@code streamrune.inbox.retention-max-age} to the runner's key-age guard for compensations
+   * resumed by a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto}
+   * unless configured, which is on while single-active-consumer leadership is on) to the runner's
+   * forward fence. {@code metrics} counts, among the saga meters, the forward commands the fence
+   * refuses ({@code streamrune.saga.forward_commands_fenced}) and the steps run again in place
+   * after a lost write of the saga row ({@code streamrune.saga.delivery_retried}).
+   *
+   * <p>{@code leadership} is the integration's single-active-consumer leadership ({@code
+   * streamrune.subscription.single-active-consumer.enabled}, on unless configured). The runner
+   * carries a lease over it, {@code "saga:" + saga type}: with more than one backend on the
+   * database, one of them delivers the saga's events, claims its deadlines and retries its
+   * compensations, and the others stand by and take over when it stops or dies. The lease is taken
+   * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
+   * SubscriptionLeadership#NOOP}) every backend delivers.
+   */
+  @Bean
+  public SagaRunner<?> orderFulfillmentSagaRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      PostgresSagaDeadLetterStore sagaDeadLetterStore,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      ObjectProvider<SubscriptionLeadership> leadership) {
+    return SagaRunner.<OrderFulfillmentState>builder()
+        .orchestrator(orderFulfillmentSaga)
+        .sagaStore(sagaStore)
+        .commandBus(commandBus)
+        // Required: poison events (routing/decider failures) are quarantined here instead of
+        // blocking the subscription.
+        .sagaDeadLetterStore(sagaDeadLetterStore)
+        .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+        // One backend delivers this saga type; the others stand by.
+        .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .build();
+  }
+
+  /**
+   * Compensates a fulfillment that has not ended by its deadline ({@link
+   * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
+   * unless configured) it claims each saga past its deadline and dispatches its compensation, which
+   * is the order's cancellation whatever the state.
+   *
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
+   * follows its lease: it claims deadlines only while this backend leads the saga type through
+   * {@link #orderFulfillmentSagaSubscription}, so it claims where the saga's steps run, and in this
+   * process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. Around a handover two backends can overlap for a moment — a backend that dies
+   * keeps its lease until the lease expires, and a deposed one may finish its page; there the saga
+   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
+   * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
+   * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
+   * the subscriptions below are, and stopped with the context, after the saga subscription.
+   */
+  @Bean(destroyMethod = "stop")
+  public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      StreamRuneProperties properties,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
+    var runner =
+        SagaTimeoutRunner.<OrderFulfillmentState>builder()
+            .decider(orderFulfillmentSaga)
+            .sagaStore(sagaStore)
+            .commandBus(commandBus)
+            // The saga runner stores its rows under the state class; the sweep selects by it.
+            .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .pollInterval(pollInterval)
+            .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  /**
+   * Subscribes the saga runner to the global event stream. Without this bean the saga would persist
+   * nothing because no event listener is wired to feed the {@code SagaRunner}.
+   *
+   * <p>{@code sagaRunner(...)} delivers to the runner under the runner's lease: this subscription
+   * takes the lease and holds it while it runs. On the backend that holds it, it delivers, and the
+   * timeout runner and the compensation retry sweeper of the runner act; on every other backend it
+   * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
+   * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
+   * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
+   * STANDBY}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
+   * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
+   * 15-second window that integration tests await for {@code CONFIRMED}; the interval also spaces a
+   * standby's attempts to take the lease. It depends on {@link #orderFulfillmentTimeoutRunner}, so
+   * it is closed before that runner stops: a runner that stops while this backend leads logs a
+   * warning, and closing the subscription first ends the lead.
+   */
+  @Bean(destroyMethod = "close")
+  @DependsOn("orderFulfillmentTimeoutRunner")
+  public PollingEventSubscription orderFulfillmentSagaSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("order-fulfillment-saga")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  // Payment process manager: reacts to PaymentInitiated by capturing (or failing) the payment.
+  @Bean
+  public PaymentProcessManager paymentProcessManager(
+      PaymentGatewaySimulator paymentGateway,
+      PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker,
+      VirtualThreadCommandBus commandBus,
+      EventStore eventStore) {
+    return new PaymentProcessManager(
+        paymentGateway, paymentGatewayCircuitBreaker, commandBus, eventStore);
+  }
+
+  /**
+   * Feeds the global event stream to the {@link PaymentProcessManager}. Without this subscription
+   * nothing reacts to {@code PaymentInitiated}, so the saga would stall in {@code
+   * AWAITING_PAYMENT}.
+   *
+   * <p>{@code leadership(...)} delivers under a lease named after the subscription, {@code
+   * payment-process-manager}: with more than one backend on the database one of them captures the
+   * payments, and the others stand by. {@code healthContributor(...)} lists it in the health
+   * details with its {@code role}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the payment
+   * capture leg of the saga completes promptly.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription paymentProcessSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      PaymentProcessManager paymentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("payment-process-manager")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(paymentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+
+  /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
+  @Bean
+  public OrderCancellationProcessManager orderCancellationProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderCancellationProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderCancellationProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-cancellation} delivers.
+   * Listed in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderCancellationSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderCancellationProcessManager orderCancellationProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderCancellationProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderCancellationProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Commits the stock of every shipped order (OrderShipmentProcessManager). */
+  @Bean
+  public OrderShipmentProcessManager orderShipmentProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderShipmentProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderShipmentProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-shipment} delivers. Listed
+   * in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderShipmentSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderShipmentProcessManager orderShipmentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderShipmentProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderShipmentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+}
+```
+
+</details>
+
+### Step 7 — Verify
+
+Start the application:
+
+```bash
+./gradlew :spring-app:bootRun
+```
+
+The saga subscription reads the event store from its first event, so the orders of Chapters 8 to 10 get a fulfillment saga as well when the application starts. No stock has arrived for any product yet, so their reservations are refused and their sagas compensate: those orders end `CANCELLED`, and the order cancellation process manager voids their payments. The saga reserves the stock of every line, so receive a shipment of `p-1` before the next order, as an `ADMIN` (Step 1c):
+
+```bash
+curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
+  -d '{"quantity": 50}'
+```
+
+Then place an order:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
@@ -2794,11 +4181,17 @@ curl -s -X POST http://localhost:8080/api/orders \
   -d '{"orderId":"o-100","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
 ```
 
-The order lands in the event store as `OrderPlaced`, the saga's polling subscription feeds it to the runner, and the runner starts the saga and dispatches `InitiatePayment`. That records `PaymentInitiated` on the `payment:pay-o-100` stream; the `PaymentProcessManager`'s subscription picks that up, calls the gateway (the failure flag is off, so it succeeds), and dispatches `CapturePayment`. `PaymentCaptured` flows back to the saga, which reserves stock, confirms the order, and reaches `COMPLETED`. Because each leg goes through a separate polling subscription, the round-trip takes a moment — give it a second or two, then query the saga store (the `SagaController` you build in Step 8):
+The order lands in the event store as `OrderPlaced`, the saga's polling subscription feeds it to the runner, and the runner starts the saga and dispatches `InitiatePayment`. That records `PaymentInitiated` on the `payment:pay-o-100` stream; the `PaymentProcessManager`'s subscription picks that up, calls the gateway (the failure flag is off, so it succeeds), and dispatches `CapturePayment`. `PaymentCaptured` flows back to the saga, which reserves stock, confirms the order, and reaches `COMPLETED`. Because each leg goes through a separate polling subscription, the round-trip takes a moment — give it a second or two, then read the saga's row in the saga store (Step 8 adds the REST endpoints for it):
 
 ```bash
-curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-100 | jq .fulfillmentStatus
-# "COMPLETED"
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT saga_id, status FROM saga_state WHERE saga_id = 'fulfillment-o-100';"
+```
+
+```
+      saga_id      |  status
+-------------------+-----------
+ fulfillment-o-100 | COMPLETED
 ```
 
 The order itself ends up `CONFIRMED` (the saga's final `ConfirmOrder`), which you can confirm with `curl -s -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" http://localhost:8080/api/orders/o-100 | jq .status` — the order's own customer asks, as Chapter 9 requires.
@@ -2806,7 +4199,7 @@ The order itself ends up `CONFIRMED` (the saga's final `ConfirmOrder`), which yo
 **See who caused what.** The metadata of the stored events shows the routing of Step 3 at work:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce -c "
   SELECT event_type,
          metadata->>'correlationId'        AS correlation_id,
          metadata->'sagaOrigin'->>'sagaId' AS origin_saga,
@@ -2840,15 +4233,13 @@ curl -i -X POST http://localhost:8080/api/orders/o-100/cancel \
 # The request's correlation id, trace id or user id is not acceptable
 ```
 
-> The above assumes the `Inventory` aggregate and its events are wired in. If you are reading this before Chapter 13 — where `InventoryDecider` is registered on the command bus and `StockReserved`/`ReservationConfirmed`/etc. are added to the event-type registry — the saga will reach `AWAITING_INVENTORY` and the `ReserveStock` command will fail because no decider is registered for it, tripping `compensate()`. With Chapter 13 in place the inventory leg runs end-to-end and the saga reaches `COMPLETED`.
-
 **What a cancel after the confirmation does.** Once the saga is `COMPLETED` it is done with the order and ignores every later event. An order that its customer or an `ADMIN` cancels after that (`POST /api/orders/{id}/cancel`, which the decider accepts for any order that is not shipped or delivered) gets its `OrderCancelled`, and the order cancellation process manager of Step 5c undoes it: a `StockReleased` at the product of every line, and a `PaymentRefunded` for the full amount, which the payment process manager passes on to the gateway. Cancel `o-100` and read the three streams:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/orders/o-100/cancel \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
   -H "Content-Type: application/json" -d '{"reason": "changed my mind"}'
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce -c "
   SELECT aggregate_type, event_type
   FROM event_stream
   WHERE aggregate_id IN ('o-100', 'pay-o-100')
@@ -2857,22 +4248,6 @@ docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "
 ```
 
 The order ends with `OrderCancelled`, the payment with `PaymentRefunded` after its `PaymentCaptured`, and the inventory with `StockReleased` after the order's `StockReserved`. The frontend of Chapter 16 offers the cancel on an order that is not shipped yet and says in its dialog what follows, and its end-to-end test asserts the refund and the release.
-
-To watch the failure/compensation path instead, flip the gateway failure flag on before placing the order (see the toggle below). The manager then calls `processPayment`, the gateway throws, the manager dispatches `FailPayment`, and the saga moves to `FAILED` and cancels the order:
-
-```bash
-curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-<orderId> | jq .fulfillmentStatus
-# "FAILED"
-```
-
-There is an admin endpoint that flips the gateway's failure flag, which Chapter 12 uses to demonstrate the circuit breaker:
-
-```bash
-curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
-# {"failureInjected":true}
-```
-
-The toggle is an admin endpoint, so the call carries an `ADMIN`'s two headers, the identity and the role: the demo's `AdminController` answers `403` without either. The check is `OwnerOrAdminAccess.requireAdmin` from Chapter 9, the first line of every route of that controller but `/health` (Chapters 12 and 14) — a stand-in for the gateway that would authenticate the caller in a real deployment. The saga reads above carry an `ADMIN`'s two headers too; the order's own customer may read the saga of their order as well (Step 8).
 
 ### Step 8 — SagaController: inspect sagas and inject failures via REST
 
@@ -2884,39 +4259,192 @@ The demo includes a `SagaController` (`spring-app/src/main/java/org/streamrune/e
 - For a moment after `POST /api/orders` the order has no row yet (the projection's polling interval, Chapter 9), and its own customer is answered `403` for the saga exactly as for the order. The saga appears for them when the order does.
 - `404` is an answer for the two callers who may know: an `ADMIN`, and the order's customer when the order has its row and the saga's row is not written yet.
 
-The rule goes where the order's rule lives. Add the import `org.streamrune.ecommerce.domain.order.OrderCommand` and two methods to `OwnerOrAdminQueries` (Chapter 9):
+The rule goes where the order's rule lives: `OwnerOrAdminQueries` (Chapter 9) gets `requireFulfillmentAccess` for one saga, `fulfillments` for the list, and the helper that reads the order id out of a saga id. Replace the class:
 
 ```java
-/** Refuses a caller who may not read the fulfillment saga with the given id. */
-public void requireFulfillmentAccess(StreamRuneContext.RequestContext caller, String sagaId) {
-  OwnerOrAdminAccess.requireIdentity(caller);
-  if (OwnerOrAdminAccess.isAdmin(caller)) {
-    return;
-  }
-  String orderId = orderIdOf(sagaId);
-  OwnerOrAdminAccess.requireOrderAccess(caller, orderId == null ? null : orders.get(orderId));
-}
+package org.streamrune.ecommerce.projections.access;
 
-/** The id of the order a fulfillment saga id names, or null when it names none. */
-private static String orderIdOf(String sagaId) {
-  String prefix = OrderCommand.PlaceOrder.SAGA_ID_PREFIX;
-  if (sagaId == null || !sagaId.startsWith(prefix)) {
-    return null;
-  }
-  String orderId = sagaId.substring(prefix.length());
-  return orderId.isBlank() ? null : orderId;
-}
+import java.util.List;
+import org.streamrune.core.StreamRuneContext;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.projections.CustomerProjection;
+import org.streamrune.ecommerce.projections.OrderProjection;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderView;
 
-/** Which fulfillment sagas the caller may list. */
-public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
-  String identity = OwnerOrAdminAccess.requireIdentity(caller);
-  if (OwnerOrAdminAccess.isAdmin(caller)) {
-    return FulfillmentScope.all();
+/**
+ * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
+ * to every read. The three applications answer {@code GET /api/customers}, {@code GET
+ * /api/customers/{id}}, {@code GET /api/orders} and {@code GET /api/orders/{id}} from this class
+ * and hand it the caller's request context; a refusal is an {@link AccessRefusedException}, which
+ * each application answers with {@code 403}. The fulfillment sagas, {@code GET
+ * /api/saga/fulfillments} and {@code GET /api/saga/fulfillments/{id}}, are decided here too: a
+ * fulfillment belongs to its order.
+ *
+ * <ul>
+ *   <li><b>One customer, one order:</b> an authenticated {@code ADMIN} or the owner; {@code null}
+ *       when the caller may read it and the read model has no row (the application answers {@code
+ *       404}).
+ *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
+ *       rows that are their own, selected by their id before anything is returned; a request
+ *       without an identity is refused.
+ *   <li><b>A fulfillment saga:</b> whoever may read the order it fulfils. The saga of an order has
+ *       the id {@code "fulfillment-" + orderId}, the id {@code OrderFulfillmentSaga} derives from
+ *       {@code OrderPlaced}, so the order is known from the saga id and its owner is the customer
+ *       the order's read-model row names.
+ * </ul>
+ *
+ * <p>A forgotten customer has no row: {@code CustomerProjection} deletes it. The customer and an
+ * {@code ADMIN} then read {@code null} for it, and it is on no list.
+ */
+public final class OwnerOrAdminQueries {
+
+  private final CustomerProjection customers;
+  private final OrderProjection orders;
+
+  public OwnerOrAdminQueries(CustomerProjection customers, OrderProjection orders) {
+    if (customers == null) {
+      throw new IllegalArgumentException("customers is required");
+    }
+    if (orders == null) {
+      throw new IllegalArgumentException("orders is required");
+    }
+    this.customers = customers;
+    this.orders = orders;
   }
-  return FulfillmentScope.only(
-      orders.listByCustomer(identity).stream()
-          .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
-          .toList());
+
+  /**
+   * One customer, for an {@code ADMIN} or the customer themself. The decision is made on the two
+   * ids alone, before the read model is asked, so a refused caller cannot tell a customer that
+   * exists from one that does not.
+   *
+   * @return the customer, or {@code null} when the read model has no row for the id
+   * @throws AccessRefusedException for everyone else
+   */
+  public CustomerView customer(StreamRuneContext.RequestContext caller, String customerId) {
+    OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
+    return customers.get(customerId);
+  }
+
+  /**
+   * The customers the caller may see: all of them for an {@code ADMIN}; for any other authenticated
+   * caller their own record, read by its id, or an empty list when they have none.
+   *
+   * @throws AccessRefusedException for a request without an identity
+   */
+  public List<CustomerView> customers(StreamRuneContext.RequestContext caller) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return customers.listAll();
+    }
+    CustomerView own = customers.get(identity);
+    return own == null ? List.of() : List.of(own);
+  }
+
+  /**
+   * One order, for an {@code ADMIN} or the customer the order names.
+   *
+   * @return the order; {@code null} only for an {@code ADMIN}, when the read model has no row for
+   *     the id
+   * @throws AccessRefusedException for everyone else, and for a caller who is not an {@code ADMIN}
+   *     when the read model has no row for the id: an order without a row has no known owner, and
+   *     the same answer as for somebody else's order keeps its existence to itself
+   */
+  public OrderView order(StreamRuneContext.RequestContext caller, String orderId) {
+    OwnerOrAdminAccess.requireIdentity(caller);
+    OrderView order = orders.get(orderId);
+    OwnerOrAdminAccess.requireOrderAccess(caller, order);
+    return order;
+  }
+
+  /**
+   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
+   * customerId} when the request names one. Any other authenticated caller gets their own orders
+   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer.
+   *
+   * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @throws AccessRefusedException for a request without an identity, and for a caller who is not
+   *     an {@code ADMIN} and asks for another customer's orders
+   */
+  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    boolean filtered = customerId != null && !customerId.isEmpty();
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+    }
+    if (filtered) {
+      OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
+    }
+    return orders.listByCustomer(identity);
+  }
+
+  /**
+   * Refuses a caller who may not change the order with the given id: the guard of the order
+   * commands that act on an existing order. The owner is the customer the order's read-model row
+   * names, as for {@link #order}.
+   *
+   * @throws AccessRefusedException unless the caller is an {@code ADMIN} or that customer
+   */
+  public void requireOrderAccess(StreamRuneContext.RequestContext caller, String orderId) {
+    order(caller, orderId);
+  }
+
+  /**
+   * Refuses a caller who may not read the fulfillment saga with the given id: the guard of {@code
+   * GET /api/saga/fulfillments/{id}}. An {@code ADMIN} gets past it for any id. Any other caller
+   * must be the customer of the order the saga fulfils, decided as {@link #order} decides it: the
+   * order id is what follows {@code "fulfillment-"} in the saga id, and the owner is the customer
+   * the order's read-model row names.
+   *
+   * <p>A saga id of another shape belongs to no order and has no owner. Neither has the saga of an
+   * order without a row: {@code OrderProjection} writes the row after {@code OrderPlaced} is
+   * stored, so for a moment after {@code POST /api/orders} the order's customer is refused here
+   * exactly as {@code GET /api/orders/{id}} refuses them, and reads the fulfillment once the order
+   * answers. The refusal is the same in every case, so it does not tell a caller whether a saga or
+   * an order exists.
+   *
+   * @throws AccessRefusedException unless the caller is an {@code ADMIN} or that customer
+   */
+  public void requireFulfillmentAccess(StreamRuneContext.RequestContext caller, String sagaId) {
+    OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return;
+    }
+    String orderId = orderIdOf(sagaId);
+    OwnerOrAdminAccess.requireOrderAccess(caller, orderId == null ? null : orders.get(orderId));
+  }
+
+  /** The id of the order a fulfillment saga id names, or {@code null} when it names none. */
+  private static String orderIdOf(String sagaId) {
+    String prefix = OrderCommand.PlaceOrder.SAGA_ID_PREFIX;
+    if (sagaId == null || !sagaId.startsWith(prefix)) {
+      return null;
+    }
+    String orderId = sagaId.substring(prefix.length());
+    return orderId.isBlank() ? null : orderId;
+  }
+
+  /**
+   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
+   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
+   * the order read model holds for the caller's id, so an order without a row yet has no saga on
+   * the caller's list yet.
+   *
+   * @throws AccessRefusedException for a request without an identity
+   */
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (OwnerOrAdminAccess.isAdmin(caller)) {
+      return FulfillmentScope.all();
+    }
+    return FulfillmentScope.only(
+        orders.listByCustomer(identity).stream()
+            .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
+            .toList());
+  }
 }
 ```
 
@@ -3058,6 +4586,97 @@ public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") in
 
 **What a customer reads.** The same row and the same state an `ADMIN` reads, for their own orders: the order id, their own customer id, the payment id (`"pay-" + orderId`, derived, not a card or account number), the lines and the total they ordered, and the fulfillment status. Nothing in a fulfillment saga's state belongs to anybody else, so nothing is cut from it. What stays with the `ADMIN` is everything that is not one order's saga: the dead letters, the faulted sagas and the recovery operations of Chapter 14, and the failure switch below.
 
+Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/SagaController.java`:
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import java.util.List;
+import java.util.Map;
+import javax.sql.DataSource;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.core.saga.LoadedSaga;
+import org.streamrune.core.saga.SagaId;
+import org.streamrune.core.saga.SagaStore;
+import org.streamrune.core.types.SagaType;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.projections.access.FulfillmentSagaRows;
+import org.streamrune.ecommerce.projections.access.FulfillmentScope;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
+
+/**
+ * The order-fulfillment sagas, for an authenticated {@code ADMIN} or the customer of the order a
+ * saga fulfils ({@link OwnerOrAdminQueries}); {@code 403} for everyone else. A saga's state names
+ * the order, its customer, the payment and the total of one purchase: an {@code ADMIN} reads every
+ * saga, a customer the sagas of their own orders. The payment-failure switch is an {@code ADMIN}'s.
+ */
+@RestController
+@RequestMapping("/api/saga/fulfillments")
+public class SagaController {
+
+  /** The type the saga store records a fulfillment saga under: the list and the single read. */
+  private static final SagaType FULFILLMENT = SagaType.fromClass(OrderFulfillmentState.class);
+
+  private final SagaStore sagaStore;
+  private final PaymentGatewaySimulator paymentGateway;
+  private final DataSource dataSource;
+  private final OwnerOrAdminQueries queries;
+
+  public SagaController(
+      SagaStore sagaStore,
+      PaymentGatewaySimulator paymentGateway,
+      DataSource dataSource,
+      OwnerOrAdminQueries queries) {
+    this.sagaStore = sagaStore;
+    this.paymentGateway = paymentGateway;
+    this.dataSource = dataSource;
+    this.queries = queries;
+  }
+
+  /**
+   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
+   * orders, selected by their ids where the rows are read. A request without an identity is
+   * refused.
+   */
+  @GetMapping
+  public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+    return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
+  }
+
+  /**
+   * One saga. {@code 404} is the answer for a saga that does not exist to a caller who may read it:
+   * an {@code ADMIN}, or the customer of the order the id names. A customer gets {@code 403} for
+   * the saga of an order that is not theirs or has no read-model row, as for the order itself.
+   */
+  @GetMapping("/{id}")
+  public ResponseEntity<OrderFulfillmentState> getSaga(@PathVariable String id) {
+    queries.requireFulfillmentAccess(RequestCaller.current(), id);
+    return sagaStore
+        .load(new SagaId(id), FULFILLMENT, OrderFulfillmentState.class)
+        .map(LoadedSaga::state)
+        .map(ResponseEntity::ok)
+        .orElse(ResponseEntity.notFound().build());
+  }
+
+  /**
+   * Shorthand for {@code POST /api/admin/payment-failure/toggle}: the saga id is ignored and the
+   * single shared {@link PaymentGatewaySimulator} flag is flipped, so the route applies the admin
+   * toggle's role check and answers 403 without the ADMIN role.
+   */
+  @PostMapping("/{id}/inject-failure")
+  public Map<String, Boolean> injectFailure(@PathVariable String id) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    boolean current = paymentGateway.isFailureInjected();
+    paymentGateway.setFailureInjected(!current);
+    return Map.of("failureInjected", !current);
+  }
+}
+```
+
 **List the fulfillment sagas** (reads directly from the `saga_state` table). As an `ADMIN`, every fulfillment saga:
 
 ```bash
@@ -3112,7 +4731,7 @@ curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost
 # {"failureInjected":true}
 ```
 
-The `{id}` path variable is accepted but not used — the endpoint flips the single shared `PaymentGatewaySimulator` flag rather than scoping the failure to one saga. Calling it a second time toggles the flag back off. This is a convenient shorthand for the `/api/admin/payment-failure/toggle` endpoint exposed by `AdminController` — both toggle the same `PaymentGatewaySimulator` bean, so both need the ADMIN role header (Step 7). The saga route applies the check the admin endpoint applies, `OwnerOrAdminAccess.requireAdmin`:
+The `{id}` path variable is accepted but not used — the endpoint flips the single shared `PaymentGatewaySimulator` flag rather than scoping the failure to one saga. Calling it a second time toggles the flag back off. Chapter 12's `AdminController` gets a second route to the same switch, `POST /api/admin/payment-failure/toggle`. The route asks `OwnerOrAdminAccess.requireAdmin` first, as every operator route does, so it needs an `ADMIN`'s two headers:
 
 ```java
 @PostMapping("/{id}/inject-failure")
@@ -3124,7 +4743,21 @@ public Map<String, Boolean> injectFailure(@PathVariable String id) {
 }
 ```
 
-Without the header the route answers `403` and the flag stays as it was; a second route to the same switch must not be a way around the admin endpoint's check.
+Without the header the route answers `403` and the flag stays as it was.
+
+**Watch the compensation path.** With the flag on, place another order. The payment process manager calls `processPayment`, the gateway throws, and the manager dispatches `FailPayment`. The saga cancels the order and ends `FAILED`; the order cancellation process manager finds nothing to undo, because no stock was reserved and the failed payment took no money:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
+  -d '{"orderId":"o-101","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-o-101 | jq .fulfillmentStatus
+# "FAILED"
+```
+
+Call the inject-failure route once more to switch the failure off again.
 
 ---
 
@@ -3138,7 +4771,7 @@ This chapter introduced six collaborating types from the saga subsystem:
 
 **`SagaStore`** is the persistence interface for saga state. `PostgresSagaStore` implements it using a single `saga_state` table, with an explicit **create / CAS-update split** rather than a single save method: `create(sagaId, sagaType, state, status)` atomically inserts a new saga at `version = 1` and throws `OptimisticLockException` if one already exists; `update(sagaId, sagaType, state, status, expectedVersion)` is a compare-and-swap write that only succeeds when the stored version matches `expectedVersion` **and** the stored status is not terminal (`COMPLETED`, `COMPENSATED`, `FAILED`) — any other condition throws `OptimisticLockException`. Both `create` and `update` persist an explicit `SagaStatus` argument; the store does not derive it from `state.status()`. This is what protects against the lost-update race where one writer (the event path) and another (the saga's own timeout runner, Step 6) race on the same saga: whichever writes second with a stale `expectedVersion` gets a CAS failure and retries on fresh state instead of silently overwriting.
 
-**`LoadedSaga`** is what `sagaStore.load(sagaId, sagaType, stateType)` returns, wrapped in `Optional`: a record of `(state, status, version)`. `status` is the framework-owned, authoritative lifecycle value from the store row — not derived from `state.status()` — because the framework can persist a status the domain state never reflects (for example `FAULTED` after a poison event the orchestrator's own `evolve` never saw, or `COMPENSATED`/`FAILED` set by `SagaRunner` itself after classifying a compensation outcome). `version` is the CAS token to pass back into `update`.
+**`LoadedSaga`** is what `sagaStore.load(sagaId, sagaType, stateType)` returns, wrapped in `Optional`: a record whose components include the deserialized `state`, the framework-owned `status` and the `version`, among the bookkeeping the store keeps per saga. `status` is the framework-owned, authoritative lifecycle value from the store row — not derived from `state.status()` — because the framework can persist a status the domain state never reflects (for example `FAULTED` after a poison event the orchestrator's own `evolve` never saw, or `COMPENSATED`/`FAILED` set by `SagaRunner` itself after classifying a compensation outcome). `version` is the CAS token to pass back into `update`.
 
 **`SagaRunner`** is the runtime that connects all the pieces — but it does not subscribe to anything itself (see Step 6): it is fed events by a `PollingEventSubscription` built with `.sagaRunner(runner)`, which calls its `asEventListener()` under the runner's lease, identifies which sagas are interested in each event, and coordinates the load → evolve → handle → persist → dispatch cycle. `SagaCommand` is the value it dispatches: a pair of `(command, aggregateId)` where `aggregateId` (an `AggregateId`, not a bare string) identifies the target aggregate stream. Each dispatched command carries a deterministic `IdempotencyKey` so a redelivered event does not re-apply it (see the command inbox in Step 6). A `SagaDeadLetterStore` is a required builder field: an orchestrator method that throws is treated as a poison event, quarantined, and the saga marked `FAULTED` instead of wedging the whole subscription.
 
@@ -3148,7 +4781,7 @@ This chapter introduced six collaborating types from the saga subsystem:
 
 ## Reliability under failure
 
-Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy path. Four properties, all wired in Step 6, keep the saga correct when things go wrong — a fuller treatment lives in the framework's `CHANGELOG.md` under **Reliability**; this section covers only what the demo exercises.
+Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy path. Four properties, all wired in Step 6, keep the saga correct when things go wrong — a fuller treatment lives in the framework's `CHANGELOG.md` under **Sagas** and **Guarantees**; this section covers only what the demo exercises.
 
 **Poison events don't wedge the subscription.** If an orchestrator method throws — a decider bug, a payload that fails to deserialize — `SagaRunner` quarantines the offending event in `saga_dead_letters` (via the `sagaDeadLetterStore` bean) and marks that one saga `FAULTED`, then keeps processing the rest of the batch. Every other order behind the poisoned one keeps moving. The quarantine row stores metadata only — event offset, event type, error — never the event payload: `event_stream` remains the framework's single crypto-governed, shreddable source of truth for payloads, so a GDPR erasure never has to chase a plaintext copy left behind in `saga_dead_letters`. To inspect what was quarantined, read `event_stream` at the recorded offset.
 
