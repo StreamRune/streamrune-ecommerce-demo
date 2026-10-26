@@ -61,7 +61,6 @@ streamrune:
     # follows within about 10 to 20 seconds. The framework default is 60s.
     compensation-retry-interval: 10s
   event-store:
-    type: postgres
     # The framework creates its own schema at startup (this is also the default): the event
     # store's Flyway series and, because a PostgreSQL-backed CryptoEngine bean is present, the
     # crypto series, each on its own history table. The demo ships no DDL of its own; an empty
