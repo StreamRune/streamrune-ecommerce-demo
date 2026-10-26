@@ -6,7 +6,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +21,9 @@ import org.junit.jupiter.api.Test;
  * the file, line for line.
  *
  * <p>A listing of a file is the fenced block that follows a line naming the file in backticks and
- * ending in a colon, such as "Create {@code `docker-compose.yml`} in the project root:".
+ * ending in a colon, such as "Create {@code `docker-compose.yml`} in the project root:", and is
+ * fenced as {@code yaml} (the Compose file) or {@code dockerfile}. Every block of the tutorial that
+ * holds a Compose file (a {@code services:} line) or a Dockerfile is a listing the test reads.
  */
 class TutorialStackFilesListingTest {
 
@@ -34,9 +38,11 @@ class TutorialStackFilesListingTest {
   @Test
   void everyListingOfAStackFileIsTheRepositorysFileSoFar() throws IOException {
     List<String> problems = new ArrayList<>();
+    Set<String> read = new HashSet<>();
     for (String name : FILES) {
       List<String> file = Files.readAllLines(REPOSITORY.resolve(name));
       List<Listing> listings = listingsOf(name);
+      listings.forEach(listing -> read.add(listing.where()));
       if (listings.isEmpty()) {
         problems.add(name + ": no chapter lists it");
         continue;
@@ -56,13 +62,50 @@ class TutorialStackFilesListingTest {
         problems.add(last.where() + ": the last listing of " + name + " is not the whole file");
       }
     }
+    for (String block : stackFileBlocks()) {
+      if (!read.contains(block)) {
+        problems.add(
+            block
+                + ": a block of a stack file that is not read as a listing (its intro names the"
+                + " file in backticks and ends in a colon)");
+      }
+    }
 
     assertThat(problems).as("listings of the stack's files").isEmpty();
+  }
+
+  /**
+   * Every block that holds a Compose file or a Dockerfile, as chapter and line of its first line.
+   */
+  private static List<String> stackFileBlocks() throws IOException {
+    List<String> blocks = new ArrayList<>();
+    for (Path chapter : chapters()) {
+      List<String> lines = Files.readAllLines(chapter);
+      for (int i = 0; i < lines.size(); i++) {
+        String fence = lines.get(i).strip();
+        if (!fence.startsWith("```")) {
+          continue;
+        }
+        String language = fence.substring(3).strip();
+        int end = i + 1;
+        boolean compose = false;
+        while (end < lines.size() && !lines.get(end).strip().startsWith("```")) {
+          compose |= lines.get(end).startsWith("services:");
+          end++;
+        }
+        if (language.equals("dockerfile") || (language.equals("yaml") && compose)) {
+          blocks.add(chapter.getFileName() + ":" + (i + 2));
+        }
+        i = end;
+      }
+    }
+    return blocks;
   }
 
   /** The listings of one file, in the order a reader meets them. */
   private static List<Listing> listingsOf(String name) throws IOException {
     String mention = "`" + name + "`";
+    String fence = "```" + (name.endsWith(".yml") ? "yaml" : "dockerfile");
     List<Listing> listings = new ArrayList<>();
     for (Path chapter : chapters()) {
       List<String> lines = Files.readAllLines(chapter);
@@ -77,7 +120,7 @@ class TutorialStackFilesListingTest {
         while (open < lines.size() && lines.get(open).isBlank()) {
           open++;
         }
-        if (open >= lines.size() || !lines.get(open).startsWith("```")) {
+        if (open >= lines.size() || !lines.get(open).strip().equals(fence)) {
           continue;
         }
         List<String> block = new ArrayList<>();

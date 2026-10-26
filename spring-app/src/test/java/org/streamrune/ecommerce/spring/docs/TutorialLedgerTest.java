@@ -28,10 +28,12 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>What is scanned.</b> The {@code curl} commands of a chapter's shell blocks (continuation
  * lines and multi-line bodies joined) and the {@code http://localhost} addresses of its text and
- * shell blocks, the addresses a reader opens in a browser. A request's ids are the values of its
- * path parameters, of its query parameters whose names end in {@code Id}, and of the {@code
- * productId}, {@code customerId} and {@code orderId} fields of its JSON body. A value with a shell
- * variable or a {@code <placeholder>} in it is not an id.
+ * shell blocks, the addresses a reader opens in a browser. A {@code curl} command without an {@code
+ * http://} or {@code https://} address the test can read fails, rather than going unchecked; {@code
+ * --json} sends its body as {@code -d} does. A request's ids are the values of its path parameters,
+ * of its query parameters whose names end in {@code Id}, and of the {@code productId}, {@code
+ * customerId} and {@code orderId} fields of its JSON body. A value with a shell variable or a
+ * {@code <placeholder>} in it is not an id.
  *
  * <p><b>The ledger</b> ({@link #LEDGER}) says, for each of them, the chapter that introduces it,
  * and how. The test holds the ledger to it: a {@code created} id has a request in its chapter that
@@ -185,6 +187,9 @@ class TutorialLedgerTest {
     List<String> problems = new ArrayList<>();
     int requests = 0;
     for (Chapter chapter : chapters()) {
+      for (int line : chapter.unreadCommands()) {
+        problems.add(chapter.name() + ":" + line + " a curl command without an address to read");
+      }
       for (Request request : chapter.requests()) {
         requests++;
         for (String key : uses(request, ledger)) {
@@ -445,17 +450,22 @@ class TutorialLedgerTest {
       List<String> headers,
       String body) {}
 
-  /** One chapter: its number, file name, the requests of its steps and its Java listings. */
+  /**
+   * One chapter: its number, file name, the requests of its steps, the lines of the {@code curl}
+   * commands it has no address of, and its Java listings.
+   */
   private record Chapter(
       int number,
       String name,
       List<Request> requests,
+      List<Integer> unreadCommands,
       String javaListings,
       Map<String, String> files) {
 
     static Chapter read(Path file, int number) throws IOException {
       List<String> lines = Files.readAllLines(file);
       List<Request> requests = new ArrayList<>();
+      List<Integer> unread = new ArrayList<>();
       StringBuilder java = new StringBuilder();
       Map<String, String> files = new LinkedHashMap<>();
       String language = null;
@@ -470,7 +480,7 @@ class TutorialLedgerTest {
             blockStart = i + 2;
           } else {
             if (SHELL.contains(language)) {
-              requests.addAll(Shell.requests(block, blockStart));
+              requests.addAll(Shell.requests(block, blockStart, unread));
             } else if (language.equals("java")) {
               String source = String.join("\n", block);
               java.append(source).append('\n');
@@ -491,7 +501,8 @@ class TutorialLedgerTest {
           }
         }
       }
-      return new Chapter(number, file.getFileName().toString(), requests, java.toString(), files);
+      return new Chapter(
+          number, file.getFileName().toString(), requests, unread, java.toString(), files);
     }
 
     private static String fileOf(List<String> block) {
@@ -513,7 +524,10 @@ class TutorialLedgerTest {
   /** Reads the requests out of a shell block: {@code curl} commands and localhost addresses. */
   private static final class Shell {
 
-    static List<Request> requests(List<String> block, int firstLine) {
+    /**
+     * The requests of a block; the first line of a curl command without an address joins unread.
+     */
+    static List<Request> requests(List<String> block, int firstLine, List<Integer> unread) {
       List<Request> requests = new ArrayList<>();
       StringBuilder command = new StringBuilder();
       int start = -1;
@@ -540,6 +554,8 @@ class TutorialLedgerTest {
           Request request = curl(start, words.subList(curl + 1, words.size()));
           if (request.port() > 0) {
             requests.add(request);
+          } else {
+            unread.add(start);
           }
         }
         command.setLength(0);
@@ -568,7 +584,7 @@ class TutorialLedgerTest {
             headers.add(next);
             i++;
           }
-          case "-d", "--data", "--data-raw", "--data-binary" -> {
+          case "-d", "--data", "--data-raw", "--data-binary", "--json" -> {
             body = next;
             i++;
           }
