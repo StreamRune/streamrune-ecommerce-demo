@@ -1421,4 +1421,4 @@ CircuitBreakerOpenException: Circuit breaker OPEN — rejecting command: Capture
 
 ## Next Up
 
-Let's add our final aggregate — Inventory — and learn about the transactional outbox pattern.
+Next: the inventory's read model and the transactional outbox pattern, which forwards a curated set of integration events to RabbitMQ.

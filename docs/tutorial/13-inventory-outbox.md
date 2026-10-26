@@ -1,4 +1,4 @@
-# Chapter 13: Inventory Aggregate & Outbox
+# Chapter 13: Inventory Read Model & Outbox
 
 > **What you'll learn:** How the inventory's read model counts the stock of the three pools Chapter 11's inventory aggregate keeps — available, reserved, and committed — and how StreamRune's transactional outbox pattern reliably forwards a curated, PII-safe set of integration events to RabbitMQ. You will add `InventoryProjection` and wire the four outbox beans (`PostgresOutboxStore`, `EcommerceIntegrationEventMapper`, `RabbitMqConfig` publisher, and `streamrune.outbox.enabled=true`) that make end-to-end delivery real. A second Spring Boot application — the `notifications-service` — subscribes to the queue and exposes `GET /received`, for an `ADMIN`, so you can verify cross-service delivery without touching the e-shop internals.
 
@@ -2159,7 +2159,7 @@ Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost
 
 The images copy the two JARs that `bootJar` builds, the backend's and the notifications service's, so Step 6 builds them before it starts the stack.
 
-The repository's `.dockerignore` keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`. If you write your own, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
+Your project needs no `.dockerignore` for these `COPY` lines. The demo's repository has one that keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`; if you add one, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
 
 The `notifications-service` deduplicates messages by `entryId` (the AMQP `messageId` property, set by `RabbitMqOutboxPublisher` to `entry.id().value()`). If the broker delivers a message twice — because the poller restarted after publishing but before marking it `DELIVERED` — the service discards the duplicate silently.
 
@@ -2172,7 +2172,7 @@ Start the full stack. Stop the `./gradlew :spring-app:bootRun` of the earlier ch
 docker compose up -d --build
 ```
 
-`docker compose ps` lists the five services of this chapter's file; wait until `postgres` and `rabbitmq` read `healthy` and the backend has started (`docker compose logs -f backend` shows `Started SpringEcommerceApplication`). The database is the one the earlier chapters filled, so `p-1`, its stock from Chapter 11 and the customer `c-1` are there.
+`docker compose ps` lists the four services of this chapter's file; wait until `postgres` and `rabbitmq` read `healthy` and the backend has started (`docker compose logs -f backend` shows `Started SpringEcommerceApplication`). The database is the one the earlier chapters filled, so `p-1`, its stock from Chapter 11 and the customer `c-1` are there.
 
 **6a. Place and confirm an order.** Confirming an order emits `OrderConfirmed`, which `EcommerceIntegrationEventMapper` includes in the outbox. Place and confirm an order:
 

@@ -22,7 +22,7 @@ A **saga** is a sequence of steps that span multiple aggregates, where each step
 The order fulfillment flow the saga drives — what its `evolve()`/`handle()`/`compensate()` code reacts to, and what the assembled demo actually runs end-to-end — follows five steps:
 
 1. `OrderPlaced` arrives — the saga starts, issues `InitiatePayment`
-2. `PaymentCaptured` arrives — saga advances and issues one `ReserveStock` per order line against the inventory aggregate (Chapter 13)
+2. `PaymentCaptured` arrives — saga advances and issues one `ReserveStock` per order line against the inventory aggregate (Step 1b)
 3. One `StockReserved` per line arrives — the one that completes the order's lines makes the saga issue `ConfirmOrder`
 4. `OrderConfirmed` arrives — saga completes (`COMPLETED`)
 5. Any failure — on `PaymentFailed` the saga moves to a non-terminal `CANCELLING` step, dispatches `CancelOrder`, and `OrderCancelled` then closes it out to `FAILED` (a terminal `evolve()` would end the saga before `handle()` ever ran, so the cancel needs that intermediate step — see [Step 3](#step-3--implement-orderfulfillmentsaga)); if a later step's command fails, or the fulfillment's deadline passes, `compensate()` cancels the order. A cancellation of the order by its customer or an `ADMIN` while the saga runs ends the fulfillment too: the saga moves to `COMPENSATING`, and its compensation cancels the order once more
@@ -48,7 +48,7 @@ stateDiagram-v2
 
 The saga never releases stock or refunds a payment itself. Every cancellation of an order is an `OrderCancelled` event — the customer's, an `ADMIN`'s, the saga's own compensation — and every `OrderCancelled` is undone by the `OrderCancellationProcessManager`: it releases the order's stock at every product of its lines and voids the payment, or refunds it once captured. Each of those commands is safe whether or not the step it undoes ran, so the undo does not need to know how far the fulfillment got.
 
-This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, the `PaymentProcessManager` that drives the capture leg, and the two process managers that undo a cancelled order and commit the stock of a shipped one. The saga issues `ReserveStock` against the `Inventory` aggregate: this chapter creates the inventory's commands, events and state, which the saga needs to compile, and Chapter 13 gives the aggregate its decider, after which the inventory leg runs end-to-end too.
+This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, the `PaymentProcessManager` that drives the capture leg, and the two process managers that undo a cancelled order and commit the stock of a shipped one. The saga reserves stock from the `Inventory` aggregate, and the undo of a cancelled order releases it there, so this chapter builds that aggregate as well: its commands, events and state, its decider (Step 1b) and the route that receives stock (Step 1c). Chapter 13 adds its read model.
 
 > **What makes the saga complete in the assembled demo.** When you place an order end-to-end, the saga does not stall — it runs all the way to `COMPLETED`. Two pieces make that work:
 >
@@ -185,7 +185,7 @@ public final class PaymentIds {
 
 ## Domain Model: Inventory Types
 
-The saga reserves the stock of every line of the order, and the two process managers of Step 5c release and commit it: they dispatch the inventory's commands and react to its events. Those types come first, so the saga compiles; the inventory's decider, which decides the commands, is Chapter 13's. Until then the command bus has no decider for `ReserveStock`, and the saga of an order compensates at that step (Step 7 shows it).
+The saga reserves the stock of every line of the order, and the two process managers of Step 5c release and commit it: they dispatch the inventory's commands and react to its events. Those types come first, so the saga compiles, and the inventory's decider follows in Step 1b: the command bus refuses a command it has no decider for, so without one no order could reserve its stock and no cancelled order could release it.
 
 Inventory tracks stock for a single product across three pools:
 
@@ -2951,7 +2951,7 @@ public final class OrderCancellationProcessManager implements EventListener {
 }
 ```
 
-For each line of the cancelled order it sends `ReleaseStock(productId, orderId)`, then `CancelPayment` for the order's payment, `PaymentIds.forOrder(orderId)`. None of them needs to know how far the fulfillment got. The inventory releases what this order holds at the product and stores nothing when it holds nothing (Chapter 13); `CancelPayment` voids a pending payment, refunds a captured one in full and stores nothing otherwise (Step 1). So the undo is the same whether the order was cancelled before its payment, between two reservations, or after its confirmation.
+For each line of the cancelled order it sends `ReleaseStock(productId, orderId)`, then `CancelPayment` for the order's payment, `PaymentIds.forOrder(orderId)`. None of them needs to know how far the fulfillment got. The inventory releases what this order holds at the product and stores nothing when it holds nothing (Step 1b); `CancelPayment` voids a pending payment, refunds a captured one in full and stores nothing otherwise (Step 1). So the undo is the same whether the order was cancelled before its payment, between two reservations, or after its confirmation.
 
 The commands continue the cancellation, as the payment process manager's continue `PaymentInitiated`: inside `StreamRuneContext.continuing(event)`, under keys made of the event's id and the line's index, `order-cancel:<eventId>:line:<i>` and `order-cancel:<eventId>:payment`. A redelivery of the event is answered from the command inbox. Another `OrderCancelled` of the same order is a new event with keys of its own, and the aggregates store only what the earlier undo left. That is why the order decider accepts `CancelOrder` on a cancelled order and appends another `OrderCancelled` (Chapter 8): a customer cancels while the saga's reservation step is still in flight, the undo of that cancellation finds nothing reserved at a product whose `ReserveStock` commits a moment later, and the saga — moved to `COMPENSATING` by the customer's cancellation — compensates with its own `CancelOrder`. That second `OrderCancelled` is stored after every reservation the saga ever stored, and its undo releases the late one. The order's stream then shows two `OrderCancelled` events, and the outbox publishes both.
 

@@ -1716,7 +1716,7 @@ public class ProductCommandController {
 }
 ```
 
-`DiscontinueProduct` keeps its `@RequireRole("ADMIN")` from Step 1, and both refusals are a `403`. The two mechanisms guard different doors. `@RequireRole` is declared on the command and enforced in the command bus, for every caller of the bus. The controller line guards the HTTP route and leaves the bus to the callers that have no request: the seed data of Chapter 17 creates its products through the command bus at startup, with no caller at all. Reading the catalogue stays open: `ProductQueryController` asks nobody. Chapter 13 gives the inventory's one write, receiving a shipment, the same first line.
+`DiscontinueProduct` keeps its `@RequireRole("ADMIN")` from Step 1, and both refusals are a `403`. The two mechanisms guard different doors. `@RequireRole` is declared on the command and enforced in the command bus, for every caller of the bus. The controller line guards the HTTP route and leaves the bus to the callers that have no request: the seed data of Chapter 17 creates its products through the command bus at startup, with no caller at all. Reading the catalogue stays open: `ProductQueryController` asks nobody. Chapter 11 gives the inventory's one write, receiving a shipment, the same first line.
 
 **Who gets what.** Four callers — one without an identity, an authenticated customer who is not the owner, the owner, and an `ADMIN`:
 
