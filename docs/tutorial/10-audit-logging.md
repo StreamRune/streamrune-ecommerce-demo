@@ -170,21 +170,15 @@ public sealed interface OrderCommand extends Command {
 
 Order commands do not carry `@Auditable` themselves because `AuditCommandInterceptor` already records every command. The annotation is reserved for queries, where auditing must be selective.
 
-### Step 2 — Create the PostgresAuditStore bean
+### Step 2 — The PostgresAuditStore bean
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add a bean that constructs `PostgresAuditStore` with the application's `DataSource`:
+The audit interceptor writes through the `PostgresAuditStore` bean that `StreamRuneConfig` declares since Chapter 7, where `ForgetSubjectService` records every forget with it:
 
 ```java
 @Bean
 public PostgresAuditStore auditStore(DataSource ds) {
   return new PostgresAuditStore(ds);
 }
-```
-
-Add the import:
-
-```java
-import org.streamrune.postgres.PostgresAuditStore;
 ```
 
 `PostgresAuditStore` implements the `AuditStore` interface from `streamrune-core`. Its `save(AuditEntry)` method executes a single `INSERT` into the `audit_log` table. The table carries an `id BIGSERIAL` surrogate primary key plus the columns `command_id`, `command_type`, `aggregate_type`, `aggregate_id`, `user_id`, `occurred_at`, `outcome`, `error_message`, `event_count`, and `correlation_id`. `aggregate_type` is the registered type of the command's aggregate (`NULL` for query-origin and subject entries); `idx_audit_aggregate` indexes `(aggregate_type, aggregate_id)`. The framework's `V001__streamrune_baseline.sql` creates the table already in this final shape — including the `correlation_id` column and a nullable `command_id`, so query-origin entries can leave it unset. The event store factory applied that baseline on the application's first start (Chapter 1), so the table is already there.
@@ -200,7 +194,7 @@ public AuditCommandInterceptor auditInterceptor(PostgresAuditStore store) {
 }
 ```
 
-Then wire it into the `VirtualThreadCommandBus` builder. The full command bus bean, including all interceptors from earlier chapters, now looks like this:
+Then wire it into the `VirtualThreadCommandBus` builder, in front of the two interceptors of chapters 3 and 9 (`AuditCommandInterceptor` comes with `org.streamrune.runtime.*`). The command bus bean now reads:
 
 ```java
 @Bean
@@ -209,33 +203,60 @@ public VirtualThreadCommandBus commandBus(
     BeanValidationInterceptor validation,
     AnnotationAuthorizationInterceptor auth,
     AuditCommandInterceptor audit) {
-  // a CircuitBreakerCommandInterceptor is added to this chain in a later chapter,
-  // so the real demo's final list is (audit, auth, validation, circuitBreaker)
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
       .interceptors(audit, auth, validation)
       .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-      // ... register deciders
+      .register(
+          ProductState.TYPE,
+          ProductCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case ProductCommand.CreateProduct c -> c.productId();
+                    case ProductCommand.UpdatePrice c -> c.productId();
+                    case ProductCommand.AdjustStock c -> c.productId();
+                    case ProductCommand.DiscontinueProduct c -> c.productId();
+                  }),
+          new ProductDecider())
+      .register(
+          OrderState.TYPE,
+          OrderCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case OrderCommand.PlaceOrder c -> c.orderId();
+                    case OrderCommand.ConfirmOrder c -> c.orderId();
+                    case OrderCommand.ShipOrder c -> c.orderId();
+                    case OrderCommand.DeliverOrder c -> c.orderId();
+                    case OrderCommand.CancelOrder c -> c.orderId();
+                  }),
+          new OrderDecider())
+      .register(
+          CustomerState.TYPE,
+          CustomerCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case CustomerCommand.RegisterCustomer c -> c.customerId();
+                    case CustomerCommand.UpdateProfile c -> c.customerId();
+                    case CustomerCommand.RequestDataExport c -> c.customerId();
+                    case CustomerCommand.ForgetCustomer c -> c.customerId();
+                  }),
+          new CustomerDecider())
       .build();
 }
 ```
 
-Add the imports (`SnapshotPolicy` is already used in the snippet above, so make sure it is imported too):
-
-```java
-import org.streamrune.runtime.AuditCommandInterceptor;
-import org.streamrune.core.SnapshotPolicy;
-```
-
-Interceptor ordering matters here: `audit` goes first, in front of `auth`. The bus delivers `onError()` only to the interceptors whose `before()` completed. Behind the authorization interceptor, the audit interceptor would never see a refused command: authorization throws before audit's `before()` runs, and the attempt leaves no trace. In front, audit's `before()` has already run when authorization refuses, so its `onError()` records the attempt as a `FAILURE` entry with the caller's id and the refusal message. A command Bean Validation rejects is recorded the same way. An attempt to do something you may not do is exactly what an audit log exists to capture. This is the framework's canonical order (`CommandInterceptorOrdering` in `streamrune-runtime`); the Quarkus and Micronaut apps get it from their integrations, which sort the chain they assemble, and all three apps check it with the same test (`shipOrderWithoutAdminRoleReturns400AndIsAuditedAsAFailure`).
+Interceptor ordering matters here: `audit` goes first, in front of `auth`. The bus delivers `onError()` only to the interceptors whose `before()` completed. Behind the authorization interceptor, the audit interceptor would never see a refused command: authorization throws before audit's `before()` runs, and the attempt leaves no trace. In front, audit's `before()` has already run when authorization refuses, so its `onError()` records the attempt as a `FAILURE` entry with the caller's id and the refusal message. A command Bean Validation rejects is recorded the same way. An attempt to do something you may not do is exactly what an audit log exists to capture. This is the framework's canonical order (`CommandInterceptorOrdering` in `streamrune-runtime`); the Quarkus and Micronaut apps get it from their integrations, which sort the chain they assemble, and all three apps check it with the same test (`shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure`).
 
 `AuditCommandInterceptor` captures the caller's user ID in `before()` by reading `StreamRuneContext.CURRENT`, and the bound `CorrelationId` with it, so each audit row is tied back to the originating business flow (the correlation id is `null` when no request context was bound). For a command a saga dispatches, and for a command that continues a saga's event (the payment process manager of Chapter 11), that id is the saga's own, `streamrune:saga:<sagaId>`. The request filter refuses the `streamrune:` prefix from a client (Chapter 9), so a row that carries it was written by a command that ran with that saga's origin bound. It pushes both onto a per-thread stack, so they remain available in `after()` and `onError()`, which run on the same thread after the `ScopedValue` scope may have moved. It is a stack rather than a single slot because a process manager can dispatch a nested command on the same thread before the outer command's callback runs. In `after()`, it writes a `SUCCESS` entry with the event count from `ctx.result()`, or a `VETOED` entry when a later interceptor's `before()` returned `false` and the command did not run. In `onError()`, it writes a `FAILURE` entry with the exception message and `eventCount=0`. Each callback takes its frame off the stack before writing and removes the `ThreadLocal` once the stack is empty, so a pooled thread carries nothing over.
 
 ### Step 4 — Wrap the `queryBus` bean with `AuditingQueryBus`
 
-In Chapter 5 you created two beans: `cachingQueryBus` (holds all handler registrations) and `queryBus` (initially returned the caching bus directly). Now replace only the `queryBus` bean body — the `cachingQueryBus` bean and its handler registrations are untouched.
+Chapter 5 registered the query handlers on the `cachingQueryBus` bean, and the controllers have injected it as their `QueryBus`. Wrap it: the `queryBus` bean is an `AuditingQueryBus` around the caching bus, and the `cachingQueryBus` bean and its handler registrations are untouched. With two `QueryBus` beans in the context, Spring hands `ProductQueryController`'s `QueryBus queryBus` parameter the bean whose name matches it, `queryBus`.
 
-Update the `queryBus` bean in `StreamRuneConfig`:
+Add the `queryBus` bean to `StreamRuneConfig`:
 
 ```java
 @Bean
@@ -246,11 +267,373 @@ public QueryBus queryBus(CachingQueryBus cachingBus, PostgresAuditStore auditSto
 
 (The parameter name is arbitrary — Spring injects the `CachingQueryBus` bean by type — but the real demo names it `cachingBus`, so we match that here.)
 
-Add the import:
+`AuditingQueryBus` comes with `org.streamrune.runtime.*`. The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 10</summary>
 
 ```java
-import org.streamrune.runtime.AuditingQueryBus;
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  @Bean
+  public HeaderUserRoleResolver userRoleResolver() {
+    return new HeaderUserRoleResolver();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
+    return new AnnotationAuthorizationInterceptor(resolver);
+  }
+
+  @Bean
+  public AuditCommandInterceptor auditInterceptor(PostgresAuditStore store) {
+    return new AuditCommandInterceptor(store);
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store,
+      BeanValidationInterceptor validation,
+      AnnotationAuthorizationInterceptor auth,
+      AuditCommandInterceptor audit) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(audit, auth, validation)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching + auditing
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public QueryBus queryBus(CachingQueryBus cachingBus, PostgresAuditStore auditStore) {
+    return new AuditingQueryBus(cachingBus, auditStore);
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess}. The customer and order controllers answer
+   * every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+}
 ```
+
+</details>
 
 The wrapping order is `AuditingQueryBus → CachingQueryBus → SimpleQueryBus`. Dispatched queries hit `AuditingQueryBus` first — every `@Auditable` query dispatch is recorded before being forwarded to the caching bus. If the result is already in the cache, the caching bus returns it immediately and no handler is called. This means cache hits **are** recorded in the audit log (the dispatch happened), but the handler was never reached. If you prefer to audit only cache misses, swap the order — but the real demo wraps `CachingQueryBus` inside `AuditingQueryBus` as shown above.
 
@@ -272,8 +655,8 @@ import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 
 /**
- * The command audit log, for the ADMIN role (403 otherwise): a row names the user who sent a
- * command and the aggregate it was sent to, for every customer.
+ * The command audit log, for the {@code ADMIN} role ({@code 403} otherwise): a row names the user
+ * who sent a command and the aggregate it was sent to, for every customer.
  */
 @RestController
 @RequestMapping("/api/audit")
@@ -386,7 +769,7 @@ curl -s http://localhost:8080/api/audit/commands \
   -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' | jq .
 ```
 
-You should see three entries, newest first. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:
+You should see the three entries of these calls first, newest first, and below them the older rows: the `GDPR_FORGET` rows that `ForgetSubjectService` wrote in Chapters 7 and 9. The refused ship attempt is one of them: the audit interceptor runs before the authorization interceptor, so the refusal is recorded as a `FAILURE` with the caller's id:
 
 ```json
 [
@@ -423,7 +806,7 @@ You should see three entries, newest first. The refused ship attempt is one of t
 Each entry records the command type, the aggregate it targeted, the caller's identity, and the number of events produced. A `PlaceOrder` that creates one `OrderPlaced` event shows `eventCount: 1`. The row of a failed command also holds the exception message in `error_message`, which this endpoint leaves out. Read it from the table:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT command_type, user_id, outcome, error_message FROM audit_log WHERE aggregate_id = 'order-audit-1' ORDER BY id"
 ```
 

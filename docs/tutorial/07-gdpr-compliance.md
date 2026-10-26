@@ -41,16 +41,23 @@ The two GDPR-relevant cases are already implemented from chapter 6:
 
 ```java
 case CustomerCommand.RequestDataExport c -> {
-    if (state.customerId() == null) throw new DomainException("Customer not found");
-    if (state.status() == CustomerStatus.FORGOTTEN)
-        throw new DomainException("Cannot export the data of a forgotten customer");
-    yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
+  if (state.customerId() == null) throw new DomainException("Customer not found");
+  // Nothing is left to export, and the stream of an erased customer takes no further event.
+  if (state.status() == CustomerStatus.FORGOTTEN)
+    throw new DomainException("Cannot export the data of a forgotten customer");
+  yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
 }
 
 case CustomerCommand.ForgetCustomer c -> {
-    if (state.customerId() == null) throw new DomainException("Customer not found");
-    if (state.status() == CustomerStatus.FORGOTTEN) yield List.of();
-    yield List.of(new CustomerEvent.CustomerForgotten(c.customerId()));
+  // An id no customer registered is refused: the forget endpoint shreds the key after this
+  // command, and a shred records a permanent tombstone, so a customer could never register
+  // under that id afterwards.
+  if (state.customerId() == null) throw new DomainException("Customer not found");
+  // Already forgotten: record nothing and succeed. The endpoint shreds the key after this
+  // command, so a request that failed after the event was recorded is finished by sending
+  // it again; refusing the repeat would leave the key in place for good.
+  if (state.status() == CustomerStatus.FORGOTTEN) yield List.of();
+  yield List.of(new CustomerEvent.CustomerForgotten(c.customerId()));
 }
 ```
 
@@ -63,11 +70,14 @@ case CustomerCommand.ForgetCustomer c -> {
 
 `ForgetSubjectService` is the framework's GDPR Article 17 orchestrator. It is **not** triggered by an event listener and there is no hidden "forget marker" on the command result — nothing happens until something calls `forget(...)`. In the demo, the controller does that explicitly: forgetting a customer is two ordered steps, both visible in the HTTP handler.
 
-`CustomerCommandController` injects the `ForgetSubjectService` bean (wired in `StreamRuneConfig`, Step 4) and uses it in the `/forget` handler:
+`CustomerCommandController` injects the `ForgetSubjectService` bean (declared in `StreamRuneConfig` in chapter 6; Step 4 gives it its purgers) and uses it in the `/forget` handler. Replace the controller with this version; the other three handlers and the two request records are those of chapter 6:
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,71 +95,129 @@ import org.streamrune.runtime.gdpr.ForgetSubjectService;
 @RequestMapping("/api/customers")
 public class CustomerCommandController {
 
-    private static final Logger LOG = LoggerFactory.getLogger(CustomerCommandController.class);
+  private static final Logger LOG = LoggerFactory.getLogger(CustomerCommandController.class);
 
-    private final VirtualThreadCommandBus commandBus;
-    private final ForgetSubjectService forgetSubjectService;
+  private final VirtualThreadCommandBus commandBus;
+  private final ForgetSubjectService forgetSubjectService;
 
-    public CustomerCommandController(
-            VirtualThreadCommandBus commandBus, ForgetSubjectService forgetSubjectService) {
-        this.commandBus = commandBus;
-        this.forgetSubjectService = forgetSubjectService;
+  public CustomerCommandController(
+      VirtualThreadCommandBus commandBus, ForgetSubjectService forgetSubjectService) {
+    this.commandBus = commandBus;
+    this.forgetSubjectService = forgetSubjectService;
+  }
+
+  @PostMapping
+  public ResponseEntity<Void> registerCustomer(@Valid @RequestBody RegisterRequest req) {
+    commandBus.execute(
+        new CustomerCommand.RegisterCustomer(
+            req.customerId(), req.name(), req.email(), req.address(), req.phone()));
+    return ResponseEntity.ok().build();
+  }
+
+  @PutMapping("/{id}")
+  public ResponseEntity<Void> updateProfile(
+      @PathVariable String id, @RequestBody UpdateProfileRequest req) {
+    commandBus.execute(
+        new CustomerCommand.UpdateProfile(id, req.name(), req.email(), req.address(), req.phone()));
+    return ResponseEntity.ok().build();
+  }
+
+  /** GDPR Article 20 request. */
+  @PostMapping("/{id}/export-data")
+  public ResponseEntity<Void> exportData(@PathVariable String id) {
+    commandBus.execute(new CustomerCommand.RequestDataExport(id));
+    return ResponseEntity.ok().build();
+  }
+
+  /**
+   * GDPR Article 17 right to erasure. Two explicit steps, in this order:
+   *
+   * <ol>
+   *   <li>{@code ForgetCustomer} records the {@code CustomerForgotten} domain event (audited,
+   *       replayable). The decider refuses an id no customer registered ({@code 400}), so nobody
+   *       can erase, and so block for good, an id before its customer exists. For a customer
+   *       already forgotten it records nothing and succeeds.
+   *   <li>{@link ForgetSubjectService#forget} crypto-shreds the subject's encryption key (terminal:
+   *       a later encrypt for this id throws {@code SubjectForgottenException}) and runs the
+   *       registered purgers to delete the customer read-model row.
+   * </ol>
+   *
+   * <p>The answer is {@code 200} only when {@link ForgetResult#fullyErased()} is true. Otherwise it
+   * is {@code 500} with a {@link ForgetResponse} saying what is left: the key is still there
+   * ({@code keyDeleted=false}), or the read models in {@code failedPurgers} may still hold the
+   * customer's data. Repeat the request until it answers {@code 200}; every step converges when
+   * re-run. If the process dies, or the shred fails, after step 2 committed, the repeat records no
+   * second event and reaches the shred again. If the shred committed and a purger failed, the
+   * repeat finds the key already gone ({@code deleteKey} is a no-op then) and runs every purger
+   * again (each is idempotent).
+   *
+   * <p>The requester id for the GDPR audit is taken from the bound request context ({@code
+   * X-User-Id}).
+   */
+  @PostMapping("/{id}/forget")
+  public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
+    commandBus.execute(new CustomerCommand.ForgetCustomer(id));
+    SubjectId subjectId = SubjectId.of(id);
+    String requesterId = currentRequesterId();
+    ForgetResult result;
+    try {
+      result =
+          forgetSubjectService.forget(
+              subjectId, requesterId != null ? UserId.of(requesterId) : null);
+    } catch (RuntimeException e) {
+      // forget() throws only when deleteKey failed; it audited the failure and ran no purger.
+      LOG.warn(
+          "GDPR forget for subject-hash={} is incomplete: the key could not be deleted;"
+              + " repeat the request",
+          subjectId.redacted(),
+          e);
+      return ResponseEntity.internalServerError().body(ForgetResponse.keyNotDeleted());
+    }
+    ForgetResponse body = ForgetResponse.of(result);
+    return result.fullyErased()
+        ? ResponseEntity.ok(body)
+        : ResponseEntity.internalServerError().body(body);
+  }
+
+  /**
+   * What a forget did. {@code keyDeleted}: the subject's encryption key is gone. {@code
+   * fullyErased}: the key is gone and every read-model purger succeeded. {@code failedPurgers}: the
+   * read models that may still hold the customer's data.
+   */
+  public record ForgetResponse(
+      boolean keyDeleted, boolean fullyErased, List<String> failedPurgers) {
+
+    static ForgetResponse of(ForgetResult result) {
+      return new ForgetResponse(result.keyDeleted(), result.fullyErased(), result.failedPurgers());
     }
 
-    // registerCustomer and updateProfile stay as they are from chapter 6.
-
-    @PostMapping("/{id}/forget")
-    public ResponseEntity<ForgetResponse> forgetCustomer(@PathVariable String id) {
-        // Step 1: record the CustomerForgotten domain event. The decider refuses an id no
-        // customer registered (HTTP 400) and records nothing for a customer already forgotten.
-        commandBus.execute(new CustomerCommand.ForgetCustomer(id));
-        // Step 2: crypto-shred the key and run the registered purgers. Both are idempotent.
-        SubjectId subjectId = SubjectId.of(id);
-        String requesterId = currentRequesterId();
-        ForgetResult result;
-        try {
-            result = forgetSubjectService.forget(
-                subjectId, requesterId != null ? UserId.of(requesterId) : null);
-        } catch (RuntimeException e) {
-            // forget() throws only when deleteKey failed; it audited the failure and ran no purger.
-            LOG.warn("GDPR forget for subject-hash={} is incomplete: the key could not be deleted;"
-                + " repeat the request", subjectId.redacted(), e);
-            return ResponseEntity.internalServerError().body(ForgetResponse.keyNotDeleted());
-        }
-        ForgetResponse body = ForgetResponse.of(result);
-        return result.fullyErased()
-            ? ResponseEntity.ok(body)
-            : ResponseEntity.internalServerError().body(body);
+    static ForgetResponse keyNotDeleted() {
+      return new ForgetResponse(false, false, List.of());
     }
+  }
 
-    @PostMapping("/{id}/export-data")
-    public ResponseEntity<Void> exportData(@PathVariable String id) {
-        commandBus.execute(new CustomerCommand.RequestDataExport(id));
-        return ResponseEntity.ok().build();
+  /**
+   * Requester id for the GDPR audit trail: the request identity, or {@code null} when none is
+   * bound.
+   */
+  private static String currentRequesterId() {
+    if (StreamRuneContext.CURRENT.isBound()) {
+      var ctx = StreamRuneContext.CURRENT.get();
+      if (ctx != null && ctx.userId() != null) {
+        return ctx.userId().value();
+      }
     }
+    return null;
+  }
 
-    /** What a forget did, so the caller can tell a complete erasure from a partial one. */
-    public record ForgetResponse(boolean keyDeleted, boolean fullyErased, List<String> failedPurgers) {
+  public record RegisterRequest(
+      @NotBlank String customerId,
+      @NotBlank String name,
+      @Email @NotBlank String email,
+      String address,
+      String phone) {}
 
-        static ForgetResponse of(ForgetResult result) {
-            return new ForgetResponse(result.keyDeleted(), result.fullyErased(), result.failedPurgers());
-        }
-
-        static ForgetResponse keyNotDeleted() {
-            return new ForgetResponse(false, false, List.of());
-        }
-    }
-
-    /** Requester id for the GDPR audit trail, read from the request-scoped context; null if unbound. */
-    private static String currentRequesterId() {
-        if (StreamRuneContext.CURRENT.isBound()) {
-            var ctx = StreamRuneContext.CURRENT.get();
-            if (ctx != null && ctx.userId() != null) {
-                return ctx.userId().value();
-            }
-        }
-        return null;
-    }
+  public record UpdateProfileRequest(String name, String email, String address, String phone) {}
 }
 ```
 
@@ -169,6 +237,8 @@ What each step does:
 | after everything, before the answer reached the caller | nothing | answers `200`; nothing new is written |
 
 Nothing in the demo sends the request again for you: the caller does, or an operator who sees the `WARN` line or the `FAILURE` audit row. The event goes first, before the key, for two reasons: the decider is the one place that knows whether the customer exists, and that check must run before the key store records a permanent tombstone; and once the customer is `FORGOTTEN`, `UpdateProfile` is refused, so no new PII is encrypted under a key that is about to be deleted.
+
+**`CustomerForgotten` also closes a window the purger leaves open.** A projection reads a page of events, decrypts it, and writes its rows afterwards. A forget can run in between: the page was decrypted while the key existed, the purger deletes the row, `forget(...)` reports `fullyErased: true`, and then the projection writes the page and puts the customer's decrypted data back into `customers_view`. Neither the key deletion nor the purger reaches a page already in memory. `CustomerProjection` handles `CustomerForgotten` by deleting the row (chapter 6), and a projection handles events in the order of the global stream, so a page decrypted before the forget is written before the projection reaches the event, whose handler removes what the page wrote; a projection that is far behind, or a rebuild, ends at the same place. That holds only while no event after `CustomerForgotten` carries the customer's data, and in the demo none does: on the customer's stream the decider refuses every command once the customer is `FORGOTTEN` (a new `RegisterCustomer` for the id is refused one step later by the key store, with `410 Gone`), and no other stream holds the customer's encrypted fields. That is why appending the event first and shredding the key second is safe: the event cannot be followed by more of the customer's data, and the shred that follows makes every earlier copy unreadable.
 
 The `/export-data` handler only dispatches `RequestDataExport` and returns `200 OK` with an empty body. The command records a `DataExportRequested` event — see Step 5 — but the demo does not assemble or return a data package.
 
@@ -194,24 +264,37 @@ import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.SubjectId;
 
+/**
+ * GDPR Article 17 read-model purger for the customer read model.
+ *
+ * <p>Crypto-shredding (deleting the subject's encryption key) only makes the {@code @Encrypted}
+ * event fields undecryptable; the {@code customers_view} row built by {@link CustomerProjection}
+ * still holds the plaintext PII it captured before the forget. {@link ForgetSubjectService} invokes
+ * this purger after the key is shredded so the row is actually removed.
+ *
+ * <p>The customer id is the subject id (see {@code @Encrypted(subjectId = "customerId")} on {@code
+ * CustomerEvent}), so a purge is a single delete keyed by id. {@link ProjectionRepository#delete}
+ * silently succeeds when the id is absent, making {@link #purge(SubjectId)} idempotent as the SPI
+ * requires.
+ */
 public final class CustomerSubjectDataPurger implements SubjectDataPurger {
 
-    private final ProjectionRepository repository;
+  private final ProjectionRepository repository;
 
-    public CustomerSubjectDataPurger(ProjectionRepository repository) {
-        this.repository = repository;
-    }
+  public CustomerSubjectDataPurger(ProjectionRepository repository) {
+    this.repository = repository;
+  }
 
-    @Override
-    public String name() {
-        return "customers_view";
-    }
+  @Override
+  public String name() {
+    return "customers_view";
+  }
 
-    @Override
-    public void purge(SubjectId subjectId) {
-        // Projection name "customers" maps to the customers_view table; the customer id is the row id.
-        repository.delete(ProjectionName.of("customers"), subjectId.value());
-    }
+  @Override
+  public void purge(SubjectId subjectId) {
+    // Projection name "customers" maps to the customers_view table; the customer id is the row id.
+    repository.delete(ProjectionName.of("customers"), subjectId.value());
+  }
 }
 ```
 
@@ -226,52 +309,60 @@ A few details that matter:
 
 The Spring integration *does* ship an auto-configured `ForgetSubjectService` (`@ConditionalOnBean(CryptoEngine.class)` + `@ConditionalOnMissingBean`). It collects every `SubjectDataPurger` bean, the audit store and, with `streamrune.query-cache.enabled=true`, the `CachingQueryBus`. The demo declares its own `ForgetSubjectService` bean anyway, so every piece the forget uses is named in one place and nothing depends on which beans happen to be present. Because the default is `@ConditionalOnMissingBean`, defining your own suppresses it. The auto-configured service applies the snapshot rule too: it needs a `SnapshotPurger` bean (the integration cannot build one, since which streams hold a subject is the application's mapping), or `streamrune.gdpr.snapshot-purge=none` for an application that stores no snapshot (the default is `required`), and otherwise the application does not start. Quarkus and Micronaut apply the same property.
 
-In `StreamRuneConfig` you already declared the `PostgresCryptoEngine` bean in Chapter 6 (wired manually as a `@Bean`; the demo leaves the Spring integration's `streamrune.crypto.postgres.enabled` switch at its default, off, so the engine is built explicitly). Add three more beans: the audit store, the purger, and the purger-equipped forget service.
+In `StreamRuneConfig` you already declared the `PostgresCryptoEngine` bean in Chapter 6 (wired manually as a `@Bean`; the demo leaves the Spring integration's `streamrune.crypto.postgres.enabled` switch at its default, off, so the engine is built explicitly), and a `forgetSubjectService` that runs no purger and states `withoutSnapshotPurge()`. This step adds the audit store and the purger, and replaces that service with the one that runs the purgers, a snapshot purger among them. The new imports are `java.util.List`, `org.streamrune.core.types.StreamId` and `org.streamrune.ecommerce.domain.customer.CustomerState`; `PostgresAuditStore` and `PostgresSnapshotStorePurger` come with `org.streamrune.postgres.*`, `CustomerSubjectDataPurger` with `org.streamrune.ecommerce.projections.*`.
 
-`ForgetSubjectService` writes each forget/purge outcome to the `audit_log` table via a `PostgresAuditStore`, so declare that bean now (Chapter 10 builds the full audit feature on top of it):
+`ForgetSubjectService` writes each forget/purge outcome to the `audit_log` table via a `PostgresAuditStore`, so declare that bean now (Chapter 10 builds the full audit feature on top of it), then the purger, the service and the snapshot purger it builds:
 
 ```java
-import java.util.List;
-import org.streamrune.core.types.AggregateId;
-import org.streamrune.core.types.StreamId;
-import org.streamrune.ecommerce.domain.customer.CustomerState;
-import org.streamrune.postgres.PostgresAuditStore;
-import org.streamrune.postgres.PostgresSnapshotStorePurger;
-import org.streamrune.runtime.CachingQueryBus;
-import org.streamrune.runtime.gdpr.ForgetSubjectService;
-import org.streamrune.ecommerce.projections.CustomerSubjectDataPurger;
-
-// ...
-
 @Bean
 public PostgresAuditStore auditStore(DataSource ds) {
-    return new PostgresAuditStore(ds);
+  return new PostgresAuditStore(ds);
 }
+```
 
+The purger and the service go with the projections, after `customerProjection`:
+
+```java
 @Bean
 public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
-    return new CustomerSubjectDataPurger(repo);
+  return new CustomerSubjectDataPurger(repo);
 }
 
+/**
+ * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+ * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+ * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+ * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+ * cached query answer taken before the erasure is served after it. The audit store records each
+ * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+ */
 @Bean
 public ForgetSubjectService forgetSubjectService(
-        PostgresCryptoEngine cryptoEngine,
-        PostgresAuditStore auditStore,
-        CustomerSubjectDataPurger customerPurger,
-        DataSource dataSource,
-        CachingQueryBus cachingQueryBus) {
-    return ForgetSubjectService.builder()
-            .cryptoEngine(cryptoEngine)
-            .auditStore(auditStore)
-            .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
-            .queryCache(cachingQueryBus)
-            .build();
+    PostgresCryptoEngine cryptoEngine,
+    PostgresAuditStore auditStore,
+    CustomerSubjectDataPurger customerPurger,
+    DataSource dataSource,
+    CachingQueryBus cachingQueryBus) {
+  return ForgetSubjectService.builder()
+      .cryptoEngine(cryptoEngine)
+      .auditStore(auditStore)
+      .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+      .queryCache(cachingQueryBus)
+      .build();
 }
 
+/**
+ * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+ * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+ * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+ * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+ * raises its purge generation, so a command that loaded the customer before the forget cannot
+ * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+ */
 static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
-    return new PostgresSnapshotStorePurger(
-            dataSource,
-            subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  return new PostgresSnapshotStorePurger(
+      dataSource,
+      subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
 }
 ```
 
@@ -279,8 +370,291 @@ This is the bean `CustomerCommandController` injects in Step 2. The wiring is de
 
 - `.cryptoEngine(cryptoEngine)` — the same `PostgresCryptoEngine` that backs the event store, so `forget(...)` deletes the very key that encrypts the subject's fields.
 - `.auditStore(auditStore)` — each forget and each purge outcome is written to the `audit_log` table.
-- `.purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))` — the purger list `forget(...)` runs after the key is shredded. As you add aggregates in later chapters, register a purger per read model holding PII and add it to this list. The second purger deletes the customer's snapshot: a snapshot (chapter 8) holds the aggregate's *decrypted* state as plain JSON, so `CustomerState` would keep the name, email, address and phone readable in `snapshot_store` after the key is gone. `PostgresSnapshotStorePurger` takes the streams to clear for a subject, here `customer:<subject id>`; the demo wires it in all three apps. The snapshot purger is not a recommendation: `ForgetSubjectService.Builder.build()` refuses a service whose purgers hold no `SnapshotPurger` (`PostgresSnapshotStorePurger` is the PostgreSQL one) unless the application calls `withoutSnapshotPurge()` to say it has never stored a snapshot, and it refuses a purger and `withoutSnapshotPurge()` together. A snapshot keeps every field of the aggregate's state that is not marked `@Encrypted` in the clear, so deleting the key does not reach it, and the framework makes the application decide rather than leave snapshots behind by default.
+- `.purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))` — the purger list `forget(...)` runs after the key is shredded. As you add aggregates in later chapters, register a purger per read model holding PII and add it to this list. The second purger clears the customer's snapshot: a snapshot (chapter 8) holds the aggregate's *decrypted* state as plain JSON, so `CustomerState` would keep the name, email, address and phone readable in `snapshot_store` after the key is gone. `PostgresSnapshotStorePurger` takes the streams to clear for a subject, here `customer:<subject id>`. It does not delete the stream's row: it empties the state (`state_type` and `state_payload` become `NULL`) and raises the row's purge generation. A command that loaded the customer before the forget saves its snapshot only while the row still has the generation that load saw, so it cannot put the cleared state back; the next command after the forget replays the events, whose encrypted fields read `[REDACTED]`. The demo wires the purger in all three apps. The snapshot purger is not a recommendation: `ForgetSubjectService.Builder.build()` refuses a service whose purgers hold no `SnapshotPurger` (`PostgresSnapshotStorePurger` is the PostgreSQL one) unless the application calls `withoutSnapshotPurge()` to say it has never stored a snapshot, and it refuses a purger and `withoutSnapshotPurge()` together. A snapshot keeps every field of the aggregate's state that is not marked `@Encrypted` in the clear, so deleting the key does not reach it, and the framework makes the application decide rather than leave snapshots behind by default.
 - `.queryCache(cachingQueryBus)` — the `CachingQueryBus` from Chapter 5. After the last purger, `forget(...)` evicts every cached query answer, so none taken before the erasure (a decrypted field, or a row the purger just deleted) is served after it. If the eviction fails, `fullyErased()` is `false`, like a failed purge.
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 7</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(validation)
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+}
+```
+
+</details>
 
 ### Step 5 — Verify the full cycle
 
@@ -302,17 +676,15 @@ When your code reads this stream back through the event store, the `@Encrypted` 
 
 **Confirm the raw database row is encrypted:**
 
-> The `psql` commands below use `docker exec -it streamrune-pg ...`, matching Chapter 6. That assumes you gave the Postgres container the name `streamrune-pg`. The demo's `docker-compose.yml` does not set `container_name`, so Compose generates one like `streamrune-ecommerce-demo-postgres-1`. Either add `container_name: streamrune-pg` under the `postgres` service, or run the same SQL with `docker compose exec postgres psql -U postgres -d streamrune_ecommerce -c "..."`.
-
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT aggregate_type, aggregate_id, event_type, payload->>'name' AS name_field FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'c-alice';"
 ```
 
 The `name_field` column will show Base64-encoded ciphertext, not `Alice Smith`. The encryption key is still present. `PostgresCryptoEngine` stores the SHA-256 hex hash of the subject id in `subject_id`, not the raw id, so the WHERE clause hashes `'c-alice'` the same way before comparing:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT subject_id FROM encryption_keys WHERE subject_id = encode(sha256(convert_to('c-alice', 'UTF8')), 'hex');"
 ```
 
@@ -332,7 +704,7 @@ Content-Type: application/json
 The forget endpoint ran both steps: it dispatched `ForgetCustomer` (appending `CustomerForgotten`) and then `forgetSubjectService.forget(SubjectId.of("c-alice"), ...)`, which deleted the key and ran the purger. `fullyErased` is `true`, so the answer is `200`. Send the same request again: it answers the same way and records no second event. Forget an id nobody registered, such as `c-nobody`, and the answer is `400 Customer not found`, with no tombstone written. The key row is now deleted (same hashed lookup as above):
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT subject_id FROM encryption_keys WHERE subject_id = encode(sha256(convert_to('c-alice', 'UTF8')), 'hex');"
 ```
 
@@ -341,7 +713,7 @@ The query returns zero rows.
 The purger also deleted the plaintext read-model row, so the `customers_view` table holds none of Alice's data:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT id FROM customers_view WHERE id = 'c-alice';"
 ```
 
@@ -350,11 +722,11 @@ This too returns zero rows — crypto shredding killed the ciphertext in the eve
 **The event stream is intact, but the PII is now unrecoverable.** The `CustomerRegistered` event still sits in `event_stream` — event sourcing never rewrites history — and its `@Encrypted` columns still hold the same Base64 ciphertext as before:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "SELECT event_type, payload->>'name' AS name_field FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'c-alice' ORDER BY version;"
 ```
 
-You will see the original `CustomerRegistered` ciphertext plus a new `CustomerForgotten` row. But that ciphertext is now **permanently undecryptable**: its key was deleted (zero rows above). When you read this stream through the app's events endpoint (Chapter 15's Event Explorer), `CryptoShreddingModule` fails to decrypt and substitutes `[REDACTED]` for every annotated field — so the API returns:
+You will see the original `CustomerRegistered` ciphertext plus a new `CustomerForgotten` row. But that ciphertext is now **permanently undecryptable**: its key was deleted (zero rows above). When the application reads this stream — the event store's `load`, and the Event Explorer endpoint of Chapter 15 — `CryptoShreddingModule` finds no key and substitutes `[REDACTED]` for every annotated field:
 
 ```json
 { "name": "[REDACTED]", "email": "[REDACTED]", "address": "[REDACTED]", "phone": "[REDACTED]" }
@@ -381,36 +753,15 @@ curl -i -X POST http://localhost:8080/api/customers/c-bob/export-data
 The response is `200 OK` with **no body** — the endpoint only dispatches `RequestDataExport`. The portability request is recorded durably as a `DataExportRequested` event in Bob's stream:
 
 ```bash
-curl -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/events/customer/c-bob
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT version, event_type, payload->>'customerId' AS customer FROM event_stream WHERE aggregate_type = 'customer' AND aggregate_id = 'c-bob' ORDER BY version;"
 ```
 
-```json
-[
-  {
-    "globalOffset": 3,
-    "streamId": "customer:c-bob",
-    "aggregateType": "customer",
-    "aggregateId": "c-bob",
-    "eventType": "CustomerRegistered",
-    "timestamp": "2026-04-25T10:35:00Z",
-    "payload": {
-      "customerId": "c-bob",
-      "name": "Bob Jones",
-      "email": "bob@example.com",
-      "address": "2 Oak Ave",
-      "phone": "+0987654321"
-    }
-  },
-  {
-    "globalOffset": 4,
-    "streamId": "customer:c-bob",
-    "aggregateType": "customer",
-    "aggregateId": "c-bob",
-    "eventType": "DataExportRequested",
-    "timestamp": "2026-04-25T10:36:00Z",
-    "payload": { "customerId": "c-bob" }
-  }
-]
+```
+ version |     event_type      | customer
+---------+---------------------+----------
+       1 | CustomerRegistered  | c-bob
+       2 | DataExportRequested | c-bob
 ```
 
 The demo stops at recording the request. To turn that request into a returned data package, follow the optional enhancement in Step 2 — inject `ExportSubjectDataService` into the controller, register a `SubjectDataCollector` per read model, and return the resulting `SubjectExport`. The framework's export service calls every registered collector and merges their named sections into one portable document.
@@ -424,9 +775,9 @@ The demo stops at recording the request. To turn that request into a returned da
 - **Report what actually happened.** The endpoint answers `200` only when `ForgetResult.fullyErased()` is `true`; a failed key deletion or a failed purger answers `500` with `keyDeleted`, `fullyErased` and `failedPurgers`. Every step is idempotent and the decider records nothing for a customer already forgotten, so sending the request again finishes an erasure that stopped part-way.
 - **`SubjectDataPurger`** is how the demo achieves *complete* erasure. `CustomerSubjectDataPurger` (`name()` = `"customers_view"`) deletes the read-model row that crypto shredding cannot touch. Register one purger per read model holding PII and pass them into `ForgetSubjectService.builder().purgers(...)`.
 - **Explicit wiring keeps the forget readable.** The Spring integration auto-configures a `ForgetSubjectService` when a `CryptoEngine` bean is present, collecting the `SubjectDataPurger` beans, the audit store and the `CachingQueryBus`. Because that bean is `@ConditionalOnMissingBean`, the demo's own `forgetSubjectService` `@Bean` — built with `.purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))` and `.queryCache(cachingQueryBus)` — replaces it. The `CryptoEngine` itself is a manual `@Bean` (`PostgresCryptoEngine`); the integration's `streamrune.crypto.postgres.enabled` switch stays off.
-- **Right to erasure (Article 17)** does not require deleting events. It requires that the personal data becomes inaccessible everywhere it is stored: the key shred handles the encrypted event fields and the encrypted copy of a dead-lettered command, the purger handles the read model.
+- **Right to erasure (Article 17)** does not require deleting events. It requires that the personal data becomes inaccessible everywhere it is stored: the key shred handles the encrypted event fields and the encrypted copy of a dead-lettered command, the read-model purger handles the read model, and the snapshot purger empties the customer's snapshot (its row stays, without a state and with a higher purge generation, so a command loaded before the forget cannot store the old state again).
 - **Right to data portability (Article 20)** is the request side. The demo dispatches `RequestDataExport`, recording a `DataExportRequested` event; `/export-data` returns `200` with no body. Assembling and returning a `SubjectExport` (via `ExportSubjectDataService` + `SubjectDataCollector` beans) is an optional enhancement the framework supports but the demo does not wire.
-- **The projection deletes on forget.** `CustomerProjection` handles `CustomerForgotten` by calling the inherited `delete(customerId)` helper — it drops the `customers_view` row rather than leaving a redacted shell, inside the same transaction as the rest of the batch, so a customer registered and forgotten in one batch leaves no row. This agrees with `CustomerSubjectDataPurger`, which deletes the same row, so projection and purger converge on the same terminal state ("row gone") regardless of which observes the forget first.
+- **The projection deletes on forget.** `CustomerProjection` handles `CustomerForgotten` by calling the inherited `delete(customerId)` helper — it drops the `customers_view` row rather than leaving a redacted shell, inside the same transaction as the rest of the batch, so a customer registered and forgotten in one batch leaves no row. This agrees with `CustomerSubjectDataPurger`, which deletes the same row, so projection and purger converge on the same terminal state ("row gone") regardless of which observes the forget first, and it closes the window in which a projection page decrypted before the forget writes the row back after the purger ran.
 
 ---
 

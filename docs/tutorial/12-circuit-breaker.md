@@ -29,7 +29,7 @@ Open `StreamRuneConfig.java` and add a bean for the interceptor. The two constru
 ```java
 @Bean
 public CircuitBreakerCommandInterceptor circuitBreaker() {
-    return new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30));
+  return new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30));
 }
 ```
 
@@ -37,7 +37,7 @@ Three consecutive failures will open the circuit. After 30 seconds it will allow
 
 ### Step 2: Add the Interceptor to the Command Bus
 
-The `VirtualThreadCommandBus` takes an ordered list of interceptors. Their `before` methods run in that order around every command dispatch, and their `after` and `onError` methods in reverse order. Add `circuitBreaker` to both the method signature and the end of the builder call:
+The `VirtualThreadCommandBus` takes an ordered list of interceptors. Their `before` methods run in that order around every command dispatch, and their `after` and `onError` methods in reverse order. Add `circuitBreaker` to both the method signature and the end of the builder call. The bean as it stands at the end of this chapter also takes the aggregate locker and the lock timeout, which Step 2b explains:
 
 ```java
 @Bean
@@ -46,12 +46,81 @@ public VirtualThreadCommandBus commandBus(
     BeanValidationInterceptor validation,
     AnnotationAuthorizationInterceptor auth,
     AuditCommandInterceptor audit,
-    CircuitBreakerCommandInterceptor circuitBreaker) {
+    CircuitBreakerCommandInterceptor circuitBreaker,
+    PostgresCommandInbox commandInbox,
+    AggregateLocker locker,
+    StreamRuneProperties properties) {
   return VirtualThreadCommandBus.builder()
       .eventStore(store)
+      .locker(locker)
+      .lockTimeout(properties.lockTimeout())
+      // Required for saga command dispatch: SagaCommandDispatch calls
+      // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+      // unless the bus has a commandInbox wired in.
+      .commandInbox(commandInbox)
       .interceptors(audit, auth, validation, circuitBreaker)
       .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-      // ... aggregate registrations unchanged
+      .register(
+          ProductState.TYPE,
+          ProductCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case ProductCommand.CreateProduct c -> c.productId();
+                    case ProductCommand.UpdatePrice c -> c.productId();
+                    case ProductCommand.AdjustStock c -> c.productId();
+                    case ProductCommand.DiscontinueProduct c -> c.productId();
+                  }),
+          new ProductDecider())
+      .register(
+          OrderState.TYPE,
+          OrderCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case OrderCommand.PlaceOrder c -> c.orderId();
+                    case OrderCommand.ConfirmOrder c -> c.orderId();
+                    case OrderCommand.ShipOrder c -> c.orderId();
+                    case OrderCommand.DeliverOrder c -> c.orderId();
+                    case OrderCommand.CancelOrder c -> c.orderId();
+                  }),
+          new OrderDecider())
+      .register(
+          CustomerState.TYPE,
+          CustomerCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case CustomerCommand.RegisterCustomer c -> c.customerId();
+                    case CustomerCommand.UpdateProfile c -> c.customerId();
+                    case CustomerCommand.RequestDataExport c -> c.customerId();
+                    case CustomerCommand.ForgetCustomer c -> c.customerId();
+                  }),
+          new CustomerDecider())
+      .register(
+          PaymentState.TYPE,
+          PaymentCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case PaymentCommand.InitiatePayment c -> c.paymentId();
+                    case PaymentCommand.CapturePayment c -> c.paymentId();
+                    case PaymentCommand.FailPayment c -> c.paymentId();
+                    case PaymentCommand.CancelPayment c -> c.paymentId();
+                  }),
+          new PaymentDecider())
+      .register(
+          InventoryState.TYPE,
+          InventoryCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case InventoryCommand.ReserveStock c -> c.productId();
+                    case InventoryCommand.ReleaseStock c -> c.productId();
+                    case InventoryCommand.ConfirmReservation c -> c.productId();
+                    case InventoryCommand.ReceiveShipment c -> c.productId();
+                  }),
+          new InventoryDecider())
       .build();
 }
 ```
@@ -80,28 +149,764 @@ An open breaker throws `CircuitBreakerOpenException` out of `commandBus.execute(
 
 `Retry-After` is a constant five seconds: the breaker does not report how long it stays open, and the other refusals have no natural duration. A genuine failure — the event store refusing the append, say — is none of the five and stays `500`.
 
-The lock timeout is the framework's `streamrune.lock-timeout`. The bus the framework auto-configures reads it; the demo builds its own bus, so it hands the builder the auto-configured `AggregateLocker` and the configured timeout. Add the two parameters and the two calls to the `commandBus` bean (`AggregateLocker` is in `org.streamrune.core`, `StreamRuneProperties` in `org.streamrune.spring`):
+The lock timeout is the framework's `streamrune.lock-timeout`. The bus the framework auto-configures reads it; the demo builds its own bus, so it hands the builder the auto-configured `AggregateLocker` and the configured timeout: the two parameters `AggregateLocker locker` and `StreamRuneProperties properties` of the `commandBus` bean in Step 2, and its calls `.locker(locker)` and `.lockTimeout(properties.lockTimeout())` (`AggregateLocker` is in `org.streamrune.core`, `StreamRuneProperties` in `org.streamrune.spring`).
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 12</summary>
 
 ```java
-@Bean
-public VirtualThreadCommandBus commandBus(
-    EventStore store,
-    BeanValidationInterceptor validation,
-    AnnotationAuthorizationInterceptor auth,
-    AuditCommandInterceptor audit,
-    CircuitBreakerCommandInterceptor circuitBreaker,
-    AggregateLocker locker,                       // <-- added
-    StreamRuneProperties properties) {            // <-- added
-  return VirtualThreadCommandBus.builder()
-      .eventStore(store)
-      .locker(locker)                             // <-- added
-      .lockTimeout(properties.lockTimeout())      // <-- added
-      .interceptors(audit, auth, validation, circuitBreaker)
-      .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
-      // ... aggregate registrations unchanged
-      .build();
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
+import org.streamrune.core.*;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
+import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.payment.PaymentCommand;
+import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Payment events
+        .registerEvent(
+            "PaymentInitiated",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentInitiated.class)
+        .registerEvent(
+            "PaymentCaptured",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentCaptured.class)
+        .registerEvent(
+            "PaymentRefunded",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentRefunded.class)
+        .registerEvent(
+            "PaymentFailed",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+        .registerEvent(
+            "PaymentVoided",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
+        // Inventory events
+        .registerEvent(
+            "StockReserved",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReleased",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
+        .registerEvent(
+            "ReservationConfirmed",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ReservationConfirmed.class)
+        .registerEvent(
+            "ShipmentReceived",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .registerState("PaymentState", PaymentState.class)
+        .registerState("InventoryState", InventoryState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  @Bean
+  public PostgresSagaStore sagaStore(DataSource ds, ObjectMapper objectMapper) {
+    return new PostgresSagaStore(ds, objectMapper);
+  }
+
+  /**
+   * Quarantine store for poison saga events (a routing method that throws — {@code extractSagaId},
+   * {@code correlateByEventData} — or an exception in the saga's own logic). Required by {@link
+   * SagaRunner.Builder#sagaDeadLetterStore} below — without it the saga runner cannot be built.
+   * Mirrors {@link #sagaStore}.
+   */
+  @Bean
+  public PostgresSagaDeadLetterStore sagaDeadLetterStore(DataSource ds) {
+    return new PostgresSagaDeadLetterStore(ds);
+  }
+
+  /**
+   * Records commands processed under a caller-supplied {@code IdempotencyKey} so a redelivered saga
+   * command (broker at-least-once redelivery) applies its events effectively once. Picked up
+   * automatically by the framework's auto-configured {@code postgresEventStoreFactory} (for the
+   * atomic keyed append) and wired explicitly into {@link #commandBus} below (saga command dispatch
+   * requires a command bus with an inbox — see {@code SagaCommandDispatch}).
+   */
+  @Bean
+  public PostgresCommandInbox commandInbox(DataSource ds) {
+    return new PostgresCommandInbox(ds);
+  }
+
+  @Bean
+  public HeaderUserRoleResolver userRoleResolver() {
+    return new HeaderUserRoleResolver();
+  }
+
+  @Bean
+  public PaymentGatewaySimulator paymentGateway() {
+    return new PaymentGatewaySimulator();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
+    return new AnnotationAuthorizationInterceptor(resolver);
+  }
+
+  @Bean
+  public AuditCommandInterceptor auditInterceptor(PostgresAuditStore store) {
+    return new AuditCommandInterceptor(store);
+  }
+
+  @Bean
+  public CircuitBreakerCommandInterceptor circuitBreaker() {
+    return new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
+   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
+   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   */
+  @Bean
+  public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
+    return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The command bus, with all interceptors, listed in the framework's canonical order ({@link
+   * org.streamrune.runtime.CommandInterceptorOrdering}), the order the Quarkus and Micronaut
+   * integrations give the chains they assemble. The bus runs {@code before()} in the listed order
+   * and {@code after()}/{@code onError()} in reverse, and only on interceptors whose {@code
+   * before()} completed. Audit comes first, so a command the authorization interceptor refuses
+   * still reaches {@code audit.onError()} and is recorded as a {@code FAILURE}; authorization comes
+   * before validation, so a caller without the role learns nothing about the validation rules; the
+   * circuit breaker comes last, so it counts only execution failures.
+   *
+   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
+   * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
+   * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
+   */
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store,
+      BeanValidationInterceptor validation,
+      AnnotationAuthorizationInterceptor auth,
+      AuditCommandInterceptor audit,
+      CircuitBreakerCommandInterceptor circuitBreaker,
+      PostgresCommandInbox commandInbox,
+      AggregateLocker locker,
+      StreamRuneProperties properties) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .locker(locker)
+        .lockTimeout(properties.lockTimeout())
+        // Required for saga command dispatch: SagaCommandDispatch calls
+        // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+        // unless the bus has a commandInbox wired in.
+        .commandInbox(commandInbox)
+        .interceptors(audit, auth, validation, circuitBreaker)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .register(
+            PaymentState.TYPE,
+            PaymentCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case PaymentCommand.InitiatePayment c -> c.paymentId();
+                      case PaymentCommand.CapturePayment c -> c.paymentId();
+                      case PaymentCommand.FailPayment c -> c.paymentId();
+                      case PaymentCommand.CancelPayment c -> c.paymentId();
+                    }),
+            new PaymentDecider())
+        .register(
+            InventoryState.TYPE,
+            InventoryCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case InventoryCommand.ReserveStock c -> c.productId();
+                      case InventoryCommand.ReleaseStock c -> c.productId();
+                      case InventoryCommand.ConfirmReservation c -> c.productId();
+                      case InventoryCommand.ReceiveShipment c -> c.productId();
+                    }),
+            new InventoryDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching + auditing
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public QueryBus queryBus(CachingQueryBus cachingBus, PostgresAuditStore auditStore) {
+    return new AuditingQueryBus(cachingBus, auditStore);
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess}. The customer and order controllers answer
+   * every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
+  }
+
+  /**
+   * The order-fulfillment saga, with its deadline: {@code app.saga.fulfillment-timeout} (15 minutes
+   * unless configured). The saga runner and the timeout runner below share this one instance.
+   */
+  @Bean
+  public OrderFulfillmentSaga orderFulfillmentSaga(
+      @Value("${app.saga.fulfillment-timeout:15m}") Duration fulfillmentTimeout) {
+    return new OrderFulfillmentSaga(fulfillmentTimeout);
+  }
+
+  /**
+   * The order-fulfillment saga runner. It is a bean so that the Spring integration finds it: for
+   * every {@code SagaRunner} bean it starts a compensation retry sweeper, which re-drives a
+   * compensation that failed transiently and faults it once {@code
+   * streamrune.saga.compensation-retry-give-up-after} (1 hour by default) has passed, it applies
+   * {@code streamrune.inbox.retention-max-age} to the runner's key-age guard for compensations
+   * resumed by a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto}
+   * unless configured, which is on while single-active-consumer leadership is on) to the runner's
+   * forward fence. {@code metrics} counts, among the saga meters, the forward commands the fence
+   * refuses ({@code streamrune.saga.forward_commands_fenced}) and the steps run again in place
+   * after a lost write of the saga row ({@code streamrune.saga.delivery_retried}).
+   *
+   * <p>{@code leadership} is the integration's single-active-consumer leadership ({@code
+   * streamrune.subscription.single-active-consumer.enabled}, on unless configured). The runner
+   * carries a lease over it, {@code "saga:" + saga type}: with more than one backend on the
+   * database, one of them delivers the saga's events, claims its deadlines and retries its
+   * compensations, and the others stand by and take over when it stops or dies. The lease is taken
+   * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
+   * SubscriptionLeadership#NOOP}) every backend delivers.
+   */
+  @Bean
+  public SagaRunner<?> orderFulfillmentSagaRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      PostgresSagaDeadLetterStore sagaDeadLetterStore,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      ObjectProvider<SubscriptionLeadership> leadership) {
+    return SagaRunner.<OrderFulfillmentState>builder()
+        .orchestrator(orderFulfillmentSaga)
+        .sagaStore(sagaStore)
+        .commandBus(commandBus)
+        // Required: poison events (routing/decider failures) are quarantined here instead of
+        // blocking the subscription.
+        .sagaDeadLetterStore(sagaDeadLetterStore)
+        .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+        // One backend delivers this saga type; the others stand by.
+        .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .build();
+  }
+
+  /**
+   * Compensates a fulfillment that has not ended by its deadline ({@link
+   * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
+   * unless configured) it claims each saga past its deadline and dispatches its compensation, which
+   * is the order's cancellation whatever the state.
+   *
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
+   * follows its lease: it claims deadlines only while this backend leads the saga type through
+   * {@link #orderFulfillmentSagaSubscription}, so it claims where the saga's steps run, and in this
+   * process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. Around a handover two backends can overlap for a moment — a backend that dies
+   * keeps its lease until the lease expires, and a deposed one may finish its page; there the saga
+   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
+   * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
+   * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
+   * the subscriptions below are, and stopped with the context, after the saga subscription.
+   */
+  @Bean(destroyMethod = "stop")
+  public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      StreamRuneProperties properties,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
+    var runner =
+        SagaTimeoutRunner.<OrderFulfillmentState>builder()
+            .decider(orderFulfillmentSaga)
+            .sagaStore(sagaStore)
+            .commandBus(commandBus)
+            // The saga runner stores its rows under the state class; the sweep selects by it.
+            .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .pollInterval(pollInterval)
+            .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  /**
+   * Subscribes the saga runner to the global event stream. Without this bean the saga would persist
+   * nothing because no event listener is wired to feed the {@code SagaRunner}.
+   *
+   * <p>{@code sagaRunner(...)} delivers to the runner under the runner's lease: this subscription
+   * takes the lease and holds it while it runs. On the backend that holds it, it delivers, and the
+   * timeout runner and the compensation retry sweeper of the runner act; on every other backend it
+   * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
+   * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
+   * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
+   * STANDBY}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
+   * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
+   * 15-second window that integration tests await for {@code CONFIRMED}; the interval also spaces a
+   * standby's attempts to take the lease. It depends on {@link #orderFulfillmentTimeoutRunner}, so
+   * it is closed before that runner stops: a runner that stops while this backend leads logs a
+   * warning, and closing the subscription first ends the lead.
+   */
+  @Bean(destroyMethod = "close")
+  @DependsOn("orderFulfillmentTimeoutRunner")
+  public PollingEventSubscription orderFulfillmentSagaSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("order-fulfillment-saga")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  // Payment process manager: reacts to PaymentInitiated by capturing (or failing) the payment.
+  @Bean
+  public PaymentProcessManager paymentProcessManager(
+      PaymentGatewaySimulator paymentGateway,
+      PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker,
+      VirtualThreadCommandBus commandBus,
+      EventStore eventStore) {
+    return new PaymentProcessManager(
+        paymentGateway, paymentGatewayCircuitBreaker, commandBus, eventStore);
+  }
+
+  /**
+   * Feeds the global event stream to the {@link PaymentProcessManager}. Without this subscription
+   * nothing reacts to {@code PaymentInitiated}, so the saga would stall in {@code
+   * AWAITING_PAYMENT}.
+   *
+   * <p>{@code leadership(...)} delivers under a lease named after the subscription, {@code
+   * payment-process-manager}: with more than one backend on the database one of them captures the
+   * payments, and the others stand by. {@code healthContributor(...)} lists it in the health
+   * details with its {@code role}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the payment
+   * capture leg of the saga completes promptly.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription paymentProcessSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      PaymentProcessManager paymentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("payment-process-manager")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(paymentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+
+  /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
+  @Bean
+  public OrderCancellationProcessManager orderCancellationProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderCancellationProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderCancellationProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-cancellation} delivers.
+   * Listed in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderCancellationSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderCancellationProcessManager orderCancellationProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderCancellationProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderCancellationProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Commits the stock of every shipped order (OrderShipmentProcessManager). */
+  @Bean
+  public OrderShipmentProcessManager orderShipmentProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderShipmentProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderShipmentProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-shipment} delivers. Listed
+   * in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderShipmentSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderShipmentProcessManager orderShipmentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderShipmentProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderShipmentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
 }
 ```
+
+</details>
+
+
 
 The table lives in one place, a small class in the shared `commands` module that the Quarkus and Micronaut apps use too. Create `commands/src/main/java/org/streamrune/ecommerce/commands/CommandRefusal.java`:
 
@@ -245,6 +1050,97 @@ Then add one handler to `GlobalExceptionHandler` (imports: `java.util.Map`, `org
   }
 ```
 
+The whole `GlobalExceptionHandler` at the end of this chapter:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import java.util.Map;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.streamrune.core.AuthorizationException;
+import org.streamrune.core.CircuitBreakerOpenException;
+import org.streamrune.core.CommandBusClosedException;
+import org.streamrune.core.CommandBusOverloadedException;
+import org.streamrune.core.DomainException;
+import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
+import org.streamrune.core.crypto.SubjectForgottenException;
+import org.streamrune.ecommerce.commands.CommandRefusal;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+  @ExceptionHandler(DomainException.class)
+  public ResponseEntity<String> handleDomainException(DomainException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * A command the caller's role does not allow ({@code @RequireRole}, checked in the command bus):
+   * {@code 403}, the status {@link #handleAccessRefused} answers with. {@code
+   * AuthorizationException} is a {@code DomainException}; this handler is the more specific one, so
+   * a refusal is not reported as the {@code 400} of a broken business rule.
+   */
+  @ExceptionHandler(AuthorizationException.class)
+  public ResponseEntity<String> handleAuthorization(AuthorizationException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  @ExceptionHandler(IllegalArgumentException.class)
+  public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * Terminal erasure: a command tried to encrypt PII for a crypto-shredded subject (e.g.
+   * re-registering a forgotten customer id). The subject was erased under GDPR Article 17, so the
+   * write is refused — 410 Gone is the honest status for a resource that was deliberately removed.
+   */
+  @ExceptionHandler(SubjectForgottenException.class)
+  public ResponseEntity<String> handleSubjectForgotten(SubjectForgottenException e) {
+    return ResponseEntity.status(HttpStatus.GONE).body(e.getMessage());
+  }
+
+  /**
+   * The caller may not read or change what the request names ({@code OwnerOrAdminAccess}): {@code
+   * 403}, the same answer for a request without an identity and for one with the wrong identity.
+   */
+  @ExceptionHandler(AccessRefusedException.class)
+  public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  /**
+   * A command the framework refused for a reason that passes ({@link CommandRefusal}): an open
+   * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
+   * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
+   * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
+   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
+   */
+  @ExceptionHandler({
+    CircuitBreakerOpenException.class,
+    CommandBusOverloadedException.class,
+    CommandBusClosedException.class,
+    LockException.class,
+    OptimisticLockException.class
+  })
+  public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
+    CommandRefusal refusal =
+        CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(refusal.body());
+  }
+}
+```
+
 The command bus throws each of the five unwrapped, so the handler sees the exception itself. The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a handler by the thrown type, so each app has one per exception type, nested in `CommandRefusalExceptionMappers` (Quarkus) and `CommandRefusalExceptionHandlers` (Micronaut). `CommandRefusalStatusIT` in each app forces four of the refusals on the app's real command bus, in an application of its own with a lock timeout of one second: a price change stopped in its audit write while it holds the product's lock (a trigger on `audit_log` waits for an advisory lock the test holds) makes a stock adjustment of the same product wait out the lock timeout on each of three attempts; a trigger on `event_stream` that raises `unique_violation` for a price change makes the event store report the version conflict it reports when a second writer stored the version first, on every attempt; a store that refuses every price change of a product answers `500` until the breaker opens and `503` after; and a closed bus refuses the next command. Each answer is checked for the status, `Retry-After` and the body. The overloaded bus cannot be reached through the demo's routes, so a unit test in each app checks its answer.
 
 ### Step 3: The gateway call, and why it needs its own breaker
@@ -263,84 +1159,17 @@ public void processPayment(String paymentId) {
 }
 ```
 
-Unlike the early scaffolding, this method is now genuinely on the hot path: the `PaymentProcessManager` (Chapter 11) calls `gateway.processPayment(paymentId)` every time it reacts to a `PaymentInitiated` event. So toggling `failureInjected` on really does make payments fail, which really does drive the saga down its compensation path. That makes the payment gateway exactly the kind of flaky external dependency a circuit breaker is meant to protect.
+This method is on the hot path: the `PaymentProcessManager` (Chapter 11) calls `gateway.processPayment(paymentId)` every time it reacts to a `PaymentInitiated` event. So toggling `failureInjected` on really does make payments fail, which really does drive the saga down its compensation path. That makes the payment gateway exactly the kind of flaky external dependency a circuit breaker is meant to protect.
 
 **Why not just let the command-bus breaker handle it?** The `processPayment` failure does not, on its own, reach the command-bus breaker — the manager catches it and turns it into a *successful* `FailPayment` command, and the saga then runs a *successful* `CancelOrder`. From the command bus's point of view, those are normal successful dispatches. Worse, the command-bus breaker resets its consecutive-failure count on **any** successful command (`after()` closes the circuit), so the saga's own compensation traffic would keep clearing the counter. A breaker on the command bus can never "see" a run of gateway failures here.
 
 The textbook fix is to put the breaker around the flaky dependency itself. `PaymentGatewayCircuitBreaker` counts only gateway-call outcomes, so consecutive gateway failures open it regardless of what the saga does on the command bus. While it is open the `PaymentProcessManager` fast-fails the payment (dispatches `FailPayment` without calling the gateway) until the cooldown admits a probe. A payment that the order's cancellation voided before the manager reached it is neither failed nor sent to the gateway: the manager reads the payment's stream first (Chapter 11, Step 5b).
 
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`:
-
-```java
-package org.streamrune.ecommerce.spring.config;
-
-import java.time.Duration;
-import java.time.Instant;
-
-public class PaymentGatewayCircuitBreaker {
-
-  public enum State {
-    CLOSED,
-    OPEN,
-    HALF_OPEN
-  }
-
-  private final int failureThreshold;
-  private final Duration cooldown;
-
-  private State state = State.CLOSED;
-  private int consecutiveFailures = 0;
-  private Instant openedAt = null;
-
-  public PaymentGatewayCircuitBreaker(int failureThreshold, Duration cooldown) {
-    this.failureThreshold = failureThreshold;
-    this.cooldown = cooldown;
-  }
-
-  /**
-   * Whether a gateway call may be attempted now. CLOSED always allows; OPEN allows a single probe
-   * once the cooldown has elapsed (transitioning to HALF_OPEN); HALF_OPEN allows the probe.
-   */
-  public synchronized boolean allowRequest() {
-    if (state == State.OPEN
-        && openedAt != null
-        && !Instant.now().isBefore(openedAt.plus(cooldown))) {
-      state = State.HALF_OPEN;
-    }
-    return state != State.OPEN;
-  }
-
-  /** Records a successful gateway call: closes the breaker and clears the failure count. */
-  public synchronized void recordSuccess() {
-    consecutiveFailures = 0;
-    state = State.CLOSED;
-    openedAt = null;
-  }
-
-  /** Records a failed gateway call: opens the breaker once the threshold is reached. */
-  public synchronized void recordFailure() {
-    consecutiveFailures++;
-    if (consecutiveFailures >= failureThreshold || state == State.HALF_OPEN) {
-      state = State.OPEN;
-      openedAt = Instant.now();
-    }
-  }
-
-  /** Current state, applying the cooldown so a long-open breaker reports HALF_OPEN when due. */
-  public synchronized State state() {
-    if (state == State.OPEN
-        && openedAt != null
-        && !Instant.now().isBefore(openedAt.plus(cooldown))) {
-      state = State.HALF_OPEN;
-    }
-    return state;
-  }
-}
-```
+Chapter 11 created that breaker, `PaymentGatewayCircuitBreaker` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`, Step 5b), together with the process manager that calls it.
 
 It implements the same CLOSED → OPEN → HALF_OPEN → CLOSED state machine as the command-bus interceptor, but its inputs are explicit `recordSuccess()` / `recordFailure()` calls from the `PaymentProcessManager` rather than command outcomes. Because it is driven by a single polling subscription, plain `synchronized` methods suffice (the `synchronized` is mostly so the admin endpoint can read `state()` safely).
 
-Register it in `StreamRuneConfig` next to the command-bus breaker — three consecutive failures open it, with a 30-second cooldown:
+Its bean, declared in Chapter 11, sits in `StreamRuneConfig` next to the command-bus breaker of Step 1 — three consecutive failures open it, with a 30-second cooldown:
 
 ```java
 @Bean
@@ -349,7 +1178,7 @@ public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
 }
 ```
 
-The `PaymentProcessManager` bean (Chapter 11, Step 6) already takes this breaker as a constructor argument, so once the bean exists the wiring is complete — the manager consults `allowRequest()` before each gateway call and reports the outcome. A breaker-open `FailPayment` of a payment that was voided in the meantime stores nothing: the payment decider fails a pending payment only, so the cancellation's void stands.
+The `PaymentProcessManager` bean (Chapter 11, Step 6) takes this breaker as a constructor argument — the manager consults `allowRequest()` before each gateway call and reports the outcome. A breaker-open `FailPayment` of a payment that was voided in the meantime stores nothing: the payment decider fails a pending payment only, so the cancellation's void stands.
 
 ### Step 4: Add Admin Endpoints
 
@@ -442,7 +1271,7 @@ curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost
 for i in 1 2 3; do
   curl -s -X POST http://localhost:8080/api/orders \
     -H "Content-Type: application/json" -H "X-User-Role: CUSTOMER" -H "X-User-Id: c-1" \
-    -d "{\"orderId\":\"cb-$i\",\"customerId\":\"c-1\",\"lines\":[{\"productId\":\"prod-widget\",\"quantity\":1}]}"
+    -d "{\"orderId\":\"cb-$i\",\"customerId\":\"c-1\",\"lines\":[{\"productId\":\"p-1\",\"quantity\":1}]}"
 done
 
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
@@ -592,4 +1421,4 @@ CircuitBreakerOpenException: Circuit breaker OPEN — rejecting command: Capture
 
 ## Next Up
 
-Let's add our final aggregate — Inventory — and learn about the transactional outbox pattern.
+Next: the inventory's read model and the transactional outbox pattern, which forwards a curated set of integration events to RabbitMQ.

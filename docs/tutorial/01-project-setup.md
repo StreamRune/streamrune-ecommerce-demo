@@ -193,9 +193,16 @@ Nothing else is needed: Gradle downloads the latest `1.0.0-alpha-SNAPSHOT` build
 
 ## Step by Step
 
-### Step 0 — Create the version catalog
+### Step 0 — Create the project and the version catalog
 
-Before writing any build file, create the Gradle version catalog so that all modules can share dependency aliases.
+Create a root directory for the project and initialise Gradle:
+
+```bash
+mkdir ecommerce && cd ecommerce
+gradle init --type basic --dsl kotlin
+```
+
+`gradle init` writes a small version catalog of its own, `gradle/libs.versions.toml`. The project uses the demo's catalog instead, so that all modules share its dependency aliases; replace the file before writing any build file.
 
 Create `gradle/libs.versions.toml` (copy from the real demo — only the key aliases used in this tutorial are shown here; copy the full file to get all aliases):
 
@@ -218,13 +225,13 @@ spotless = "7.1.0"
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jakarta-validation-api = { module = "jakarta.validation:jakarta.validation-api", version.ref = "jakarta-validation" }
 jakarta-el = { module = "org.glassfish:jakarta.el", version.ref = "jakarta-el" }
-assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "spring-boot" }
 spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux", version.ref = "spring-boot" }
 spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation", version.ref = "spring-boot" }
 spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc", version.ref = "spring-boot" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator", version.ref = "spring-boot" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "spring-boot" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 
 [plugins]
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
@@ -235,13 +242,6 @@ spring-dependency-management = { id = "io.spring.dependency-management", version
 > Copy the complete `gradle/libs.versions.toml` from the real demo — it includes all aliases for later chapters (Quarkus, Micronaut, observability, testing, etc.).
 
 ### Step 1 — Create the Gradle project structure
-
-Create a root directory for the project and initialise Gradle:
-
-```bash
-mkdir ecommerce && cd ecommerce
-gradle init --type basic --dsl kotlin
-```
 
 Open `settings.gradle.kts` and replace its contents with the composite build version (Path A):
 
@@ -529,29 +529,49 @@ dependencies {
 
 StreamRune's PostgreSQL EventStore needs a running database, and nothing more: an **empty** database is enough. This demo lets StreamRune auto-configure the event store (the Spring auto-configuration in `streamrune-spring` picks up the `EventTypeRegistry` bean you define, plus the crypto engine and upcaster beans added in later chapters), and the auto-configured factory creates the schema itself when the application starts. It runs the Flyway baseline bundled in the `streamrune-postgres` jar (`db/streamrune-migration/`) and records it in its own history table, `flyway_schema_history_streamrune`, so it never collides with migrations of your own. You write no DDL and copy no schema file.
 
+The database runs in Docker, described by a Compose file that later chapters extend with the rest of the stack. Create `docker-compose.yml` in the project root:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: streamrune_ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+```
+
 Start PostgreSQL:
 
 ```bash
-docker run -d \
-  --name streamrune-pg \
-  -e POSTGRES_DB=streamrune_ecommerce \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  postgres:17
+docker compose up -d postgres
 ```
+
+The `pgdata` volume keeps the database between restarts, so the products, customers and orders you create in one chapter are still there in the next. `docker compose down` stops the container and keeps the volume; `docker compose down -v` deletes it too, and the next start begins with an empty database.
 
 > **Why `postgres:17`:** StreamRune requires PostgreSQL 17 or newer (its CI tests 17 and 18) and refuses an older server at startup — `PostgresEventStoreFactory.create()` throws `UnsupportedServerVersionException` before it touches the schema, whatever `streamrune.event-store.schema.auto-initialize` says. The demo's containers, tests and `docker-compose.yml` all use 17, the oldest supported version.
 
 Wait a few seconds for the container to initialise, then check that the database answers:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce -c "\dt"
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce -c "\dt"
 ```
 
 It prints `Did not find any relations.` — the database is empty until the application's first start (Step 8).
 
-> **Tip:** When you reach Chapter 17, `docker compose up` starts PostgreSQL, RabbitMQ, the backend, the notifications service and the frontend together. For the tutorial chapters, the standalone container above is simpler.
+> **Tip:** The application itself runs outside Docker, with `./gradlew :spring-app:bootRun`, through Chapter 12. Chapter 13 adds RabbitMQ, the backend and the notifications service to `docker-compose.yml`, Chapter 16 the frontend and Chapter 17 a second backend; from Chapter 13 on, `docker compose up` can start the whole stack.
 
 ### Step 6 — Configure the datasource
 
@@ -573,16 +593,12 @@ spring:
 
 streamrune:
   event-store:
-    type: postgres
     schema:
       # The framework creates its own schema at startup (this is also the default): the event
       # store's Flyway series (classpath:db/streamrune-migration, history table
       # flyway_schema_history_streamrune). The demo ships no DDL of its own; an empty database is
       # all the app needs.
       auto-initialize: true
-  projection:
-    type: polling
-    interval: 100
   projections:
     auto-discovery:
       enabled: false
@@ -594,9 +610,11 @@ management:
         include: health,metrics
 ```
 
-A word on the `streamrune.*` block. The PostgreSQL EventStore is selected simply by having the `streamrune-postgres` artifact on the classpath (StreamRune's auto-configuration detects it) — **not** by the `streamrune.event-store.type` key. Likewise, the framework's catch-up polling interval is controlled by `streamrune.polling-interval-ms` (default `5000`), **not** by `projection.interval`. The `event-store.type`, `projection.type`, and `projection.interval` keys shown above are inert: they appear in the real demo's `application.yml` but the framework does not bind or read them, so they have no effect. They are kept here for parity with the real demo's file; treat them as documentation, not configuration.
+A word on the `streamrune.*` block. No key selects the event store: `streamrune-spring` carries the PostgreSQL event store, and its auto-configuration builds it once the application has a `DataSource` bean, which Spring Boot creates from the `spring.datasource.*` keys above. `streamrune.event-store.schema.auto-initialize` runs the framework's Flyway migrations when the application starts (Step 8).
 
-`streamrune.projections.auto-discovery.enabled: false` **is** a real, bound property (prefix `streamrune.projections.auto-discovery`). It turns off auto-discovery of projections on the classpath. The tutorial wires projections explicitly via `MultiProjectionRunner` (Chapter 5), so auto-discovery would conflict with the manual wiring.
+`streamrune.projections.auto-discovery.enabled: false` turns off auto-discovery of projections on the classpath. The tutorial wires projections explicitly via `MultiProjectionRunner` (Chapter 5), so auto-discovery would conflict with the manual wiring.
+
+Every key the framework binds, with its default, is in its [configuration reference](https://github.com/StreamRune/streamrune/blob/main/docs/guide/configuration.md); the projections' catch-up polling interval, for one, is `streamrune.polling-interval-ms` (`5000` unless configured), which Chapter 5 comes back to.
 
 > The real demo also ships an `application.properties` alongside this `application.yml`. It carries the same datasource defaults plus `spring.sql.init.mode=never`, which the native-image build needs at AOT processing time. You do not need it for the plain `bootRun` in this chapter; it matters only for the native build (Chapter 17, *Deploy to production*).
 
@@ -612,9 +630,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
 public class SpringEcommerceApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(SpringEcommerceApplication.class, args);
-    }
+  public static void main(String[] args) {
+    SpringApplication.run(SpringEcommerceApplication.class, args);
+  }
 }
 ```
 
@@ -701,7 +719,7 @@ Spring Boot 4.x ships with Jackson 3.x as its primary `ObjectMapper`. StreamRune
 
 To prevent a `ClassNotFoundException` at runtime you must expose a Jackson 2.x `ObjectMapper` bean explicitly. Spring Boot will prefer the existing Jackson 3.x auto-configured bean for its own use; StreamRune beans will ask for this one by type.
 
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` as the complete (minimal) file below. Chapter 2 adds the `eventTypeRegistry` and `commandBus` beans to this same class — the `EventStore` itself is auto-configured by `streamrune-spring`, so you never declare it. Later chapters add more beans — so keep this file and grow it; do not overwrite it.
+Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` as the complete (minimal) file below. Chapter 2 adds the `eventTypeRegistry` and `commandBus` beans to this same class — the `EventStore` itself is auto-configured by `streamrune-spring`, so you never declare it. Every chapter that changes this class shows the whole file as it stands at the end of that chapter, so your file can always be compared with the listing, or replaced by it.
 
 ```java
 package org.streamrune.ecommerce.spring.config;
@@ -725,7 +743,7 @@ public class StreamRuneConfig {
 
 Spring Boot will prefer its own Jackson 3.x bean; StreamRune beans ask for this one by type. You will see it referenced in the `PostgresSagaStore` wiring in Chapter 11.
 
-> **Forward note:** The real demo also carries an `@ImportRuntimeHints(EcommerceNativeHints.class)` annotation on this class (and the `EcommerceNativeHints` class itself) for the GraalVM native build: Chapter 14 explains why the sealed command roots must be registered, and Chapter 17 (*Deploy to production*) builds the binary. JVM `bootRun` is unaffected — skip this for now.
+> **Forward note:** Chapter 14 adds an `@ImportRuntimeHints(EcommerceNativeHints.class)` annotation to this class, and the `EcommerceNativeHints` class itself, for the GraalVM native build: the sealed command roots must be registered for reflection there. Chapter 17 (*Deploy to production*) builds the binary. JVM `bootRun` needs neither.
 
 ### Step 8 — Start the application and verify it connects
 
@@ -742,7 +760,7 @@ On startup you should see the application connect to PostgreSQL and finally log 
 Check the tables the first start created:
 
 ```bash
-docker exec -it streamrune-pg psql -U postgres -d streamrune_ecommerce \
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "\dt"
 ```
 
@@ -754,7 +772,7 @@ The application exposes a health endpoint at `http://localhost:8080/actuator/hea
 curl http://localhost:8080/actuator/health
 ```
 
-A `{"status":"UP"}` response confirms the application is connected to the database and all subsystems are healthy.
+A response with `"status":"UP"` (Spring Boot adds the names of its health groups: `{"groups":["liveness","readiness"],"status":"UP"}`) confirms the application is connected to the database and all subsystems are healthy.
 
 ---
 

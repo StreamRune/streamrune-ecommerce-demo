@@ -1,6 +1,6 @@
-# Chapter 13: Inventory Aggregate & Outbox
+# Chapter 13: Inventory Read Model & Outbox
 
-> **What you'll learn:** How to model an inventory aggregate with three distinct stock pools — available, reserved, and committed — and how StreamRune's transactional outbox pattern reliably forwards a curated, PII-safe set of integration events to RabbitMQ. You will build `InventoryDecider` with full TDD coverage and wire the four outbox beans (`PostgresOutboxStore`, `EcommerceIntegrationEventMapper`, `RabbitMqConfig` publisher, and `streamrune.outbox.enabled=true`) that make end-to-end delivery real. A second Spring Boot application — the `notifications-service` — subscribes to the queue and exposes `GET /received`, for an `ADMIN`, so you can verify cross-service delivery without touching the e-shop internals.
+> **What you'll learn:** How the inventory's read model counts the stock of the three pools Chapter 11's inventory aggregate keeps — available, reserved, and committed — and how StreamRune's transactional outbox pattern reliably forwards a curated, PII-safe set of integration events to RabbitMQ. You will add `InventoryProjection` and wire the four outbox beans (`PostgresOutboxStore`, `EcommerceIntegrationEventMapper`, `RabbitMqConfig` publisher, and `streamrune.outbox.enabled=true`) that make end-to-end delivery real. A second Spring Boot application — the `notifications-service` — subscribes to the queue and exposes `GET /received`, for an `ADMIN`, so you can verify cross-service delivery without touching the e-shop internals.
 
 ---
 
@@ -31,489 +31,113 @@ StreamRune provides `OutboxStore`, `PostgresOutboxStore`, `OutboxPoller`, `Outbo
 
 ## Domain Model
 
-Inventory tracks stock for a single product across three pools:
-
-- **available** — units that can be sold right now.
-- **reserved** — units held for an order between its payment and its shipment, per order: each order has its own reservation at the product.
-- **committed** — units confirmed for fulfillment; they leave the warehouse when the order ships.
-
-The lifecycle of a unit flows: available → reserved (on `ReserveStock`) → committed (on `ConfirmReservation`) → gone. Cancellations reverse the first step: reserved → available again (on `ReleaseStock`). New stock arrives via `ReceiveShipment`. The lifecycle is per order: a release or a confirmation acts on the reservation of the order it names, at the product it names, and stores nothing when that order holds none. So a release that runs twice releases once, a release after the shipment committed the stock changes nothing, and two orders at one product are released and confirmed apart. The fulfillment saga of Chapter 11 sends `ReserveStock` for every line of an order; the order cancellation process manager sends `ReleaseStock` for every line of a cancelled order, and the order shipment process manager sends `ConfirmReservation` for every line of a shipped one (Chapter 11, Step 5c).
-
-### Commands
-
-Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryCommand.java`:
-
-```java
-package org.streamrune.ecommerce.domain.inventory;
-
-import org.streamrune.core.Command;
-
-public sealed interface InventoryCommand extends Command {
-  record ReserveStock(String productId, String orderId, int quantity) implements InventoryCommand {}
-
-  record ReleaseStock(String productId, String orderId) implements InventoryCommand {}
-
-  record ConfirmReservation(String productId, String orderId) implements InventoryCommand {}
-
-  record ReceiveShipment(String productId, int quantity) implements InventoryCommand {}
-}
-```
-
-### Events
-
-Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryEvent.java`:
-
-```java
-package org.streamrune.ecommerce.domain.inventory;
-
-import org.streamrune.core.DomainEvent;
-
-public sealed interface InventoryEvent extends DomainEvent {
-  record StockReserved(String productId, String orderId, int quantity, int availableAfter)
-      implements InventoryEvent {}
-
-  record StockReleased(String productId, String orderId, int quantity, int availableAfter)
-      implements InventoryEvent {}
-
-  record ReservationConfirmed(String productId, String orderId, int quantity)
-      implements InventoryEvent {}
-
-  record ShipmentReceived(String productId, int quantity, int availableAfter)
-      implements InventoryEvent {}
-}
-```
-
-`ReleaseStock` and `ConfirmReservation` name the order and no quantity: the quantity is the one the order reserved, which the aggregate knows. Each event records the `availableAfter` pool size at the time of the transition. This makes the event self-describing: a consumer can reconstruct the current availability without replaying the entire stream.
-
-### State
-
-Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/InventoryState.java`:
-
-```java
-package org.streamrune.ecommerce.domain.inventory;
-
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import java.util.Map;
-import java.util.OptionalInt;
-import org.streamrune.core.AggregateState;
-import org.streamrune.core.types.AggregateType;
-
-public record InventoryState(
-    String productId, int available, int reserved, int committed, Map<String, Integer> reservations)
-    implements AggregateState {
-  /**
-   * The aggregate type the inventory decider is registered under: streams are
-   * inventory:<productId>.
-   */
-  public static final AggregateType TYPE = AggregateType.of("inventory");
-
-  /**
-   * {@code reservations} holds the open reservation of each order at this product, by order id: an
-   * entry is added by {@code StockReserved} and removed by {@code StockReleased} or {@code
-   * ReservationConfirmed}. The state is snapshotted with the map.
-   */
-  @JsonCreator
-  public InventoryState(
-      @JsonProperty("productId") String productId,
-      @JsonProperty("available") int available,
-      @JsonProperty("reserved") int reserved,
-      @JsonProperty("committed") int committed,
-      @JsonProperty("reservations") Map<String, Integer> reservations) {
-    this.productId = productId;
-    this.available = available;
-    this.reserved = reserved;
-    this.committed = committed;
-    this.reservations = reservations == null ? Map.of() : Map.copyOf(reservations);
-  }
-
-  public InventoryState() {
-    this(null, 0, 0, 0, Map.of());
-  }
-
-  /** The quantity the order holds reserved at this product, or none. */
-  public OptionalInt reservationOf(String orderId) {
-    Integer quantity = reservations.get(orderId);
-    return quantity == null ? OptionalInt.empty() : OptionalInt.of(quantity);
-  }
-}
-```
-
-The zero-argument constructor satisfies `AggregateState`; StreamRune calls it when no prior events exist for the stream.
-
-`reservations` holds the open reservation of each order at this product, by order id. `StockReserved` adds an entry; `StockReleased` and `ReservationConfirmed` remove it, so the map holds only the orders in flight for the product. The bus snapshots the state with the map (chapter 8): the canonical constructor is the one Jackson uses (`@JsonCreator`, one `@JsonProperty` per component), and it reads a state written without `reservations` as an empty map. A snapshot that lost the map would make every release and confirmation after it store nothing, with no error, and strand the stock. `reservationOf(orderId)` is the quantity an order holds, or none.
+Inventory tracks stock for a single product across three pools — **available**, **reserved** (per order, between its payment and its shipment) and **committed** (confirmed for an order that ships). Chapter 11 built the aggregate — its commands, events, state and decider, and the `POST /api/inventory/{productId}/receive` route — because the fulfillment saga reserves stock and the two process managers release and commit it. This chapter adds what the shop shows of it, the inventory read model, and then the outbox.
 
 ---
 
 ## Step by Step
 
-### Step 1: Write the Tests First
+### Step 1: Add `InventoryProjection` and register it in `MultiProjectionRunner`
 
-Create `commands/src/test/java/org/streamrune/ecommerce/commands/inventory/InventoryDeciderTest.java`. `DeciderFixture` from `streamrune-test` removes all boilerplate: `given` supplies prior events, `when` issues a command, and `expectEvents` / `expectState` / `expectException` assert the outcome.
+The read model is one row per product with the three counters. Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/InventoryView.java`:
 
 ```java
-package org.streamrune.ecommerce.commands.inventory;
+package org.streamrune.ecommerce.queries.dto;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
-import java.util.OptionalInt;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.streamrune.core.DomainException;
-import org.streamrune.ecommerce.domain.inventory.*;
-import org.streamrune.test.DeciderFixture;
-
-class InventoryDeciderTest {
-
-  private final DeciderFixture<InventoryCommand, InventoryState, InventoryEvent> fixture =
-      DeciderFixture.of(new InventoryDecider());
-
-  private InventoryEvent.ShipmentReceived received() {
-    return new InventoryEvent.ShipmentReceived("p-1", 10, 10);
-  }
-
-  @Test
-  void receiveShipment() {
-    fixture
-        .given()
-        .when(new InventoryCommand.ReceiveShipment("p-1", 100))
-        .expectEvents(new InventoryEvent.ShipmentReceived("p-1", 100, 100))
-        .expectState(
-            s -> {
-              assertThat(s.available()).isEqualTo(100);
-              assertThat(s.reserved()).isEqualTo(0);
-            });
-  }
-
-  @Test
-  void reserveStock_recordsTheOrdersReservation() {
-    fixture
-        .given(received())
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
-        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
-        .expectState(
-            s -> {
-              assertThat(s.available()).isEqualTo(7);
-              assertThat(s.reserved()).isEqualTo(3);
-              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
-            });
-  }
-
-  @Test
-  void reserveStock_twiceForOneOrder_storesNothingTheSecondTime() {
-    fixture
-        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
-        .expectNoEvents();
-  }
-
-  @ParameterizedTest
-  @ValueSource(ints = {0, -1})
-  void reserveStock_aNonPositiveQuantity_isRefused(int quantity) {
-    fixture
-        .given(received())
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", quantity))
-        .expectException(DomainException.class);
-  }
-
-  @Test
-  void reserveStock_insufficient_throws() {
-    fixture
-        .given(received())
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
-        .expectException(DomainException.class);
-  }
-
-  @Test
-  void releaseStock_releasesWhatTheOrderHolds() {
-    fixture
-        .given(received(), new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
-        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
-        .expectState(
-            s -> {
-              assertThat(s.available()).isEqualTo(10);
-              assertThat(s.reserved()).isEqualTo(0);
-              assertThat(s.reservations()).isEmpty();
-            });
-  }
-
-  @Test
-  void releaseStock_withoutAReservation_storesNothing() {
-    fixture
-        .given(received())
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
-        .expectNoEvents();
-  }
-
-  @Test
-  void releaseStock_afterTheReservationWasConfirmed_storesNothing() {
-    fixture
-        .given(
-            received(),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
-            new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
-        .expectNoEvents();
-  }
-
-  @Test
-  void releaseStock_twice_releasesOnce() {
-    fixture
-        .given(
-            received(),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
-            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-1"))
-        .expectNoEvents();
-  }
-
-  @Test
-  void confirmReservation_afterTheReservationWasReleased_storesNothing() {
-    fixture
-        .given(
-            received(),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
-            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
-        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
-        .expectNoEvents();
-  }
-
-  @Test
-  void reserveStock_afterTheOrdersReservationWasReleased_reservesAgain() {
-    fixture
-        .given(
-            received(),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 7),
-            new InventoryEvent.StockReleased("p-1", "o-1", 3, 10))
-        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 3))
-        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-1", 3, 7))
-        .expectState(
-            s -> {
-              assertThat(s.reserved()).isEqualTo(3);
-              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
-            });
-  }
-
-  @Test
-  void confirmReservation_commitsTheOrdersQuantity() {
-    fixture
-        .given(
-            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
-            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
-        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
-        .expectEvents(new InventoryEvent.ReservationConfirmed("p-1", "o-1", 3))
-        .expectState(
-            s -> {
-              assertThat(s.reserved()).isEqualTo(5);
-              assertThat(s.committed()).isEqualTo(3);
-            });
-  }
-
-  @Test
-  void confirmReservation_withoutAReservation_storesNothing() {
-    fixture
-        .given(received())
-        .when(new InventoryCommand.ConfirmReservation("p-1", "o-1"))
-        .expectNoEvents();
-  }
-
-  @Test
-  void twoOrdersAtOneProduct_areReleasedAndConfirmedApart() {
-    fixture
-        .given(
-            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
-            new InventoryEvent.StockReserved("p-1", "o-2", 5, 12))
-        .when(new InventoryCommand.ReleaseStock("p-1", "o-2"))
-        .expectEvents(new InventoryEvent.StockReleased("p-1", "o-2", 5, 17))
-        .expectState(
-            s -> {
-              assertThat(s.reserved()).isEqualTo(3);
-              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
-              assertThat(s.reservationOf("o-2")).isEqualTo(OptionalInt.empty());
-            });
-  }
-}
+public record InventoryView(String productId, int available, int reserved, int committed) {}
 ```
 
-Run the tests. They will all fail because `InventoryDecider` does not exist yet. That is expected.
-
-### Step 2: Implement `InventoryDecider`
-
-Create `commands/src/main/java/org/streamrune/ecommerce/commands/inventory/InventoryDecider.java`:
+and `projections/src/main/java/org/streamrune/ecommerce/projections/InventoryProjection.java`, which follows the pattern of `ProductProjection` and `OrderProjection`:
 
 ```java
-package org.streamrune.ecommerce.commands.inventory;
+package org.streamrune.ecommerce.projections;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.OptionalInt;
-import org.streamrune.core.Decider;
-import org.streamrune.core.DomainException;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.ecommerce.domain.inventory.*;
+import org.streamrune.ecommerce.queries.dto.InventoryView;
 
-public class InventoryDecider implements Decider<InventoryCommand, InventoryState, InventoryEvent> {
+public class InventoryProjection extends BaseProjection {
 
-  @Override
-  public InventoryState initialState() {
-    return new InventoryState();
-  }
-
-  /**
-   * Stock is held per order: a second reservation of one order at one product stores nothing, and a
-   * release or a confirmation acts on this order's reservation alone — nothing when it holds none.
-   */
-  @Override
-  public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
-    return switch (cmd) {
-      case InventoryCommand.ReserveStock c -> {
-        if (c.quantity() <= 0)
-          throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
-        if (state.reservationOf(c.orderId()).isPresent()) yield List.of();
-        if (state.available() < c.quantity())
-          throw new DomainException(
-              "Insufficient stock for "
-                  + c.productId()
-                  + ": available="
-                  + state.available()
-                  + ", requested="
-                  + c.quantity());
-        yield List.of(
-            new InventoryEvent.StockReserved(
-                c.productId(), c.orderId(), c.quantity(), state.available() - c.quantity()));
-      }
-
-      case InventoryCommand.ReleaseStock c -> {
-        OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
-        yield List.of(
-            new InventoryEvent.StockReleased(
-                c.productId(), c.orderId(), held.getAsInt(), state.available() + held.getAsInt()));
-      }
-
-      case InventoryCommand.ConfirmReservation c -> {
-        OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
-        yield List.of(
-            new InventoryEvent.ReservationConfirmed(c.productId(), c.orderId(), held.getAsInt()));
-      }
-
-      case InventoryCommand.ReceiveShipment c ->
-          List.of(
-              new InventoryEvent.ShipmentReceived(
-                  c.productId(), c.quantity(), state.available() + c.quantity()));
-    };
+  public InventoryProjection(ProjectionRepository repository) {
+    super(repository, "inventory");
   }
 
   @Override
-  public InventoryState evolve(InventoryState state, InventoryEvent evt) {
-    return switch (evt) {
-      case InventoryEvent.StockReserved e ->
-          new InventoryState(
-              e.productId(),
-              e.availableAfter(),
-              state.reserved() + e.quantity(),
-              state.committed(),
-              with(state.reservations(), e.orderId(), e.quantity()));
-      case InventoryEvent.StockReleased e ->
-          new InventoryState(
-              e.productId(),
-              e.availableAfter(),
-              state.reserved() - e.quantity(),
-              state.committed(),
-              without(state.reservations(), e.orderId()));
-      case InventoryEvent.ReservationConfirmed e ->
-          new InventoryState(
-              state.productId(),
-              state.available(),
-              state.reserved() - e.quantity(),
-              state.committed() + e.quantity(),
-              without(state.reservations(), e.orderId()));
-      case InventoryEvent.ShipmentReceived e ->
-          new InventoryState(
-              e.productId(),
-              e.availableAfter(),
-              state.reserved(),
-              state.committed(),
-              state.reservations());
-    };
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      if (envelope.event() instanceof InventoryEvent evt) {
+        switch (evt) {
+          case InventoryEvent.StockReserved e ->
+              findById(e.productId(), InventoryView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new InventoryView(
+                                  e.productId(),
+                                  e.availableAfter(),
+                                  existing.reserved() + e.quantity(),
+                                  existing.committed())));
+          case InventoryEvent.StockReleased e ->
+              findById(e.productId(), InventoryView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new InventoryView(
+                                  e.productId(),
+                                  e.availableAfter(),
+                                  existing.reserved() - e.quantity(),
+                                  existing.committed())));
+          case InventoryEvent.ReservationConfirmed e ->
+              findById(e.productId(), InventoryView.class)
+                  .ifPresent(
+                      existing ->
+                          save(
+                              e.productId(),
+                              new InventoryView(
+                                  e.productId(),
+                                  existing.available(),
+                                  existing.reserved() - e.quantity(),
+                                  existing.committed() + e.quantity())));
+          case InventoryEvent.ShipmentReceived e ->
+              save(
+                  e.productId(),
+                  new InventoryView(
+                      e.productId(),
+                      e.availableAfter(),
+                      findById(e.productId(), InventoryView.class)
+                          .map(InventoryView::reserved)
+                          .orElse(0),
+                      findById(e.productId(), InventoryView.class)
+                          .map(InventoryView::committed)
+                          .orElse(0)));
+        }
+      }
+    }
   }
 
-  private static Map<String, Integer> with(
-      Map<String, Integer> reservations, String orderId, int quantity) {
-    var next = new HashMap<>(reservations);
-    next.put(orderId, quantity);
-    return next;
+  public InventoryView get(String productId) {
+    return findById(productId, InventoryView.class).orElse(null);
   }
 
-  private static Map<String, Integer> without(Map<String, Integer> reservations, String orderId) {
-    var next = new HashMap<>(reservations);
-    next.remove(orderId);
-    return next;
+  public List<InventoryView> listAll() {
+    return repository.findAll(projectionName(), InventoryView.class);
   }
 }
 ```
 
-A few things worth noting. `ReserveStock` is the only command that can fail: it refuses a quantity that is not positive and checks `state.available()` before emitting an event. A second reservation of one order at one product stores nothing, so a redelivered `ReserveStock` reserves once. `ReleaseStock` and `ConfirmReservation` act on `state.reservationOf(orderId)`, the quantity this order reserved at this product: they never take a quantity from the command and never read the pool-wide `reserved` counter, so one order cannot release or commit the units another order holds. Both store nothing when the order holds no reservation, which is what makes them safe to send whether or not the reservation step ran, and safe to send twice.
-
-Run the tests. They should all pass.
-
-### Step 3: Register Inventory Events in the Event Type Registry
-
-Open `StreamRuneConfig.java` and add the four inventory event types to the `SimpleEventTypeRegistry` inside the `eventTypeRegistry` bean:
-
-```java
-.registerEvent(
-    "StockReserved",
-    org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
-.registerEvent(
-    "StockReleased",
-    org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
-.registerEvent(
-    "ReservationConfirmed",
-    org.streamrune.ecommerce.domain.inventory.InventoryEvent.ReservationConfirmed.class)
-.registerEvent(
-    "ShipmentReceived",
-    org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
-```
-
-### Step 4: Register the Inventory Decider in the Command Bus
-
-In the same file, add the `InventoryCommand` block to the `VirtualThreadCommandBus` builder. The inventory decider registers under its own aggregate type, `InventoryState.TYPE` (`inventory`), so `ReserveStock` for `p-1` writes to `inventory:p-1` while the product's events live in `product:p-1` — one stream per product and per type, no hand-made prefix. The framework refuses two registrations of one command type and two overlapping command roots with different types at startup.
-
-```java
-.register(
-    InventoryState.TYPE,
-    InventoryCommand.class,
-    cmd ->
-        AggregateId.of(
-            switch (cmd) {
-              case InventoryCommand.ReserveStock c -> c.productId();
-              case InventoryCommand.ReleaseStock c -> c.productId();
-              case InventoryCommand.ConfirmReservation c -> c.productId();
-              case InventoryCommand.ReceiveShipment c -> c.productId();
-            }),
-    new InventoryDecider())
-```
-
-> Two aggregate types may share an id value without sharing a stream: `ReserveStock` for `productId = "p-1"` writes to `inventory:p-1`, and the `ProductCreated`, `PriceUpdated` and `StockAdjusted` events of the product `p-1` stay in `product:p-1`. The type is part of the stream's identity — the event store keeps it in its own `aggregate_type` column, next to `aggregate_id` — so mixing the two kinds of events in one stream cannot happen by construction.
-
-> The inventory id is the product id itself, so `AggregateId.of`'s 255-character bound (chapter 2) applies to it as is: a product id over the bound, or one with a control character, makes an inventory request answer `400`. An order cannot name such a product id: the `OrderCommand.OrderLine` constructor refuses it when the order is placed (chapter 8), with the same bound. If the saga meets such an id anyway, in an `OrderPlaced` event that never crossed that check, its reservation is refused here and the saga compensates the order (chapter 11).
-
-### Step 4b: Add `InventoryProjection` and register it in `MultiProjectionRunner`
-
-Create `projections/src/main/java/org/streamrune/ecommerce/projections/InventoryProjection.java` (source follows the same pattern as `ProductProjection` and `OrderProjection` — copy the full implementation from the real demo at that path). Like the other projections, it extends `org.streamrune.core.projection.BaseProjection` (introduced in the projections chapter) and persists the `org.streamrune.ecommerce.queries.dto.InventoryView` DTO in the `queries` module, so make sure both already exist before you compile. The projection applies each event's own quantity: `StockReserved` and `StockReleased` carry the order's quantity, and `ReservationConfirmed` carries the quantity that order reserved, not the product's whole reserved pool, so the counters stay right while several orders hold stock at one product.
+The projection applies each event's own quantity: `StockReserved` and `StockReleased` carry the order's quantity, and `ReservationConfirmed` carries the quantity that order reserved, not the product's whole reserved pool, so the counters stay right while several orders hold stock at one product.
 
 Register the bean in `StreamRuneConfig`:
 
 ```java
 @Bean
 public InventoryProjection inventoryProjection(ProjectionRepository repo) {
-    return new InventoryProjection(repo);
+  return new InventoryProjection(repo);
 }
 ```
 
@@ -531,7 +155,6 @@ public MultiProjectionRunner projectionRunner(
     CustomerProjection customerProjection,
     InventoryProjection inventoryProjection,
     CacheInvalidator cacheInvalidator) {
-
   var runner =
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
@@ -566,51 +189,1017 @@ All four projections are now wired. The runner assigns each its own virtual thre
 
 `InventoryProjection` is a **counter** (`existing.reserved() + e.quantity()`). That is exactly why it must be `TRANSACTIONAL_LOCAL`: under at-least-once a crash between the write and the checkpoint would reserve the stock twice.
 
-### Step 5: Wire the Outbox Beans
+### Step 2: Wire the Outbox Beans
 
-Add three beans to `StreamRuneConfig.java`. The `PostgresOutboxStore` must share the same `DataSource` as the event store — that is what makes the outbox insert and the event append atomic. The `OutboxEventMapper` determines which events are forwarded and in what shape. Both beans are discovered by the auto-configured `postgresEventStoreFactory`.
+The outbox needs two beans in `StreamRuneConfig.java`, the store and the mapper. The `PostgresOutboxStore` must share the same `DataSource` as the event store — that is what makes the outbox insert and the event append atomic. The `OutboxEventMapper` determines which events are forwarded and in what shape. Both beans are discovered by the auto-configured `postgresEventStoreFactory`.
+
+The mapper is the PII boundary, so it is a class of its own in the shared `commands` module, which the Quarkus and Micronaut apps use too. Create `commands/src/main/java/org/streamrune/ecommerce/commands/integration/EcommerceIntegrationEventMapper.java`:
 
 ```java
-import java.time.Duration;
-import javax.sql.DataSource;
+package org.streamrune.ecommerce.commands.integration;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.util.List;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.outbox.OutboxEntry;
+import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxEventMapper;
-import org.streamrune.core.outbox.OutboxOrderingMode;
-import org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper;
-import org.streamrune.postgres.PostgresOutboxStore;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.domain.order.OrderEvent;
+import org.streamrune.ecommerce.domain.payment.PaymentEvent;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
 
 /**
- * Outbox store bean: needed by both the auto-configured postgresEventStoreFactory (so outbox
- * entries are written inside the same append transaction) and the auto-configured OutboxPoller.
+ * Curated, PII-safe outbox mapper for the e-commerce demo.
  *
- * The claim lease (2 minutes) must strictly exceed the RabbitMQ publisher's in-flight horizon
- * (below): 30s publish-block budget + 30s confirm timeout = 60s horizon, plus
- * the framework's recommended 30s margin = 90s minimum. OutboxPoller refuses to boot when the
- * lease does not exceed the horizon, so this is a hard requirement, not a tuning choice.
+ * <p>ONLY the allowlisted integration events below are published to the broker. All {@code
+ * CustomerEvent.*} and {@code InventoryEvent.*} types — and {@code OrderPlaced} (carries {@code
+ * customerId}) and {@code PaymentInitiated} — are explicitly excluded. Each published entry
+ * contains a small, hand-crafted integration DTO with ONLY non-PII business fields. The payment
+ * outcomes published are {@code PaymentCaptured}, {@code PaymentRefunded}, {@code PaymentVoided}
+ * and {@code PaymentFailed}.
  *
- * STRICT_PER_AGGREGATE is the default; it is written out so the choice is visible. The demo's
- * outbox carries order lifecycle, payment outcomes and stock changes — consumers that must not
- * see n+1 before n — so a FAILED entry blocks its aggregate until an operator replays or skips
- * it. The alternative, AVAILABILITY_FIRST, lets later entries flow past a FAILED one and is only
- * right for telemetry-like consumers that are idempotent AND order-tolerant.
+ * <p>Every entry carries a {@code streamId} — the stream the event was appended to ({@code
+ * order:<id>}, {@code payment:<id>}, {@code product:<id>}): the demo's outbox channel is {@code
+ * STRICT_PER_AGGREGATE}, where a {@code null} stream fails the append with {@code
+ * OutboxOrderingViolationException}.
  */
+public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
+
+  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+  @Override
+  public List<OutboxEntry> toOutbox(EventEnvelope envelope) {
+    String eventId = envelope.metadata().eventId().value();
+    StreamId stream = envelope.streamId();
+    return switch (envelope.event()) {
+      // --- Order lifecycle (OrderPlaced excluded — carries customerId) ---
+      case OrderEvent.OrderConfirmed e ->
+          List.of(entry(eventId, new OrderConfirmedDto(e.orderId()), "OrderConfirmed", stream));
+      case OrderEvent.OrderShipped e ->
+          List.of(entry(eventId, new OrderShippedDto(e.orderId()), "OrderShipped", stream));
+      case OrderEvent.OrderDelivered e ->
+          List.of(entry(eventId, new OrderDeliveredDto(e.orderId()), "OrderDelivered", stream));
+      case OrderEvent.OrderCancelled e ->
+          List.of(
+              entry(
+                  eventId,
+                  new OrderCancelledDto(e.orderId(), e.reason()),
+                  "OrderCancelled",
+                  stream));
+
+      // --- Payment outcomes (PaymentInitiated excluded) ---
+      case PaymentEvent.PaymentCaptured e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PaymentCapturedDto(e.paymentId(), e.orderId()),
+                  "PaymentCaptured",
+                  stream));
+      case PaymentEvent.PaymentRefunded e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PaymentRefundedDto(e.paymentId(), e.reason()),
+                  "PaymentRefunded",
+                  stream));
+      case PaymentEvent.PaymentVoided e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PaymentVoidedDto(e.paymentId(), e.reason()),
+                  "PaymentVoided",
+                  stream));
+      case PaymentEvent.PaymentFailed e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PaymentFailedDto(e.paymentId(), e.reason()),
+                  "PaymentFailed",
+                  stream));
+
+      // --- Product catalog ---
+      case ProductEvent.ProductCreated e ->
+          List.of(
+              entry(
+                  eventId,
+                  new ProductCreatedDto(
+                      e.productId(),
+                      e.name(),
+                      e.category(),
+                      e.price().amount(),
+                      e.price().currency(),
+                      e.stock()),
+                  "ProductCreated",
+                  stream));
+      case ProductEvent.PriceUpdated e ->
+          List.of(
+              entry(
+                  eventId,
+                  new PriceUpdatedDto(
+                      e.productId(),
+                      e.previousPrice().amount(),
+                      e.previousPrice().currency(),
+                      e.newPrice().amount(),
+                      e.newPrice().currency()),
+                  "PriceUpdated",
+                  stream));
+      case ProductEvent.StockAdjusted e ->
+          List.of(
+              entry(
+                  eventId,
+                  new StockAdjustedDto(e.productId(), e.previousStock(), e.newStock(), e.reason()),
+                  "StockAdjusted",
+                  stream));
+      case ProductEvent.ProductDiscontinued e ->
+          List.of(
+              entry(
+                  eventId,
+                  new ProductDiscontinuedDto(e.productId()),
+                  "ProductDiscontinued",
+                  stream));
+
+      // --- Everything else: CustomerEvent.*, InventoryEvent.*, OrderPlaced,
+      //                       PaymentInitiated — excluded to prevent PII leakage ---
+      default -> List.of();
+    };
+  }
+
+  private OutboxEntry entry(String eventId, Object dto, String payloadType, StreamId stream) {
+    try {
+      return OutboxEntry.pending(
+          OutboxEntryId.of(eventId), OBJECT_MAPPER.writeValueAsString(dto), payloadType, stream);
+    } catch (JsonProcessingException e) {
+      throw new RuntimeException("Failed to serialize integration event DTO: " + payloadType, e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Integration DTOs — contain only non-PII business fields
+  // ---------------------------------------------------------------------------
+
+  record OrderConfirmedDto(String orderId) {}
+
+  record OrderShippedDto(String orderId) {}
+
+  record OrderDeliveredDto(String orderId) {}
+
+  record OrderCancelledDto(String orderId, String reason) {}
+
+  record PaymentCapturedDto(String paymentId, String orderId) {}
+
+  record PaymentRefundedDto(String paymentId, String reason) {}
+
+  record PaymentVoidedDto(String paymentId, String reason) {}
+
+  record PaymentFailedDto(String paymentId, String reason) {}
+
+  record ProductCreatedDto(
+      String productId,
+      String name,
+      String category,
+      BigDecimal price,
+      String currency,
+      int stock) {}
+
+  record PriceUpdatedDto(
+      String productId,
+      BigDecimal previousPrice,
+      String previousCurrency,
+      BigDecimal newPrice,
+      String newCurrency) {}
+
+  record StockAdjustedDto(String productId, int previousStock, int newStock, String reason) {}
+
+  record ProductDiscontinuedDto(String productId) {}
+}
+```
+
+Then the two beans (imports `org.streamrune.core.outbox.OutboxEventMapper`, `org.streamrune.core.outbox.OutboxOrderingMode` and `org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper`; `PostgresOutboxStore` comes with `org.streamrune.postgres.*`):
+
+```java
 @Bean
 public PostgresOutboxStore outboxStore(DataSource ds) {
-    return new PostgresOutboxStore(
-        ds, Duration.ofMinutes(2), OutboxOrderingMode.STRICT_PER_AGGREGATE);
+  return new PostgresOutboxStore(
+      ds, Duration.ofMinutes(2), OutboxOrderingMode.STRICT_PER_AGGREGATE);
 }
 
 /**
- * Curated, PII-safe integration event mapper. Only allowlisted, non-PII events
- * are forwarded to the broker. All CustomerEvent.* and InventoryEvent.* types,
- * plus OrderPlaced and PaymentInitiated, are explicitly excluded.
+ * Curated, PII-safe integration event mapper. Consumed by the auto-configured {@code
+ * postgresEventStoreFactory} alongside {@link #outboxStore} to enable transactional outbox
+ * emission. Only allowlisted, non-PII events are forwarded to the broker.
  */
 @Bean
 public OutboxEventMapper outboxEventMapper() {
-    return new EcommerceIntegrationEventMapper();
+  return new EcommerceIntegrationEventMapper();
 }
 ```
 
 The `PostgresOutboxStore` constructor takes the claim lease (two minutes here — the maximum time a poller holds an `IN_PROGRESS` entry before another instance may reclaim it) and the ordering mode. Strict mode also makes `streamId` mandatory: every `OutboxEntry` the mapper returns must name the stream whose order the consumer depends on — `EcommerceIntegrationEventMapper` passes `envelope.streamId()`, the event's own stream (`order:<id>`, `payment:<id>`, `product:<id>`) — and a `null` stream fails the append with `OutboxOrderingViolationException`. The `OutboxEventMapper` is `EcommerceIntegrationEventMapper`, which lives in the `commands` module at `org.streamrune.ecommerce.commands.integration`. Its `toOutbox(EventEnvelope)` method returns an empty list for excluded events and a single-entry list (with a compact integration DTO) for allowed ones.
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 13</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.time.Duration;
+import java.util.List;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
+import org.streamrune.core.*;
+import org.streamrune.core.outbox.OutboxEventMapper;
+import org.streamrune.core.outbox.OutboxOrderingMode;
+import org.streamrune.core.projection.OffsetStore;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.subscription.SubscriptionConfig;
+import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.SagaType;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.crypto.postgres.PostgresCryptoEngine;
+import org.streamrune.ecommerce.commands.customer.CustomerDecider;
+import org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper;
+import org.streamrune.ecommerce.commands.inventory.InventoryDecider;
+import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
+import org.streamrune.ecommerce.commands.order.OrderDecider;
+import org.streamrune.ecommerce.commands.order.OrderPricing;
+import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
+import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
+import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.customer.CustomerCommand;
+import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
+import org.streamrune.ecommerce.domain.order.OrderCommand;
+import org.streamrune.ecommerce.domain.order.OrderState;
+import org.streamrune.ecommerce.domain.payment.PaymentCommand;
+import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.projections.*;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.query.ListProducts;
+import org.streamrune.postgres.*;
+import org.streamrune.runtime.*;
+import org.streamrune.runtime.gdpr.ForgetSubjectService;
+import org.streamrune.spring.StreamRuneProperties;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code
+   * CustomerEvent}. Wired into the event store below so PII is encrypted at rest in {@code
+   * event_stream.payload}; deleting a subject's key (the forget flow) crypto-shreds that subject.
+   * Its {@code encryption_keys}, {@code forgotten_subjects} and {@code erased_key_generations}
+   * tables come from the framework's crypto migration series, which the event store factory applies
+   * at startup next to its own ({@code streamrune.event-store.schema.auto-initialize}).
+   */
+  @Bean
+  public PostgresCryptoEngine cryptoEngine(DataSource ds) {
+    return PostgresCryptoEngine.builder().dataSource(ds).build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        // Order events
+        .registerEvent(
+            "OrderPlaced", org.streamrune.ecommerce.domain.order.OrderEvent.OrderPlaced.class)
+        .registerEvent(
+            "OrderConfirmed", org.streamrune.ecommerce.domain.order.OrderEvent.OrderConfirmed.class)
+        .registerEvent(
+            "OrderShipped", org.streamrune.ecommerce.domain.order.OrderEvent.OrderShipped.class)
+        .registerEvent(
+            "OrderDelivered", org.streamrune.ecommerce.domain.order.OrderEvent.OrderDelivered.class)
+        .registerEvent(
+            "OrderCancelled", org.streamrune.ecommerce.domain.order.OrderEvent.OrderCancelled.class)
+        // Customer events
+        .registerEvent(
+            "CustomerRegistered",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerRegistered.class)
+        .registerEvent(
+            "ProfileUpdated",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.ProfileUpdated.class)
+        .registerEvent(
+            "DataExportRequested",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.DataExportRequested.class)
+        .registerEvent(
+            "CustomerForgotten",
+            org.streamrune.ecommerce.domain.customer.CustomerEvent.CustomerForgotten.class)
+        // Payment events
+        .registerEvent(
+            "PaymentInitiated",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentInitiated.class)
+        .registerEvent(
+            "PaymentCaptured",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentCaptured.class)
+        .registerEvent(
+            "PaymentRefunded",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentRefunded.class)
+        .registerEvent(
+            "PaymentFailed",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentFailed.class)
+        .registerEvent(
+            "PaymentVoided",
+            org.streamrune.ecommerce.domain.payment.PaymentEvent.PaymentVoided.class)
+        // Inventory events
+        .registerEvent(
+            "StockReserved",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReleased",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
+        .registerEvent(
+            "ReservationConfirmed",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ReservationConfirmed.class)
+        .registerEvent(
+            "ShipmentReceived",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        // Aggregate states, by simple class name: the bus snapshots a state under that name and
+        // refuses to write a snapshot for a state the registry does not resolve.
+        .registerState("ProductState", ProductState.class)
+        .registerState("OrderState", OrderState.class)
+        .registerState("CustomerState", CustomerState.class)
+        .registerState("PaymentState", PaymentState.class)
+        .registerState("InventoryState", InventoryState.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  /**
+   * Outbox store bean: needed by both the auto-configured {@code postgresEventStoreFactory} (so
+   * outbox entries are written inside the same append transaction) and the auto-configured {@code
+   * OutboxPoller} (so it can poll + claim pending entries).
+   *
+   * <p>The claim lease (2 minutes) must strictly exceed the {@link
+   * org.streamrune.rabbitmq.RabbitMqOutboxPublisher}'s in-flight horizon: {@link
+   * RabbitMqConfig#outboxPublisher} uses the default 30s {@code publishBlockBudget} plus its own
+   * 30s {@code confirmTimeout}, for a 60s horizon, plus the framework's recommended 30s margin —
+   * 90s minimum. {@code OutboxPoller.Builder.build()} refuses to boot (fails fast rather than
+   * risking a duplicate-and-reorder publish) when the lease does not exceed the horizon.
+   *
+   * <p>STRICT_PER_AGGREGATE (the default, stated here so the choice is visible): the demo's outbox
+   * carries order lifecycle, payment outcomes and stock changes — consumers that must not see n+1
+   * before n. A terminal FAILED entry therefore blocks its aggregate until an operator replays or
+   * skips it from the admin API (tutorial ch. 14). The mapper sets aggregateId on every entry,
+   * which strict mode requires.
+   */
+  @Bean
+  public PostgresOutboxStore outboxStore(DataSource ds) {
+    return new PostgresOutboxStore(
+        ds, Duration.ofMinutes(2), OutboxOrderingMode.STRICT_PER_AGGREGATE);
+  }
+
+  /**
+   * Curated, PII-safe integration event mapper. Consumed by the auto-configured {@code
+   * postgresEventStoreFactory} alongside {@link #outboxStore} to enable transactional outbox
+   * emission. Only allowlisted, non-PII events are forwarded to the broker.
+   */
+  @Bean
+  public OutboxEventMapper outboxEventMapper() {
+    return new EcommerceIntegrationEventMapper();
+  }
+
+  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
+  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
+  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
+  @Bean
+  public JdbcProjectionRepository projectionRepository(DataSource ds) {
+    return new JdbcProjectionRepository(ds);
+  }
+
+  @Bean
+  public PostgresAuditStore auditStore(DataSource ds) {
+    return new PostgresAuditStore(ds);
+  }
+
+  @Bean
+  public PostgresSagaStore sagaStore(DataSource ds, ObjectMapper objectMapper) {
+    return new PostgresSagaStore(ds, objectMapper);
+  }
+
+  /**
+   * Quarantine store for poison saga events (a routing method that throws — {@code extractSagaId},
+   * {@code correlateByEventData} — or an exception in the saga's own logic). Required by {@link
+   * SagaRunner.Builder#sagaDeadLetterStore} below — without it the saga runner cannot be built.
+   * Mirrors {@link #sagaStore}.
+   */
+  @Bean
+  public PostgresSagaDeadLetterStore sagaDeadLetterStore(DataSource ds) {
+    return new PostgresSagaDeadLetterStore(ds);
+  }
+
+  /**
+   * Records commands processed under a caller-supplied {@code IdempotencyKey} so a redelivered saga
+   * command (broker at-least-once redelivery) applies its events effectively once. Picked up
+   * automatically by the framework's auto-configured {@code postgresEventStoreFactory} (for the
+   * atomic keyed append) and wired explicitly into {@link #commandBus} below (saga command dispatch
+   * requires a command bus with an inbox — see {@code SagaCommandDispatch}).
+   */
+  @Bean
+  public PostgresCommandInbox commandInbox(DataSource ds) {
+    return new PostgresCommandInbox(ds);
+  }
+
+  @Bean
+  public HeaderUserRoleResolver userRoleResolver() {
+    return new HeaderUserRoleResolver();
+  }
+
+  @Bean
+  public PaymentGatewaySimulator paymentGateway() {
+    return new PaymentGatewaySimulator();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public AnnotationAuthorizationInterceptor authInterceptor(HeaderUserRoleResolver resolver) {
+    return new AnnotationAuthorizationInterceptor(resolver);
+  }
+
+  @Bean
+  public AuditCommandInterceptor auditInterceptor(PostgresAuditStore store) {
+    return new AuditCommandInterceptor(store);
+  }
+
+  @Bean
+  public CircuitBreakerCommandInterceptor circuitBreaker() {
+    return new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
+   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
+   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   */
+  @Bean
+  public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
+    return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The command bus, with all interceptors, listed in the framework's canonical order ({@link
+   * org.streamrune.runtime.CommandInterceptorOrdering}), the order the Quarkus and Micronaut
+   * integrations give the chains they assemble. The bus runs {@code before()} in the listed order
+   * and {@code after()}/{@code onError()} in reverse, and only on interceptors whose {@code
+   * before()} completed. Audit comes first, so a command the authorization interceptor refuses
+   * still reaches {@code audit.onError()} and is recorded as a {@code FAILURE}; authorization comes
+   * before validation, so a caller without the role learns nothing about the validation rules; the
+   * circuit breaker comes last, so it counts only execution failures.
+   *
+   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
+   * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
+   * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
+   */
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store,
+      BeanValidationInterceptor validation,
+      AnnotationAuthorizationInterceptor auth,
+      AuditCommandInterceptor audit,
+      CircuitBreakerCommandInterceptor circuitBreaker,
+      PostgresCommandInbox commandInbox,
+      AggregateLocker locker,
+      StreamRuneProperties properties) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .locker(locker)
+        .lockTimeout(properties.lockTimeout())
+        // Required for saga command dispatch: SagaCommandDispatch calls
+        // commandBus.execute(command, IdempotencyKey), which throws IllegalStateException
+        // unless the bus has a commandInbox wired in.
+        .commandInbox(commandInbox)
+        .interceptors(audit, auth, validation, circuitBreaker)
+        .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .register(
+            OrderState.TYPE,
+            OrderCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case OrderCommand.PlaceOrder c -> c.orderId();
+                      case OrderCommand.ConfirmOrder c -> c.orderId();
+                      case OrderCommand.ShipOrder c -> c.orderId();
+                      case OrderCommand.DeliverOrder c -> c.orderId();
+                      case OrderCommand.CancelOrder c -> c.orderId();
+                    }),
+            new OrderDecider())
+        .register(
+            CustomerState.TYPE,
+            CustomerCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case CustomerCommand.RegisterCustomer c -> c.customerId();
+                      case CustomerCommand.UpdateProfile c -> c.customerId();
+                      case CustomerCommand.RequestDataExport c -> c.customerId();
+                      case CustomerCommand.ForgetCustomer c -> c.customerId();
+                    }),
+            new CustomerDecider())
+        .register(
+            PaymentState.TYPE,
+            PaymentCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case PaymentCommand.InitiatePayment c -> c.paymentId();
+                      case PaymentCommand.CapturePayment c -> c.paymentId();
+                      case PaymentCommand.FailPayment c -> c.paymentId();
+                      case PaymentCommand.CancelPayment c -> c.paymentId();
+                    }),
+            new PaymentDecider())
+        .register(
+            InventoryState.TYPE,
+            InventoryCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case InventoryCommand.ReserveStock c -> c.productId();
+                      case InventoryCommand.ReleaseStock c -> c.productId();
+                      case InventoryCommand.ConfirmReservation c -> c.productId();
+                      case InventoryCommand.ReceiveShipment c -> c.productId();
+                    }),
+            new InventoryDecider())
+        .build();
+  }
+
+  // Projections
+  @Bean
+  public ProductProjection productProjection(ProjectionRepository repo) {
+    return new ProductProjection(repo);
+  }
+
+  @Bean
+  public OrderProjection orderProjection(ProjectionRepository repo) {
+    return new OrderProjection(repo);
+  }
+
+  @Bean
+  public CustomerProjection customerProjection(ProjectionRepository repo) {
+    return new CustomerProjection(repo);
+  }
+
+  /**
+   * Read-model purger for the customer subject. {@link ForgetSubjectService} runs it after the
+   * encryption key is shredded, deleting the {@code customers_view} row so the forget removes the
+   * plaintext PII the projection captured (crypto-shredding alone only kills the ciphertext).
+   */
+  @Bean
+  public CustomerSubjectDataPurger customerSubjectDataPurger(ProjectionRepository repo) {
+    return new CustomerSubjectDataPurger(repo);
+  }
+
+  /**
+   * GDPR Article 17 orchestrator. {@link CustomerCommandController}'s forget endpoint calls {@code
+   * forget(customerId, requester)} after emitting {@code ForgetCustomer}: step 1 deletes the
+   * subject's key (crypto-shred + terminal-erasure tombstone), step 2 runs every registered purger
+   * to remove the subject's read-model rows, step 3 evicts the {@link CachingQueryBus}, so no
+   * cached query answer taken before the erasure is served after it. The audit store records each
+   * outcome in {@code audit_log} (command_type {@code GDPR_FORGET}).
+   */
+  @Bean
+  public ForgetSubjectService forgetSubjectService(
+      PostgresCryptoEngine cryptoEngine,
+      PostgresAuditStore auditStore,
+      CustomerSubjectDataPurger customerPurger,
+      DataSource dataSource,
+      CachingQueryBus cachingQueryBus) {
+    return ForgetSubjectService.builder()
+        .cryptoEngine(cryptoEngine)
+        .auditStore(auditStore)
+        .purgers(List.of(customerPurger, customerSnapshotPurger(dataSource)))
+        .queryCache(cachingQueryBus)
+        .build();
+  }
+
+  /**
+   * Purges the snapshots of a forgotten customer. A snapshot holds the aggregate's state as plain
+   * JSON, and {@code CustomerState} carries the customer's name, email, address and phone in the
+   * clear (the encryption lives on the events), so the key shred alone leaves them readable in
+   * {@code snapshot_store}. The purger empties the state of the customer stream's snapshot row and
+   * raises its purge generation, so a command that loaded the customer before the forget cannot
+   * store its snapshot again. The customer's stream is {@code customer:<subject id>}.
+   */
+  static PostgresSnapshotStorePurger customerSnapshotPurger(DataSource dataSource) {
+    return new PostgresSnapshotStorePurger(
+        dataSource,
+        subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
+  }
+
+  @Bean
+  public InventoryProjection inventoryProjection(ProjectionRepository repo) {
+    return new InventoryProjection(repo);
+  }
+
+  @Bean
+  public OffsetStore offsetStore(DataSource ds) {
+    return new PostgresOffsetStore(ds);
+  }
+
+  /**
+   * How often each projection reads the event store for new events: {@code
+   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * seconds and one second unless configured. They are the two properties the framework's own
+   * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
+   * so it hands them over itself. The integration tests set a shorter interval.
+   */
+  private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
+    return new SubscriptionConfig(
+        true,
+        Duration.ofMillis(properties.pollingIntervalMs()),
+        Duration.ofMillis(properties.pollingJitterMs()));
+  }
+
+  @Bean(destroyMethod = "close")
+  public MultiProjectionRunner projectionRunner(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      JdbcProjectionRepository projectionRepository,
+      StreamRuneProperties properties,
+      ProductProjection productProjection,
+      OrderProjection orderProjection,
+      CustomerProjection customerProjection,
+      InventoryProjection inventoryProjection,
+      CacheInvalidator cacheInvalidator) {
+    var runner =
+        MultiProjectionRunner.builder()
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .subscriptionConfig(projectionPolling(properties))
+            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+            // checkpoint in ONE transaction — the inventory counter can never double-reserve.
+            .atomicProcessor(projectionRepository)
+            .register(
+                "products",
+                new CacheAwareProjection(productProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "orders",
+                new CacheAwareProjection(orderProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "customers",
+                new CacheAwareProjection(customerProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .register(
+                "inventory",
+                new CacheAwareProjection(inventoryProjection, cacheInvalidator),
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  // Query Bus with caching + auditing
+  @Bean
+  public CachingQueryBus cachingQueryBus(ProductProjection productProjection) {
+    var simpleQueryBus = new SimpleQueryBus();
+    var cachingBus = CachingQueryBus.builder().delegate(simpleQueryBus).build();
+    cachingBus.register(ListProducts.class, (ListProducts q) -> productProjection.listAll());
+    return cachingBus;
+  }
+
+  @Bean
+  public QueryBus queryBus(CachingQueryBus cachingBus, PostgresAuditStore auditStore) {
+    return new AuditingQueryBus(cachingBus, auditStore);
+  }
+
+  @Bean
+  public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
+    return cachingBus.cacheInvalidator();
+  }
+
+  /**
+   * The customer and order read models as one caller may see them: an authenticated {@code ADMIN}
+   * or the owner, the rule of {@code OwnerOrAdminAccess}. The customer and order controllers answer
+   * every read from it.
+   */
+  @Bean
+  public OwnerOrAdminQueries ownerOrAdminQueries(
+      CustomerProjection customerProjection, OrderProjection orderProjection) {
+    return new OwnerOrAdminQueries(customerProjection, orderProjection);
+  }
+
+  /**
+   * The order-fulfillment saga, with its deadline: {@code app.saga.fulfillment-timeout} (15 minutes
+   * unless configured). The saga runner and the timeout runner below share this one instance.
+   */
+  @Bean
+  public OrderFulfillmentSaga orderFulfillmentSaga(
+      @Value("${app.saga.fulfillment-timeout:15m}") Duration fulfillmentTimeout) {
+    return new OrderFulfillmentSaga(fulfillmentTimeout);
+  }
+
+  /**
+   * The order-fulfillment saga runner. It is a bean so that the Spring integration finds it: for
+   * every {@code SagaRunner} bean it starts a compensation retry sweeper, which re-drives a
+   * compensation that failed transiently and faults it once {@code
+   * streamrune.saga.compensation-retry-give-up-after} (1 hour by default) has passed, it applies
+   * {@code streamrune.inbox.retention-max-age} to the runner's key-age guard for compensations
+   * resumed by a live event, and it applies {@code streamrune.saga.forward-fence} ({@code auto}
+   * unless configured, which is on while single-active-consumer leadership is on) to the runner's
+   * forward fence. {@code metrics} counts, among the saga meters, the forward commands the fence
+   * refuses ({@code streamrune.saga.forward_commands_fenced}) and the steps run again in place
+   * after a lost write of the saga row ({@code streamrune.saga.delivery_retried}).
+   *
+   * <p>{@code leadership} is the integration's single-active-consumer leadership ({@code
+   * streamrune.subscription.single-active-consumer.enabled}, on unless configured). The runner
+   * carries a lease over it, {@code "saga:" + saga type}: with more than one backend on the
+   * database, one of them delivers the saga's events, claims its deadlines and retries its
+   * compensations, and the others stand by and take over when it stops or dies. The lease is taken
+   * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
+   * SubscriptionLeadership#NOOP}) every backend delivers.
+   */
+  @Bean
+  public SagaRunner<?> orderFulfillmentSagaRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      PostgresSagaDeadLetterStore sagaDeadLetterStore,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      ObjectProvider<SubscriptionLeadership> leadership) {
+    return SagaRunner.<OrderFulfillmentState>builder()
+        .orchestrator(orderFulfillmentSaga)
+        .sagaStore(sagaStore)
+        .commandBus(commandBus)
+        // Required: poison events (routing/decider failures) are quarantined here instead of
+        // blocking the subscription.
+        .sagaDeadLetterStore(sagaDeadLetterStore)
+        .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+        // One backend delivers this saga type; the others stand by.
+        .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .build();
+  }
+
+  /**
+   * Compensates a fulfillment that has not ended by its deadline ({@link
+   * OrderFulfillmentSaga#timeout()}): every {@code app.saga.timeout-poll-interval} (10 seconds
+   * unless configured) it claims each saga past its deadline and dispatches its compensation, which
+   * is the order's cancellation whatever the state.
+   *
+   * <p>It is built from {@link #orderFulfillmentSagaRunner}, shares that runner's step lock and
+   * follows its lease: it claims deadlines only while this backend leads the saga type through
+   * {@link #orderFulfillmentSagaSubscription}, so it claims where the saga's steps run, and in this
+   * process a claim at a saga's deadline waits for a delivery that is dispatching the saga's
+   * forward commands. Around a handover two backends can overlap for a moment — a backend that dies
+   * keeps its lease until the lease expires, and a deposed one may finish its page; there the saga
+   * runner's forward fence keeps the order: a forward command is stored before the claim, and its
+   * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
+   * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
+   * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
+   * the subscriptions below are, and stopped with the context, after the saga subscription.
+   */
+  @Bean(destroyMethod = "stop")
+  public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
+      OrderFulfillmentSaga orderFulfillmentSaga,
+      PostgresSagaStore sagaStore,
+      VirtualThreadCommandBus commandBus,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      StreamRuneProperties properties,
+      ObjectProvider<StreamRuneMetrics> metrics,
+      @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
+    var runner =
+        SagaTimeoutRunner.<OrderFulfillmentState>builder()
+            .decider(orderFulfillmentSaga)
+            .sagaStore(sagaStore)
+            .commandBus(commandBus)
+            // The saga runner stores its rows under the state class; the sweep selects by it.
+            .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .pollInterval(pollInterval)
+            .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .build();
+    runner.start();
+    return runner;
+  }
+
+  /**
+   * Subscribes the saga runner to the global event stream. Without this bean the saga would persist
+   * nothing because no event listener is wired to feed the {@code SagaRunner}.
+   *
+   * <p>{@code sagaRunner(...)} delivers to the runner under the runner's lease: this subscription
+   * takes the lease and holds it while it runs. On the backend that holds it, it delivers, and the
+   * timeout runner and the compensation retry sweeper of the runner act; on every other backend it
+   * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
+   * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
+   * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
+   * STANDBY}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
+   * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
+   * 15-second window that integration tests await for {@code CONFIRMED}; the interval also spaces a
+   * standby's attempts to take the lease. It depends on {@link #orderFulfillmentTimeoutRunner}, so
+   * it is closed before that runner stops: a runner that stops while this backend leads logs a
+   * warning, and closing the subscription first ends the lead.
+   */
+  @Bean(destroyMethod = "close")
+  @DependsOn("orderFulfillmentTimeoutRunner")
+  public PollingEventSubscription orderFulfillmentSagaSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      SagaRunner<?> orderFulfillmentSagaRunner,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("order-fulfillment-saga")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .sagaRunner(orderFulfillmentSagaRunner)
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  // Payment process manager: reacts to PaymentInitiated by capturing (or failing) the payment.
+  @Bean
+  public PaymentProcessManager paymentProcessManager(
+      PaymentGatewaySimulator paymentGateway,
+      PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker,
+      VirtualThreadCommandBus commandBus,
+      EventStore eventStore) {
+    return new PaymentProcessManager(
+        paymentGateway, paymentGatewayCircuitBreaker, commandBus, eventStore);
+  }
+
+  /**
+   * Feeds the global event stream to the {@link PaymentProcessManager}. Without this subscription
+   * nothing reacts to {@code PaymentInitiated}, so the saga would stall in {@code
+   * AWAITING_PAYMENT}.
+   *
+   * <p>{@code leadership(...)} delivers under a lease named after the subscription, {@code
+   * payment-process-manager}: with more than one backend on the database one of them captures the
+   * payments, and the others stand by. {@code healthContributor(...)} lists it in the health
+   * details with its {@code role}.
+   *
+   * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the payment
+   * capture leg of the saga completes promptly.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription paymentProcessSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      PaymentProcessManager paymentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName("payment-process-manager")
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(paymentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Prices every order from the product catalogue, as the product streams hold it. */
+  @Bean
+  public OrderPricing orderPricing(EventStore eventStore) {
+    return new OrderPricing(eventStore);
+  }
+
+  /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
+  @Bean
+  public OrderCancellationProcessManager orderCancellationProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderCancellationProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderCancellationProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-cancellation} delivers.
+   * Listed in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderCancellationSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderCancellationProcessManager orderCancellationProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderCancellationProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderCancellationProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+
+  /** Commits the stock of every shipped order (OrderShipmentProcessManager). */
+  @Bean
+  public OrderShipmentProcessManager orderShipmentProcessManager(
+      VirtualThreadCommandBus commandBus) {
+    return new OrderShipmentProcessManager(commandBus);
+  }
+
+  /**
+   * Feeds the global event stream to {@link #orderShipmentProcessManager}: with more than one
+   * backend on the database, the one that holds the lease {@code order-shipment} delivers. Listed
+   * in the health details with its role.
+   */
+  @Bean(destroyMethod = "close")
+  public PollingEventSubscription orderShipmentSubscription(
+      EventStore eventStore,
+      OffsetStore offsetStore,
+      OrderShipmentProcessManager orderShipmentProcessManager,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
+    var subscription =
+        PollingEventSubscription.builder()
+            .subscriptionName(OrderShipmentProcessManager.SUBSCRIPTION_NAME)
+            .eventStore(eventStore)
+            .offsetStore(offsetStore)
+            .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
+            .listener(orderShipmentProcessManager)
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
+            .build();
+    subscription.start();
+    return subscription;
+  }
+}
+```
+
+</details>
 
 You also need to enable the outbox and tell the app where the broker is, in `application.yml`. Add the `rabbitmq` block under the existing `spring:` key and the `outbox` block under the existing `streamrune:` key:
 
@@ -629,11 +1218,11 @@ streamrune:
     skipped-retention-max-age: 30d
 ```
 
-The publisher's connection (Step 5b) reads the broker address from these `spring.rabbitmq.*` properties, and opens on the first publish, not at startup. The defaults reach a broker on `localhost`; under Docker Compose (Step 7) the backend sets `RABBITMQ_HOST` to the broker's service name.
+The publisher's connection (Step 4) reads the broker address from these `spring.rabbitmq.*` properties, and opens on the first publish, not at startup. The defaults reach a broker on `localhost`; under Docker Compose (Step 5) the backend sets `RABBITMQ_HOST` to the broker's service name.
 
 `streamrune.outbox.enabled=true` activates the auto-configured `OutboxPoller`. Without it the poller bean is not created and delivered entries accumulate indefinitely. `retention-max-age: 7d` tells the auto-configured `OutboxRetentionSweeper` to delete `DELIVERED` entries older than seven days, preventing unbounded table growth. `skipped-retention-max-age: 30d` keeps the audit rows of operator skips (Chapter 14) for thirty days; `FAILED` entries are never pruned — they block their aggregate until someone resolves them.
 
-### Step 5a-pre: Add Build Dependencies for RabbitMQ
+### Step 3: Add Build Dependencies for RabbitMQ
 
 Before wiring `RabbitMqConfig`, add the two RabbitMQ-related dependencies to `spring-app/build.gradle.kts`. The `streamrune-postgres` artifact (for `PostgresOutboxStore`) is already present; add the new lines if they are not there:
 
@@ -644,9 +1233,9 @@ implementation("org.streamrune:streamrune-rabbitmq-outbox:$sr") // adds RabbitMq
 implementation("org.springframework.boot:spring-boot-starter-amqp") // adds Spring AMQP, @RabbitListener and the RabbitMQ Java client
 ```
 
-Without `streamrune-rabbitmq-outbox` and `spring-boot-starter-amqp`, Step 5b's `RabbitMqConfig.java` imports will fail to resolve at compile time.
+Without `streamrune-rabbitmq-outbox` and `spring-boot-starter-amqp`, Step 4's `RabbitMqConfig.java` imports will fail to resolve at compile time.
 
-The publisher class of Step 5b lives in the shared `commands` module, next to `EcommerceIntegrationEventMapper`, because the Quarkus and Micronaut apps wire the same class. Add its three dependencies to `commands/build.gradle.kts`. The RabbitMQ Java client is an `api` dependency: the class takes the app's `ConnectionFactory` and hands its topology a `Channel`, so the client is part of what the module offers its users:
+The publisher class of Step 4 lives in the shared `commands` module, next to `EcommerceIntegrationEventMapper`, because the Quarkus and Micronaut apps wire the same class. Add its three dependencies to `commands/build.gradle.kts`. The RabbitMQ Java client is an `api` dependency: the class takes the app's `ConnectionFactory` and hands its topology a `Channel`, so the client is part of what the module offers its users:
 
 ```kotlin
 // commands/build.gradle.kts — inside the dependencies { } block
@@ -655,7 +1244,7 @@ api(libs.rabbitmq.client)
 implementation(libs.slf4j.api)
 ```
 
-### Step 5b: Wire the RabbitMQ Publisher
+### Step 4: Wire the RabbitMQ Publisher
 
 The outbox exists so that a command does not depend on the broker: its integration events are written in the command's own transaction, and the relay delivers them later. The application's startup should not depend on the broker either. A `RabbitMqOutboxPublisher` publishes on a channel it is given when it is built — and a channel needs an open connection — so the demo builds it on the first publish, not at startup. Create `commands/src/main/java/org/streamrune/ecommerce/commands/integration/LazyRabbitMqOutboxPublisher.java`:
 
@@ -1196,10 +1785,10 @@ The plain RabbitMQ Java client with automatic recovery (its default, set explici
 
 **The application starts and serves commands while the broker is down, and drains the outbox when it returns.** Nothing at startup connects to RabbitMQ, so the app comes up without it and accepts every command; the integration events wait in `outbox_events`. You can watch it happen:
 
-- `GET /api/admin/outbox` (as an `ADMIN`) lists the waiting entries: `status` `PENDING`, `attempts` `0`, and `lastError` naming the broker, e.g. `RabbitMQ is not reachable at localhost:5672, nothing was published: java.net.ConnectException: Connection refused`.
+- The `outbox_events` table holds the waiting entries — `status` `PENDING`, `attempts` `0`, and `last_error` naming the broker, e.g. `RabbitMQ is not reachable at localhost:5672, nothing was published: java.net.ConnectException: Connection refused` (Step 6e reads it; Chapter 14 adds `GET /api/admin/outbox` for it).
 - The relay logs one `WARN` per poll cycle: `Outbox delivery hit a broker-wide TRANSPORT failure for 3 of 3 claimed entries (...) retry deferred by up to ... — escalating toward the 60s cap while the failures last: RabbitMQ is not reachable at ...`.
 - `streamrune.outbox.pending` (`/actuator/metrics/streamrune.outbox.pending`) counts the backlog, and `/actuator/health` stays `UP`: the `relay.outbox-relay` block (Chapter 15) reads `UP`, because a refused publish fails an entry, not the relay's poll cycle.
-- When the broker answers, the publisher logs `Outbox publisher connected to RabbitMQ at localhost:5672`, the entries are delivered in order, and `GET /api/admin/outbox` empties. An entry that waited longest waits up to the 60-second cap for its next attempt.
+- When the broker answers, the publisher logs `Outbox publisher connected to RabbitMQ at localhost:5672`, the entries are delivered in order, and their rows read `DELIVERED`. An entry that waited longest waits up to the 60-second cap for its next attempt.
 
 A broker that goes away after the publisher connected shows the same way, with the client's own error in `lastError` (the client reconnects by itself). `OutboxBrokerDownStartupIT` in each app proves the startup case: it starts the app with a broker port nothing listens on, expects `UP` health, a command answered `200` and its entry `PENDING` with the refusal recorded and no attempt counted, then starts RabbitMQ on that port and expects the entry `DELIVERED` and on the queue once.
 
@@ -1212,59 +1801,11 @@ management:
       enabled: false
 ```
 
-### Step 6: Wire `InventoryCommandController`
-
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryCommandController.java`. This is the REST entry point for the only inventory command that operators trigger directly — receiving a new shipment. Stock reservations and releases are driven by the saga, not by direct HTTP calls.
-
-```java
-package org.streamrune.ecommerce.spring.controller;
-
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Positive;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
-import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
-import org.streamrune.runtime.VirtualThreadCommandBus;
-
-/** Receiving a shipment changes the stock every order reserves from: for an {@code ADMIN} only. */
-@RestController
-@RequestMapping("/api/inventory")
-public class InventoryCommandController {
-  private final VirtualThreadCommandBus commandBus;
-
-  public InventoryCommandController(VirtualThreadCommandBus commandBus) {
-    this.commandBus = commandBus;
-  }
-
-  @PostMapping("/{productId}/receive")
-  public ResponseEntity<Void> receiveShipment(
-      @PathVariable String productId, @Valid @RequestBody ReceiveShipmentRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, req.quantity()));
-    return ResponseEntity.ok().build();
-  }
-
-  public record ReceiveShipmentRequest(@Positive int quantity) {}
-}
-```
-
-The handler's first line is the guard Chapter 9 gave the product writes: `OwnerOrAdminAccess.requireAdmin` answers `403` to everyone but an `ADMIN`, the role together with an identity. The stock a shipment adds is the stock every customer's order reserves from, so the route is an operator's:
-
-```bash
-curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \
-  -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
-  -d '{"quantity": 50}'
-# → 200 OK; 403 without the two headers
-```
-
-`ReceiveShipment` itself carries no `@RequireRole`: the seed data of Chapter 17 and a dead-letter replay (Chapter 14) dispatch it through the command bus without a request.
-
-### Step 7: Create the `notifications-service` Module and Wire docker-compose
+### Step 5: Create the `notifications-service` Module and Wire docker-compose
 
 The `notifications-service` is a separate, headless Spring Boot application. It subscribes to the `streamrune.integration` queue via `@RabbitListener` and exposes two endpoints on port 8090: `GET /received`, which returns the last 200 received integration events from memory to an `ADMIN`, and `GET /health`, an open `200` without a body. It runs independently of the e-shop — no access to the e-shop's database, no awareness of the event store. That decoupling is the whole point of the outbox pattern.
 
-**7a. Register the module in `settings.gradle.kts`.** Add it to the `include(...)` call alongside the other modules:
+**5a. Register the module in `settings.gradle.kts`.** Add it to the `include(...)` call alongside the other modules:
 
 ```kotlin
 include(
@@ -1277,7 +1818,7 @@ include(
 )
 ```
 
-**7b. Create `notifications-service/build.gradle.kts`:**
+**5b. Create `notifications-service/build.gradle.kts`:**
 
 ```kotlin
 plugins {
@@ -1300,7 +1841,7 @@ tasks.named<Test>("test") {
 }
 ```
 
-**7c. Create the four Java source files** under `notifications-service/src/main/java/org/streamrune/ecommerce/notifications/`:
+**5c. Create the four Java source files** under `notifications-service/src/main/java/org/streamrune/ecommerce/notifications/`:
 
 `NotificationsApplication.java`:
 
@@ -1312,6 +1853,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
 public class NotificationsApplication {
+
   public static void main(String[] args) {
     SpringApplication.run(NotificationsApplication.class, args);
   }
@@ -1490,7 +2032,7 @@ public class ReceivedController {
 
 `GET /received` answers an `ADMIN` only. A body it shows names an order, a payment or a product, and an `OrderCancelled` body carries the reason the customer gave, so the endpoint follows Chapter 9's definition: the `ADMIN` role together with an identity, `403` for everyone else. The service shares no code with the e-shop and reads the two headers itself; like every header check of the demo it is the gateway stand-in, not authentication. `GET /health` is the open endpoint: a `200` without a body, which is all a probe needs and all a caller without headers learns from this service.
 
-**7d. Create `notifications-service/src/main/resources/application.yml`:**
+**5d. Create `notifications-service/src/main/resources/application.yml`:**
 
 ```yaml
 spring:
@@ -1510,11 +2052,12 @@ app:
     queue: streamrune.integration
 ```
 
-**7e. Create `notifications-service/Dockerfile`.** The Dockerfile copies a pre-built JAR, so build the JAR locally before running `docker compose build`:
+**5e. Create `notifications-service/Dockerfile`.** The Dockerfile copies a pre-built JAR, so build the JAR locally before running `docker compose build`:
 
 ```dockerfile
-# Pre-built JAR approach: run ./gradlew :notifications-service:bootJar first,
-# then docker compose build copies the result.
+# Pre-built JAR approach: run ./gradlew :notifications-service:bootJar locally first,
+# then docker compose build copies the result. This avoids needing the
+# StreamRune framework source inside the Docker build context.
 FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY notifications-service/build/libs/notifications-service-0.1.0-SNAPSHOT.jar app.jar
@@ -1522,73 +2065,129 @@ EXPOSE 8090
 ENTRYPOINT ["java", "--enable-preview", "-jar", "app.jar"]
 ```
 
-**7f. Add two new services to `docker-compose.yml`:**
+**5f. Add the broker, the backend and the notifications service to the Compose file.** The backend runs from the JAR that `bootJar` builds, in a container of its own.
+
+Create `Dockerfile.backend` in the project root:
+
+```dockerfile
+# Pre-built JAR approach: run ./gradlew :spring-app:bootJar locally first,
+# then docker compose build copies the result. This avoids needing the
+# StreamRune framework source inside the Docker build context.
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY spring-app/build/libs/spring-app-0.1.0-SNAPSHOT.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "--enable-preview", "-jar", "app.jar"]
+```
+
+and replace `docker-compose.yml` with the stack of this chapter:
 
 ```yaml
-rabbitmq:
-  image: rabbitmq:3-management
-  ports:
-    - "5672:5672"
-    - "15672:15672"
-  healthcheck:
-    test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
-    interval: 5s
-    timeout: 10s
-    retries: 10
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: streamrune_ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
-notifications-service:
-  build:
-    context: .
-    dockerfile: notifications-service/Dockerfile
-  ports:
-    - "8090:8090"
-  environment:
-    RABBITMQ_HOST: rabbitmq
-    RABBITMQ_USERNAME: guest
-    RABBITMQ_PASSWORD: guest
-  depends_on:
-    rabbitmq:
-      condition: service_healthy
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      # check_port_connectivity, not ping: ping answers as soon as the Erlang node runs, seconds
+      # before the AMQP listener accepts connections, and the backend and the notifications
+      # service connect the moment this check passes.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/streamrune_ecommerce
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
+      APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+    # The backend starts without the broker: its outbox publisher connects on the first publish.
+    # Waiting for the broker lets the first integration events go out at once.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  notifications-service:
+    build:
+      context: .
+      dockerfile: notifications-service/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  pgdata:
 ```
 
-Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). The health check is `check_port_connectivity` rather than `ping`: `ping` succeeds as soon as the broker's Erlang node runs, several seconds before port 5672 accepts connections, and the services that wait for `service_healthy` connect the moment the check passes. Update the `backend` service too: add `RABBITMQ_HOST: rabbitmq`, `RABBITMQ_USERNAME: guest` and `RABBITMQ_PASSWORD: guest` to its `environment`, and `rabbitmq: condition: service_healthy` to its `depends_on`. The backend starts without the broker (Step 5b); waiting for it only lets the seed data's integration events go out at once instead of on the relay's backoff. Without `RABBITMQ_HOST` the backend's outbox publisher looks for the broker on `localhost` inside its own container and never connects: the backend serves, and its entries wait `PENDING`.
+Port 5672 is the AMQP port; 15672 exposes the management UI at `http://localhost:15672` (guest/guest). The health check is `check_port_connectivity` rather than `ping`: `ping` succeeds as soon as the broker's Erlang node runs, several seconds before port 5672 accepts connections, and the services that wait for `service_healthy` connect the moment the check passes. The `backend` service reaches the database and the broker by their service names: `SPRING_DATASOURCE_URL` points at `postgres`, and `RABBITMQ_HOST` at `rabbitmq` — without it the backend's outbox publisher looks for the broker on `localhost` inside its own container and never connects: the backend serves, and its entries wait `PENDING`. The `APP_SAGA_*` variables set the saga's deadline and the timeout runner's poll interval of Chapter 11, here to their defaults. The backend starts without the broker (Step 4); waiting for it only lets the first integration events go out at once instead of on the relay's backoff.
 
-Before running `docker compose up`, build the two JARs the images copy — the backend's and the notifications service's:
+The images copy the two JARs that `bootJar` builds, the backend's and the notifications service's, so Step 6 builds them before it starts the stack.
 
-```bash
-./gradlew :spring-app:bootJar :notifications-service:bootJar
-docker compose up
-```
-
-The repository's `.dockerignore` keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`. If you write your own, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
+Your project needs no `.dockerignore` for these `COPY` lines. The demo's repository has one that keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`; if you add one, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
 
 The `notifications-service` deduplicates messages by `entryId` (the AMQP `messageId` property, set by `RabbitMqOutboxPublisher` to `entry.id().value()`). If the broker delivers a message twice — because the poller restarted after publishing but before marking it `DELIVERED` — the service discards the duplicate silently.
 
-### Step 8: Verify End-to-End Delivery
+### Step 6: Verify End-to-End Delivery
 
-Start the full stack. Build both JARs first (the Dockerfiles copy pre-built jars — see Step 7e):
+Start the full stack. Stop the `./gradlew :spring-app:bootRun` of the earlier chapters first: the backend container takes port 8080. Build both JARs (the Dockerfiles copy pre-built jars — see Step 5e), then start everything in the background:
 
 ```bash
 ./gradlew :spring-app:bootJar :notifications-service:bootJar
-docker compose up
+docker compose up -d --build
 ```
 
-Wait for all services to be healthy. `SeedDataRunner` issues `ReceiveShipment` at startup for the seed products, so inventory events are already written by the time you reach the next step.
+`docker compose ps` lists the four services of this chapter's file; wait until `postgres` and `rabbitmq` read `healthy` and the backend has started (`docker compose logs -f backend` shows `Started SpringEcommerceApplication`). The database is the one the earlier chapters filled, so `p-1`, its stock from Chapter 11 and the customer `c-1` are there.
 
-**8a. Place and confirm an order.** Confirming an order emits `OrderConfirmed`, which `EcommerceIntegrationEventMapper` includes in the outbox. Place and confirm an order:
+**6a. Place and confirm an order.** Confirming an order emits `OrderConfirmed`, which `EcommerceIntegrationEventMapper` includes in the outbox. Place and confirm an order:
 
 ```bash
-# Place an order (adapt IDs to your seed data)
+# Place an order of the product p-1
 curl -s -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
-  -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"prod-widget","quantity":1}]}'
+  -d '{"orderId":"o-test-1","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
 
 # The saga automatically progresses through payment and inventory;
 # once PaymentCaptured fires, OrderConfirmed follows automatically.
 ```
 
-**8b. Check the notifications service.** Within a couple of seconds the poller claims the outbox entry and publishes it to RabbitMQ. The `notifications-service` receives it and stores it in memory:
+**6b. Check the notifications service.** Within a couple of seconds the poller claims the outbox entry and publishes it to RabbitMQ. The `notifications-service` receives it and stores it in memory:
 
 ```bash
 curl -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8090/received
@@ -1596,7 +2195,7 @@ curl -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8090/recei
 
 You should see a JSON array containing an entry whose `type` is `"OrderConfirmed"` and whose `body` contains the `orderId`. The response is newest-first. Without the two headers the answer is `403`: the bodies name orders, and the service shows them to an `ADMIN` only. `curl -i http://localhost:8090/health` answers `200` with an empty body to anyone.
 
-**8c. Confirm customer events are NOT forwarded.** Register a new customer and verify no notification arrives:
+**6c. Confirm customer events are NOT forwarded.** Register a new customer and verify no notification arrives:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/customers \
@@ -1610,18 +2209,28 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8090/re
 
 The count does not change. `CustomerRegistered` is excluded by `EcommerceIntegrationEventMapper` (the `default -> List.of()` branch), so no outbox entry is written and no message is published. Customer PII never leaves the e-shop's database.
 
-**8d. Optional — RabbitMQ management UI.** Visit `http://localhost:15672` (guest/guest). The `streamrune.events` exchange and `streamrune.integration` queue are visible under Exchanges and Queues. The queue's message rate chart shows the delivery spike when orders are confirmed. Under Connections, the one named `streamrune-outbox-publisher` is the outbox publisher's own connection from Step 5b.
+**6d. Optional — RabbitMQ management UI.** Visit `http://localhost:15672` (guest/guest). The `streamrune.events` exchange and `streamrune.integration` queue are visible under Exchanges and Queues. The queue's message rate chart shows the delivery spike when orders are confirmed. Under Connections, the one named `streamrune-outbox-publisher` is the outbox publisher's own connection from Step 4.
 
-**8e. Optional — stop the broker.** The shop keeps working without RabbitMQ:
+**6e. Optional — stop the broker.** The shop keeps working without RabbitMQ:
 
 ```bash
 docker compose stop rabbitmq
-# Place and confirm another order as in 8a: the requests answer as before.
-curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/outbox
+# Place and confirm another order as in 6a: the requests answer as before.
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT payload_type, status, attempts, last_error FROM outbox_events WHERE status <> 'DELIVERED';"
 docker compose start rabbitmq
 ```
 
-While the broker is stopped, the order's `OrderConfirmed` entry is listed `PENDING` with the client's error in `lastError`, the backend logs the relay's `WARN` each poll cycle, and `/actuator/health` stays `UP` (Step 5b). Once the broker is back, the client reconnects, the relay's next attempt delivers the entry — within its backoff, at most a minute — and `/received` on the notifications service lists it.
+While the broker is stopped, the order's `OrderConfirmed` entry is listed `PENDING` with the client's error in `lastError`, the backend logs the relay's `WARN` each poll cycle, and `/actuator/health` stays `UP` (Step 4). Once the broker is back, the client reconnects, the relay's next attempt delivers the entry — within its backoff, at most a minute — and `/received` on the notifications service lists it.
+
+**6f. Back to `bootRun`.** The later chapters change the backend's code, and a container runs the JAR it was built from. Stop the backend's container and run the application from Gradle again, against the database, the broker and the notifications service that keep running in Docker:
+
+```bash
+docker compose stop backend
+./gradlew :spring-app:bootRun
+```
+
+To run the backend in Docker instead, build its JAR again after each change and recreate the container: `./gradlew :spring-app:bootJar` and `docker compose up -d --build backend`.
 
 ### When delivery fails: replay or skip
 
@@ -1654,7 +2263,7 @@ Nothing else releases a blocked stream: `OutboxStore.delete` refuses a `FAILED` 
 
 **`RabbitMqOutboxPublisher`** is the `OutboxPublisher` implementation that sends AMQP messages. It puts its channel into confirm mode when it is built; the confirm timeout (30 s) plus its default 30 s publish-block budget give a 60 s in-flight horizon, well below the claim lease (2 min), so a broker timeout causes the poller to retry without losing the entry — and `OutboxPoller` refuses to boot in the first place if the lease does not strictly exceed that horizon. The channel must stay in confirm mode for the publisher's whole life, so it comes from a dedicated, automatically recovering RabbitMQ Java client connection, never from Spring AMQP's caching `ConnectionFactory`, whose recreated channels lose confirm mode after a reconnect.
 
-**`LazyRabbitMqOutboxPublisher`** opens that connection and builds the `RabbitMqOutboxPublisher` on the first publish, so the application starts and serves commands while the broker is down. Until the broker answers, every publish fails as a transport failure: the entries stay `PENDING` with the error in `lastError`, no attempt is counted, the relay retries on a backoff capped at 60 s, and the outbox drains once the broker is back. `streamrune.outbox.pending`, the relay's `WARN` line and `GET /api/admin/outbox` show the backlog; health stays `UP`.
+**`LazyRabbitMqOutboxPublisher`** opens that connection and builds the `RabbitMqOutboxPublisher` on the first publish, so the application starts and serves commands while the broker is down. Until the broker answers, every publish fails as a transport failure: the entries stay `PENDING` with the error in `lastError`, no attempt is counted, the relay retries on a backoff capped at 60 s, and the outbox drains once the broker is back. `streamrune.outbox.pending`, the relay's `WARN` line and the `outbox_events` table show the backlog; health stays `UP`.
 
 **notifications-service** is a separate Spring Boot application. It has no access to the e-shop's database — it only sees what arrives on the `streamrune.integration` queue. This is the key decoupling: the e-shop publishes integration events; downstream consumers are fully independent services. The notifications service deduplicates by `entryId` to handle at-least-once delivery.
 

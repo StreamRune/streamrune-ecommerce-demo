@@ -4,11 +4,12 @@ micronaut:
   server:
     port: 8081
     netty:
-      # The StreamRune filter binds the request context (user id, role) on the thread it runs the
-      # route on. With the default STREAMED server type a request body that arrives after the
-      # headers resumes the route on the Netty event loop instead, outside that binding, and the
-      # controller sees no identity and no role. FULL_CONTENT reads the whole request before
-      # routing, so every route runs inside the binding.
+      # Where a route runs. The demo's routes block on the command bus. With the default STREAMED
+      # server type a request body that arrives after the headers resumes the route on a Netty
+      # event loop, which a blocking route stalls for every connection the loop serves. FULL_CONTENT
+      # reads the whole request before routing, so every route runs on the blocking executor the
+      # StreamRune filter runs on. The request context (user id, role) reaches a route under either
+      # type: the filter stores it on the request and the module's buses bind it from there.
       server-type: full_content
     cors:
       enabled: true
@@ -60,7 +61,6 @@ streamrune:
     # follows within about 10 to 20 seconds. The framework default is 60s.
     compensation-retry-interval: 10s
   event-store:
-    type: postgres
     # The framework creates its own schema at startup (this is also the default): the event
     # store's Flyway series and, because a PostgreSQL-backed CryptoEngine bean is present, the
     # crypto series, each on its own history table. The demo ships no DDL of its own; an empty

@@ -24,7 +24,6 @@ streamrune:
     # follows within about 10 to 20 seconds. The framework default is 60s.
     compensation-retry-interval: 10s
   event-store:
-    type: postgres
     schema:
       # The framework creates its own schema at startup (this is also the default): the event
       # store's Flyway series (classpath:db/streamrune-migration, history table
@@ -32,9 +31,6 @@ streamrune:
       # crypto series (classpath:db/crypto-migration, flyway_schema_history_crypto). The demo ships
       # no DDL of its own; an empty database is all the app needs.
       auto-initialize: true
-  projection:
-    type: polling
-    interval: 100
   projections:
     auto-discovery:
       enabled: false

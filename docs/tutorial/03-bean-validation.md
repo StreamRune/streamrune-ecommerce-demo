@@ -47,22 +47,22 @@ import org.streamrune.core.Command;
 import org.streamrune.ecommerce.domain.common.Money;
 
 public sealed interface ProductCommand extends Command {
-    record CreateProduct(
-        @NotBlank String productId,
-        @NotBlank String name,
-        String description,
-        String category,
-        @NotNull Money price,
-        @PositiveOrZero int initialStock)
-        implements ProductCommand {}
+  record CreateProduct(
+      @NotBlank String productId,
+      @NotBlank String name,
+      String description,
+      String category,
+      @NotNull Money price,
+      @PositiveOrZero int initialStock)
+      implements ProductCommand {}
 
-    record UpdatePrice(@NotBlank String productId, @NotNull Money newPrice)
-        implements ProductCommand {}
+  record UpdatePrice(@NotBlank String productId, @NotNull Money newPrice)
+      implements ProductCommand {}
 
-    record AdjustStock(@NotBlank String productId, int quantityChange, String reason)
-        implements ProductCommand {}
+  record AdjustStock(@NotBlank String productId, int quantityChange, String reason)
+      implements ProductCommand {}
 
-    record DiscontinueProduct(@NotBlank String productId) implements ProductCommand {}
+  record DiscontinueProduct(@NotBlank String productId) implements ProductCommand {}
 }
 ```
 
@@ -76,19 +76,13 @@ The `domain` module already has `jakarta.validation-api` on its classpath as an 
 
 ### Step 2 — Create the BeanValidationInterceptor bean
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. Add the following import and bean definition:
-
-```java
-import org.streamrune.runtime.BeanValidationInterceptor;
-```
-
-Then add the bean method alongside the existing `eventTypeRegistry` and `commandBus` beans:
+The interceptor is a bean of `StreamRuneConfig`, next to the `eventTypeRegistry` and `commandBus` beans of chapter 2. `BeanValidationInterceptor` is in `org.streamrune.runtime`, which the file imports whole, so the import list does not change:
 
 ```java
 @Bean
 public BeanValidationInterceptor validationInterceptor() {
-    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
-    return new BeanValidationInterceptor(factory.getValidator());
+  var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+  return new BeanValidationInterceptor(factory.getValidator());
 }
 ```
 
@@ -96,13 +90,94 @@ public BeanValidationInterceptor validationInterceptor() {
 
 ### Step 3 — Wire the interceptor into the CommandBus
 
-Update the `commandBus` bean to accept the interceptor as a parameter and register it in the builder chain:
+The `commandBus` bean takes the interceptor as a parameter and registers it in the builder chain:
 
 ```java
 @Bean
 public VirtualThreadCommandBus commandBus(
-        EventStore store,
-        BeanValidationInterceptor validation) {
+    EventStore store, BeanValidationInterceptor validation) {
+  return VirtualThreadCommandBus.builder()
+      .eventStore(store)
+      .interceptors(validation)
+      .register(
+          ProductState.TYPE,
+          ProductCommand.class,
+          cmd ->
+              AggregateId.of(
+                  switch (cmd) {
+                    case ProductCommand.CreateProduct c -> c.productId();
+                    case ProductCommand.UpdatePrice c -> c.productId();
+                    case ProductCommand.AdjustStock c -> c.productId();
+                    case ProductCommand.DiscontinueProduct c -> c.productId();
+                  }),
+          new ProductDecider())
+      .build();
+}
+```
+
+The `.interceptors(...)` call takes a varargs list. Order matters: the bus calls `before()` left to right and `after()`/`onError()` right to left, and only on the interceptors whose `before()` completed. With only one interceptor for now the order is trivial. Later chapters put the audit and authorization interceptors in front of validation and a circuit breaker behind it, in the framework's canonical order (`CommandInterceptorOrdering` in `streamrune-runtime`): authorization runs before validation, so a caller who may not send a command learns nothing about its validation rules, and audit runs before authorization, so a refused command is still recorded.
+
+Replace `StreamRuneConfig.java` with the class as it stands at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 3</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.runtime.*;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        .build();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
     return VirtualThreadCommandBus.builder()
         .eventStore(store)
         .interceptors(validation)
@@ -119,10 +194,11 @@ public VirtualThreadCommandBus commandBus(
                     }),
             new ProductDecider())
         .build();
+  }
 }
 ```
 
-The `.interceptors(...)` call takes a varargs list. Order matters: the bus calls `before()` left to right and `after()`/`onError()` right to left, and only on the interceptors whose `before()` completed. With only one interceptor for now the order is trivial. Later chapters put the audit and authorization interceptors in front of validation and a circuit breaker behind it, in the framework's canonical order (`CommandInterceptorOrdering` in `streamrune-runtime`): authorization runs before validation, so a caller who may not send a command learns nothing about its validation rules, and audit runs before authorization, so a refused command is still recorded.
+</details>
 
 ### Step 4 — Verify: valid command still works
 
@@ -181,11 +257,20 @@ curl -i -X POST http://localhost:8080/api/products \
   -d '{"productId":"p-4","name":"Gadget","initialStock":5}'
 ```
 
-Both return `400 Bad Request`, but with Spring's default validation error body (`Content-Type: application/problem+json`, an RFC 7807 problem document listing the field errors) — *not* the plain-text `Command validation failed for CreateProduct` message. That is because `CreateProductRequest` carries `@NotBlank String name` and `@NotNull @Positive BigDecimal price`, so Spring rejects the blank name and the missing price at the web layer, raising a `MethodArgumentNotValidException` before `commandBus.execute(...)` is ever called.
+Both return `400 Bad Request`, but not with the plain-text `Command validation failed for CreateProduct` message. `CreateProductRequest` carries `@NotBlank String name` and `@NotNull @Positive BigDecimal price`, so Spring rejects the blank name and the missing price at the web layer, raising a `MethodArgumentNotValidException` before `commandBus.execute(...)` is ever called. No handler of `GlobalExceptionHandler` takes that exception, so Spring Boot answers with its default error body, which names neither the field nor the constraint:
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"timestamp":"2026-10-26T10:15:30.000Z","status":400,"error":"Bad Request","path":"/api/products"}
+```
+
+The Quarkus and Micronaut apps answer the same two requests with `400` too: they check the request fields in the handler and answer with a plain-text message that names the field, such as `name must not be blank`.
 
 This is defense in depth, not redundancy:
 
-- The **DTO `@Valid` layer** guards the HTTP entry point and gives clients a detailed field-by-field error document.
+- The **DTO `@Valid` layer** guards the HTTP entry point: a malformed body is refused before any command exists.
 - The **command-bus interceptor** is the safety net that validates the command itself — it fires for fields the DTO leaves open (like `initialStock`) and for any command constructed in code that bypasses the controller entirely (tests, importers, message consumers). It guarantees that whatever reaches the `Decider` is structurally well-formed.
 
 ---
@@ -195,7 +280,7 @@ This is defense in depth, not redundancy:
 - **Command interceptors** implement `CommandInterceptor` and are called by the `CommandBus` before and after `decide()`. They are the right place for cross-cutting concerns that should not pollute domain logic.
 - **`BeanValidationInterceptor`** reads JSR-380 annotations on command fields, runs the Jakarta Validator, and throws a **`ValidationException`** — which extends `DomainException` (a `RuntimeException`) — carrying a list of `ValidationError` records (`field`, `message`, `code`) before the command reaches the `Decider`.
 - **Interceptor chain ordering**: `before()` fires left-to-right, `after()` and `onError()` fire right-to-left (like servlet filters). Validation is not first: from Chapter 9 on it sits behind authorization, so a caller without the required role is refused before validation runs, and from Chapter 10 on behind audit, so that refusal is recorded.
-- **Two validation layers**: the controller's DTO `@Valid` check rejects malformed HTTP bodies at the web layer (a Spring `MethodArgumentNotValidException` → 400 problem+json), while the command-bus interceptor is the defense-in-depth net that validates the command regardless of entry point and catches fields the DTO leaves open (like `initialStock`).
+- **Two validation layers**: the controller's DTO `@Valid` check rejects malformed HTTP bodies at the web layer (a Spring `MethodArgumentNotValidException` → 400 with Spring Boot's default error body), while the command-bus interceptor is the defense-in-depth net that validates the command regardless of entry point and catches fields the DTO leaves open (like `initialStock`).
 - **`GlobalExceptionHandler`** maps `DomainException` (and therefore `ValidationException`) to `400 Bad Request` via its `handleDomainException` handler. No changes to the web layer were needed.
 - **Every failure has its status.** Over the tutorial the handler grows into this table, the same in the Spring, Quarkus and Micronaut apps:
 

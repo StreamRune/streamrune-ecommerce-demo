@@ -59,57 +59,58 @@ import org.streamrune.core.types.EventType;
 
 class ProductCreatedUpcasterTest {
 
-    private final ProductCreatedUpcaster upcaster = new ProductCreatedUpcaster();
+  private final ProductCreatedUpcaster upcaster = new ProductCreatedUpcaster();
 
-    @Test
-    void eventType() {
-        assertThat(upcaster.eventType()).isEqualTo(new EventType("ProductCreated"));
-    }
+  @Test
+  void eventType() {
+    assertThat(upcaster.eventType()).isEqualTo(new EventType("ProductCreated"));
+  }
 
-    @Test
-    void currentVersion() {
-        assertThat(upcaster.currentVersion()).isEqualTo(2);
-    }
+  @Test
+  void currentVersion() {
+    assertThat(upcaster.currentVersion()).isEqualTo(2);
+  }
 
-    @Test
-    void upcast_v1_to_v2_addsCategoryField() {
-        Map<String, Object> v1 = new HashMap<>();
-        v1.put("productId", "p-1");
-        v1.put("name", "Widget");
-        v1.put("description", "A widget");
-        v1.put("price", Map.of("amount", 10, "currency", "USD"));
-        v1.put("stock", 50);
+  @Test
+  void upcast_v1_to_v2_addsCategoryField() {
+    Map<String, Object> v1 = new HashMap<>();
+    v1.put("productId", "p-1");
+    v1.put("name", "Widget");
+    v1.put("description", "A widget");
+    v1.put("price", Map.of("amount", 10, "currency", "USD"));
+    v1.put("stock", 50);
 
-        Map<String, Object> v2 = upcaster.upcast(v1, 1);
+    Map<String, Object> v2 = upcaster.upcast(v1, 1);
 
-        assertThat(v2).containsEntry("category", "Uncategorized");
-        assertThat(v2).containsEntry("productId", "p-1");
-        assertThat(v2).containsEntry("name", "Widget");
-    }
+    assertThat(v2).containsEntry("category", "Uncategorized");
+    assertThat(v2).containsEntry("productId", "p-1");
+    assertThat(v2).containsEntry("name", "Widget");
+  }
 
-    @Test
-    void upcast_v1_keepsACategoryThePayloadAlreadyCarries() {
-        // A product created before this upcaster was registered is stamped 1
-        // although its payload already has a category: leave that category alone.
-        Map<String, Object> stampedV1 = new HashMap<>();
-        stampedV1.put("productId", "p-2");
-        stampedV1.put("category", "Gadgets");
+  @Test
+  void upcast_v1_keepsACategoryThePayloadAlreadyCarries() {
+    // schema_version records the upcaster chain in effect when the event was written, not the
+    // payload's shape: a product created before this upcaster was registered is stamped 1 even
+    // though its payload already has a category. The step must leave that category alone.
+    Map<String, Object> stampedV1 = new HashMap<>();
+    stampedV1.put("productId", "p-2");
+    stampedV1.put("category", "Gadgets");
 
-        Map<String, Object> v2 = upcaster.upcast(stampedV1, 1);
+    Map<String, Object> v2 = upcaster.upcast(stampedV1, 1);
 
-        assertThat(v2).containsEntry("category", "Gadgets");
-    }
+    assertThat(v2).containsEntry("category", "Gadgets");
+  }
 
-    @Test
-    void upcast_v1_fillsANullCategory() {
-        Map<String, Object> v1 = new HashMap<>();
-        v1.put("productId", "p-3");
-        v1.put("category", null);
+  @Test
+  void upcast_v1_fillsANullCategory() {
+    Map<String, Object> v1 = new HashMap<>();
+    v1.put("productId", "p-3");
+    v1.put("category", null);
 
-        Map<String, Object> v2 = upcaster.upcast(v1, 1);
+    Map<String, Object> v2 = upcaster.upcast(v1, 1);
 
-        assertThat(v2).containsEntry("category", "Uncategorized");
-    }
+    assertThat(v2).containsEntry("category", "Uncategorized");
+  }
 }
 ```
 
@@ -134,25 +135,34 @@ import java.util.Map;
 import org.streamrune.core.types.EventType;
 import org.streamrune.core.upcasting.EventUpcaster;
 
+/**
+ * Upcasts ProductCreated events from v1 (no category) to v2 (with category field). A v1 event
+ * without a category gets "Uncategorized".
+ *
+ * <p>The stored schema version records the upcaster chain in effect when the event was written, not
+ * the payload's shape: products created before this upcaster was registered are stamped v1 although
+ * their payload already carries a category. The step therefore only fills a missing (or null)
+ * category and never replaces one the payload already has.
+ */
 public class ProductCreatedUpcaster implements EventUpcaster {
 
-    @Override
-    public EventType eventType() {
-        return new EventType("ProductCreated");
-    }
+  @Override
+  public EventType eventType() {
+    return new EventType("ProductCreated");
+  }
 
-    @Override
-    public int currentVersion() {
-        return 2;
-    }
+  @Override
+  public int currentVersion() {
+    return 2;
+  }
 
-    @Override
-    public Map<String, Object> upcast(Map<String, Object> eventData, int fromVersion) {
-        if (fromVersion == 1) {
-            eventData.putIfAbsent("category", "Uncategorized");
-        }
-        return eventData;
+  @Override
+  public Map<String, Object> upcast(Map<String, Object> eventData, int fromVersion) {
+    if (fromVersion == 1) {
+      eventData.putIfAbsent("category", "Uncategorized");
     }
+    return eventData;
+  }
 }
 ```
 
@@ -175,21 +185,108 @@ The upcaster is a pure function with no Spring context, no database, and no mock
 
 ### Step 5 — Register the upcaster
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add a `productCreatedUpcaster` bean. StreamRune's Spring auto-configuration discovers every `EventUpcaster` bean via `ObjectProvider` and wraps them in an `UpcasterChain` when it builds the `EventStore` — no changes to any other bean are needed:
+Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java` and add a `productCreatedUpcaster` bean, with the imports of `org.streamrune.core.upcasting.EventUpcaster` and `org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster`. StreamRune's Spring auto-configuration discovers every `EventUpcaster` bean via `ObjectProvider` and wraps them in an `UpcasterChain` when it builds the `EventStore` — no changes to any other bean are needed:
 
 ```java
-import org.streamrune.core.upcasting.EventUpcaster;
-import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
-
-/**
- * Exposes the product-created upcaster so the auto-configured event store
- * can collect it via ObjectProvider<EventUpcaster>.
- */
 @Bean
 public EventUpcaster productCreatedUpcaster() {
-    return new ProductCreatedUpcaster();
+  return new ProductCreatedUpcaster();
 }
 ```
+
+The whole class at the end of this chapter:
+
+<details>
+<summary><code>StreamRuneConfig.java</code> at the end of Chapter 4</summary>
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.streamrune.core.*;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.upcasting.EventUpcaster;
+import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.upcaster.ProductCreatedUpcaster;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.runtime.*;
+
+@Configuration(proxyBeanMethods = false)
+public class StreamRuneConfig {
+
+  // Spring Boot 4.0 auto-configures Jackson 3.x (tools.jackson.databind.ObjectMapper).
+  // StreamRune framework still uses Jackson 2.x — provide the legacy ObjectMapper explicitly.
+  @Bean
+  public ObjectMapper legacyObjectMapper() {
+    return JsonMapper.builder().build();
+  }
+
+  /**
+   * Exposes the event registry for the auto-configured {@code postgresEventStoreFactory} to pick up
+   * via {@code ObjectProvider<EventTypeRegistry>}.
+   */
+  @Bean
+  public EventTypeRegistry eventTypeRegistry() {
+    return SimpleEventTypeRegistry.builder()
+        // Product events
+        .registerEvent(
+            "ProductCreated",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductCreated.class)
+        .registerEvent(
+            "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
+        .registerEvent(
+            "StockAdjusted",
+            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
+        .registerEvent(
+            "ProductDiscontinued",
+            org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
+        .build();
+  }
+
+  /**
+   * Exposes the product-created upcaster so the auto-configured {@code postgresEventStoreFactory}
+   * can collect it via {@code ObjectProvider<EventUpcaster>}.
+   */
+  @Bean
+  public EventUpcaster productCreatedUpcaster() {
+    return new ProductCreatedUpcaster();
+  }
+
+  // Interceptors
+  @Bean
+  public BeanValidationInterceptor validationInterceptor() {
+    var factory = jakarta.validation.Validation.buildDefaultValidatorFactory();
+    return new BeanValidationInterceptor(factory.getValidator());
+  }
+
+  @Bean
+  public VirtualThreadCommandBus commandBus(
+      EventStore store, BeanValidationInterceptor validation) {
+    return VirtualThreadCommandBus.builder()
+        .eventStore(store)
+        .interceptors(validation)
+        .register(
+            ProductState.TYPE,
+            ProductCommand.class,
+            cmd ->
+                AggregateId.of(
+                    switch (cmd) {
+                      case ProductCommand.CreateProduct c -> c.productId();
+                      case ProductCommand.UpdatePrice c -> c.productId();
+                      case ProductCommand.AdjustStock c -> c.productId();
+                      case ProductCommand.DiscontinueProduct c -> c.productId();
+                    }),
+            new ProductDecider())
+        .build();
+  }
+}
+```
+
+</details>
 
 That is the complete change for this chapter. The auto-configured event store already holds the `EventTypeRegistry` from chapter 2; now it also discovers this upcaster bean and includes it in the chain. No `PostgresEventStore.create(...)` call to modify.
 
@@ -206,7 +303,7 @@ Start the application:
 Insert a product *without* a category field by writing a raw v1 event directly into PostgreSQL — a row with no `category` key in its JSON payload:
 
 ```bash
-docker exec -i streamrune-pg psql -U postgres -d streamrune_ecommerce <<'SQL'
+docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce <<'SQL'
 WITH reserved AS (
   UPDATE global_offset_sequence SET next_value = next_value + 1 WHERE id = 1
   RETURNING next_value AS global_offset
@@ -243,8 +340,6 @@ The `SELECT` lists one value per column, in the order of the column list. A few 
 **The metadata must be complete.** The store binds the `metadata` column to the framework's `EventMetadata` record each time it reads the row. Required are `eventId`, `commandId` and `correlationId` (non-blank strings) and `timestamp` (epoch seconds, the form the framework itself writes, or an ISO-8601 instant such as `"2026-01-01T00:00:00Z"`). `traceId`, `spanId`, `causationId`, `userId`, `baggage` and `sagaOrigin` are optional. A hand-written row leaves `sagaOrigin` out: the command bus writes it for an event a saga's command produced (Chapter 11), and this event has no such cause. A key `EventMetadata` does not define is refused as well.
 
 > **An incomplete object poisons the stream.** The `INSERT` accepts any JSON — say `'{}'` — but the row then cannot be read: every command on `p-legacy` fails with a server error, and so does every retry. Because the row is also part of the global stream, every projection and saga subscription that reads past its offset fails on it too, from chapter 5 on. Nothing in the application repairs such a row, so get the metadata right before you insert it.
-
-> If you started Postgres with `docker compose up` instead of the named `docker run` from Chapter 1, address it by service name: replace the first line with `docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce <<'SQL'` and keep the rest.
 
 Now send a command that forces the aggregate to be replayed from the event store:
 
