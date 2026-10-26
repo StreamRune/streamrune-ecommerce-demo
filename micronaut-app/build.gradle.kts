@@ -42,9 +42,9 @@ graalvmNative {
 }
 
 micronaut {
-    // The version catalog exposes "micronaut = 5.2.14" (library version) which the plugin
-    // picks up for its BOM import; micronaut-platform doesn't publish that version, so we
-    // disable the auto-import and manage all Micronaut dependency versions via the catalog.
+    // The version catalog exposes "micronaut" (the library version) which the plugin picks up
+    // for its BOM import; micronaut-platform doesn't publish that version, so we disable the
+    // auto-import and manage all Micronaut dependency versions via the catalog.
     importMicronautPlatform.set(false)
 }
 
