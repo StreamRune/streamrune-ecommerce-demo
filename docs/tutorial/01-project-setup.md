@@ -207,9 +207,8 @@ Create `gradle/libs.versions.toml` (copy from the real demo — only the key ali
 streamrune = "1.0.0-alpha-SNAPSHOT"
 spring-boot = "4.1.1"
 spring-dependency-management = "1.1.6"
-jackson = "2.18.3"
+jackson = "2.22.4"
 jakarta-validation = "3.0.2"
-hibernate-validator = "8.0.1.Final"
 jakarta-el = "4.0.2"
 assertj = "3.27.7"
 spotless = "7.1.0"
@@ -218,7 +217,6 @@ spotless = "7.1.0"
 [libraries]
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jakarta-validation-api = { module = "jakarta.validation:jakarta.validation-api", version.ref = "jakarta-validation" }
-hibernate-validator = { module = "org.hibernate.validator:hibernate-validator", version.ref = "hibernate-validator" }
 jakarta-el = { module = "org.glassfish:jakarta.el", version.ref = "jakarta-el" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "spring-boot" }

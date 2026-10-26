@@ -19,7 +19,10 @@ micronaut-sql = "7.2.0"
 micronaut-micrometer = "6.1.0"
 
 # Core
-jackson = "2.18.3"
+# jackson-databind and jackson-datatype-jsr310 release as 2.<minor>.<patch>; jackson-annotations
+# releases as 2.<minor> only, so it has a version of its own.
+jackson = "2.22.4"
+jackson-annotations = "2.22"
 hikaricp = "6.2.1"
 postgresql = "42.7.14"
 # Kept in step with the StreamRune framework build (13.9.0 accepts PostgreSQL 18 without the "Flyway upgrade
@@ -32,7 +35,6 @@ cron-utils = "9.2.1"
 
 # Validation
 jakarta-validation = "3.0.2"
-hibernate-validator = "8.0.1.Final"
 jakarta-el = "4.0.2"
 
 # Messaging
@@ -78,7 +80,7 @@ version-catalog-update = "0.8.4"
 
 [libraries]
 # Jackson
-jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
+jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson-annotations" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
 
@@ -93,7 +95,6 @@ cron-utils = { module = "com.cronutils:cron-utils", version.ref = "cron-utils" }
 
 # Validation
 jakarta-validation-api = { module = "jakarta.validation:jakarta.validation-api", version.ref = "jakarta-validation" }
-hibernate-validator = { module = "org.hibernate.validator:hibernate-validator", version.ref = "hibernate-validator" }
 jakarta-el = { module = "org.glassfish:jakarta.el", version.ref = "jakarta-el" }
 
 # Messaging
