@@ -48,7 +48,7 @@ import org.junit.jupiter.api.io.TempDir;
  * artifacts) and the third-party libraries stay, the demo modules' compiled classes go.
  *
  * <p><b>The Spring configuration.</b> Each listing of {@code StreamRuneConfig} grows out of the
- * listing before it, apart from the beans a chapter rewrites ({@link #REWRITES}).
+ * listing before it, apart from the lines a chapter rewrites ({@link #REWRITES}).
  *
  * <p><b>The finished project.</b> After the last chapter the reader's files are the repository's:
  * the last listing of every file the tutorial lists in full is that file, character for character.
@@ -81,19 +81,33 @@ class TutorialListingsCompileTest {
       "org.streamrune.ecommerce.spring.config.StreamRuneConfig";
 
   /**
-   * The bean methods of {@code StreamRuneConfig} that a chapter rewrites instead of extending: the
-   * chapter of one listing, the chapter of the next listing, and the bean.
+   * The lines of {@code StreamRuneConfig} that a chapter rewrites instead of extending: the chapter
+   * of one listing, the chapter of the next listing, the bean, and the start of each line of that
+   * bean's method in the earlier listing that the later chapter changes.
    */
   private static final List<Rewrite> REWRITES =
       List.of(
           // Chapter 6 builds the forget service without a snapshot purge; chapter 7 gives it the
-          // audit store, the purgers and the query cache.
-          new Rewrite(6, 7, "forgetSubjectService"),
+          // audit store, the purgers and the query cache, and a javadoc that says so.
+          new Rewrite(
+              6,
+              7,
+              "forgetSubjectService",
+              List.of(
+                  "* The GDPR erasure service:",
+                  "* crypto-shreds the",
+                  "* builder refuses a service",
+                  "* states that no aggregate snapshot",
+                  "return ForgetSubjectService.builder()")),
           // Chapter 14's javadoc of the saga runner names the resume route chapter 14 adds.
-          new Rewrite(13, 14, "orderFulfillmentSagaRunner"),
+          new Rewrite(
+              13,
+              14,
+              "orderFulfillmentSagaRunner",
+              List.of("* streamrune.saga.compensation-retry-give-up-after} (1 hour by default)")),
           // Chapter 17 keeps the bus builder in a variable, to add the saga command delay of the
           // two-backend runs.
-          new Rewrite(15, 17, "commandBus"));
+          new Rewrite(15, 17, "commandBus", List.of("return VirtualThreadCommandBus.builder()")));
 
   /** The marker a comment line starts with, and the end of a comment at the end of a line. */
   private static final Pattern COMMENT_MARKER = Pattern.compile("^\\s*(?:/\\*\\*|\\*/|\\*|//)");
@@ -228,9 +242,10 @@ class TutorialListingsCompileTest {
    * the ones a fragment pins, so each one grows out of the one before it: its words, strings and
    * symbols, read without the comment markers, are in their order words, strings and symbols of the
    * next listing. Reading them so lets a bean gain a parameter or a javadoc wrap anew, which moves
-   * the line breaks and keeps every word. A bean that a chapter rewrites instead of extending is in
-   * {@link #REWRITES}, and its method in the earlier listing is left out of that comparison. A
-   * change that reaches some listings from its chapter on and misses the ones between fails here.
+   * the line breaks and keeps every word. A line that a chapter rewrites instead of extending is in
+   * {@link #REWRITES}, and that line of the earlier listing is left out of the comparison, the rest
+   * of its bean method not. A change that reaches some listings from its chapter on and misses the
+   * ones between fails here.
    */
   @Test
   void eachListingOfTheSpringConfigurationGrowsOutOfTheOneBefore() throws IOException {
@@ -262,7 +277,15 @@ class TutorialListingsCompileTest {
             || beanMethod(later.source().lines().toList(), rewrite.bean()).isEmpty()) {
           problems.add(rewrite + ": the bean is not in both listings");
         }
-        rewritten.addAll(method);
+        for (String start : rewrite.lines()) {
+          List<Integer> changed =
+              method.stream().filter(k -> lines.get(k).strip().startsWith(start)).toList();
+          if (changed.size() != 1) {
+            problems.add(
+                rewrite.bean() + ": [" + start + "] does not begin exactly one line of it");
+          }
+          rewritten.addAll(changed);
+        }
         if (firstMissing(tokens(lines, Set.of()), next) != null) {
           needed.add(rewrite);
         }
@@ -636,8 +659,11 @@ class TutorialListingsCompileTest {
   /** One compilation unit: where its first line is in the tutorial, its class and its source. */
   private record Listing(String chapter, int firstLine, String className, String source) {}
 
-  /** A bean method that a chapter rewrites: the chapters of the two listings, and the bean. */
-  private record Rewrite(int from, int to, String bean) {}
+  /**
+   * Lines of a bean method that a chapter rewrites: the chapters of the two listings, the bean, and
+   * how each changed line of the earlier listing begins (without its indentation).
+   */
+  private record Rewrite(int from, int to, String bean, List<String> lines) {}
 
   /** A word, string or symbol of a listing, and the index of its line. */
   private record Token(int line, String text) {}

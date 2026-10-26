@@ -124,10 +124,10 @@ In `frontend/`, after `npm ci`:
   changes it, in a collapsed block at the end of the chapter's configuration steps, and the bean
   methods the text shows on their own are excerpts of that listing. Each listing of
   `StreamRuneConfig` grows out of the one before it: a change to a bean reaches every listing from
-  its chapter on, and a bean a chapter rewrites instead of extending is named, with the two
-  chapters, in the compile test's list of rewrites. The last listing of a file is the file in the
-  repository. A class a listing uses is listed in full in that chapter or an earlier one, never
-  later.
+  its chapter on, and a line a chapter rewrites instead of extending is named, with its bean and
+  the two chapters, in the compile test's list of rewrites. The last listing of a file is the file
+  in the repository. A class a listing uses is listed in full in that chapter or an earlier one,
+  never later.
 - **Steps use what exists.** Every product, customer or order id, endpoint, port and request header a
   chapter's `curl` steps and `localhost` addresses use was created or introduced in that chapter or
   an earlier one. The ledger in `TutorialLedgerTest` says where each was introduced; a step that

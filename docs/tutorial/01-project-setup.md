@@ -610,7 +610,7 @@ management:
         include: health,metrics
 ```
 
-A word on the `streamrune.*` block. No key selects the event store: the `streamrune-postgres` artifact on the classpath is what makes StreamRune's auto-configuration build the PostgreSQL `EventStore`. `streamrune.event-store.schema.auto-initialize` runs the framework's Flyway migrations when the application starts (Step 8).
+A word on the `streamrune.*` block. No key selects the event store: `streamrune-spring` carries the PostgreSQL event store, and its auto-configuration builds it once the application has a `DataSource` bean, which Spring Boot creates from the `spring.datasource.*` keys above. `streamrune.event-store.schema.auto-initialize` runs the framework's Flyway migrations when the application starts (Step 8).
 
 `streamrune.projections.auto-discovery.enabled: false` turns off auto-discovery of projections on the classpath. The tutorial wires projections explicitly via `MultiProjectionRunner` (Chapter 5), so auto-discovery would conflict with the manual wiring.
 
