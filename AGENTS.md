@@ -79,10 +79,10 @@ In `frontend/`, after `npm ci`:
   ships), and the projections create the read-model tables on first use.
 - **CI.** The required checks of a pull request are `Spring backend integration tests`,
   `Quarkus backend integration tests`, `Micronaut backend integration tests`, `Shared module tests`
-  (which also runs `spotlessCheck` and the docs tests) and `dco`. CI checks out the framework's `main` as the sibling, so a pull request is built against
-  the framework's current source. The other jobs and workflows run the README's run paths (Docker
-  Compose, `bootRun`, the live Playwright suite), the mocked Playwright suite and the native-image
-  smoke test.
+  (which also runs `spotlessCheck` and the docs tests) and `dco`. CI checks out the framework's
+  `main` as the sibling, so a pull request is built against the framework's current source. The
+  other jobs and workflows run the README's run paths (Docker Compose, `bootRun`, the live
+  Playwright suite), the mocked Playwright suite and the native-image smoke test.
 
 ## 3. Conventions
 
