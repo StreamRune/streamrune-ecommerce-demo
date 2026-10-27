@@ -504,7 +504,7 @@ dependencies {
     // NoClassDefFoundError (io/opentelemetry/api/OpenTelemetry) — even though your own code never
     // touches them directly.
     implementation(libs.opentelemetry.api)
-    implementation(libs.spring.security.core)
+    implementation("org.springframework.security:spring-security-core")
 
     // Spring Boot starters
     implementation("org.springframework.boot:spring-boot-starter-web")
@@ -521,7 +521,7 @@ dependencies {
 
 > `spring-boot-starter-webflux` is added now because Chapter 15 (Server-Sent Events) streams `Flux<ServerSentEvent<String>>` from the reactive stack (Spring WebFlux and Reactor). Adding it here prevents a compilation failure when you reach that chapter.
 >
-> `opentelemetry-api` and `spring-security-core` are runtime requirements of StreamRune's Spring auto-configuration, not of your code. The `gradle/libs.versions.toml` catalog you copied from the real demo already defines both aliases (`opentelemetry` and `spring-security` versions). Omitting them compiles fine but fails at startup.
+> `opentelemetry-api` and `spring-security-core` are runtime requirements of StreamRune's Spring auto-configuration, not of your code. The `gradle/libs.versions.toml` catalog you copied from the real demo defines the `opentelemetry-api` alias, and Spring Boot's dependency management gives `spring-security-core` the version of Spring Security it manages, as it does for the starters. Omitting them compiles fine but fails at startup.
 
 ### Step 5 — Start PostgreSQL
 

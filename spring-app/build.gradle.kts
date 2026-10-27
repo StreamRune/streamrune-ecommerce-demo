@@ -80,7 +80,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-amqp")
     // Required for AOT: StreamRuneAutoConfiguration references these optional classes.
     implementation(libs.opentelemetry.api)
-    implementation(libs.spring.security.core)
+    implementation("org.springframework.security:spring-security-core")
 
     testImplementation(libs.spring.boot.starter.test)
     // The tutorial listings compiled by TutorialListingsCompileTest include decider tests.

@@ -42,11 +42,6 @@ rabbitmq = "5.25.0"
 # Observability
 opentelemetry = "1.47.0"
 
-# Security
-# In step with the StreamRune framework build; in spring-app, Spring Boot's dependency management
-# decides the version.
-spring-security = "7.1.2"
-
 # Jakarta
 jakarta-annotation = "3.0.0"
 jakarta-servlet = "6.0.0"
@@ -106,7 +101,6 @@ spring-boot-starter-validation = { module = "org.springframework.boot:spring-boo
 spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc", version.ref = "spring-boot" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator", version.ref = "spring-boot" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "spring-boot" }
-spring-security-core = { module = "org.springframework.security:spring-security-core", version.ref = "spring-security" }
 
 # Quarkus
 quarkus-bom = { module = "io.quarkus:quarkus-bom", version.ref = "quarkus" }
