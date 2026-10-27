@@ -16,7 +16,7 @@ In this chapter you will:
 - Verify `MicrometerStreamRuneMetrics` records counters and timers for commands, events, and projections. Because the auto-configuration registers this bean automatically when a `MeterRegistry` is present — and actuator provides a `SimpleMeterRegistry` — the wiring reduces to verifying that the dependency is on the classpath.
 - Opt into `OpenTelemetryCommandInterceptor` as a command interceptor so that every command dispatch creates an OpenTelemetry span with the command type, command ID, and aggregate ID as attributes. The shipped demo does not wire this — it is an addition you make in Step 3.
 - Verify that `StreamRuneHealthIndicator` is registered and returns meaningful detail about the PostgreSQL connection and subscription lag.
-- Build the aggregate lock's connection pool in the app, so that its meters (`hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`) show how many commands hold a lock connection and how many wait for one.
+- Give the aggregate lock's connection pool a metrics tracker, so that its meters (`hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`) show how many commands hold a lock connection and how many wait for one.
 - Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream and a per-stream event list, both for an `ADMIN` because they show decrypted payloads, and an open SSE endpoint that announces new events in real time, without their payload.
 - Switch on the framework's own SSE endpoint, `GET /api/sse/{aggregateType}/{aggregateId}`, which streams the events of one aggregate. The framework serves it and feeds it; the application adds a property and an `SseAuthorizer` that lets in an `ADMIN` or the customer the stream belongs to, and nobody else.
 
@@ -129,98 +129,21 @@ No additional code is required for this step. Proceed to Step 5 and return here 
 
 ### Step 4b: Watch the Aggregate Lock's Pool
 
-The aggregate lock of Chapter 12 holds a connection of a pool of its own for the whole run of every command. `PgAdvisoryLocker.withDedicatedPool` builds that pool and keeps it to itself: it is no bean, so neither Spring Boot's pool meters nor its `db` check see it, and a pool whose connections are all taken shows only in the `LockException`s of the commands that waited ten seconds for one (Chapter 12, Step 2b). To watch it, the app builds the pool itself, with the settings `withDedicatedPool` gives it and Hikari's Micrometer tracker, and hands it to `PgAdvisoryLocker`'s constructor, which takes a `DataSource`. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/AdvisoryLockPool.java`:
-
-```java
-package org.streamrune.ecommerce.spring.config;
-
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
-import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
-import io.micrometer.core.instrument.MeterRegistry;
-import java.time.Duration;
-import javax.sql.DataSource;
-
-/**
- * The connections the aggregate lock is taken on ({@code StreamRuneConfig#aggregateLocker}): a
- * Hikari pool of their own, apart from the application's pool, whose meters reach Micrometer as
- * {@code hikaricp.connections.*} with the tag {@code pool=streamrune-advisory-lock}. A command
- * holds one of its connections from its lock to its end, so {@code hikaricp.connections.active} is
- * the commands in flight and {@code hikaricp.connections.pending} the commands waiting for a
- * connection. The pool is saturated when {@code active} stands at {@code hikaricp.connections.max}
- * and {@code pending} is above zero; a wait that runs out is counted in {@code
- * hikaricp.connections.timeout}, and its command's attempt fails with a {@code LockException}.
- *
- * <p>The pool has the settings of the one {@code PgAdvisoryLocker.withDedicatedPool} builds, which
- * that locker keeps to itself and reports nowhere: the app builds the pool here and hands it to
- * {@code new PgAdvisoryLocker(DataSource)}. A locker built on a pool it is given does not close the
- * pool, so the application closes it ({@link #close()}). The Quarkus and Micronaut apps build the
- * same pool.
- */
-public final class AdvisoryLockPool implements AutoCloseable {
-
-  /** The pool's name, the value of the {@code pool} tag of its meters. */
-  public static final String NAME = "streamrune-advisory-lock";
-
-  private final HikariDataSource connections;
-
-  /**
-   * Opens the pool: {@code size} connections to the database at {@code url}, its meters in {@code
-   * meterRegistry}.
-   */
-  public AdvisoryLockPool(
-      String url, String username, String password, int size, MeterRegistry meterRegistry) {
-    HikariConfig config = new HikariConfig();
-    config.setPoolName(NAME);
-    config.setJdbcUrl(url);
-    config.setUsername(username);
-    config.setPassword(password);
-    config.setMaximumPoolSize(size);
-    // When every connection is taken, a command waits this long for one, then fails with a
-    // LockException.
-    config.setConnectionTimeout(Duration.ofSeconds(10).toMillis());
-    config.setKeepaliveTime(Duration.ofMinutes(5).toMillis());
-    config.setMaxLifetime(Duration.ofMinutes(30).toMillis());
-    config.setMetricsTrackerFactory(new MicrometerMetricsTrackerFactory(meterRegistry));
-    connections = new HikariDataSource(config);
-  }
-
-  /** The pool, for the locker. */
-  public DataSource dataSource() {
-    return connections;
-  }
-
-  /** Closes the pool's connections and removes its meters. */
-  @Override
-  public void close() {
-    connections.close();
-  }
-}
-```
-
-`StreamRuneConfig` imports `io.micrometer.core.instrument.MeterRegistry` and declares the pool as a bean, which Spring closes with the context — a locker does not close a pool it is given:
+The aggregate lock of Chapter 12 holds a connection of a pool of its own for the whole run of every command. That pool is no `DataSource` bean, so neither Spring Boot's pool meters nor its `db` check see it, and a pool whose connections are all taken shows only in the `LockException`s of the commands that waited ten seconds for one (Chapter 12, Step 2b). `PgAdvisoryLocker.withDedicatedPool` takes a fifth argument for that, a HikariCP `MetricsTrackerFactory`: given `new MicrometerMetricsTrackerFactory(meterRegistry)`, the pool reports to the app's `MeterRegistry` (the `SimpleMeterRegistry` Actuator provides). `StreamRuneConfig` imports `com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory` and `io.micrometer.core.instrument.MeterRegistry`, and the locker's bean takes the registry:
 
 ```java
 @Bean(destroyMethod = "close")
-public AdvisoryLockPool advisoryLockPool(
+public PgAdvisoryLocker aggregateLocker(
     @Value("${spring.datasource.url}") String url,
     @Value("${spring.datasource.username}") String username,
     @Value("${spring.datasource.password}") String password,
     MeterRegistry meterRegistry) {
-  return new AdvisoryLockPool(url, username, password, 10, meterRegistry);
+  return PgAdvisoryLocker.withDedicatedPool(
+      url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
 }
 ```
 
-The locker is built on it; the connection settings it took in Chapter 12 go to the pool:
-
-```java
-@Bean
-public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
-  return new PgAdvisoryLocker(advisoryLockPool.dataSource());
-}
-```
-
-The bean is the `AdvisoryLockPool` and not the Hikari pool inside it, because a second `DataSource` bean would make Spring Boot's auto-configured application pool step aside. The tracker registers the pool's meters with the app's `MeterRegistry` (the `SimpleMeterRegistry` Actuator provides) under Hikari's names, tagged `pool=streamrune-advisory-lock`:
+The pool's meters carry Hikari's names and the pool's name as their tag, `pool=streamrune-advisory-lock`:
 
 | Meter | Type | What it shows |
 |---|---|---|
@@ -234,7 +157,7 @@ The bean is the `AdvisoryLockPool` and not the Hikari pool inside it, because a 
 
 **What saturation looks like.** `active` stands at `max` and `pending` is above zero: every lock connection is held, and the next commands wait for one. A burst that drains within the ten seconds shows as a peak of `pending` and a longer `acquire`. One that does not shows in `timeout`: each of those commands fails its attempt with a `LockException`, the bus tries it again, and once its attempts are spent it is dead-lettered (Chapter 12, Step 2b; Chapter 14), so the dead-letter gauges of Step 2 rise with it. Alert on `pending` above zero for longer than a burst lasts, and on any `timeout`. A pool that saturates under the load it must carry is too small for it: size it, and the application's pool with it, for the commands each backend runs at once, below PostgreSQL's `max_connections` (Chapter 17). The application's own pool reports the same names under its own `pool` tag, which is why the query of Step 7 names the tag.
 
-> **Quarkus and Micronaut.** Both apps build the same pool (`AdvisoryLockPool` in their `config` packages) with the app's `MeterRegistry`: `StreamRuneProducer#advisoryLockPool` with the application pool's size, twenty, and `StreamRuneFactory#advisoryLockPool` with ten. Quarkus serves the meters at `/q/metrics` in Prometheus' format (`hikaricp_connections_active{pool="streamrune-advisory-lock"}`), Micronaut at `/metrics/hikaricp.connections.active`. The `AggregateLockerWiringIT` of each app checks the meters: the pool's size, the gauge of the waiting commands, the counter of the waits that ran out, and a held lock counted as an active connection.
+> **Quarkus and Micronaut.** Both apps hand the locker the same tracker on the app's `MeterRegistry`: `StreamRuneProducer#aggregateLocker`, whose pool has the application pool's size, twenty, and `StreamRuneFactory#aggregateLocker`, whose pool has ten. Quarkus serves the meters at `/q/metrics` in Prometheus' format (`hikaricp_connections_active{pool="streamrune-advisory-lock"}`), Micronaut at `/metrics/hikaricp.connections.active`. The `AggregateLockerWiringIT` of each app checks the meters: the pool's size, the gauge of the waiting commands, the counter of the waits that ran out, and a held lock counted as an active connection.
 
 ### Step 5: Create EventExplorerController
 
@@ -1426,6 +1349,7 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
@@ -1729,27 +1653,21 @@ public class StreamRuneConfig {
    * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's in-process locker steps aside for this bean
-   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker takes its connections
-   * from {@link #advisoryLockPool}, a pool it does not own.
-   */
-  @Bean
-  public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
-    return new PgAdvisoryLocker(advisoryLockPool.dataSource());
-  }
-
-  /**
-   * The lock pool of {@link #aggregateLocker}, with the application pool's size, ten, and its
-   * meters in the app's registry: {@code
-   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock} answers how
-   * many of its connections the commands hold. Spring closes it with the context.
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it. The pool reports to the app's {@code MeterRegistry} through Hikari's
+   * Micrometer tracker: {@code hikaricp.connections.*}, tagged {@code
+   * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
+   * commands wait for one ({@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
    */
   @Bean(destroyMethod = "close")
-  public AdvisoryLockPool advisoryLockPool(
+  public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
       @Value("${spring.datasource.password}") String password,
       MeterRegistry meterRegistry) {
-    return new AdvisoryLockPool(url, username, password, 10, meterRegistry);
+    return PgAdvisoryLocker.withDedicatedPool(
+        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   /**
@@ -2679,7 +2597,7 @@ Two details of the wire. Lines that start with a colon are comments, which an SS
 
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
 
-**`AdvisoryLockPool`** is the pool the aggregate lock takes its connections from, built by the app with Hikari's Micrometer tracker and handed to `new PgAdvisoryLocker(DataSource)`, which leaves its closing to the app. Its meters reach `/actuator/metrics` as `hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`: `active` at `max` with `pending` above zero is a saturated pool, and `timeout` counts the waits for a connection that ran out, each one an attempt of a command that failed with `LockException`.
+**The aggregate lock's pool** reports to Micrometer once `withDedicatedPool` is handed `new MicrometerMetricsTrackerFactory(meterRegistry)`, HikariCP's tracker for a `MeterRegistry`; the locker still owns the pool and closes it. Its meters reach `/actuator/metrics` as `hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`: `active` at `max` with `pending` above zero is a saturated pool, and `timeout` counts the waits for a connection that ran out, each one an attempt of a command that failed with `LockException`.
 
 **`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to an `ADMIN`; that check is a demo shortcut on two client-supplied headers, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open, and because it cannot ask who is calling it names no stream and carries no payload: `LiveFeed` runs one reader per app for at most 100 connections: a connection begins at the head of the global stream, the reader polls `EventStore.readGlobalStream` once a second, and each event stored from then on goes to every connected client as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and a `LiveFeedFrame` — the global offset, the aggregate type, the event type and the timestamp — as its data. A connection is never served the store's history, and its reader ends when the client leaves or the app stops. A view that wants the detail reads it from the guarded endpoints. `Flux.create` bridges the imperative polling thread to the reactive `Flux` the controller returns.
 

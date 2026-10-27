@@ -105,20 +105,6 @@ class TutorialListingsCompileTest {
               14,
               "orderFulfillmentSagaRunner",
               List.of("* streamrune.saga.compensation-retry-give-up-after} (1 hour by default)")),
-          // Up to chapter 14 the locker builds its own pool from the connection settings; from
-          // chapter 15 on the app builds the pool, with its meters, and hands it to the locker.
-          new Rewrite(
-              14,
-              15,
-              "aggregateLocker",
-              List.of(
-                  "* ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns",
-                  "* Spring closes with it.",
-                  "@Bean(destroyMethod = \"close\")",
-                  "@Value(\"${spring.datasource.url}\") String url,",
-                  "@Value(\"${spring.datasource.username}\") String username,",
-                  "@Value(\"${spring.datasource.password}\") String password) {",
-                  "return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);")),
           // Chapter 17 keeps the bus builder in a variable, to add the saga command delay of the
           // two-backend runs.
           new Rewrite(15, 17, "commandBus", List.of("return VirtualThreadCommandBus.builder()")));

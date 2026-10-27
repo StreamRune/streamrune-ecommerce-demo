@@ -21,19 +21,21 @@ import org.streamrune.core.AggregateLocker;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
-import org.streamrune.ecommerce.quarkus.config.AdvisoryLockPool;
 import org.streamrune.postgres.PgAdvisoryLocker;
 
 /**
  * The command bus locks an aggregate in PostgreSQL ({@link PgAdvisoryLocker}): the lock holds
  * across every instance of the app on one database, as in the Spring app, whose {@code
  * TwoInstanceSagaIT} shows a command on one backend waiting for the lock a command on the other
- * holds. The framework's in-process locker steps aside for the app's. Its connections come from the
- * app's {@link AdvisoryLockPool}, whose meters reach Micrometer.
+ * holds. The framework's in-process locker steps aside for the app's, whose pool reports its meters
+ * to Micrometer.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
 class AggregateLockerWiringIT {
+
+  /** The name of the locker's pool, the {@code pool} tag of its meters. */
+  private static final String LOCK_POOL = "streamrune-advisory-lock";
 
   @Inject AggregateLocker locker;
 
@@ -98,11 +100,7 @@ class AggregateLockerWiringIT {
         applicationPool.getConfiguration().connectionPoolConfiguration().maxSize();
     assertThat(lockPoolGauge("hikaricp.connections.max").value()).isEqualTo(applicationPoolSize);
     assertThat(lockPoolGauge("hikaricp.connections.pending")).isNotNull();
-    assertThat(
-            meterRegistry
-                .find("hikaricp.connections.timeout")
-                .tag("pool", AdvisoryLockPool.NAME)
-                .counter())
+    assertThat(meterRegistry.find("hikaricp.connections.timeout").tag("pool", LOCK_POOL).counter())
         .as("the waits for a lock connection that ran out")
         .isNotNull();
 
@@ -123,8 +121,8 @@ class AggregateLockerWiringIT {
 
   /** A gauge of the lock pool, which must exist. */
   private Gauge lockPoolGauge(String name) {
-    Gauge gauge = meterRegistry.find(name).tag("pool", AdvisoryLockPool.NAME).gauge();
-    assertThat(gauge).as("%s tagged pool=%s", name, AdvisoryLockPool.NAME).isNotNull();
+    Gauge gauge = meterRegistry.find(name).tag("pool", LOCK_POOL).gauge();
+    assertThat(gauge).as("%s tagged pool=%s", name, LOCK_POOL).isNotNull();
     return gauge;
   }
 

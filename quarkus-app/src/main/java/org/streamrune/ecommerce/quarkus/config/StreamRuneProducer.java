@@ -1,5 +1,6 @@
 package org.streamrune.ecommerce.quarkus.config;
 
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
@@ -266,36 +267,31 @@ public class StreamRuneProducer {
    * that runs out is a {@code LockException}.
    *
    * <p>The framework's producer of the in-process locker is a {@code @DefaultBean}, which this one
-   * replaces. The locker takes its connections from {@link #advisoryLockPool}, a pool it does not
-   * own.
+   * replaces. The locker owns its pool, which {@link #closeAggregateLocker} closes with the
+   * application. The pool reports to the app's {@code MeterRegistry} through Hikari's Micrometer
+   * tracker: {@code /q/metrics} serves its meters in Prometheus' format, {@code
+   * hikaricp_connections_active{pool="streamrune-advisory-lock"}} among them.
    */
   @Produces
   @Singleton
-  public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
-    return new PgAdvisoryLocker(advisoryLockPool.dataSource());
-  }
-
-  /**
-   * The lock pool of {@link #aggregateLocker}, with the application pool's size and its meters in
-   * the app's registry: {@code /q/metrics} serves them in Prometheus' format, {@code
-   * hikaricp_connections_active{pool="streamrune-advisory-lock"}} among them. {@link
-   * #closeAdvisoryLockPool} closes it with the application.
-   */
-  @Produces
-  @Singleton
-  public AdvisoryLockPool advisoryLockPool(
+  public PgAdvisoryLocker aggregateLocker(
       @ConfigProperty(name = "quarkus.datasource.jdbc.url") String url,
       @ConfigProperty(name = "quarkus.datasource.username") String username,
       @ConfigProperty(name = "quarkus.datasource.password") String password,
       @ConfigProperty(name = "quarkus.datasource.jdbc.max-size", defaultValue = "20")
           int applicationPoolSize,
       MeterRegistry meterRegistry) {
-    return new AdvisoryLockPool(url, username, password, applicationPoolSize, meterRegistry);
+    return PgAdvisoryLocker.withDedicatedPool(
+        url,
+        username,
+        password,
+        applicationPoolSize,
+        new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
-  /** Closes the aggregate lock's pool when the application stops. */
-  void closeAdvisoryLockPool(@Disposes AdvisoryLockPool pool) {
-    pool.close();
+  /** Closes the aggregate locker's pool when the application stops. */
+  void closeAggregateLocker(@Disposes PgAdvisoryLocker locker) {
+    locker.close();
   }
 
   /**

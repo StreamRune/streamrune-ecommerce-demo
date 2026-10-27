@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.micronaut.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
@@ -319,27 +320,19 @@ public class StreamRuneFactory {
    * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's locker is {@code @Requires(missingBeans = AggregateLocker.class)}, so it
-   * steps aside for this bean. The locker takes its connections from {@link #advisoryLockPool}, a
-   * pool it does not own.
-   */
-  @Singleton
-  public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
-    return new PgAdvisoryLocker(advisoryLockPool.dataSource());
-  }
-
-  /**
-   * The lock pool of {@link #aggregateLocker}, with the application pool's size, ten, and its
-   * meters in the app's registry: {@code /metrics/hikaricp.connections.active} lists the
-   * measurements of one of them. Micronaut closes it with the application.
+   * steps aside for this bean. The locker owns its pool, which Micronaut closes with it. The pool
+   * reports to the app's {@code MeterRegistry} through Hikari's Micrometer tracker: {@code
+   * /metrics/hikaricp.connections.active} lists the measurements of one of its meters.
    */
   @Singleton
   @Bean(preDestroy = "close")
-  public AdvisoryLockPool advisoryLockPool(
+  public PgAdvisoryLocker aggregateLocker(
       @Value("${datasources.default.url}") String url,
       @Value("${datasources.default.username}") String username,
       @Value("${datasources.default.password}") String password,
       MeterRegistry meterRegistry) {
-    return new AdvisoryLockPool(url, username, password, 10, meterRegistry);
+    return PgAdvisoryLocker.withDedicatedPool(
+        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   @Singleton

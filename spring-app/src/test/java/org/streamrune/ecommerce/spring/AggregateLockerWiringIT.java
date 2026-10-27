@@ -15,16 +15,18 @@ import org.streamrune.core.AggregateLocker;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
-import org.streamrune.ecommerce.spring.config.AdvisoryLockPool;
 import org.streamrune.postgres.PgAdvisoryLocker;
 
 /**
- * The command bus locks an aggregate in PostgreSQL ({@link PgAdvisoryLocker}) on the connections of
- * the app's {@link AdvisoryLockPool}, whose meters reach Micrometer and {@code /actuator/metrics},
- * as in the Quarkus and Micronaut apps. {@code TwoInstanceSagaIT} shows a command on one backend
- * waiting for the lock a command on the other holds.
+ * The command bus locks an aggregate in PostgreSQL ({@link PgAdvisoryLocker}) on a pool of the
+ * locker's own, whose meters reach Micrometer and {@code /actuator/metrics}, as in the Quarkus and
+ * Micronaut apps. {@code TwoInstanceSagaIT} shows a command on one backend waiting for the lock a
+ * command on the other holds.
  */
 class AggregateLockerWiringIT extends AbstractIntegrationTest {
+
+  /** The name of the locker's pool, the {@code pool} tag of its meters. */
+  private static final String LOCK_POOL = "streamrune-advisory-lock";
 
   @Autowired private AggregateLocker locker;
 
@@ -48,11 +50,7 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
   void theLockPoolReportsItsConnectionsToMicrometer() throws Exception {
     assertThat(lockPoolGauge("hikaricp.connections.max").value()).isEqualTo(10);
     assertThat(lockPoolGauge("hikaricp.connections.pending")).isNotNull();
-    assertThat(
-            meterRegistry
-                .find("hikaricp.connections.timeout")
-                .tag("pool", AdvisoryLockPool.NAME)
-                .counter())
+    assertThat(meterRegistry.find("hikaricp.connections.timeout").tag("pool", LOCK_POOL).counter())
         .as("the waits for a lock connection that ran out")
         .isNotNull();
 
@@ -70,7 +68,7 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
                       .isGreaterThanOrEqualTo(1));
     }
 
-    JsonNode lockPool = metric("hikaricp.connections.active?tag=pool:" + AdvisoryLockPool.NAME);
+    JsonNode lockPool = metric("hikaricp.connections.active?tag=pool:" + LOCK_POOL);
     assertThat(lockPool.path("name").asText()).isEqualTo("hikaricp.connections.active");
     List<String> pools = new ArrayList<>();
     for (JsonNode tag : metric("hikaricp.connections.active").path("availableTags")) {
@@ -80,7 +78,7 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
     }
     assertThat(pools)
         .as("the pools that report the name: the lock pool and the application's")
-        .contains(AdvisoryLockPool.NAME)
+        .contains(LOCK_POOL)
         .hasSize(2);
   }
 
@@ -101,8 +99,8 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
 
   /** A gauge of the lock pool, which must exist. */
   private Gauge lockPoolGauge(String name) {
-    Gauge gauge = meterRegistry.find(name).tag("pool", AdvisoryLockPool.NAME).gauge();
-    assertThat(gauge).as("%s tagged pool=%s", name, AdvisoryLockPool.NAME).isNotNull();
+    Gauge gauge = meterRegistry.find(name).tag("pool", LOCK_POOL).gauge();
+    assertThat(gauge).as("%s tagged pool=%s", name, LOCK_POOL).isNotNull();
     return gauge;
   }
 }

@@ -21,9 +21,6 @@ micronaut-micrometer = "6.1.0"
 # modules, quarkus-app and micronaut-app.
 jackson = "2.22.4"
 postgresql = "42.7.14"
-# Kept in step with the StreamRune framework build, whose PgAdvisoryLocker runs on it: quarkus-app builds the
-# aggregate lock's pool with it (AdvisoryLockPool), and the Quarkus BOM manages no version of it.
-hikaricp = "6.2.1"
 # Kept in step with the StreamRune framework build (Flyway 13 accepts PostgreSQL 18 without the "Flyway upgrade
 # recommended" WARN that 10.22.0 logged). The framework's event store applies its schema at startup, so no demo
 # module declares these two aliases; Flyway reaches the apps through streamrune-postgres.
@@ -65,7 +62,6 @@ jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", ver
 
 # Database
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
-hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
