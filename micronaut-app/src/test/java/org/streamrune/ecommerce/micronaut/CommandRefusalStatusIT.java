@@ -18,6 +18,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.MethodOrderer;
@@ -35,7 +36,7 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it
  * was not. The Spring and Quarkus apps answer the same. An answer with {@code Retry-After} exposes
  * it to the frontend's origin, whose page reads it to wait that long before it sends the request
- * again.
+ * again. No answer allows credentials.
  *
  * <p>Each condition is forced on the app's real command bus, in this class's own application
  * context: the tests leave its circuit breaker open and its bus closed, which no other test class
@@ -63,6 +64,8 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       CIRCUIT_BREAKER_OPEN}.
  *   <li><b>A closed command bus.</b> Once the bus is closed, as on shutdown, a command is refused
  *       with {@code COMMAND_BUS_CLOSED}.
+ *   <li><b>A preflight.</b> The question a browser asks before the page sends a keyed stock
+ *       adjustment is answered for the frontend's origin, without credentials.
  * </ol>
  */
 @MicronautTest(transactional = false)
@@ -210,6 +213,22 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
     assertRefused(createProduct("m-refusal-closed-" + System.nanoTime()), "COMMAND_BUS_CLOSED");
   }
 
+  /**
+   * Before the page sends a command, the browser asks whether it may: a preflight with the method
+   * and the headers of the request, here a keyed stock adjustment's. The answer admits the
+   * frontend's origin and allows no credentials.
+   */
+  @Test
+  @Order(6)
+  void aPreflightAdmitsTheFrontendsOrigin_andAllowsNoCredentials() throws Exception {
+    HttpResponse<String> answer = preflight("/api/products/m-refusal-preflight/stock", "PUT");
+
+    assertThat(answer.statusCode()).as("status of the preflight").isEqualTo(200);
+    assertThat(answer.headers().firstValue("Access-Control-Allow-Origin"))
+        .contains(FRONTEND_ORIGIN);
+    assertNoCredentialsAllowed(answer);
+  }
+
   private static void assertRefused(HttpResponse<String> answer, String reason) {
     assertThat(answer.statusCode()).as("status of %s", answer.body()).isEqualTo(503);
     assertThat(answer.headers().firstValue("Retry-After")).contains("5");
@@ -223,11 +242,25 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
   /**
    * The page runs on another origin, and a browser shows it a response header outside the CORS
    * safelist only when the answer exposes it: without that the page cannot read how long to wait.
+   * The answer allows no credentials ({@link #assertNoCredentialsAllowed}).
    */
   private static void assertRetryAfterReadable(HttpResponse<String> answer) {
     assertThat(answer.headers().firstValue("Access-Control-Expose-Headers"))
         .as("Access-Control-Expose-Headers of the answer to %s", FRONTEND_ORIGIN)
         .hasValueSatisfying(exposed -> assertThat(exposed).containsIgnoringCase("Retry-After"));
+    assertNoCredentialsAllowed(answer);
+  }
+
+  /**
+   * A browser shows another origin the answer to a request it sent with its cookies or its HTTP
+   * authentication only when the answer says {@code Access-Control-Allow-Credentials: true}. The
+   * demo's caller is two request headers, not a cookie, so no answer says it: an identity the
+   * browser sends on its own never makes an answer readable to another origin.
+   */
+  private static void assertNoCredentialsAllowed(HttpResponse<String> answer) {
+    assertThat(answer.headers().firstValue("Access-Control-Allow-Credentials"))
+        .as("Access-Control-Allow-Credentials of the answer to %s", FRONTEND_ORIGIN)
+        .isNotEqualTo(Optional.of("true"));
   }
 
   /**
@@ -296,6 +329,20 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
         {"productId": "%s", "name": "Lamp", "description": "refusals", "category": "Home",
          "price": 20.00, "initialStock": 3}"""
             .formatted(productId));
+  }
+
+  /** The preflight a browser sends before a {@code method} request of the page to {@code path}. */
+  private HttpResponse<String> preflight(String path, String method) throws Exception {
+    return http.send(
+        HttpRequest.newBuilder(server.getURI().resolve(path))
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .header("Origin", FRONTEND_ORIGIN)
+            .header("Access-Control-Request-Method", method)
+            .header(
+                "Access-Control-Request-Headers",
+                "content-type,idempotency-key,x-user-id,x-user-role")
+            .build(),
+        HttpResponse.BodyHandlers.ofString());
   }
 
   private HttpResponse<String> send(String method, String path, String json) {

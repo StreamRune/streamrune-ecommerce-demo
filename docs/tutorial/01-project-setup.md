@@ -676,7 +676,7 @@ public class GlobalExceptionHandler {
 
 ### Step 7b — Create `CorsConfig`
 
-The frontend (Chapter 16) runs on port 3000 and needs CORS headers. Create the config now so you never have to debug CORS later. `exposedHeaders` lets the page read the `Retry-After` of an answer: a browser shows a page of another origin only a short safelist of response headers unless the answer names more, and the page waits that long before it sends a refused command again (Chapter 12, Step 2b; Chapter 16).
+The frontend (Chapter 16) runs on port 3000 and needs CORS headers. Create the config now so you never have to debug CORS later. `exposedHeaders` lets the page read the `Retry-After` of an answer: a browser shows a page of another origin only a short safelist of response headers unless the answer names more, and the page waits that long before it sends a refused command again (Chapter 12, Step 2b; Chapter 16). `allowCredentials(false)` is Spring's default, written out: the caller is two request headers (Chapter 9), never a cookie, so no answer allows credentials, and a browser shows another origin no answer to a request it sent with its cookies. The Quarkus and Micronaut apps set the same in their configuration.
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/CorsConfig.java`:
 
@@ -700,7 +700,9 @@ public class CorsConfig {
             .allowedOrigins("http://localhost:3000")
             .allowedMethods("*")
             .allowedHeaders("*")
-            .exposedHeaders("Retry-After");
+            .exposedHeaders("Retry-After")
+            // The caller is two request headers, never a cookie: no answer allows credentials.
+            .allowCredentials(false);
       }
     };
   }

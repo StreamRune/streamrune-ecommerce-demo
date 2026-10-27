@@ -17,7 +17,9 @@ public class CorsConfig {
             .allowedOrigins("http://localhost:3000")
             .allowedMethods("*")
             .allowedHeaders("*")
-            .exposedHeaders("Retry-After");
+            .exposedHeaders("Retry-After")
+            // The caller is two request headers, never a cookie: no answer allows credentials.
+            .allowCredentials(false);
       }
     };
   }
