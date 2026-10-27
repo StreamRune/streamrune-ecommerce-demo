@@ -64,6 +64,7 @@ import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
+import org.streamrune.integration.DeadLetterUnkeyedReplaySetting;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.postgres.JdbcProjectionRepository;
@@ -527,8 +528,13 @@ public class StreamRuneFactory {
    * forgotten while the entry waited, the fields decrypt to {@code [REDACTED]} and the runner does
    * not replay the command.
    *
-   * <p>{@code OPERATOR_ONLY}: on its schedule the runner replays only the entries the command inbox
-   * can deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
+   * <p>The policy is the one the framework builds the command bus with, from {@code
+   * streamrune.dead-letter.*} (five replays, the first a minute after the failure, unless
+   * configured), and the inbox window is the bus's too: the bus answers a keyed command that fails
+   * again under its key by the rules this runner replays by, and the framework warns at startup
+   * when the two differ. {@code OPERATOR_ONLY} ({@code streamrune.dead-letter.unkeyed-replay}
+   * unless configured): on its schedule the runner replays only the entries the command inbox can
+   * deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
    * command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}), because its
    * caller may already have retried it successfully. {@code metrics}, when a {@code
    * StreamRuneMetrics} bean exists, counts those entries ({@code streamrune.dlq.awaiting_operator})
@@ -553,13 +559,14 @@ public class StreamRuneFactory {
         .registerCommand(CustomerCommand.class)
         .registerCommand(PaymentCommand.class)
         .registerCommand(InventoryCommand.class)
+        // The policy of streamrune.dead-letter.*, which the framework builds its command bus with.
         .policy(
             new DeadLetterRetryPolicy(
-                5,
-                Duration.ofSeconds(60),
+                properties.deadLetterMaxRetries(),
+                Duration.ofMillis(properties.deadLetterRetryIntervalMs()),
                 2.0,
                 false,
-                DeadLetterRetryPolicy.UnkeyedReplay.OPERATOR_ONLY))
+                DeadLetterUnkeyedReplaySetting.parse(properties.deadLetterUnkeyedReplay())))
         // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
         .metrics(metrics)

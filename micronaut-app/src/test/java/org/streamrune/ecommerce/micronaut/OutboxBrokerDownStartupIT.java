@@ -3,6 +3,10 @@ package org.streamrune.ecommerce.micronaut;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
@@ -31,9 +35,11 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.slf4j.LoggerFactory;
 import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
 import org.streamrune.runtime.BackgroundRelayHealthContributor;
 import org.streamrune.runtime.BackgroundRelayHealthContributor.ComponentHealth;
+import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.testcontainers.containers.RabbitMQContainer;
 
 /**
@@ -53,12 +59,32 @@ import org.testcontainers.containers.RabbitMQContainer;
  * <p>The relay retries a transport failure on a backoff that grows towards 60 seconds while the
  * failures last, so the delivery after the broker starts waits for the entry's next attempt, which
  * the test allows for.
+ *
+ * <p>The app starts without the dead-letter retry runner's warning that its command bus answers a
+ * keyed command that fails again under its key by another policy or inbox window than the runner
+ * replays by ({@link #RUNNER_AND_BUS_DIFFER}): the runner takes the {@code
+ * streamrune.dead-letter.*} policy the framework builds the bus with. The framework's log is read
+ * from the instance of this class on ({@link #frameworkLog}), which is built before the application
+ * context starts: the line that says where request identities come from shows that the start was
+ * read.
  */
 @MicronautTest(transactional = false)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class OutboxBrokerDownStartupIT implements TestPropertyProvider {
 
   private static final String DATABASE = "broker_down";
+
+  /** How the framework's warning that the retry runner and its command bus differ begins. */
+  private static final String RUNNER_AND_BUS_DIFFER =
+      "DeadLetterRetryRunner replays by maxRetries=";
+
+  /** What the framework logs from the construction of this instance on. */
+  private final ListAppender<ILoggingEvent> frameworkLog = new ListAppender<>();
+
+  {
+    frameworkLog.start();
+    frameworkLogger().addAppender(frameworkLog);
+  }
 
   private final int brokerPort = freePort();
 
@@ -95,6 +121,11 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
   @AfterAll
   void stopBroker() {
     rabbit.stop();
+    frameworkLogger().detachAppender(frameworkLog);
+  }
+
+  private static Logger frameworkLogger() {
+    return (Logger) LoggerFactory.getLogger("org.streamrune");
   }
 
   @Test
@@ -103,6 +134,15 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
         client.toBlocking().exchange(HttpRequest.GET("/health"), String.class);
     assertThat(health.getStatus().getCode()).isEqualTo(200);
     assertThat(health.body()).contains("\"status\":\"UP\"");
+    assertThat(frameworkLog.list)
+        .as("the framework's log from the start of the application")
+        .anyMatch(event -> event.getFormattedMessage().startsWith("Request identity: "))
+        .as("the retry runner and the command bus answer a keyed re-send by the same rules")
+        .noneMatch(
+            event ->
+                event.getLevel() == Level.WARN
+                    && event.getLoggerName().equals(DeadLetterRetryRunner.class.getName())
+                    && event.getFormattedMessage().startsWith(RUNNER_AND_BUS_DIFFER));
 
     String productId = "m-broker-down-" + System.nanoTime();
     HttpResponse<String> created =

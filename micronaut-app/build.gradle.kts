@@ -98,8 +98,11 @@ dependencies {
     // PostgreSQL JDBC driver for the Hikari datasource.
     runtimeOnly(libs.postgresql)
 
-    // SLF4J backend — without it Micronaut startup failures are silently swallowed
-    runtimeOnly("ch.qos.logback:logback-classic:1.5.18")
+    // SLF4J backend — without it Micronaut startup failures are silently swallowed. The tests read
+    // the log through it too (OutboxBrokerDownStartupIT).
+    val logback = "ch.qos.logback:logback-classic:1.5.18"
+    runtimeOnly(logback)
+    testImplementation(logback)
 
     // In-memory stores (InMemoryProjectionRepository, InMemoryEventStore) for Docker-free tests.
     testImplementation("org.streamrune:streamrune-test:$sr")

@@ -21,9 +21,12 @@ import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.Status;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.streamrune.ecommerce.spring.config.RabbitMqConfig;
 import org.streamrune.spring.StreamRuneHealthIndicator;
@@ -48,8 +51,17 @@ import org.testcontainers.containers.RabbitMQContainer;
  * <p>The relay retries a transport failure on a backoff that grows towards 60 seconds while the
  * failures last, so the delivery after the broker starts waits for the entry's next attempt, which
  * the test allows for.
+ *
+ * <p>The app starts without the dead-letter retry runner's warning that its command bus answers a
+ * keyed command that fails again under its key by another policy or inbox window than the runner
+ * replays by ({@link #RUNNER_AND_BUS_DIFFER}): the bus the app builds takes the runner's.
  */
+@ExtendWith(OutputCaptureExtension.class)
 class OutboxBrokerDownStartupIT {
+
+  /** How the framework's warning that the retry runner and its command bus differ begins. */
+  private static final String RUNNER_AND_BUS_DIFFER =
+      "DeadLetterRetryRunner replays by maxRetries=";
 
   private static final String DATABASE = "broker_down";
 
@@ -71,12 +83,18 @@ class OutboxBrokerDownStartupIT {
   }
 
   @Test
-  void theAppServesWithoutTheBrokerAndDeliversTheOutboxOnceTheBrokerAnswers() throws Exception {
+  void theAppServesWithoutTheBrokerAndDeliversTheOutboxOnceTheBrokerAnswers(CapturedOutput output)
+      throws Exception {
     createDatabase();
     int brokerPort = freePort();
     rabbit = new RabbitOnPort(brokerPort);
 
     app = start(brokerPort);
+    assertThat(output.getAll())
+        .as("the app's log from its start")
+        .contains("Tomcat started on port")
+        .as("the retry runner and the command bus answer a keyed re-send by the same rules")
+        .doesNotContain(RUNNER_AND_BUS_DIFFER);
 
     HttpResponse<String> health = get("/actuator/health");
     assertThat(health.statusCode()).as("health: %s", health.body()).isEqualTo(200);

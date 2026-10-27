@@ -20,6 +20,8 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.ServerSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
@@ -48,13 +50,29 @@ import org.testcontainers.containers.RabbitMQContainer;
  * <p>The relay retries a transport failure on a backoff that grows towards 60 seconds while the
  * failures last, so the delivery after the broker starts waits for the entry's next attempt, which
  * the test allows for.
+ *
+ * <p>The app starts without the dead-letter retry runner's warning that its command bus answers a
+ * keyed command that fails again under its key by another policy or inbox window than the runner
+ * replays by ({@link #RUNNER_AND_BUS_DIFFER}): the runner takes the {@code
+ * streamrune.dead-letter.*} policy the framework builds the bus with. The profile writes the app's
+ * log to {@link #STARTUP_LOG} as well, which the file handler starts afresh when the app boots.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
 @TestProfile(OutboxBrokerDownStartupIT.BrokerDownProfile.class)
 class OutboxBrokerDownStartupIT {
 
-  /** The outbox on, its relay polling every 500 ms, and a broker port nothing listens on. */
+  /** How the framework's warning that the retry runner and its command bus differ begins. */
+  private static final String RUNNER_AND_BUS_DIFFER =
+      "DeadLetterRetryRunner replays by maxRetries=";
+
+  /** The log of the app of this profile, from its start. */
+  private static final Path STARTUP_LOG = Path.of("build", "broker-down-startup.log");
+
+  /**
+   * The outbox on, its relay polling every 500 ms, a broker port nothing listens on, and the log in
+   * a file as well.
+   */
   public static class BrokerDownProfile implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
@@ -62,7 +80,9 @@ class OutboxBrokerDownStartupIT {
           "streamrune.outbox.enabled", "true",
           "streamrune.outbox.flush-interval-ms", "500",
           "rabbitmq.host", "localhost",
-          "rabbitmq.port", String.valueOf(freePort()));
+          "rabbitmq.port", String.valueOf(freePort()),
+          "quarkus.log.file.enabled", "true",
+          "quarkus.log.file.path", STARTUP_LOG.toString());
     }
   }
 
@@ -87,6 +107,10 @@ class OutboxBrokerDownStartupIT {
     rabbit = new RabbitOnPort(brokerPort);
 
     given().when().get("/q/health").then().statusCode(200);
+    assertThat(Files.readString(STARTUP_LOG))
+        .as("the retry runner and the command bus answer a keyed re-send by the same rules")
+        .contains("Installed features")
+        .doesNotContain(RUNNER_AND_BUS_DIFFER);
 
     String productId = "q-broker-down-" + System.nanoTime();
     given()
