@@ -18,8 +18,7 @@ import { newId } from "@/lib/ids";
 import { isQueuedForReplay } from "@/lib/api";
 import {
   keyForOperation,
-  operationApplied,
-  operationFailed,
+  outcomeOf,
   pendingOperation,
   startNewOperation,
   type OperationKind,
@@ -146,10 +145,17 @@ function signed(quantity: number): string {
   return quantity > 0 ? `+${quantity}` : `${quantity}`;
 }
 
+/** What the notice says of a held change, by what the backend answered it so far. */
+const OUTCOME_TEXT = {
+  queued: "is queued for a replay; its outcome shows in the admin dead-letter list.",
+  unknown: "has no answer yet: it may have been applied.",
+  refused: "was not applied: the backend refused it for now and wrote nothing.",
+} as const;
+
 /**
  * The notice of a dialog whose change of this product has no final answer: the
- * amount, whether the backend queued it, what sending it again does, and the
- * way to start a new change instead.
+ * amount, what the backend answered it so far, what sending it again does, and
+ * the way to start a new change instead.
  */
 function PendingNotice({
   pending,
@@ -164,11 +170,9 @@ function PendingNotice({
   return (
     <div role="status" className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm space-y-2">
       <p>
-        {pending.state === "queued"
-          ? `The ${noun} of ${amount} is queued and will be applied.`
-          : `The ${noun} of ${amount} has no answer yet: it may have been applied.`}{" "}
-        Sending {amount} again sends it under the same key, so it is applied once. A different
-        amount is a new {noun}; so is the same amount after Start a new change.
+        The {noun} of {amount} {OUTCOME_TEXT[outcomeOf(pending)]} Sending {amount} again sends it
+        under the same key, so it is applied once. A different amount is a new {noun}; so is the
+        same amount after Start a new change.
       </p>
       <Button type="button" variant="outline" size="sm" onClick={onStartNew}>
         Start a new change
@@ -178,12 +182,12 @@ function PendingNotice({
 }
 
 /**
- * The toast after a failed send: a queued change will be applied and is no
- * error; any other failure shows the backend's words.
+ * The toast after a failed send: a change queued for a replay is no error; any
+ * other failure shows the backend's words.
  */
 function reportFailure(err: unknown, fallback: string) {
   if (isQueuedForReplay(err)) {
-    toast.info(err instanceof Error ? err.message : "Queued, it will be applied");
+    toast.info(err instanceof Error ? err.message : "Queued for replay");
   } else {
     toast.error(err instanceof Error ? err.message : fallback);
   }
@@ -192,18 +196,14 @@ function reportFailure(err: unknown, fallback: string) {
 /**
  * A change of one product's quantity sent under the key of the intended
  * operation (`pending-operations.ts`): the dialog opens on the change that has
- * no final answer yet, if there is one.
+ * no final answer yet, if there is one, and reads it again after each send.
  */
 function usePendingOperation(kind: OperationKind, productId: string) {
   const [pending, setPending] = useState(() => pendingOperation(kind, productId));
   return {
     pending,
     keyFor: (quantity: number) => keyForOperation(kind, productId, quantity),
-    applied: (key: string) => {
-      operationApplied(kind, productId, key);
-      setPending(undefined);
-    },
-    failed: (key: string, err: unknown) => setPending(operationFailed(kind, productId, key, err)),
+    refresh: () => setPending(pendingOperation(kind, productId)),
     startNew: () => {
       startNewOperation(kind, productId);
       setPending(undefined);
@@ -224,7 +224,8 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
     // The backend's field is `quantity`: the change to apply, negative to remove.
     const quantity = parseInt(delta, 10);
     // One key per intended adjustment: the page's own retry, and the same amount sent again from
-    // this dialog or after it was closed, carry it, so the backend applies the change once.
+    // this dialog, after it was closed or after a reload, carry it, so the backend applies the
+    // change once.
     const idempotencyKey = operation.keyFor(quantity);
     try {
       await mutateAsync({
@@ -232,11 +233,11 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
         body: { quantity, reason: reason || undefined },
         idempotencyKey,
       });
-      operation.applied(idempotencyKey);
+      operation.refresh();
       toast.success("Stock adjusted");
       onClose();
     } catch (err) {
-      operation.failed(idempotencyKey, err);
+      operation.refresh();
       reportFailure(err, "Failed to adjust stock");
       if (isQueuedForReplay(err)) onClose();
     }
@@ -322,11 +323,11 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
         body: { quantity: amount },
         idempotencyKey,
       });
-      operation.applied(idempotencyKey);
+      operation.refresh();
       toast.success("Shipment received into the inventory");
       onClose();
     } catch (err) {
-      operation.failed(idempotencyKey, err);
+      operation.refresh();
       reportFailure(err, "Failed to receive shipment");
       if (isQueuedForReplay(err)) onClose();
     }

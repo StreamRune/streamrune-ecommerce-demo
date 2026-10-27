@@ -35,7 +35,8 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * whatever it failed on, and the answer carries its entry's {@code commandId}: {@code 503} with
  * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} when it was sent with an {@code
  * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it
- * was not.
+ * was not. An answer with {@code Retry-After} exposes it to the frontend's origin, whose page reads
+ * it to wait that long before it sends the request again.
  *
  * <p>Each condition is forced on the app's real command bus, in a Spring context of its own on a
  * database of its own ({@code command_refusals}): the tests leave its circuit breaker open and its
@@ -76,6 +77,12 @@ class CommandRefusalStatusIT {
   private static final long HELD_AUDIT_LOCK = 7_421_001L;
 
   private static final ObjectMapper JSON = new ObjectMapper();
+
+  /**
+   * The origin of the frontend, which every request here comes from, as a browser sends it: the
+   * answers carry the CORS headers the page sees.
+   */
+  private static final String FRONTEND_ORIGIN = "http://localhost:3000";
 
   private static final HttpClient HTTP =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -243,10 +250,21 @@ class CommandRefusalStatusIT {
   private static void assertRefused(HttpResponse<String> answer, String reason) {
     assertThat(answer.statusCode()).as("status of %s", answer.body()).isEqualTo(503);
     assertThat(answer.headers().firstValue("Retry-After")).contains("5");
+    assertRetryAfterReadable(answer);
     JsonNode body = jsonBody(answer);
     assertThat(body.path("reason").asText()).isEqualTo(reason);
     assertThat(body.path("message").asText()).isNotBlank();
     assertThat(body.has("commandId")).as("a refusal leaves no entry").isFalse();
+  }
+
+  /**
+   * The page runs on another origin, and a browser shows it a response header outside the CORS
+   * safelist only when the answer exposes it: without that the page cannot read how long to wait.
+   */
+  private static void assertRetryAfterReadable(HttpResponse<String> answer) {
+    assertThat(answer.headers().firstValue("Access-Control-Expose-Headers"))
+        .as("Access-Control-Expose-Headers of the answer to %s", FRONTEND_ORIGIN)
+        .hasValueSatisfying(exposed -> assertThat(exposed).containsIgnoringCase("Retry-After"));
   }
 
   /**
@@ -257,6 +275,7 @@ class CommandRefusalStatusIT {
       HttpResponse<String> answer, DataSource dataSource, String key) throws Exception {
     assertThat(answer.statusCode()).as("status of %s", answer.body()).isEqualTo(503);
     assertThat(answer.headers().firstValue("Retry-After")).contains("5");
+    assertRetryAfterReadable(answer);
     JsonNode body = jsonBody(answer);
     assertThat(body.path("reason").asText()).isEqualTo("QUEUED_FOR_REPLAY");
     assertThat(body.path("message").asText()).contains("same key");
@@ -332,6 +351,7 @@ class CommandRefusalStatusIT {
                           + app.getEnvironment().getRequiredProperty("local.server.port")
                           + path))
               .header("Content-Type", "application/json")
+              .header("Origin", FRONTEND_ORIGIN)
               .header("X-User-Id", "admin-1")
               .header("X-User-Role", "ADMIN");
       if (key != null) {

@@ -25,6 +25,10 @@ micronaut:
             - OPTIONS
           allowed-headers:
             - "*"
+          # The page reads the Retry-After of a refusal and waits for it before it sends the
+          # command again; a browser hides the header from another origin unless it is exposed.
+          exposed-headers:
+            - Retry-After
   endpoints:
     health:
       enabled: true

@@ -683,7 +683,7 @@ public class GlobalExceptionHandler {
 
 ### Step 7b — Create `CorsConfig`
 
-The frontend (Chapter 16) runs on port 3000 and needs CORS headers. Create the config now so you never have to debug CORS later.
+The frontend (Chapter 16) runs on port 3000 and needs CORS headers. Create the config now so you never have to debug CORS later. `exposedHeaders` lets the page read the `Retry-After` of an answer: a browser shows a page of another origin only a short safelist of response headers unless the answer names more, and the page waits that long before it sends a refused command again (Chapter 12, Step 2b; Chapter 16).
 
 Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/CorsConfig.java`:
 
@@ -706,7 +706,8 @@ public class CorsConfig {
             .addMapping("/api/**")
             .allowedOrigins("http://localhost:3000")
             .allowedMethods("*")
-            .allowedHeaders("*");
+            .allowedHeaders("*")
+            .exposedHeaders("Retry-After");
       }
     };
   }

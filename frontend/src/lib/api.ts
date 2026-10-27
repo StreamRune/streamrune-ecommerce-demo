@@ -41,11 +41,11 @@ function buildHeaders(): HeadersInit {
  * A request the backend refused. `status` is the HTTP status and `message`
  * what a toast shows: for `403` that the selected role may not do this, for
  * `503` that the backend is busy and the request may be sent again in a few
- * seconds, or that the command is queued and will be applied, for a `500` that
- * waits for an operator that an operator decides, for every other status the
- * backend's own words (a `400` carries the decider's or the validation's
- * message, e.g. "Insufficient stock for product: prod-1"). The backend's words
- * follow in every case.
+ * seconds, or that the command is queued for a replay whose outcome shows in
+ * the admin dead-letter list, for a `500` that waits for an operator that an
+ * operator decides, for every other status the backend's own words (a `400`
+ * carries the decider's or the validation's message, e.g. "Insufficient stock
+ * for product: prod-1"). The backend's words follow in every case.
  */
 export class ApiError extends Error {
   readonly status: number;
@@ -59,23 +59,54 @@ export class ApiError extends Error {
    * one.
    */
   readonly reason?: string;
+  /** The answer's `Retry-After`, in seconds, when it has one the page can read. */
+  readonly retryAfterSeconds?: number;
 
-  constructor(status: number, detail: string, reason?: string) {
+  constructor(status: number, detail: string, reason?: string, retryAfterSeconds?: number) {
     super(describeRefusal(status, detail, reason));
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.reason = reason;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
 /**
- * Whether the answer says the command is not applied yet but will be: the
+ * Whether the answer says the command is not applied yet and may still be: the
  * backend stored it for a replay under its `Idempotency-Key` (`503` with
- * `QUEUED_FOR_REPLAY`). Sending it again with the same key is safe.
+ * `QUEUED_FOR_REPLAY`). The replay can fail in its turn and wait for an
+ * operator, so its outcome shows in the admin dead-letter list. Sending it
+ * again with the same key is safe.
  */
 export function isQueuedForReplay(error: unknown): boolean {
   return error instanceof ApiError && error.reason === "QUEUED_FOR_REPLAY";
+}
+
+/** The reasons of a `503` the backend gives a command it refused before writing anything. */
+const REFUSALS = new Set([
+  "CIRCUIT_BREAKER_OPEN",
+  "COMMAND_BUS_OVERLOADED",
+  "COMMAND_BUS_CLOSED",
+  "AGGREGATE_LOCK_UNAVAILABLE",
+  "AGGREGATE_VERSION_CONFLICT",
+]);
+
+/**
+ * Whether the backend refused the command for a reason that passes and wrote
+ * nothing: a `503` naming one of the five refusals. The same request succeeds
+ * later.
+ */
+export function isRefusal(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 503 && REFUSALS.has(error.reason ?? "")
+  );
+}
+
+/** `Retry-After` in seconds; a date or a value the page cannot read counts as none. */
+function retryAfterOf(res: Response): number | undefined {
+  const value = Number(res.headers.get("retry-after") ?? Number.NaN);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function describeRefusal(status: number, detail: string, reason?: string): string {
@@ -86,8 +117,9 @@ function describeRefusal(status: number, detail: string, reason?: string): strin
     return `The backend refused the request (400): ${detail || "Bad Request"}`;
   }
   if (status === 503 && reason === "QUEUED_FOR_REPLAY") {
-    // The command failed and the backend recorded it with its key: a replay applies it.
-    return `Queued, it will be applied (503): ${detail}`;
+    // The command failed and the backend recorded it with its key for a replay, which can fail
+    // in its turn: the admin dead-letter list shows what became of it.
+    return `Queued for replay; the outcome shows in the admin dead-letter list (503): ${detail}`;
   }
   if (status === 500 && reason === "AWAITING_OPERATOR") {
     // The command failed and waits for an operator, who replays or discards it.
@@ -155,7 +187,7 @@ async function apiFetch<T>(
   });
   if (!res.ok) {
     const { detail, reason } = await refusalOf(res);
-    throw new ApiError(res.status, detail, reason);
+    throw new ApiError(res.status, detail, reason, retryAfterOf(res));
   }
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {

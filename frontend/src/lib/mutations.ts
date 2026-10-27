@@ -19,7 +19,9 @@ import {
   togglePaymentFailure,
   injectSagaFailure,
   ApiError,
+  isQueuedForReplay,
 } from "./api";
+import { sendHeldOperation } from "./pending-operations";
 import { readAgainUntilSettled } from "./read-model-sync";
 
 /**
@@ -30,27 +32,51 @@ import { readAgainUntilSettled } from "./read-model-sync";
 function useInvalidatingMutation<TData, TVariables>(
   mutationFn: (vars: TVariables) => Promise<TData>,
   invalidateKeys: QueryKey[],
-  retry: (failureCount: number, error: Error) => boolean = () => false
+  retry: (failureCount: number, error: Error) => boolean = () => false,
+  retryDelay?: (failureCount: number, error: Error) => number
 ) {
   const queryClient = useQueryClient();
   return useMutation<TData, Error, TVariables>({
     mutationFn,
     retry,
+    retryDelay,
     onSuccess: () => readAgainUntilSettled(queryClient, invalidateKeys),
   });
 }
 
 /**
- * The page's own retry of a command sent with an `Idempotency-Key`: twice more
- * when no answer arrived (the request or its answer was lost) or the backend
- * failed (`5xx`), a command it queued for a replay (`503 QUEUED_FOR_REPLAY`)
- * included. A retry sends the same variables, so the same key, and the
- * backend applies the change once whichever attempt, or the replay, reached it
- * first. A refusal (`4xx`) is the backend's answer and is not sent again.
+ * The page's own retry of a command sent with an `Idempotency-Key`. A retry
+ * sends the same variables, so the same key, and the backend applies the change
+ * once whichever attempt reached it.
+ *
+ * - **No answer, or a `5xx` that says nothing** (the request or its answer was
+ *   lost, a `500`): twice more.
+ * - **A refusal** (`503` with `CIRCUIT_BREAKER_OPEN`, a busy aggregate, a
+ *   closing bus): once more, after its `Retry-After`. The backend wrote nothing,
+ *   and an attempt before then would meet the same refusal.
+ * - **`QUEUED_FOR_REPLAY`**: not again. The backend recorded the change for a
+ *   replay; another attempt at once would most likely fail the same way, leave
+ *   one more entry and count once more toward the command bus's circuit
+ *   breaker, which opens after three failures in a row. The dialog keeps the
+ *   key, and the user's own send of the same change is the deliberate re-send.
+ * - **Any other `4xx`**: not again. It is the backend's answer.
  */
 function retryKeyedCommand(failureCount: number, error: Error): boolean {
-  if (failureCount >= 2) return false;
-  return !(error instanceof ApiError) || error.status >= 500;
+  if (isQueuedForReplay(error)) return false;
+  if (error instanceof ApiError && error.status === 503) return failureCount < 1;
+  if (error instanceof ApiError && error.status < 500) return false;
+  return failureCount < 2;
+}
+
+/**
+ * How long the page waits before its retry: the answer's `Retry-After` when it
+ * names one, never less than the backoff react-query uses by default (1 s, then
+ * 2 s).
+ */
+function keyedCommandRetryDelay(failureCount: number, error: Error): number {
+  const backoff = Math.min(1000 * 2 ** failureCount, 30_000);
+  const retryAfter = error instanceof ApiError ? error.retryAfterSeconds : undefined;
+  return retryAfter === undefined ? backoff : Math.max(backoff, retryAfter * 1000);
 }
 
 // ─── Products ────────────────────────────────────────────────────────────────
@@ -59,7 +85,10 @@ export function useCreateProduct() {
   return useInvalidatingMutation(createProduct, [["products"]]);
 }
 
-/** The caller sends the key of the intended change (`pending-operations.ts`) with every request of it. */
+/**
+ * The caller sends the key of the intended change (`pending-operations.ts`),
+ * which records what each attempt's answer says about the change.
+ */
 export function useAdjustStock() {
   return useInvalidatingMutation(
     ({
@@ -70,9 +99,13 @@ export function useAdjustStock() {
       productId: string;
       body: { quantity: number; reason?: string };
       idempotencyKey: string;
-    }) => adjustStock(productId, body, idempotencyKey),
+    }) =>
+      sendHeldOperation("adjust-stock", productId, idempotencyKey, () =>
+        adjustStock(productId, body, idempotencyKey)
+      ),
     [["products"]],
-    retryKeyedCommand
+    retryKeyedCommand,
+    keyedCommandRetryDelay
   );
 }
 
@@ -93,7 +126,10 @@ export function useDiscontinueProduct() {
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
-/** The caller sends the key of the intended change (`pending-operations.ts`) with every request of it. */
+/**
+ * The caller sends the key of the intended change (`pending-operations.ts`),
+ * which records what each attempt's answer says about the change.
+ */
 export function useReceiveShipment() {
   return useInvalidatingMutation(
     ({
@@ -104,9 +140,13 @@ export function useReceiveShipment() {
       productId: string;
       body: { quantity: number };
       idempotencyKey: string;
-    }) => receiveShipment(productId, body, idempotencyKey),
+    }) =>
+      sendHeldOperation("receive-shipment", productId, idempotencyKey, () =>
+        receiveShipment(productId, body, idempotencyKey)
+      ),
     [["products"]],
-    retryKeyedCommand
+    retryKeyedCommand,
+    keyedCommandRetryDelay
   );
 }
 
