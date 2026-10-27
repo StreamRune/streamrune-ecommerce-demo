@@ -85,7 +85,8 @@ import org.junit.jupiter.api.Test;
  * the docs tests, in {@code spring-app/build.gradle.kts}, so Gradle re-runs this test when a file
  * in another module, a chapter or a script changes; {@link
  * #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()} holds that declaration to the extensions
- * and names the walk reads.
+ * and names the walk reads, and {@link #everyScannedFileIsADeclaredGradleInputOfThisTask()} to the
+ * files it reads.
  */
 class InternalTrackerIdRatchetTest {
 
@@ -186,11 +187,11 @@ class InternalTrackerIdRatchetTest {
   }
 
   /**
-   * The scanned names Gradle's default excludes leave out of every file tree, {@code
-   * publicTextSources} included: {@code spring-app/build.gradle.kts} declares each such file by its
-   * path ({@link #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()}).
+   * System property carrying the path of the file that lists, repository-relative, every file
+   * Gradle resolves for the public-text input of the docs-test task. Set by {@code
+   * spring-app/build.gradle.kts}.
    */
-  private static final Set<String> LEFT_OUT_OF_FILE_TREES = Set.of(".gitignore");
+  private static final String DECLARED_SOURCES_PROPERTY = "streamrune.publictext.declared-sources";
 
   /**
    * The forbidden shapes. Each alternative is anchored on word boundaries so a longer ordinary word
@@ -900,11 +901,9 @@ class InternalTrackerIdRatchetTest {
    * The Gradle inputs of this test are the files it reads: the extensions and the names that {@code
    * spring-app/build.gradle.kts} includes in {@code publicTextSources} are {@link
    * #SCANNED_EXTENSIONS} and {@link #SCANNED_NAMES}, with the Dockerfiles ({@code Dockerfile} and
-   * {@code Dockerfile.*}); and every file the walk reads that Gradle's default excludes leave out
-   * of a file tree ({@link #LEFT_OUT_OF_FILE_TREES}) is declared by its path in {@code
-   * ignoreLists}. A kind of file the walk reads and the build does not declare would leave an edit
-   * of it with the result of an earlier run; one the build declares and the walk does not read
-   * would run this test again for nothing.
+   * {@code Dockerfile.*}). A kind of file the walk reads and the build does not declare would leave
+   * an edit of it with the result of an earlier run; one the build declares and the walk does not
+   * read would run this test again for nothing.
    */
   @Test
   void theGradleInputsNameTheExtensionsAndNamesTheWalkReads() {
@@ -935,28 +934,46 @@ class InternalTrackerIdRatchetTest {
     assertEquals(new TreeSet<>(SCANNED_EXTENSIONS), extensions, "the extensions of the inputs");
     assertEquals(expectedNames, names, "the file names of the inputs");
     assertTrue(dockerfiles, "the inputs include **/Dockerfile.*");
+  }
 
+  /**
+   * The files Gradle resolves for the public-text input of this test are the files the walk reads.
+   * The lists of {@link #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()} can agree while a
+   * file is still missing from the input: Gradle's default excludes drop some names from every file
+   * tree whatever it includes ({@code .gitignore} among them), so this test compares the files, as
+   * Gradle hands them over through {@link #DECLARED_SOURCES_PROPERTY}.
+   */
+  @Test
+  void everyScannedFileIsADeclaredGradleInputOfThisTask() {
+    String manifestPath = System.getProperty(DECLARED_SOURCES_PROPERTY);
+    if (manifestPath == null) {
+      fail(
+          "-D"
+              + DECLARED_SOURCES_PROPERTY
+              + " is not set, so the declared-inputs check cannot run. Gradle's docsTest task supplies"
+              + " it (spring-app/build.gradle.kts); run `./gradlew :spring-app:docsTest`.");
+    }
+    Set<String> scanned = new TreeSet<>();
+    publicTextFiles().forEach(file -> scanned.add(relative(file)));
     Set<String> declared = new TreeSet<>();
-    Pattern resolved = Pattern.compile("resolve\\(\"([^\"]+)\"\\)");
-    for (String line : build) {
-      if (line.startsWith("val ignoreLists")) {
-        Matcher path = resolved.matcher(line);
-        while (path.find()) {
-          declared.add(path.group(1));
-        }
+    for (String line : read(Path.of(manifestPath))) {
+      if (!line.isBlank()) {
+        declared.add(line.strip());
       }
     }
-    Set<String> leftOut = new TreeSet<>();
-    for (Path file : publicTextFiles()) {
-      if (LEFT_OUT_OF_FILE_TREES.contains(file.getFileName().toString())) {
-        leftOut.add(relative(file));
-      }
+    Set<String> scannedButNotDeclared = new TreeSet<>(scanned);
+    scannedButNotDeclared.removeAll(declared);
+    Set<String> declaredButNotScanned = new TreeSet<>(declared);
+    declaredButNotScanned.removeAll(scanned);
+    if (!scannedButNotDeclared.isEmpty() || !declaredButNotScanned.isEmpty()) {
+      fail(
+          "the Gradle inputs of this test are not the files it reads (declare them in"
+              + " spring-app/build.gradle.kts):\n  read but NOT declared (an edit of these"
+              + " does not re-run this test): "
+              + scannedButNotDeclared
+              + "\n  declared but not read (an edit of these re-runs it for nothing): "
+              + declaredButNotScanned);
     }
-    assertFalse(leftOut.isEmpty(), "the walk reads the ignore lists");
-    assertEquals(leftOut, declared, "the ignore lists declared one by one in ignoreLists");
-    assertTrue(
-        build.stream().anyMatch(line -> line.strip().equals("inputs.files(ignoreLists)")),
-        "the docs tests take ignoreLists as an input");
   }
 
   private static String relative(Path file) {

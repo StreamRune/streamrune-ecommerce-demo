@@ -195,6 +195,11 @@ In `frontend/`, after `npm ci`:
   that a failure.
 - **`--enable-preview`.** A test or main class started from an IDE needs `--enable-preview` on its
   JVM as well.
+- **`InternalTrackerIdRatchetTest` fails outside Gradle by design.** One of its tests compares the
+  files it reads with the files Gradle declares as the inputs of `docsTest`, a list the task hands
+  over (`-Dstreamrune.publictext.declared-sources`): Gradle's default excludes leave a `.gitignore`
+  out of every file tree, so the build declares the repository's two on their own. Run it with
+  `./gradlew :spring-app:docsTest`, not from an IDE.
 - **Quarkus scopes.** The Quarkus application produces its projections as `@Singleton` beans. A
   normal-scoped or intercepted `BaseProjection` subclass also needs
   `quarkus.arc.transform-unproxyable-classes=true` (the Quarkus default), because

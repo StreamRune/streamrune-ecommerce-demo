@@ -115,10 +115,44 @@ val publicTextSources =
         exclude("frontend/next-env.d.ts")
     }
 
-// Gradle's default excludes leave every `.gitignore` out of a file tree, publicTextSources included,
-// and the ratchet reads them: each is declared by its path. InternalTrackerIdRatchetTest holds the
-// include lines above and this list to the files its walk reads.
+// Gradle's default excludes drop every file named .gitignore from a file tree, whatever the tree
+// includes, so the two ignore lists the ratchet reads by name are declared on their own. A .gitignore
+// in another directory needs a path of its own here too: the ratchet fails when it reads a file that
+// is not declared.
 val ignoreLists = files(rootDir.resolve(".gitignore"), rootDir.resolve("frontend/.gitignore"))
+
+// The public text the docs tests read, as Gradle resolves it: the tree and the ignore lists.
+val docsTestInputs = files(publicTextSources, ignoreLists)
+
+// Hands the files Gradle resolves for docsTestInputs to InternalTrackerIdRatchetTest, which fails when
+// they are not the files its walk reads: a file the walk reads and Gradle does not declare would let
+// an edit of it keep an earlier result.
+val publicTextSourceManifest =
+    tasks.register("publicTextSourceManifest") {
+        group = "verification"
+        description =
+            "Writes the public-text file list declared as an input of the docs tests, so the " +
+                "ratchet can prove the declaration covers what it scans."
+        val sources = docsTestInputs
+        val repoRoot = rootDir
+        val manifest = layout.buildDirectory.file("public-text/declared-sources.txt")
+        inputs
+            .files(sources)
+            .withPropertyName("publicTextSources")
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+        outputs.file(manifest)
+        doLast {
+            val file = manifest.get().asFile
+            file.parentFile.mkdirs()
+            file.writeText(
+                sources.files
+                    .filter { it.isFile }
+                    .map { it.relativeTo(repoRoot).invariantSeparatorsPath }
+                    .sorted()
+                    .joinToString("\n"),
+            )
+        }
+    }
 
 // The docs tests (org.streamrune.ecommerce.spring.docs) whose class names end in Test need no
 // Docker: they run in `docsTest`, which `check`, the root `quickCheck` and the `Shared module tests`
@@ -139,12 +173,18 @@ val docsTest =
         useJUnitPlatform { includeEngines("junit-jupiter") }
         jvmArgs("--enable-preview")
         include(docsTestClasses)
-        inputs.files(publicTextSources)
+        inputs.files(docsTestInputs)
             .withPathSensitivity(PathSensitivity.RELATIVE)
             .withPropertyName("publicTextSources")
-        inputs.files(ignoreLists)
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-            .withPropertyName("ignoreLists")
+        dependsOn(publicTextSourceManifest)
+        val manifest = publicTextSourceManifest.map { it.outputs.files.singleFile }
+        // Passed through an argument provider rather than `systemProperty`, so the absolute path
+        // never enters the task's cache key.
+        jvmArgumentProviders.add(
+            CommandLineArgumentProvider {
+                listOf("-Dstreamrune.publictext.declared-sources=${manifest.get().absolutePath}")
+            },
+        )
     }
 
 tasks.named<Test>("test") {
