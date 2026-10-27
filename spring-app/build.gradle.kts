@@ -104,6 +104,7 @@ val publicTextSources =
         include("**/*.java", "**/*.md", "**/*.kts", "**/*.gradle", "**/*.toml", "**/*.properties")
         include("**/*.yml", "**/*.yaml", "**/*.sql", "**/*.sh", "**/*.xml", "**/*.json", "**/*.txt")
         include("**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.css", "**/*.bat")
+        include("**/*.svg")
         include("**/Dockerfile", "**/Dockerfile.*", "**/.gitmessage", "**/.gitignore")
         include("**/.dockerignore", "**/LICENSE", "**/NOTICE", "**/CODEOWNERS", "**/gradlew")
         exclude("**/build/**", "**/out/**", "**/bin/**", "**/.gradle/**", "**/.kotlin/**")
