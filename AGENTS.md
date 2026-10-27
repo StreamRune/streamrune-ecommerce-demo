@@ -147,7 +147,10 @@ In `frontend/`, after `npm ci`:
   its configuration fails the chapter, with Spring's report. The reader's `application.yml` is
   chapter 1's listing with every later `yaml` block merged into it whose introducing line names
   `spring-app/src/main/resources/application.yml`: a chapter that adds configuration names the
-  file there.
+  file there, and after the last chapter the merged file must be the repository's, key for key.
+  Both tests give the reader's project the framework and every library of the test's own
+  classpath, whatever the chapters' build files declare: a dependency a chapter forgets to add
+  fails neither of them, so a chapter that uses a new library shows the line that adds it.
   `TutorialLedgerTest` checks every step against the ledger and the ledger against the chapters (a
   `curl` command without an `http://` address fails, and an id the ledger calls `listed` must be
   named by a listing of a main source file, not by a test's fixture); `TutorialStackFilesListingTest` checks the

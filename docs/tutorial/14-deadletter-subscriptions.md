@@ -234,6 +234,14 @@ A runner you define yourself **replaces** the framework's default one, on all th
 
 Without `.pollInterval(...)` the runner polls every minute. The batch size defaults to 10, configurable with `.batchSize(20)`.
 
+The bean reads its interval from `app.dead-letter.poll-interval`, a minute unless configured. Add the key to `spring-app/src/main/resources/application.yml`, under the `app` block of Chapter 11:
+
+```yaml
+app:
+  dead-letter:
+    poll-interval: 60s
+```
+
 ### Step 3b: Give the stock adjustment an idempotency key
 
 `PUT /api/products/{id}/stock` sends `AdjustStock`, a change *by* a quantity, and `POST /api/inventory/{productId}/receive` sends `ReceiveShipment`, which adds to the inventory. A client that sends either request twice — after a timeout, or from a retry button — changes the stock twice, and so would a replay of its dead-letter entry. The other writes of the demo do not have this problem: a create names the id the client chose, and a second create answers `400 already exists`; a price is set, not changed by an amount; shipping, delivering and cancelling move an order from one state to the next, and the decider refuses the second move.
@@ -1246,7 +1254,9 @@ public class AdminController {
 | `STALE_REPLAY_BLOCKED` | `409 Conflict` with a message | A keyed entry older than the inbox window. |
 | `ADMISSION_REFUSED` | `503` with `Retry-After: 5` | The command bus admits no more work. Nothing ran; the entry is unchanged. |
 | `READER_BEHIND` | `503` with `Retry-After: 5` | This backend's code reads the command's aggregate at an older event schema than one the aggregate holds — a backend still on the previous release during a rolling deployment of an event-schema change. Nothing was appended, and the entry is unchanged: its attempt is not counted, so the deployment can neither exhaust nor discard it. It replays on a backend that reads the event, by the schedule or a later retry. |
-| `FAILED` | `500` | The command failed again; the entry's attempt count went up. | Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
+| `FAILED` | `500` | The command failed again; the entry's attempt count went up. |
+
+Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
 
 **The operator's two ways out.** A `409` leaves the decision to the operator, who looks at the command's effect — for a stock adjustment, whether the product's stock changed — and the message names both remedies. When the effect is missing, `?force=true` replays the entry, and the runner logs a `WARN` naming the operator. When it is present, the command already ran (its caller retried it), and `DELETE /api/admin/dead-letters/{id}` removes the entry through `deadLetterQueue.discard(commandId)`, so that nothing replays it; it answers `200 {"outcome": "DISCARDED"}`, or `404` when the entry is gone. Either way the entry leaves `streamrune.dlq.awaiting_operator`.
 

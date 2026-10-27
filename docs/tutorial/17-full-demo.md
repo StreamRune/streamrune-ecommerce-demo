@@ -8,7 +8,7 @@
 
 There is almost no new code in this chapter: a seed runner, and one demo-only interceptor for the two-backend run at its end. You already built the rest. This chapter is a guided end-to-end walkthrough of the complete ecommerce demo — from the Next.js frontend through the Spring Boot backend, across all five aggregates, through the saga, and back to the read model.
 
-The goal is to see every feature work together at the same time, understand where each piece lives, and confirm that the system behaves correctly: encrypted PII at rest, an order-fulfillment saga that runs end-to-end (payment captured by the process manager, stock reserved, order confirmed), a payment-gateway circuit breaker that trips when you inject failures, the dead letter queue wired into the command bus, and a GDPR forget request that crypto-shreds the key and purges the read model. The last section runs two backends on one database and checks that the saga's forward fence (Chapter 11) keeps every forward command of a fulfillment ahead of its compensation, with one backend killed halfway.
+The goal is to see every feature work together at the same time, understand where each piece lives, and confirm that the system behaves correctly: encrypted PII at rest, an order-fulfillment saga that runs end-to-end (payment captured by the process manager, stock reserved, order confirmed), a payment-gateway circuit breaker that trips when the gateway stops answering, the dead letter queue wired into the command bus, and a GDPR forget request that crypto-shreds the key and purges the read model. The last section runs two backends on one database and checks that the saga's forward fence (Chapter 11) keeps every forward command of a fulfillment ahead of its compensation, with one backend killed halfway.
 
 By the end of this chapter you will have run the entire application, exercised every major feature, and have a checklist to verify that nothing was missed.
 
@@ -893,6 +893,14 @@ public VirtualThreadCommandBus commandBus(
   }
   return bus.build();
 }
+```
+
+The property is off unless a run sets it: `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` of the Compose file is read as this key. Give it its default in `spring-app/src/main/resources/application.yml`, under the `app` block:
+
+```yaml
+app:
+  chaos:
+    saga-command-delay-max: 0ms
 ```
 
 This is the last change to `StreamRuneConfig`, and the class is now the demo's file:

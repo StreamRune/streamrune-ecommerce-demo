@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.tools.JavaCompiler;
@@ -44,6 +45,8 @@ import org.yaml.snakeyaml.Yaml;
  * add to it with fragments: a {@code yaml} block whose introducing line names {@value
  * #APPLICATION_YML}. The test merges every fragment up to the chapter into the file, key by key, a
  * later value replacing an earlier one, and puts the result on the started project's classpath.
+ * After the last chapter the merged file is the repository's, key for key: a fragment whose keys or
+ * values drifted from the file, or a key of the file that no chapter gives, fails the test.
  */
 class TutorialChaptersStartIT {
 
@@ -101,6 +104,11 @@ class TutorialChaptersStartIT {
     assertThat(fragments)
         .as("configuration the chapters give, the listing of chapter 1 and the fragments after it")
         .isGreaterThanOrEqualTo(9);
+    Map<String, Object> repository =
+        yaml().load(Files.readString(REPOSITORY.resolve(APPLICATION_YML)));
+    assertThat(keys("", configuration))
+        .as("%s as the chapters build it, key by key, against the repository's", APPLICATION_YML)
+        .containsExactlyInAnyOrderEntriesOf(keys("", repository));
     assertThat(started).as("chapters whose project was started").isGreaterThan(10);
     assertThat(failures).as("chapters whose project does not start").isEmpty();
   }
@@ -200,6 +208,21 @@ class TutorialChaptersStartIT {
       i = end;
     }
     return fragments;
+  }
+
+  /** Every key of {@code section} below {@code prefix} as a dotted path, with its value. */
+  private static Map<String, Object> keys(String prefix, Map<?, ?> section) {
+    Map<String, Object> keys = new TreeMap<>();
+    section.forEach(
+        (key, value) -> {
+          String path = prefix.isEmpty() ? String.valueOf(key) : prefix + "." + key;
+          if (value instanceof Map<?, ?> nested) {
+            keys.putAll(keys(path, nested));
+          } else {
+            keys.put(path, value);
+          }
+        });
+    return keys;
   }
 
   /** Puts every key of {@code fragment} into {@code configuration}, a section into its section. */

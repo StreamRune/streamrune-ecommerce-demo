@@ -47,18 +47,7 @@ management:
         include: health,metrics
 ```
 
-To see the full StreamRune health detail at `/actuator/health` rather than a bare `{"status":"UP"}`, add `show-details: always` under the same `management` block of `spring-app/src/main/resources/application.yml`:
-
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,metrics
-  endpoint:
-    health:
-      show-details: always
-```
+To see the full StreamRune health detail at `/actuator/health` rather than a bare `{"status":"UP"}`, a run sets `management.endpoint.health.show-details` to `always`. The demo's `application.yml` leaves it at Spring's default, `never`, so the detail stays off unless a run asks for it: Step 7 starts the application with the environment variable `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always`, which Spring reads as that key, and Chapter 17 passes the same variable to its two backends in Docker Compose.
 
 ### Step 2: Verify MicrometerStreamRuneMetrics Auto-wiring
 
@@ -2301,7 +2290,13 @@ That is the whole wiring. With `streamrune.sse.enabled=true` the Spring integrat
 
 ### Step 7: Verify — Health, Metrics, and SSE
 
-Start the application and run the following verification commands.
+Start the application with the health details on (stop it first if it runs):
+
+```bash
+MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always ./gradlew :spring-app:bootRun
+```
+
+Then run the following verification commands.
 
 **Health check:**
 
