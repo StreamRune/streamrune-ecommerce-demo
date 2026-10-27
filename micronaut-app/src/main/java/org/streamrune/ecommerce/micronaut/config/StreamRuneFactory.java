@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.micronaut.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
 import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
@@ -64,6 +65,7 @@ import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.postgres.JdbcProjectionRepository;
+import org.streamrune.postgres.PgAdvisoryLocker;
 import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
@@ -299,6 +301,32 @@ public class StreamRuneFactory {
   @Singleton
   public JdbcProjectionRepository projectionRepository(DataSource ds) {
     return new JdbcProjectionRepository(ds);
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten (Hikari's default, as the demo sets none): as many commands as the application
+   * pool serves at once. Each backend opens both pools, which together stay below PostgreSQL's
+   * {@code max_connections}. A command waits for its lock up to {@code streamrune.lock-timeout},
+   * and before that, when every connection of the lock pool is taken, up to ten seconds for one of
+   * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
+   *
+   * <p>The framework's locker is {@code @Requires(missingBeans = AggregateLocker.class)}, so it
+   * steps aside for this bean. The locker owns its pool, which Micronaut closes with it.
+   */
+  @Singleton
+  @Bean(preDestroy = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${datasources.default.url}") String url,
+      @Value("${datasources.default.username}") String username,
+      @Value("${datasources.default.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   @Singleton

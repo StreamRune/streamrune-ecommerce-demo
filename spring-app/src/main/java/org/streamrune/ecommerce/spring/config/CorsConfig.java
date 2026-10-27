@@ -16,7 +16,8 @@ public class CorsConfig {
             .addMapping("/api/**")
             .allowedOrigins("http://localhost:3000")
             .allowedMethods("*")
-            .allowedHeaders("*");
+            .allowedHeaders("*")
+            .exposedHeaders("Retry-After");
       }
     };
   }

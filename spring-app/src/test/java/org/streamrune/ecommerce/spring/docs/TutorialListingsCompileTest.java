@@ -504,7 +504,7 @@ class TutorialListingsCompileTest {
   }
 
   /** The test classpath without the entries under the demo's root: the demo modules' classes. */
-  private static String frameworkAndLibraries() {
+  static String frameworkAndLibraries() {
     List<String> demo = underRepository(System.getProperty("java.class.path"));
     String kept =
         Stream.of(System.getProperty("java.class.path").split(File.pathSeparator))
@@ -554,14 +554,14 @@ class TutorialListingsCompileTest {
     return " in its line endings";
   }
 
-  private static List<Path> chapters() throws IOException {
+  static List<Path> chapters() throws IOException {
     try (Stream<Path> files = Files.list(TUTORIAL)) {
       return files.filter(p -> p.toString().endsWith(".md")).sorted().toList();
     }
   }
 
   /** The {@code ```java} blocks of one chapter that are complete files, in reading order. */
-  private static List<Listing> completeFiles(Path chapter) throws IOException {
+  static List<Listing> completeFiles(Path chapter) throws IOException {
     List<Listing> listings = new ArrayList<>();
     for (Block block : blocks(chapter)) {
       if (!block.isCompleteFile()) {
@@ -610,7 +610,7 @@ class TutorialListingsCompileTest {
     return blocks;
   }
 
-  private static List<String> compile(
+  static List<String> compile(
       JavaCompiler javac, List<Listing> listings, String classpath, Path classes)
       throws IOException {
     DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
@@ -623,6 +623,9 @@ class TutorialListingsCompileTest {
             "--release",
             String.valueOf(Runtime.version().feature()),
             "--enable-preview",
+            // The reader's build compiles with -parameters, as the Spring Boot plugin sets it:
+            // Spring tells two beans of one type apart by the name of the parameter they go to.
+            "-parameters",
             "-proc:none",
             "-implicit:none",
             "-nowarn",
@@ -657,7 +660,7 @@ class TutorialListingsCompileTest {
   }
 
   /** One compilation unit: where its first line is in the tutorial, its class and its source. */
-  private record Listing(String chapter, int firstLine, String className, String source) {}
+  record Listing(String chapter, int firstLine, String className, String source) {}
 
   /**
    * Lines of a bean method that a chapter rewrites: the chapters of the two listings, the bean, and

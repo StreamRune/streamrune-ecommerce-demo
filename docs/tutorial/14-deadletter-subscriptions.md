@@ -130,7 +130,7 @@ public VirtualThreadCommandBus commandBus(
 }
 ```
 
-From now on a command that fails on infrastructure — a database or network error — is recorded in `dead_letter_queue` before the error reaches the caller. The caller's answer says which failure it was: a genuine failure, a store error say, is `500`; a command that could not take its aggregate's lock within the lock timeout on any attempt is recorded too, and is answered `503` with `Retry-After: 5` and `{"reason": "AGGREGATE_LOCK_UNAVAILABLE", ...}`, because the same request succeeds once the lock is free; so is a command that met a version conflict on every attempt (`AGGREGATE_VERSION_CONFLICT`). The other refusals of Chapter 12, Step 2b — an open circuit breaker (`CIRCUIT_BREAKER_OPEN`), a closing bus (`COMMAND_BUS_CLOSED`), an overloaded one (`COMMAND_BUS_OVERLOADED`) — are `503` as well, and are never recorded: nothing was attempted. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. Two kinds of command never reach this queue, whatever fails: a command a saga sends, and a command a listener dispatches inside `StreamRuneContext.continuing(event)` — the payment process manager's `CapturePayment`, the order cancellation process manager's `ReleaseStock` and `CancelPayment`, the order shipment process manager's `ConfirmReservation`, and just as much a continuation of an event no saga caused — because an entry has no place for the causing event or for the saga origin such a command carries, so a replay would store its events without them. Their caller retries instead: the saga handles its own failures, and a listener's command is run again by the redelivery of the event it reacts to (chapter 11, Step 5b).
+From now on a command that fails on infrastructure — a database or network error, a lock it could not take within the lock timeout on any attempt, a version conflict on every attempt — is recorded in `dead_letter_queue`, and the bus tells its caller so: it throws `CommandDeadLetteredException` in place of the failure, which is its cause, with the entry's id as `commandId()` and the command's idempotency key, if it ran under one, as `idempotencyKey()`. The command is not applied, and a replay of the entry can still apply it: its outcome is pending, not final. Step 3b gives the stock adjustment its key and shows how the app answers such a command. The other refusals of Chapter 12, Step 2b — an open circuit breaker (`CIRCUIT_BREAKER_OPEN`), a closing bus (`COMMAND_BUS_CLOSED`), an overloaded one (`COMMAND_BUS_OVERLOADED`) — are never recorded: nothing was attempted, and they keep their `503`. The lock's and the version conflict's own answers, `AGGREGATE_LOCK_UNAVAILABLE` and `AGGREGATE_VERSION_CONFLICT`, remain for a command whose entry could not be stored, when the failure itself reaches the caller. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. Two kinds of command never reach this queue, whatever fails: a command a saga sends, and a command a listener dispatches inside `StreamRuneContext.continuing(event)` — the payment process manager's `CapturePayment`, the order cancellation process manager's `ReleaseStock` and `CancelPayment`, the order shipment process manager's `ConfirmReservation`, and just as much a continuation of an event no saga caused — because an entry has no place for the causing event or for the saga origin such a command carries, so a replay would store its events without them. Their caller retries instead: the saga handles its own failures, and a listener's command is run again by the redelivery of the event it reacts to (chapter 11, Step 5b).
 
 The bus stores the command as JSON, written by the mapper you pass to `.objectMapper(...)`. `DeadLetterRetryRunner.createObjectMapper(cryptoEngine)` registers the `CryptoShreddingModule`, so the `@Encrypted` fields of `RegisterCustomer` and `UpdateProfile` (chapter 6) are stored as ciphertext under the customer's key, and the forget flow (chapter 7) erases them with the events. Do not pass the application's `ObjectMapper` bean here: it has no crypto module, and the queue would hold the customer's name, email, address and phone in plaintext.
 
@@ -233,6 +233,14 @@ and annotate `StreamRuneConfig` with `@ImportRuntimeHints(EcommerceNativeHints.c
 A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (5 attempts, 60 s initial backoff, `OPERATOR_ONLY`, the inbox window, the metrics bean, `app.dead-letter.poll-interval`, the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean and the crypto-aware mapper by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse a `StockAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
 
 Without `.pollInterval(...)` the runner polls every minute. The batch size defaults to 10, configurable with `.batchSize(20)`.
+
+The bean reads its interval from `app.dead-letter.poll-interval`, a minute unless configured. Add the key to `spring-app/src/main/resources/application.yml`, under the `app` block of Chapter 11:
+
+```yaml
+app:
+  dead-letter:
+    poll-interval: 60s
+```
 
 ### Step 3b: Give the stock adjustment an idempotency key
 
@@ -448,6 +456,8 @@ public class InventoryCommandController {
 A key that is blank, that is longer than 512 characters together with the caller's id (the scoped key is `<userId>|<key>`), or that holds a control character is refused with `400`, and so is a key presented again for another product: the bus never hands one stream's result to another. Try it — the second request answers `200` and leaves the stock of `p-1` as the first one set it (`curl http://localhost:8080/api/products/p-1` shows it five above where it was):
 
 ```bash
+# One key for one intended change, this restock of five: mint it once, and send the request again
+# with the same key after a lost answer or a 5xx, until a 2xx or a 4xx answers it.
 KEY=$(uuidgen)
 for i in 1 2; do
   curl -s -o /dev/null -w '%{http_code}\n' -X PUT http://localhost:8080/api/products/p-1/stock \
@@ -456,7 +466,310 @@ for i in 1 2; do
 done
 ```
 
-The key is what makes a failed adjustment safe to replay: the bus stores it with the dead-letter entry, the runner replays the entry under it, and a caller who already retried with the same key is answered from the inbox. The frontend's Adjust Stock and Receive Shipment dialogs send a fresh key per submit (Chapter 16). `IdempotencyKeyIT` in each app checks the rules above.
+**One key per intended change.** The key belongs to the change you mean, not to a request: the block mints `KEY` once for the restock of five, and every request of that restock carries it. A request that fails is sent again with the same key. A new key would be a new restock.
+
+**A failure that left an entry is pending.** The key is what makes a failed adjustment safe to replay: the bus stores it with the dead-letter entry, the runner replays the entry under it, and a request sent again with the same key meets the replay in the command inbox — whichever comes first runs the command, and the other is answered with the recorded result. So a `5xx` to a keyed request does not say "not applied, start over": the command may be queued for a replay that applies it. A request sent under a new key is a second operation, which the replay applies beside the first one: the stock goes up by ten. The answer therefore says what happened. `CommandRefusal` (Chapter 12) answers `CommandDeadLetteredException` before it looks at anything else, whatever the command failed on — a lock timeout or a version conflict that left an entry is pending as well:
+
+| What the bus did | Status | Body | What the client does |
+|---|---|---|---|
+| Dead-lettered a keyed command | `503` with `Retry-After: 5` | `{"reason": "QUEUED_FOR_REPLAY", "commandId": ..., "message": ...}` | Sends it again with the same key, or waits for the replay. Either way the command runs once. |
+| Dead-lettered an unkeyed command | `500`, no `Retry-After` | `{"reason": "AWAITING_OPERATOR", "commandId": ..., "message": ...}` | Does not send it again: an operator replays or discards the entry (Step 5), and a request sent as well would apply it a second time. |
+| Refused it without an entry (Chapter 12, Step 2b) | `503` with `Retry-After: 5` | `{"reason": "CIRCUIT_BREAKER_OPEN", ...}` and the others | Sends it again later. |
+| Failed without an entry: a business rejection, a store error with the entry's write failing too | `400`, or `500` | the error | Treats a `400` as final; a `500` says nothing was recorded. |
+
+Neither answer is `202 Accepted`: a client takes a `2xx` for done and never sends the request again, while a replay can fail in its turn and be kept for an operator. The `commandId` is the entry's id, the one `POST /api/admin/dead-letters/{id}/retry` takes (Step 5). The unkeyed answer is a `500` without `Retry-After` rather than a `503`: a client that retries every `503` on its own would send the command again while the entry waits, and an operator's replay would then apply it twice.
+
+`CommandDeadLetteredException` is in `streamrune-runtime`. Add it to `commands/build.gradle.kts`, inside the `dependencies { }` block:
+
+```kotlin
+// commands/build.gradle.kts — inside the dependencies { } block
+implementation("org.streamrune:streamrune-runtime:$sr")
+```
+
+`CommandRefusal` with the two new reasons, the entry's id and the status of each answer, the whole file:
+
+```java
+package org.streamrune.ecommerce.commands;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+import org.streamrune.core.CircuitBreakerOpenException;
+import org.streamrune.core.CommandBusClosedException;
+import org.streamrune.core.CommandBusOverloadedException;
+import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
+import org.streamrune.runtime.CommandDeadLetteredException;
+
+/**
+ * A command the framework did not apply, for a reason that passes or with an outcome that is still
+ * pending, and how the three apps answer it: a status, {@code Retry-After: 5} when the client may
+ * send the request again, and a JSON body that names the reason and says what happened, {@code
+ * {"reason": "CIRCUIT_BREAKER_OPEN", "message": "..."}}. Every other failure keeps its own answer:
+ * a broken business rule is {@code 400}, a refused caller {@code 403}, and a genuine failure that
+ * left nothing behind, a store error with no dead-letter queue to record it, {@code 500}.
+ *
+ * <p>The five refusals are answered {@code 503 Service Unavailable} with {@code Retry-After}: the
+ * same request succeeds later.
+ *
+ * <ul>
+ *   <li>{@link CircuitBreakerOpenException} — the command bus's circuit breaker is open (or
+ *       half-open with its probe in flight) after consecutive infrastructure failures, and refuses
+ *       every command until a probe succeeds. Nothing was attempted. The breaker does not say how
+ *       long it stays open, so {@code Retry-After} is the same short wait as for the others.
+ *   <li>{@link CommandBusOverloadedException} — the bus's budget of in-flight asynchronous commands
+ *       is used up. Nothing was attempted. Only {@code executeAsync} has the budget; the demo's
+ *       routes run commands synchronously, so it is mapped for completeness.
+ *   <li>{@link CommandBusClosedException} — the bus is closing (the application is shutting down)
+ *       and admits no new command. Nothing was attempted; another instance, or this one restarted,
+ *       runs the command when it is sent again.
+ *   <li>{@link LockException} — the command's aggregate lock could not be taken within the lock
+ *       timeout ({@code streamrune.lock-timeout}), on every attempt of the bus's retry policy: a
+ *       command on the same aggregate held it all along, or the locker could not reach its store.
+ *       The decider never ran and nothing was written. A later attempt takes the lock once it is
+ *       free; nothing in the request is wrong, so the answer is {@code 503} with {@code
+ *       Retry-After} and not {@code 409 Conflict}, which tells a client its request conflicts with
+ *       the state of the resource. With a dead-letter queue the bus records the command there and
+ *       throws {@link CommandDeadLetteredException} instead (below); the lock's own exception
+ *       reaches a controller when there is no queue or the entry could not be stored.
+ *   <li>{@link OptimisticLockException} — the aggregate's stream had moved past the version the
+ *       command was decided on, on every attempt of the bus's retry policy: another writer appended
+ *       to the stream between the command's load and its append each time (an instance whose lock
+ *       is its own, a writer outside the command bus). Nothing was written. The bus reloads the
+ *       aggregate on each attempt, and the client sent no version that could conflict, so the
+ *       answer is the lock's: {@code 503} with {@code Retry-After}, the same request succeeding
+ *       later, and with a dead-letter queue the bus records the command there like the lock's. Only
+ *       the command bus's append conflict reaches a controller; the subtypes the framework raises
+ *       for projections and saga rows are thrown on the threads of subscriptions.
+ * </ul>
+ *
+ * <p>{@link CommandDeadLetteredException} is not a refusal: the command failed, the bus stored its
+ * entry in the dead-letter queue, and a replay of the entry can still apply it. Its outcome is
+ * pending, and the answer says what the client does about it, whatever the failure was, a lock
+ * timeout and a version conflict included. The body carries the entry's {@code commandId}.
+ *
+ * <ul>
+ *   <li><b>A keyed command</b> ({@code Idempotency-Key}) is queued for replay under its key: the
+ *       retry runner replays it on its schedule. {@code 503} with {@code Retry-After} and {@code
+ *       QUEUED_FOR_REPLAY}: the client sends the request again with the same key, or waits. The
+ *       command inbox runs the command once, whichever of the two comes first. A new key is a new
+ *       operation, and the replay applies the first one beside it.
+ *   <li><b>An unkeyed command</b> waits for an operator, who replays or discards the entry: nothing
+ *       pairs a replay with a request the client sends again, so the two would apply the command
+ *       twice. {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After}: the client
+ *       does not send it again on its own.
+ * </ul>
+ *
+ * <p>Neither is {@code 202 Accepted}: a client takes a {@code 2xx} for done and never sends the
+ * request again, while a replay can fail in its turn and be kept for an operator.
+ *
+ * @param reason what refused the command, or what happens to it now
+ * @param message what the body tells the client
+ * @param commandId the dead-letter entry's id, the {@code id} of {@code POST
+ *     /api/admin/dead-letters/{id}/retry}; {@code null} for a refusal, which leaves no entry
+ */
+public record CommandRefusal(Reason reason, String message, String commandId) {
+
+  /** How long a client waits before it sends a refused command again, in seconds. */
+  public static final int RETRY_AFTER_SECONDS = 5;
+
+  /** What refused the command, or what happens to it now; the body's {@code reason}. */
+  public enum Reason {
+    CIRCUIT_BREAKER_OPEN,
+    COMMAND_BUS_OVERLOADED,
+    COMMAND_BUS_CLOSED,
+    AGGREGATE_LOCK_UNAVAILABLE,
+    AGGREGATE_VERSION_CONFLICT,
+    QUEUED_FOR_REPLAY,
+    AWAITING_OPERATOR
+  }
+
+  /**
+   * The answer {@code failure} gets, or empty when it is none of these: a failure the app answers
+   * otherwise. A dead-lettered command is told apart before its cause is looked at: a lock timeout
+   * that left an entry is pending, not refused.
+   *
+   * @param failure what the command bus threw
+   */
+  public static Optional<CommandRefusal> of(Throwable failure) {
+    return switch (failure) {
+      case CommandDeadLetteredException deadLettered -> Optional.of(pending(deadLettered));
+      case CircuitBreakerOpenException _ ->
+          refusal(
+              Reason.CIRCUIT_BREAKER_OPEN,
+              "The command bus refuses commands while its circuit breaker is open.");
+      case CommandBusOverloadedException _ ->
+          refusal(Reason.COMMAND_BUS_OVERLOADED, "The command bus admits no more commands now.");
+      case CommandBusClosedException _ ->
+          refusal(
+              Reason.COMMAND_BUS_CLOSED,
+              "The application is shutting down and admits no more commands.");
+      case LockException _ ->
+          refusal(
+              Reason.AGGREGATE_LOCK_UNAVAILABLE,
+              "The aggregate's lock could not be taken in time.");
+      case OptimisticLockException _ ->
+          refusal(
+              Reason.AGGREGATE_VERSION_CONFLICT,
+              "The aggregate changed while the command ran; nothing was written.");
+      case null, default -> Optional.empty();
+    };
+  }
+
+  /**
+   * The HTTP status: {@code 500 Internal Server Error} for a command that awaits an operator,
+   * {@code 503 Service Unavailable} for every other answer.
+   */
+  public int status() {
+    return reason == Reason.AWAITING_OPERATOR ? 500 : 503;
+  }
+
+  /**
+   * Whether the client may send the request again: the answer then carries {@code Retry-After:}
+   * {@value #RETRY_AFTER_SECONDS}. A command that awaits an operator is not sent again.
+   */
+  public boolean retryLater() {
+    return status() == 503;
+  }
+
+  /**
+   * The JSON body: {@code reason}, then {@code commandId} when there is an entry, {@code message}.
+   */
+  public Map<String, String> body() {
+    Map<String, String> body = new LinkedHashMap<>();
+    body.put("reason", reason.name());
+    if (commandId != null) {
+      body.put("commandId", commandId);
+    }
+    body.put("message", message);
+    return body;
+  }
+
+  private static CommandRefusal pending(CommandDeadLetteredException deadLettered) {
+    String commandId = deadLettered.commandId().value();
+    return deadLettered.idempotencyKey() != null
+        ? new CommandRefusal(
+            Reason.QUEUED_FOR_REPLAY,
+            "The command is not applied yet: it is queued for a replay under its Idempotency-Key."
+                + " Send it again with the same key, or wait; a new key is a new operation.",
+            commandId)
+        : new CommandRefusal(
+            Reason.AWAITING_OPERATOR,
+            "The command failed and is recorded for an operator, who replays or discards it."
+                + " Sending it again would apply it a second time if the operator replays it.",
+            commandId);
+  }
+
+  private static Optional<CommandRefusal> refusal(Reason reason, String message) {
+    return Optional.of(new CommandRefusal(reason, message, null));
+  }
+}
+```
+
+`GlobalExceptionHandler` maps the new type in the handler of Chapter 12, which now takes its status from the refusal and sends `Retry-After` only when the client may send the request again. Spring picks a handler by the thrown type before it looks at the cause, so the dead-lettered command reaches this handler as itself:
+
+```java
+package org.streamrune.ecommerce.spring.config;
+
+import java.util.Map;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.streamrune.core.AuthorizationException;
+import org.streamrune.core.CircuitBreakerOpenException;
+import org.streamrune.core.CommandBusClosedException;
+import org.streamrune.core.CommandBusOverloadedException;
+import org.streamrune.core.DomainException;
+import org.streamrune.core.LockException;
+import org.streamrune.core.OptimisticLockException;
+import org.streamrune.core.crypto.SubjectForgottenException;
+import org.streamrune.ecommerce.commands.CommandRefusal;
+import org.streamrune.ecommerce.queries.access.AccessRefusedException;
+import org.streamrune.runtime.CommandDeadLetteredException;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+  @ExceptionHandler(DomainException.class)
+  public ResponseEntity<String> handleDomainException(DomainException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * A command the caller's role does not allow ({@code @RequireRole}, checked in the command bus):
+   * {@code 403}, the status {@link #handleAccessRefused} answers with. {@code
+   * AuthorizationException} is a {@code DomainException}; this handler is the more specific one, so
+   * a refusal is not reported as the {@code 400} of a broken business rule.
+   */
+  @ExceptionHandler(AuthorizationException.class)
+  public ResponseEntity<String> handleAuthorization(AuthorizationException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  @ExceptionHandler(IllegalArgumentException.class)
+  public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException e) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+  }
+
+  /**
+   * Terminal erasure: a command tried to encrypt PII for a crypto-shredded subject (e.g.
+   * re-registering a forgotten customer id). The subject was erased under GDPR Article 17, so the
+   * write is refused — 410 Gone is the honest status for a resource that was deliberately removed.
+   */
+  @ExceptionHandler(SubjectForgottenException.class)
+  public ResponseEntity<String> handleSubjectForgotten(SubjectForgottenException e) {
+    return ResponseEntity.status(HttpStatus.GONE).body(e.getMessage());
+  }
+
+  /**
+   * The caller may not read or change what the request names ({@code OwnerOrAdminAccess}): {@code
+   * 403}, the same answer for a request without an identity and for one with the wrong identity.
+   */
+  @ExceptionHandler(AccessRefusedException.class)
+  public ResponseEntity<String> handleAccessRefused(AccessRefusedException e) {
+    return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+  }
+
+  /**
+   * A command the framework refused for a reason that passes ({@link CommandRefusal}): an open
+   * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
+   * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
+   * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
+   * too.
+   *
+   * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
+   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
+   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
+   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
+   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
+   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
+   */
+  @ExceptionHandler({
+    CircuitBreakerOpenException.class,
+    CommandBusOverloadedException.class,
+    CommandBusClosedException.class,
+    LockException.class,
+    OptimisticLockException.class,
+    CommandDeadLetteredException.class
+  })
+  public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
+    CommandRefusal refusal =
+        CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
+    ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
+    if (refusal.retryLater()) {
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+    }
+    return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
+  }
+}
+```
+
+The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a mapper by the thrown type, so each app has one more, `CommandDeadLettered`, nested in `CommandRefusalExceptionMappers` and `CommandRefusalExceptionHandlers`; a lock timeout or a version conflict that the bus dead-lettered reaches it, not the lock's mapper. `CommandRefusalStatusIT` in each app sends a keyed and an unkeyed stock adjustment while the product's lock is held, and again while every append meets a version conflict, and checks the two answers and the entries they name; with the entry's write refused as well, the version conflict reaches the caller as itself, `AGGREGATE_VERSION_CONFLICT`. `DeadLetterReplayPolicyIT` checks the answer to every adjustment it dead-letters.
+
+The frontend's Adjust Stock and Receive Shipment dialogs keep the key of a change until it is answered for good, and say that a `QUEUED_FOR_REPLAY` change will be applied (Chapter 16). `IdempotencyKeyIT` in each app checks the rules above.
 
 ### Step 4: Configure `ProjectionErrorStrategy.DLQ` per projection (optional production hardening)
 
@@ -482,7 +795,7 @@ When `orderProjection.process(batch)` throws, the internal runner writes a `Proj
 
 ### Step 5: Extend `AdminController` with Dead-Letter and Outbox Endpoints
 
-`AdminController` was created in Chapter 12 with only the circuit-breaker and payment-failure endpoints. Now that both `DeadLetterQueue` and `OutboxStore` beans exist, extend it to add the dead-letter and outbox endpoints. Step 5b below adds a further round of saga dead-letter endpoints once the `SagaDeadLetterReplayer` bean exists.
+`AdminController` was created in Chapter 12 with only the circuit-breaker endpoint and the payment gateway's two switches. Now that both `DeadLetterQueue` and `OutboxStore` beans exist, extend it to add the dead-letter and outbox endpoints. Step 5b below adds a further round of saga dead-letter endpoints once the `SagaDeadLetterReplayer` bean exists.
 
 Replace the existing `AdminController` with the full version:
 
@@ -624,7 +937,10 @@ public class AdminController {
       case STALE_REPLAY_BLOCKED ->
           ResponseEntity.status(HttpStatus.CONFLICT)
               .body(Map.of("outcome", outcome.name(), "message", STALE_REPLAY_MESSAGE));
-      case ADMISSION_REFUSED ->
+      // Nothing ran and the entry is untouched, so the operator tries again later: the bus admits
+      // no more work (ADMISSION_REFUSED), or this replica's code reads the command's aggregate at
+      // an older event schema than one it holds, during a rolling deployment (READER_BEHIND).
+      case ADMISSION_REFUSED, READER_BEHIND ->
           ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
               .header("Retry-After", "5")
               .body(Map.of("outcome", outcome.name()));
@@ -899,6 +1215,25 @@ public class AdminController {
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 
+  /**
+   * Switches the payment gateway's outage on or off. While it is on the gateway answers no call: a
+   * new payment stays {@code PENDING} and its event is delivered again, the gateway breaker opens
+   * after three calls without an answer, and the payments go through once it is off again.
+   */
+  @PostMapping("/payment-outage/toggle")
+  public Map<String, Boolean> togglePaymentOutage() {
+    requireAdmin();
+    boolean current = paymentGateway.isOutage();
+    paymentGateway.setOutage(!current);
+    return Map.of("outage", !current);
+  }
+
+  @GetMapping("/payment-outage")
+  public Map<String, Boolean> paymentOutageState() {
+    requireAdmin();
+    return Map.of("outage", paymentGateway.isOutage());
+  }
+
   /** Open to every caller: the answer says that the application runs and nothing else. */
   @GetMapping("/health")
   public Map<String, String> health() {
@@ -909,7 +1244,19 @@ public class AdminController {
 
 > The constructor also injects `PaymentGatewayCircuitBreaker` (from Chapter 12), so `/circuit-breaker` reports both the command-bus breaker (`state`) and the payment-gateway breaker (`paymentGateway`). It takes the outbox replayer as an `ObjectProvider<OutboxFailedReplayer>` rather than the replayer itself: the framework auto-configures `OutboxFailedReplayer` only while `streamrune.outbox.enabled` is `true`, so with the outbox switched off the controller still starts and the two outbox operations answer `503`.
 
-`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id), force)`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint maps the runner's `RetryOutcome`: `200 OK` for `REPLAYED`, `404 Not Found` when no entry exists for that id, `409 Conflict` with a message for `NOT_DEDUPLICATED` (the command carries no idempotency key, so if its caller already retried it a replay applies it twice) and for `STALE_REPLAY_BLOCKED` (a keyed entry older than the inbox window), `503` with `Retry-After` for `ADMISSION_REFUSED` (the command bus admits no more work) and `500` for `FAILED`. Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
+`deadLetterQueue.read(limit)` returns entries ordered newest-first. Each `DeadLetterEntry` carries the original command payload as a JSON string, the command type name, error details, the number of original attempts, and the number of DLQ retry attempts so far. The `/retry` endpoint **re-dispatches the command through the bus on demand**: it calls `deadLetterRetryRunner.retry(new CommandId(id), force)`, which loads the entry, deserializes its command, and executes it under a `DLQ_REPLAY` marker plus the entry's original request context (correlation id, user). A guarded command such as `ShipOrder` replays too: the replay has no request for `HeaderUserRoleResolver` to read the role from, so the framework does not repeat the role check, and the command, authorized once before it was dead-lettered, runs under the dead-letter-replay system principal as the recorded user, with a `WARN` naming it (Chapter 9 explains why the resolver declares `requiresRequestContext()`). On success the entry is discarded; on failure its DLQ attempt count is incremented. The endpoint maps the runner's `RetryOutcome`:
+
+| `RetryOutcome` | Answer | What it means |
+|---|---|---|
+| `REPLAYED` | `200 OK` | The command ran, or the inbox recognised its key; the entry is gone. |
+| `NOT_FOUND` | `404 Not Found` | No entry has that id. |
+| `NOT_DEDUPLICATED` | `409 Conflict` with a message | The command carries no idempotency key: if its caller already retried it, a replay applies it twice. |
+| `STALE_REPLAY_BLOCKED` | `409 Conflict` with a message | A keyed entry older than the inbox window. |
+| `ADMISSION_REFUSED` | `503` with `Retry-After: 5` | The command bus admits no more work. Nothing ran; the entry is unchanged. |
+| `READER_BEHIND` | `503` with `Retry-After: 5` | This backend's code reads the command's aggregate at an older event schema than one the aggregate holds — a backend still on the previous release during a rolling deployment of an event-schema change. Nothing was appended, and the entry is unchanged: its attempt is not counted, so the deployment can neither exhaust nor discard it. It replays on a backend that reads the event, by the schedule or a later retry. |
+| `FAILED` | `500` | The command failed again; the entry's attempt count went up. |
+
+Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
 
 **The operator's two ways out.** A `409` leaves the decision to the operator, who looks at the command's effect — for a stock adjustment, whether the product's stock changed — and the message names both remedies. When the effect is missing, `?force=true` replays the entry, and the runner logs a `WARN` naming the operator. When it is present, the command already ran (its caller retried it), and `DELETE /api/admin/dead-letters/{id}` removes the entry through `deadLetterQueue.discard(commandId)`, so that nothing replays it; it answers `200 {"outcome": "DISCARDED"}`, or `404` when the entry is gone. Either way the entry leaves `streamrune.dlq.awaiting_operator`.
 
@@ -934,7 +1281,7 @@ The `/outbox` endpoint lists `PENDING` entries with `outboxStore.findByStatus(Ou
 - `POST /api/admin/outbox/failed/{id}/replay` → `{"outcome":"REPLAYED"}` — the entry goes back to `PENDING` at its original position and is delivered before the entries that waited behind it. `NOT_FAILED` means someone already resolved it; `NOT_FOUND` means the id is unknown.
 - `POST /api/admin/outbox/failed/{id}/skip` with `{"reason":"…"}` → `{"outcome":"SKIPPED"}` — the entry will never be delivered; the row records who, when and why, and the aggregate's later entries flow again. The **who** is `skippedBy`, and the controller does not read it from a header: it takes the user id the framework's request filter already resolved into `StreamRuneContext.CURRENT` — in this demo's trusted-gateway mode that is `X-User-Id` (Chapter 9) — exactly as `CustomerCommandController.currentRequesterId()` does for the GDPR audit. An `ADMIN` always has one: `requireAdmin()` refuses a caller without an identity before the handler reads it. `reason` is required.
 
-**Every route of the controller but `/health` asks for an `ADMIN`.** `requireAdmin()` is the helper Chapter 12 gave the controller: it calls `OwnerOrAdminAccess.requireAdmin` (Chapter 9), which wants an identity and the `ADMIN` role — the `role` entry of the request context's baggage, the same entry `HeaderUserRoleResolver` reads, copied by the framework filter from `X-User-Role` — and answers `403` otherwise, also to `X-User-Role: ADMIN` without `X-User-Id`. It guards the operations — `dead-letters/{id}/retry`, `DELETE dead-letters/{id}`, the three saga recovery operations (`saga-dead-letters/replay`, `saga-dead-letters/replay-all`, `sagas/faulted/resume`), `DELETE saga-dead-letters`, `payment-failure/toggle` and the two new outbox operations — and the listings too: a dead-lettered command and an outbox entry carry the payload of somebody's command or event, and the saga listings name other people's orders. One route outside this controller flips the same switch as `payment-failure/toggle`: `SagaController`'s `POST /api/saga/fulfillments/{id}/inject-failure` shorthand (Chapter 11) calls `requireAdmin` too, so the payment-failure flag cannot be flipped without the role through either route. This is the same demo shortcut Chapter 9 is honest about: the role is whatever the client claims, so the check is a stand-in for the gateway that would authenticate the caller in a real deployment — without it the chapter would teach an admin surface that lets anyone read or drop a message. The frontend already sends `X-User-Role` on every call, so the Admin page keeps working when you pick the ADMIN persona.
+**Every route of the controller but `/health` asks for an `ADMIN`.** `requireAdmin()` is the helper Chapter 12 gave the controller: it calls `OwnerOrAdminAccess.requireAdmin` (Chapter 9), which wants an identity and the `ADMIN` role — the `role` entry of the request context's baggage, the same entry `HeaderUserRoleResolver` reads, copied by the framework filter from `X-User-Role` — and answers `403` otherwise, also to `X-User-Role: ADMIN` without `X-User-Id`. It guards the operations — `dead-letters/{id}/retry`, `DELETE dead-letters/{id}`, the three saga recovery operations (`saga-dead-letters/replay`, `saga-dead-letters/replay-all`, `sagas/faulted/resume`), `DELETE saga-dead-letters`, `payment-failure/toggle`, `payment-outage/toggle` and the two new outbox operations — and the listings too: a dead-lettered command and an outbox entry carry the payload of somebody's command or event, and the saga listings name other people's orders. One route outside this controller flips the same switch as `payment-failure/toggle`: `SagaController`'s `POST /api/saga/fulfillments/{id}/inject-failure` shorthand (Chapter 11) calls `requireAdmin` too, so the payment-failure flag cannot be flipped without the role through either route. This is the same demo shortcut Chapter 9 is honest about: the role is whatever the client claims, so the check is a stand-in for the gateway that would authenticate the caller in a real deployment — without it the chapter would teach an admin surface that lets anyone read or drop a message. The frontend already sends `X-User-Role` on every call, so the Admin page keeps working when you pick the ADMIN persona.
 
 Try it (the ids come from the `failed` listing):
 
@@ -1256,12 +1603,39 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover. Distinct from {@code circuitBreaker} above, which guards the command bus
+   * generally.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
     return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten (Hikari's default, as the demo sets none): as many commands as the application
+   * pool serves at once. Each backend opens both pools, which together stay below PostgreSQL's
+   * {@code max_connections}. A command waits for its lock up to {@code streamrune.lock-timeout},
+   * and before that, when every connection of the lock pool is taken, up to ten seconds for one of
+   * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
+   *
+   * <p>The framework's in-process locker steps aside for this bean
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it.
+   */
+  @Bean(destroyMethod = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${spring.datasource.url}") String url,
+      @Value("${spring.datasource.username}") String username,
+      @Value("${spring.datasource.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   /**
@@ -1283,7 +1657,7 @@ public class StreamRuneConfig {
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
    * in plaintext.
    *
-   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
@@ -1910,7 +2284,7 @@ There is deliberately no polling runner behind this bean — poison failures are
 | `POST` | `/api/admin/sagas/faulted/resume?sagaId=…` | Resumes a compensation faulted without an entry, through `resumeFaulted`. Returns `{"outcome": "..."}`. |
 | `DELETE` | `/api/admin/saga-dead-letters?sagaId=…&eventOffset=…` | Discards a quarantined entry without replaying it, through `SagaDeadLetterReplayer.discard`. `sagaId` is omitted for an entry whose saga could never be identified. Returns `{"discarded": true/false}`. |
 
-The three `POST` operations also take `force=true` (below). The four mutating endpoints carry the ADMIN role header from Step 5.
+The three `POST` operations also take `force=true` (below). The four mutating endpoints carry the ADMIN role header from Step 5. With the state the earlier chapters left — `fulfillment-o-100` completed, `fulfillment-o-101` failed, nothing quarantined — each call finds nothing to do, and answers so; the comment after it says what a saga in the situation it is made for answers:
 
 ```bash
 # List quarantined saga dead-letters
@@ -1921,15 +2295,18 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/a
 
 # Drain a saga after redeploying the fix
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/saga-dead-letters/replay-all?sagaId=fulfillment-o-100"
-# {"outcomes":["REPLAYED","REPLAYED"]}
+# {"outcomes":[]}
+# A saga with two quarantined entries: {"outcomes":["REPLAYED","REPLAYED"]}
 
 # Resume a compensation the sweeper gave up on
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/sagas/faulted/resume?sagaId=fulfillment-o-101"
-# {"outcome":"RESUMED"}
+# {"outcome":"NOT_FAULTED"}
+# A FAULTED saga whose compensation then runs to its end: {"outcome":"RESUMED"}
 
 # Discard an entry without replaying it
 curl -s -X DELETE -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/saga-dead-letters?sagaId=fulfillment-o-100&eventOffset=42"
-# {"discarded":true}
+# {"discarded":false}
+# An entry at that offset: {"discarded":true}
 ```
 
 A replay answers with one of nine outcomes — `replay` once, `replay-all` once per attempt:

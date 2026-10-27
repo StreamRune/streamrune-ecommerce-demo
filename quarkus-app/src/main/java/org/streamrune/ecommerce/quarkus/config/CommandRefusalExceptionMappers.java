@@ -11,30 +11,36 @@ import org.streamrune.core.CommandBusOverloadedException;
 import org.streamrune.core.LockException;
 import org.streamrune.core.OptimisticLockException;
 import org.streamrune.ecommerce.commands.CommandRefusal;
+import org.streamrune.runtime.CommandDeadLetteredException;
 
 /**
  * Maps a command the framework refused for a reason that passes ({@link CommandRefusal}) to HTTP
  * 503 Service Unavailable with {@code Retry-After} and a JSON body naming the reason, as the Spring
  * {@code GlobalExceptionHandler} and the Micronaut {@code CommandRefusalExceptionHandlers} do: an
  * open circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
- * that could not be taken in time, a version conflict on every attempt. JAX-RS picks a mapper by
- * the thrown type, so there is one per exception type; the command bus throws each of them
- * unwrapped. A genuine failure, such as a store error, is not one of these and stays 500.
+ * that could not be taken in time, a version conflict on every attempt. A command the bus
+ * dead-lettered ({@link CommandDeadLetteredException}) is pending: 503 with {@code Retry-After} and
+ * {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, 500 with {@code
+ * AWAITING_OPERATOR} when it did not, its entry's {@code commandId} in the body either way. JAX-RS
+ * picks a mapper by the thrown type, so there is one per exception type: a lock timeout or a
+ * version conflict that the bus dead-lettered reaches the dead-lettered command's mapper, not the
+ * lock's. A genuine failure that left no entry, such as a store error, is none of these and stays
+ * 500.
  */
 public final class CommandRefusalExceptionMappers {
 
   private CommandRefusalExceptionMappers() {}
 
-  /** The 503 answer to {@code refused}. */
+  /** The answer to {@code refused}: its status, {@code Retry-After} when it may be sent again. */
   static Response refused(RuntimeException refused) {
     CommandRefusal refusal =
         CommandRefusal.of(refused)
             .orElseThrow(() -> new IllegalStateException("not a refusal", refused));
-    return Response.status(Response.Status.SERVICE_UNAVAILABLE)
-        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
-        .type(MediaType.APPLICATION_JSON)
-        .entity(refusal.body())
-        .build();
+    Response.ResponseBuilder answer = Response.status(refusal.status());
+    if (refusal.retryLater()) {
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+    }
+    return answer.type(MediaType.APPLICATION_JSON).entity(refusal.body()).build();
   }
 
   /** The command bus's circuit breaker is open. */
@@ -79,6 +85,15 @@ public final class CommandRefusalExceptionMappers {
   public static class AggregateVersionConflict implements ExceptionMapper<OptimisticLockException> {
     @Override
     public Response toResponse(OptimisticLockException e) {
+      return refused(e);
+    }
+  }
+
+  /** The command failed and its dead-letter entry is stored: its outcome is pending. */
+  @Provider
+  public static class CommandDeadLettered implements ExceptionMapper<CommandDeadLetteredException> {
+    @Override
+    public Response toResponse(CommandDeadLetteredException e) {
       return refused(e);
     }
   }

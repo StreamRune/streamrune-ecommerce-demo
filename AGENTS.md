@@ -51,7 +51,7 @@ runs its tests, with `--enable-preview`.
 | `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck` and the tests of `domain`, `commands`, `queries` and `projections` and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | under 20 seconds |
 | `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
-| `./gradlew :spring-app:test --tests "org.streamrune.ecommerce.spring.docs.*"` | The tutorial tests (section 5), without Docker | |
+| `./gradlew :spring-app:test --tests "org.streamrune.ecommerce.spring.docs.*"` | The tutorial tests (section 5). `TutorialChaptersStartIT` needs Docker; the others do not (`--tests "*docs.Tutorial*Test"`) | about 2 minutes, most of it starting every chapter's project |
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
 | the same, then `docker compose --profile two-backends up -d --build` | Adds `backend-2`, a second Spring backend on the same database (port 8091), for the two-backend runs of the README and Chapter 17 | |
@@ -140,8 +140,20 @@ In `frontend/`, after `npm ci`:
   that each listing of `StreamRuneConfig` grows out of the one before, that a bean method a chapter
   shows is an excerpt of that chapter's listing of its class, that a block declaring a file of the
   repository starts with its `package` line, and that the imports the fragments show resolve.
+  `TutorialChaptersStartIT` starts each chapter's project: it compiles the project's main sources
+  as the compile test does (with `-parameters`, as the reader's Spring Boot build does) and starts
+  `SpringEcommerceApplication` in a JVM of its own against a database of its own on the test
+  PostgreSQL, so a bean nothing declares, two beans of one injected type or a builder that refuses
+  its configuration fails the chapter, with Spring's report. The reader's `application.yml` is
+  chapter 1's listing with every later `yaml` block merged into it whose introducing line names
+  `spring-app/src/main/resources/application.yml`: a chapter that adds configuration names the
+  file there, and after the last chapter the merged file must be the repository's, key for key.
+  Both tests give the reader's project the framework and every library of the test's own
+  classpath, whatever the chapters' build files declare: a dependency a chapter forgets to add
+  fails neither of them, so a chapter that uses a new library shows the line that adds it.
   `TutorialLedgerTest` checks every step against the ledger and the ledger against the chapters (a
-  `curl` command without an `http://` address fails); `TutorialStackFilesListingTest` checks the
+  `curl` command without an `http://` address fails, and an id the ledger calls `listed` must be
+  named by a listing of a main source file, not by a test's fixture); `TutorialStackFilesListingTest` checks the
   listings of `docker-compose.yml`, `Dockerfile.backend` and `notifications-service/Dockerfile`
   against the repository's files (an earlier Compose listing is the file with the later chapters'
   services left out; every Compose or Dockerfile block is one of them);

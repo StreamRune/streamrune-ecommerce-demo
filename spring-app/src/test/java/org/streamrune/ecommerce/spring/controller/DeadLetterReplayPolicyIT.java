@@ -246,6 +246,57 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(stockAdjustments(pid)).isOne();
   }
 
+  /**
+   * A replay on a replica whose code reads the product's stream at an older event schema than one
+   * it holds — a replica still on the previous release during a rolling deployment — fails before
+   * anything is appended ({@code READER_BEHIND}): the endpoint answers {@code 503} with {@code
+   * Retry-After}, the entry keeps its attempt count, and the replay succeeds once the stream is
+   * readable. The test raises the stored {@code schema_version} of the product's events above every
+   * version the app's upcasters reach, then puts it back.
+   */
+  @Test
+  void aReplayOnAReplicaBehindTheStoredSchema_is503_andLeavesTheEntryAsItWas() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = CommandId.of(UUID.randomUUID().toString());
+    deadLetterQueue.publish(
+        new DeadLetterPublishRequest(
+            "{\"productId\":\"" + pid + "\",\"quantityChange\":5,\"reason\":\"restock\"}",
+            ProductCommand.AdjustStock.class.getName(),
+            commandId,
+            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            IllegalStateException.class.getName(),
+            "transient downstream failure",
+            3,
+            Instant.now(),
+            CorrelationId.of("corr-" + UUID.randomUUID()),
+            UserId.of("admin-1"),
+            null,
+            IdempotencyKey.scopedTo("admin-1", UUID.randomUUID().toString())));
+    try (var ahead = new StoredSchemaAhead(dataSource, pid)) {
+      retry(commandId, false, "ops-1")
+          .expectStatus()
+          .isEqualTo(503)
+          .expectHeader()
+          .valueEquals("Retry-After", "5")
+          .expectBody()
+          .jsonPath("$.outcome")
+          .isEqualTo("READER_BEHIND");
+    }
+
+    var entry = deadLetterQueue.find(commandId);
+    assertThat(entry).as("the entry stays for a replica that reads the stream").isPresent();
+    assertThat(entry.get().dlqAttempts()).as("the refusal is not counted").isZero();
+    assertThat(stockAdjustments(pid)).isZero();
+
+    retry(commandId, false, "ops-1")
+        .expectStatus()
+        .isOk()
+        .expectBody()
+        .jsonPath("$.outcome")
+        .isEqualTo("REPLAYED");
+    assertThat(stockAdjustments(pid)).isOne();
+  }
+
   @Test
   void aForcedRetryOfAnUnknownEntryIs404_andAuditsNothing() throws Exception {
     CommandId commandId = CommandId.of(UUID.randomUUID().toString());
@@ -255,11 +306,27 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
 
-  /** {@code PUT /stock} while the store refuses the event: the bus dead-letters the command. */
+  /**
+   * {@code PUT /stock} while the store refuses the event: the bus dead-letters the command, and the
+   * answer names the entry: {@code 503} with {@code Retry-After} and {@code QUEUED_FOR_REPLAY} for
+   * a keyed adjustment, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} for
+   * an unkeyed one.
+   */
   private CommandId failedAdjustment(String pid, String key) throws Exception {
+    String[] answered = new String[1];
     try (var failures = new AppendFailureInjection(dataSource)) {
       failures.failAppend(ProductState.TYPE, pid, "StockAdjusted");
-      adjustStock(pid, key).expectStatus().is5xxServerError();
+      var answer = adjustStock(pid, key).expectStatus().isEqualTo(key == null ? 500 : 503);
+      answer =
+          key == null
+              ? answer.expectHeader().doesNotExist("Retry-After")
+              : answer.expectHeader().valueEquals("Retry-After", "5");
+      answer
+          .expectBody()
+          .jsonPath("$.reason")
+          .isEqualTo(key == null ? "AWAITING_OPERATOR" : "QUEUED_FOR_REPLAY")
+          .jsonPath("$.commandId")
+          .value(id -> answered[0] = (String) id);
     }
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps =
@@ -269,12 +336,51 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
       try (ResultSet rs = ps.executeQuery()) {
         assertThat(rs.next()).as("the failed adjustment is dead-lettered").isTrue();
         CommandId commandId = CommandId.of(rs.getString(1));
+        assertThat(answered[0]).as("the answer names the entry").isEqualTo(commandId.value());
         if (key == null) {
           assertThat(rs.getString(2)).isNull();
         } else {
           assertThat(rs.getString(2)).as("the entry keeps the caller's key").endsWith(key);
         }
         return commandId;
+      }
+    }
+  }
+
+  /**
+   * Raises the stored {@code schema_version} of every event of one product above what the app's
+   * upcasters reach, as a newer release would have stored them; {@link #close()} puts it back.
+   */
+  private static final class StoredSchemaAhead implements AutoCloseable {
+
+    private static final int AHEAD = 1000;
+
+    private final DataSource dataSource;
+    private final String productId;
+
+    StoredSchemaAhead(DataSource dataSource, String productId) throws Exception {
+      this.dataSource = dataSource;
+      this.productId = productId;
+      shift(AHEAD);
+    }
+
+    @Override
+    public void close() throws Exception {
+      shift(-AHEAD);
+    }
+
+    private void shift(int by) throws Exception {
+      try (Connection conn = dataSource.getConnection();
+          PreparedStatement ps =
+              conn.prepareStatement(
+                  "UPDATE event_stream SET schema_version = schema_version + ?"
+                      + " WHERE aggregate_type = 'product' AND aggregate_id = ?")) {
+        ps.setInt(1, by);
+        ps.setString(2, productId);
+        assertThat(ps.executeUpdate()).isPositive();
+        if (!conn.getAutoCommit()) {
+          conn.commit();
+        }
       }
     }
   }

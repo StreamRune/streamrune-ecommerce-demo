@@ -86,7 +86,8 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  *
  * <p>The capture leg is driven by a payment process manager (in the runtime app), which reacts to
  * {@code PaymentInitiated} by calling the payment gateway and dispatching {@code CapturePayment}
- * (success) or {@code FailPayment} (failure).
+ * (captured) or {@code FailPayment} (declined); a call without an answer decides nothing, and the
+ * saga waits for its payment.
  *
  * <p>Command targets are built with the {@code AggregateId} constructor, never {@code
  * AggregateId.of}. Every target comes from the saga's stored state — the order, payment and product
@@ -116,8 +117,13 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * the saga's {@code SagaRunner}, whose forward fence is on: a forward command of a step still in
  * flight when the deadline claims the saga is stored before the claim, or is refused at its commit.
  * A forward command stored before the claim is covered: the compensation's cancellation starts the
- * undo of whatever the streams hold. The timeout is {@link #DEFAULT_TIMEOUT} unless the application
- * passes one ({@code app.saga.fulfillment-timeout} in the three apps).
+ * undo of whatever the streams hold. The deadline holds until the saga applies {@code
+ * OrderConfirmed}, not until the order is confirmed: when the saga's runner applies that event late
+ * (a backlog, a lease moving to another backend), the deadline can claim a saga whose order the
+ * read model already shows {@code CONFIRMED}, and the cancellation refunds the paid order and
+ * releases its stock. It also bounds a payment the gateway gives no answer for, which the saga
+ * waits for until then. The timeout is {@link #DEFAULT_TIMEOUT} unless the application passes one
+ * ({@code app.saga.fulfillment-timeout} in the three apps).
  */
 public class OrderFulfillmentSaga
     implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {

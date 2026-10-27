@@ -113,6 +113,14 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
 
   /** What every answer but the expected ones means; `true` when it was handled. */
   async function handleCommonRefusal(err: unknown): Promise<boolean> {
+    if (err instanceof ApiError && err.status === 503 && err.reason === "READER_BEHIND") {
+      // A backend still on the previous release, during a rolling deployment of an event-schema
+      // change: nothing ran, and the entry waits for a backend that reads the events.
+      toast.error(
+        "This backend reads the command's events at an older schema version than they were stored with: the entry is unchanged; it is replayed once an upgraded backend runs it"
+      );
+      return true;
+    }
     if (err instanceof ApiError && err.status === 503) {
       toast.error("The backend is busy and admits no more commands: try again in a few seconds");
       return true;

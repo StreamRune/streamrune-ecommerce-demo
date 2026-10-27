@@ -131,6 +131,51 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
   }
 
   /**
+   * A gateway that answers no call does not fail the payment: the outcome is unknown, so the
+   * payment stays {@code PENDING}, {@code PaymentInitiated} is delivered again, and the order is
+   * not cancelled. After three calls without an answer the gateway breaker opens. Once the gateway
+   * answers, the payment is captured and the saga confirms the order.
+   */
+  @Test
+  void aGatewayOutageHoldsThePayment_andTheOrderIsConfirmedOnceTheGatewayAnswers()
+      throws Exception {
+    String orderId = "m-pm-outage-" + System.nanoTime();
+    String productId = "m-pm-prod-" + System.nanoTime();
+    String paymentId = "pay-" + orderId;
+    createProduct(productId);
+    commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 5));
+
+    paymentGateway.setOutage(true);
+    try {
+      placeOrder(orderId, "m-pm-cust-" + System.nanoTime(), productId);
+
+      await()
+          .atMost(Duration.ofSeconds(60))
+          .untilAsserted(
+              () ->
+                  assertThat(paymentGatewayCircuitBreaker.state())
+                      .as("three deliveries without an answer open the gateway breaker")
+                      .isEqualTo(PaymentGatewayCircuitBreaker.State.OPEN));
+      assertThat(eventTypes(PaymentState.TYPE, paymentId))
+          .as("a call without an answer neither fails nor captures the payment")
+          .containsExactly("PaymentInitiated");
+      assertThat(eventTypes(OrderState.TYPE, orderId)).doesNotContain("OrderCancelled");
+    } finally {
+      paymentGateway.setOutage(false);
+      // The breaker lets a probe through 30 seconds after it opened; the test closes it at once.
+      paymentGatewayCircuitBreaker.recordSuccess();
+    }
+
+    await()
+        .atMost(Duration.ofSeconds(90))
+        .untilAsserted(
+            () -> assertThat(eventTypes(OrderState.TYPE, orderId)).contains("OrderConfirmed"));
+    assertThat(eventTypes(PaymentState.TYPE, paymentId))
+        .containsExactly("PaymentInitiated", "PaymentCaptured");
+    assertThat(paymentGateway.hasCaptured(paymentId)).isTrue();
+  }
+
+  /**
    * The customer cancels while the capture cannot be recorded: the cancellation voids the pending
    * payment, though the gateway has taken the money. The redelivered {@code PaymentInitiated} finds
    * the void and the gateway's capture, and records the capture, which the payment refunds in the

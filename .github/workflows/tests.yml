@@ -161,8 +161,12 @@ jobs:
       # create a product and change its price and stock, the payment-failure switch, edit, export
       # and forget) and asserts each result through the page. replay-safety.live.spec.ts writes an
       # unkeyed dead-letter entry into the stack's database (docker compose exec postgres) and
-      # drives the Admin page's Retry through the backend's 409 to the confirmed forced replay, and
-      # sends a stock adjustment twice under one Idempotency-Key. E2E_REQUIRE_BACKEND makes a backend
+      # drives the Admin page's Retry through the backend's 409 to the confirmed forced replay,
+      # sends a stock adjustment twice under one Idempotency-Key, and has the store refuse one
+      # product's stock adjustment for a moment (a trigger) so the backend queues it for a replay:
+      # the page sends it once, the Adjust Stock dialog opened again sends it under its key, and the
+      # stock changes once.
+      # E2E_REQUIRE_BACKEND makes a backend
       # that does not answer a failure instead of a skip; E2E_REUSE_SERVER has Playwright use the
       # frontend that is already up instead of starting its own.
       - uses: actions/setup-node@v7

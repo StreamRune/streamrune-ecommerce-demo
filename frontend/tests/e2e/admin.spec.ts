@@ -151,6 +151,22 @@ test.describe("Admin page — dead-letter Retry", () => {
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 
+  test("a 503 READER_BEHIND says this backend's code is behind the stored events", async ({
+    page,
+  }) => {
+    const sent = await deadLetterRetries(page, (route) =>
+      json(route, 503, { outcome: "READER_BEHIND" }, { "Retry-After": "5" })
+    );
+    await page.goto("/admin");
+    await page.getByRole("button", { name: "Retry" }).click();
+
+    await expect(
+      page.getByText(/reads the command's events at an older schema.*the entry is unchanged/)
+    ).toBeVisible();
+    await expect(page.getByText(/The backend is busy/)).toHaveCount(0);
+    expect(sent).toHaveLength(1);
+  });
+
   test("a 404 says the entry is gone", async ({ page }) => {
     await deadLetterRetries(page, (route) => route.fulfill({ status: 404, body: "" }));
 

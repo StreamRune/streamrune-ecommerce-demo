@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.spring.docs;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -18,6 +19,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Every step of a chapter works with what the chapters up to it built: each product, customer and
@@ -38,10 +40,11 @@ import org.junit.jupiter.api.Test;
  * <p><b>The ledger</b> ({@link #LEDGER}) says, for each of them, the chapter that introduces it,
  * and how. The test holds the ledger to it: a {@code created} id has a request in its chapter that
  * creates it ({@code POST /api/products}, {@code /api/customers} or {@code /api/orders} with the id
- * in its body), a {@code listed} one is named by a Java listing of its chapter (an aggregate type,
- * a product the seed data creates), a {@code controller} endpoint is mapped by the controllers the
- * reader has at the end of its chapter and not before, and every other entry (an id named on
- * purpose, a framework endpoint, a port, a header) is used in its chapter.
+ * in its body), a {@code listed} one is named by a listing of a main source file of its chapter,
+ * the application's code and not a test's fixture (an aggregate type, a product the seed data
+ * creates), a {@code controller} endpoint is mapped by the controllers the reader has at the end of
+ * its chapter and not before, and every other entry (an id named on purpose, a framework endpoint,
+ * a port, a header) is used in its chapter.
  */
 class TutorialLedgerTest {
 
@@ -89,6 +92,7 @@ class TutorialLedgerTest {
           controller("POST /api/saga/fulfillments/{id}/inject-failure", 11),
           controller("GET /api/admin/circuit-breaker", 12),
           controller("POST /api/admin/payment-failure/toggle", 12),
+          controller("POST /api/admin/payment-outage/toggle", 12),
           controller("POST /api/inventory/{id}/receive", 11),
           controller("GET /received", 13),
           controller("GET /health", 13),
@@ -146,6 +150,8 @@ class TutorialLedgerTest {
           named("fulfillment-o-100", 11, "the fulfillment saga of order o-100"),
           created("o-101", 11),
           named("fulfillment-o-101", 11, "the fulfillment saga of order o-101"),
+          created("cb-decline-1", 12),
+          named("fulfillment-cb-decline-1", 12, "the fulfillment saga of the declined order"),
           named("fulfillment-cb-1", 12, "the fulfillment saga of the first breaker order"),
           created("o-test-1", 13),
           created("o-fail-1", 14),
@@ -229,7 +235,7 @@ class TutorialLedgerTest {
             case CREATED ->
                 chapter.requests().stream()
                     .anyMatch(r -> r.method().equals("POST") && createdId(r).equals(entry.key()));
-            case LISTED -> chapter.javaListings().contains("\"" + entry.key() + "\"");
+            case LISTED -> chapter.namesInAMainListing(entry.key());
             case CONTROLLER ->
                 mappedByChapter.get(entry.chapter() - 1).containsKey(normalized(entry.key()))
                     && (entry.chapter() == 1
@@ -383,6 +389,40 @@ class TutorialLedgerTest {
     return byChapter;
   }
 
+  /**
+   * A {@code listed} id is introduced by the application's code, so the test that a listing names
+   * it reads the listings of main source files only: a test's fixture names ids no reader has.
+   */
+  @Test
+  void aListedIdIsNamedByAListingOfTheApplication_notByATestFixture(@TempDir Path dir)
+      throws IOException {
+    Path chapter = dir.resolve("99-listed.md");
+    Files.writeString(
+        chapter,
+        """
+        ```java
+        package org.streamrune.ecommerce.commands.payment;
+
+        class PaymentDeciderTest {
+          String order = "o-1";
+        }
+        ```
+
+        ```java
+        package org.streamrune.ecommerce.spring.config;
+
+        public class SeedDataRunner {
+          String product = "prod-widget";
+        }
+        ```
+        """);
+
+    Chapter read = Chapter.read(chapter, 99);
+
+    assertThat(read.namesInAMainListing("prod-widget")).as("named by the seed data").isTrue();
+    assertThat(read.namesInAMainListing("o-1")).as("named by a test's fixture only").isFalse();
+  }
+
   private static List<Chapter> chapters() throws IOException {
     List<Chapter> chapters = new ArrayList<>();
     try (Stream<Path> files = Files.list(TUTORIAL)) {
@@ -452,21 +492,19 @@ class TutorialLedgerTest {
 
   /**
    * One chapter: its number, file name, the requests of its steps, the lines of the {@code curl}
-   * commands it has no address of, and its Java listings.
+   * commands it has no address of, and the files its Java listings declare, by class name.
    */
   private record Chapter(
       int number,
       String name,
       List<Request> requests,
       List<Integer> unreadCommands,
-      String javaListings,
       Map<String, String> files) {
 
     static Chapter read(Path file, int number) throws IOException {
       List<String> lines = Files.readAllLines(file);
       List<Request> requests = new ArrayList<>();
       List<Integer> unread = new ArrayList<>();
-      StringBuilder java = new StringBuilder();
       Map<String, String> files = new LinkedHashMap<>();
       String language = null;
       List<String> block = new ArrayList<>();
@@ -483,7 +521,6 @@ class TutorialLedgerTest {
               requests.addAll(Shell.requests(block, blockStart, unread));
             } else if (language.equals("java")) {
               String source = String.join("\n", block);
-              java.append(source).append('\n');
               if (!block.isEmpty() && block.getFirst().startsWith("package ")) {
                 files.put(fileOf(block), source);
               }
@@ -501,8 +538,28 @@ class TutorialLedgerTest {
           }
         }
       }
-      return new Chapter(
-          number, file.getFileName().toString(), requests, unread, java.toString(), files);
+      return new Chapter(number, file.getFileName().toString(), requests, unread, files);
+    }
+
+    /**
+     * Whether a listing of a main source file of this chapter names {@code id} as a string literal:
+     * a class of the application the reader runs, such as the seed data, and not the fixture of a
+     * test.
+     */
+    boolean namesInAMainListing(String id) {
+      return files.entrySet().stream()
+          .filter(file -> isMainSource(file.getKey()))
+          .anyMatch(file -> file.getValue().contains("\"" + id + "\""));
+    }
+
+    /** Whether a module of the demo holds {@code className} in its main sources. */
+    private static boolean isMainSource(String className) {
+      String relative = "src/main/java/" + className.replace('.', '/') + ".java";
+      try (Stream<Path> modules = Files.list(Path.of(".."))) {
+        return modules.anyMatch(module -> Files.isRegularFile(module.resolve(relative)));
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
 
     private static String fileOf(List<String> block) {

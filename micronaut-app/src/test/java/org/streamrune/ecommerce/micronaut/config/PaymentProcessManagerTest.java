@@ -46,6 +46,7 @@ import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.payment.PaymentCommand;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
+import org.streamrune.runtime.CommandDeadLetteredException;
 import org.streamrune.runtime.LocalStripedLocker;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 import org.streamrune.test.InMemoryCommandInbox;
@@ -135,15 +136,15 @@ class PaymentProcessManagerTest {
         .isInstanceOf(CircuitBreakerOpenException.class);
     assertThat(store.types(STREAM)).containsExactly("PaymentInitiated");
     assertThat(breaker.state())
-        .as("the gateway failure itself was counted")
-        .isEqualTo(PaymentGatewayCircuitBreaker.State.OPEN);
+        .as("the decline is the gateway's answer; its breaker counts no failure")
+        .isEqualTo(PaymentGatewayCircuitBreaker.State.CLOSED);
 
     manager.onEvents(List.of(initiated));
 
     assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentFailed");
     assertThat(gateway.calls())
-        .as("the open gateway breaker fails the payment without calling the gateway")
-        .isEqualTo(1);
+        .as("the second delivery asks the gateway again, which declines again")
+        .isEqualTo(2);
   }
 
   @Test
@@ -161,18 +162,15 @@ class PaymentProcessManagerTest {
 
   @Test
   void aSecondDeliveryOfAFailedPaymentDoesNotChargeItWhenTheGatewayHasRecovered() {
-    // A breaker that stays closed after one failure, so only the payment's state can stop the
-    // second gateway call.
-    var tolerantManager =
-        new PaymentProcessManager(
-            gateway, new PaymentGatewayCircuitBreaker(3, Duration.ofMinutes(5)), bus, store);
+    // A decline leaves the breaker closed, so only the payment's state can stop the second
+    // gateway call.
     EventEnvelope initiated = store.initiate(PAYMENT);
     gateway.setFailureInjected(true);
-    tolerantManager.onEvents(List.of(initiated));
+    manager.onEvents(List.of(initiated));
     assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentFailed");
     gateway.setFailureInjected(false);
 
-    tolerantManager.onEvents(List.of(initiated));
+    manager.onEvents(List.of(initiated));
 
     assertThat(gateway.calls()).isEqualTo(1);
     assertThat(gateway.charges()).isZero();
@@ -349,7 +347,7 @@ class PaymentProcessManagerTest {
   }
 
   @Test
-  void aFailedGatewayCallContinuesThePaymentInitiatedEventToo() {
+  void aDeclineContinuesThePaymentInitiatedEventToo() {
     EventEnvelope initiated = store.initiate(PAYMENT);
     gateway.setFailureInjected(true);
 
@@ -358,6 +356,90 @@ class PaymentProcessManagerTest {
     assertThat(bus.attempted()).hasSize(1).first().isInstanceOf(PaymentCommand.FailPayment.class);
     assertThat(bus.causes().getFirst().sagaOrigin()).isEqualTo(new SagaOrigin(SAGA_TYPE, SAGA, 1));
     assertThat(bus.contexts().getFirst().userId()).isNull();
+  }
+
+  // ---- A decline is the gateway's answer and fails the payment. A call without an answer leaves
+  // the outcome unknown: the gateway may have taken the money. The manager records a capture the
+  // gateway reports and otherwise lets the event be delivered again; it never fails the payment.
+  // An open breaker is no answer either. ----
+
+  @Test
+  void aDeclineFailsThePayment_andTheBreakerCountsNoFailure() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.setFailureInjected(true);
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(bus.attempted())
+        .containsExactly(
+            new PaymentCommand.FailPayment(
+                PAYMENT, "Simulated payment gateway declined payment " + PAYMENT));
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentFailed");
+    assertThat(breaker.state())
+        .as("a decline is the answer of a gateway that works")
+        .isEqualTo(PaymentGatewayCircuitBreaker.State.CLOSED);
+  }
+
+  @Test
+  void aGatewayThatTookTheMoneyAndThenGaveNoAnswer_capturesThePayment_andNeverFailsIt() {
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.loseTheAnswerAfterTheCharge();
+
+    manager.onEvents(List.of(initiated));
+
+    assertThat(gateway.charges()).as("the gateway took the money").isEqualTo(1);
+    assertThat(bus.attempted())
+        .as("the gateway reports the capture: it is recorded, and the payment is never failed")
+        .containsExactly(new PaymentCommand.CapturePayment(PAYMENT));
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentCaptured");
+    assertThat(breaker.state())
+        .as("a call without an answer is what the breaker counts")
+        .isEqualTo(PaymentGatewayCircuitBreaker.State.OPEN);
+  }
+
+  @Test
+  void aCallWithoutAnAnswerOrACharge_leavesThePaymentPending_untilADeliveryGetsAnAnswer() {
+    // A breaker that stays closed after one call without an answer, so the second delivery calls
+    // the gateway.
+    var tolerantManager =
+        new PaymentProcessManager(
+            gateway, new PaymentGatewayCircuitBreaker(3, Duration.ofMinutes(5)), bus, store);
+    EventEnvelope initiated = store.initiate(PAYMENT);
+    gateway.setOutage(true);
+
+    assertThatThrownBy(() -> tolerantManager.onEvents(List.of(initiated)))
+        .as("the outcome is unknown: the subscription delivers the event again")
+        .isInstanceOf(PaymentProcessManager.PaymentOutcomeUnknownException.class)
+        .hasCauseInstanceOf(IllegalStateException.class);
+    assertThat(bus.attempted()).as("nothing is decided").isEmpty();
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated");
+
+    gateway.setOutage(false);
+    tolerantManager.onEvents(List.of(initiated));
+
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentCaptured");
+    assertThat(gateway.charges()).isEqualTo(1);
+  }
+
+  @Test
+  void anOpenBreakerHoldsThePayment_andRecordsACaptureTheGatewayReports() {
+    breaker.recordFailure();
+    EventEnvelope initiated = store.initiate(PAYMENT);
+
+    assertThatThrownBy(() -> manager.onEvents(List.of(initiated)))
+        .as("an open breaker is no answer: the payment waits")
+        .isInstanceOf(PaymentProcessManager.PaymentOutcomeUnknownException.class);
+    assertThat(gateway.calls()).as("the open breaker keeps the call from being made").isZero();
+    assertThat(bus.attempted()).as("an open breaker is not a decline").isEmpty();
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated");
+
+    // An earlier call took the money, and its answer was lost.
+    gateway.chargedEarlier(PAYMENT);
+    manager.onEvents(List.of(initiated));
+
+    assertThat(gateway.calls()).isZero();
+    assertThat(bus.attempted()).containsExactly(new PaymentCommand.CapturePayment(PAYMENT));
+    assertThat(store.types(STREAM)).containsExactly("PaymentInitiated", "PaymentCaptured");
   }
 
   // ---- The framework's own bus: a failed command dispatched inside
@@ -453,6 +535,9 @@ class PaymentProcessManagerTest {
                       .execute(
                           new PaymentCommand.CapturePayment(PAYMENT),
                           new IdempotencyKey("payment-capture:" + PAYMENT)))
+          .as("the entry is stored, so the outcome is pending; the store's failure is the cause")
+          .isInstanceOf(CommandDeadLetteredException.class)
+          .cause()
           .isInstanceOf(EventStoreException.class);
 
       assertThat(real.deadLetters().all())
@@ -635,10 +720,15 @@ class PaymentProcessManagerTest {
     }
   }
 
-  /** Counts every gateway call and every real charge (a call for a new payment that succeeded). */
+  /**
+   * Counts every gateway call and every real charge (a call that took the money for a new payment).
+   * It can lose its answer after the charge, as a call to a real gateway can time out after the
+   * gateway took the money.
+   */
   private static final class CountingGateway extends PaymentGatewaySimulator {
     private int calls;
     private int charges;
+    private boolean loseTheAnswerAfterTheCharge;
 
     @Override
     public void processPayment(String paymentId) {
@@ -648,6 +738,14 @@ class PaymentProcessManagerTest {
       if (!known) {
         charges++;
       }
+      if (loseTheAnswerAfterTheCharge) {
+        throw new IllegalStateException("Read timed out after the charge of payment " + paymentId);
+      }
+    }
+
+    /** Every later call charges the payment and then fails without an answer. */
+    void loseTheAnswerAfterTheCharge() {
+      loseTheAnswerAfterTheCharge = true;
     }
 
     int calls() {

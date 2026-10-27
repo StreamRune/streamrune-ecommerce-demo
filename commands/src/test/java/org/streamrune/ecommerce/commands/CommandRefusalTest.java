@@ -12,12 +12,22 @@ import org.streamrune.core.LockException;
 import org.streamrune.core.OptimisticLockException;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
+import org.streamrune.core.types.CommandId;
+import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.CommandRefusal.Reason;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.runtime.CommandDeadLetteredException;
 import org.streamrune.runtime.LockAcquisitionException;
 
-/** The refusals the apps answer {@code 503}, and the failures they do not. */
+/**
+ * The refusals the apps answer {@code 503}, the dead-lettered commands whose outcome is pending,
+ * and the failures that are neither.
+ */
 class CommandRefusalTest {
+
+  private static final StreamId PRODUCT =
+      StreamId.of(AggregateType.of("product"), AggregateId.of("p-1"));
 
   @Test
   void eachRefusalNamesItsReasonAndTheWait() {
@@ -49,7 +59,50 @@ class CommandRefusalTest {
     assertThat(refusal.body().get("reason")).isEqualTo("COMMAND_BUS_OVERLOADED");
     assertThat(refusal.body().get("message"))
         .isEqualTo("The command bus admits no more commands now.");
+    assertThat(refusal.status()).isEqualTo(503);
+    assertThat(refusal.retryLater()).isTrue();
     assertThat(CommandRefusal.RETRY_AFTER_SECONDS).isEqualTo(5);
+  }
+
+  @Test
+  void aDeadLetteredKeyedCommandIsQueuedForReplay_whateverItFailedOn() {
+    for (RuntimeException cause :
+        List.of(
+            new LockException("timeout"),
+            new OptimisticLockException("conflict"),
+            new EventStoreException("store down"))) {
+      CommandRefusal answer =
+          CommandRefusal.of(deadLettered(IdempotencyKey.scopedTo("admin-1", "k-1"), cause))
+              .orElseThrow();
+
+      assertThat(answer.reason())
+          .as("dead-lettered after %s", cause)
+          .isEqualTo(Reason.QUEUED_FOR_REPLAY);
+      assertThat(answer.status()).as("not applied yet: send it again with the key").isEqualTo(503);
+      assertThat(answer.retryLater()).isTrue();
+      assertThat(List.copyOf(answer.body().keySet()))
+          .containsExactly("reason", "commandId", "message");
+      assertThat(answer.body().get("commandId")).isEqualTo("cmd-dl-1");
+      assertThat(answer.body().get("message")).contains("same key");
+    }
+  }
+
+  @Test
+  void aDeadLetteredUnkeyedCommandAwaitsAnOperator_andIsNotSentAgain() {
+    for (RuntimeException cause :
+        List.of(new LockException("timeout"), new EventStoreException("store down"))) {
+      CommandRefusal answer = CommandRefusal.of(deadLettered(null, cause)).orElseThrow();
+
+      assertThat(answer.reason())
+          .as("dead-lettered after %s", cause)
+          .isEqualTo(Reason.AWAITING_OPERATOR);
+      assertThat(answer.status()).isEqualTo(500);
+      assertThat(answer.retryLater()).as("no Retry-After: a resend may apply it twice").isFalse();
+      assertThat(List.copyOf(answer.body().keySet()))
+          .containsExactly("reason", "commandId", "message");
+      assertThat(answer.body().get("commandId")).isEqualTo("cmd-dl-1");
+      assertThat(answer.body().get("message")).contains("operator");
+    }
   }
 
   @Test
@@ -62,5 +115,19 @@ class CommandRefusalTest {
 
   private static Reason reasonOf(RuntimeException failure) {
     return CommandRefusal.of(failure).orElseThrow().reason();
+  }
+
+  /**
+   * What the bus throws once the entry of a stock adjustment that failed on {@code cause} is
+   * stored.
+   */
+  private static CommandDeadLetteredException deadLettered(
+      IdempotencyKey key, RuntimeException cause) {
+    return new CommandDeadLetteredException(
+        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        CommandId.of("cmd-dl-1"),
+        PRODUCT,
+        key,
+        cause);
   }
 }

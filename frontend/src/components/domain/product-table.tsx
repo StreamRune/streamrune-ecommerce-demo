@@ -14,7 +14,16 @@ import {
   useReceiveShipment,
 } from "@/lib/mutations";
 import type { ProductView, ProductStatus } from "@/lib/types";
-import { newId, newIdempotencyKey } from "@/lib/ids";
+import { newId } from "@/lib/ids";
+import { isQueuedForReplay } from "@/lib/api";
+import {
+  keyForOperation,
+  outcomeOf,
+  pendingOperation,
+  startNewOperation,
+  type OperationKind,
+  type PendingOperation,
+} from "@/lib/pending-operations";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import {
   Table,
@@ -131,27 +140,106 @@ function CreateProductDialog() {
 
 // ─── Row Action Dialogs ───────────────────────────────────────────────────────
 
+/** `+5`, `-3`: an amount as the dialog shows it. */
+function signed(quantity: number): string {
+  return quantity > 0 ? `+${quantity}` : `${quantity}`;
+}
+
+/** What the notice says of a held change, by what the backend answered it so far. */
+const OUTCOME_TEXT = {
+  queued: "is queued for a replay; its outcome shows in the admin dead-letter list.",
+  unknown: "has no answer yet: it may have been applied.",
+  refused: "was not applied: the backend refused it for now and wrote nothing.",
+} as const;
+
+/**
+ * The notice of a dialog whose change of this product has no final answer: the
+ * amount, what the backend answered it so far, what sending it again does, and
+ * the way to start a new change instead.
+ */
+function PendingNotice({
+  pending,
+  noun,
+  onStartNew,
+}: {
+  pending: PendingOperation;
+  noun: string;
+  onStartNew: () => void;
+}) {
+  const amount = signed(pending.quantity);
+  return (
+    <div role="status" className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm space-y-2">
+      <p>
+        The {noun} of {amount} {OUTCOME_TEXT[outcomeOf(pending)]} Sending {amount} again sends it
+        under the same key, so it is applied once. A different amount is a new {noun}; so is the
+        same amount after Start a new change.
+      </p>
+      <Button type="button" variant="outline" size="sm" onClick={onStartNew}>
+        Start a new change
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * The toast after a failed send: a change queued for a replay is no error; any
+ * other failure shows the backend's words.
+ */
+function reportFailure(err: unknown, fallback: string) {
+  if (isQueuedForReplay(err)) {
+    toast.info(err instanceof Error ? err.message : "Queued for replay");
+  } else {
+    toast.error(err instanceof Error ? err.message : fallback);
+  }
+}
+
+/**
+ * A change of one product's quantity sent under the key of the intended
+ * operation (`pending-operations.ts`): the dialog opens on the change that has
+ * no final answer yet, if there is one, and reads it again after each send.
+ */
+function usePendingOperation(kind: OperationKind, productId: string) {
+  const [pending, setPending] = useState(() => pendingOperation(kind, productId));
+  return {
+    pending,
+    keyFor: (quantity: number) => keyForOperation(kind, productId, quantity),
+    refresh: () => setPending(pendingOperation(kind, productId)),
+    startNew: () => {
+      startNewOperation(kind, productId);
+      setPending(undefined);
+    },
+  };
+}
+
 function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: () => void }) {
-  const [delta, setDelta] = useState("0");
+  const operation = usePendingOperation("adjust-stock", product.productId);
+  const [delta, setDelta] = useState(() =>
+    operation.pending ? String(operation.pending.quantity) : "0"
+  );
   const [reason, setReason] = useState("");
-  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const { mutateAsync, isPending } = useAdjustStock();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // The backend's field is `quantity`: the change to apply, negative to remove.
+    const quantity = parseInt(delta, 10);
+    // One key per intended adjustment: the page's own retry, and the same amount sent again from
+    // this dialog, after it was closed or after a reload, carry it, so the backend applies the
+    // change once.
+    const idempotencyKey = operation.keyFor(quantity);
     try {
-      // The backend's field is `quantity`: the change to apply, negative to remove.
       await mutateAsync({
         productId: product.productId,
-        body: { quantity: parseInt(delta, 10), reason: reason || undefined },
-        // One key per adjustment: the page's own retry and a resubmit of the unchanged form send
-        // it again, so a change sent twice is applied once. Editing the form makes it a new one.
+        body: { quantity, reason: reason || undefined },
         idempotencyKey,
       });
+      operation.refresh();
       toast.success("Stock adjusted");
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to adjust stock");
+      operation.refresh();
+      reportFailure(err, "Failed to adjust stock");
+      if (isQueuedForReplay(err)) onClose();
     }
   }
 
@@ -161,29 +249,22 @@ function AdjustStockForm({ product, onClose }: { product: ProductView; onClose: 
         <DialogTitle>Adjust Stock — {product.name}</DialogTitle>
       </DialogHeader>
       <p className="text-sm text-muted-foreground">Current stock: {product.stock}</p>
+      {operation.pending && (
+        <PendingNotice pending={operation.pending} noun="adjustment" onStartNew={operation.startNew} />
+      )}
       <div className="space-y-1">
         <Label htmlFor="as-delta">Delta (positive = add, negative = remove)</Label>
         <Input
           id="as-delta"
           type="number"
           value={delta}
-          onChange={(e) => {
-            setDelta(e.target.value);
-            setIdempotencyKey(newIdempotencyKey());
-          }}
+          onChange={(e) => setDelta(e.target.value)}
           required
         />
       </div>
       <div className="space-y-1">
         <Label htmlFor="as-reason">Reason (optional)</Label>
-        <Input
-          id="as-reason"
-          value={reason}
-          onChange={(e) => {
-            setReason(e.target.value);
-            setIdempotencyKey(newIdempotencyKey());
-          }}
-        />
+        <Input id="as-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Adjust"}</Button>
@@ -225,22 +306,30 @@ function UpdatePriceForm({ product, onClose }: { product: ProductView; onClose: 
 }
 
 function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClose: () => void }) {
-  const [quantity, setQuantity] = useState("1");
-  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+  const operation = usePendingOperation("receive-shipment", product.productId);
+  const [quantity, setQuantity] = useState(() =>
+    operation.pending ? String(operation.pending.quantity) : "1"
+  );
   const { mutateAsync, isPending } = useReceiveShipment();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const amount = parseInt(quantity, 10);
+    // One key per intended shipment, as for a stock adjustment.
+    const idempotencyKey = operation.keyFor(amount);
     try {
       await mutateAsync({
         productId: product.productId,
-        body: { quantity: parseInt(quantity, 10) },
+        body: { quantity: amount },
         idempotencyKey,
       });
+      operation.refresh();
       toast.success("Shipment received into the inventory");
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to receive shipment");
+      operation.refresh();
+      reportFailure(err, "Failed to receive shipment");
+      if (isQueuedForReplay(err)) onClose();
     }
   }
 
@@ -253,6 +342,9 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
         Adds to the inventory the fulfillment saga reserves from when an order is placed. The Stock
         column of this table is the catalogue&apos;s own figure and stays as it is.
       </p>
+      {operation.pending && (
+        <PendingNotice pending={operation.pending} noun="shipment" onStartNew={operation.startNew} />
+      )}
       <div className="space-y-1">
         <Label htmlFor="rs-qty">Quantity</Label>
         <Input
@@ -260,10 +352,7 @@ function ReceiveShipmentForm({ product, onClose }: { product: ProductView; onClo
           type="number"
           min="1"
           value={quantity}
-          onChange={(e) => {
-            setQuantity(e.target.value);
-            setIdempotencyKey(newIdempotencyKey());
-          }}
+          onChange={(e) => setQuantity(e.target.value)}
           required
         />
       </div>
