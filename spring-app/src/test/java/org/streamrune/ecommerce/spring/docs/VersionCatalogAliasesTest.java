@@ -28,6 +28,10 @@ import org.junit.jupiter.api.Test;
  * looks maintained, and its version falls behind the framework's without anyone noticing. The
  * Flyway pair is kept on purpose, in step with the framework build, as the catalog says ({@link
  * #KEPT}).
+ *
+ * <p>A build listing is a {@code kotlin} or {@code kts} block of a chapter ({@link
+ * #buildListings}): an accessor the prose of a chapter names, or a block of another language, is no
+ * use, since no reader's build resolves it.
  */
 class VersionCatalogAliasesTest {
 
@@ -77,15 +81,12 @@ class VersionCatalogAliasesTest {
     Map<String, Map<String, String>> catalog = sections(Files.readAllLines(CATALOG));
     Set<String> accessors = new TreeSet<>();
     Set<String> lookups = new TreeSet<>();
-    for (Path file : buildFilesAndChapters()) {
-      String text = Files.readString(file);
-      Matcher accessor = ACCESSOR.matcher(text);
-      while (accessor.find()) {
-        accessors.add(accessor.group(1));
-      }
-      Matcher lookup = LOOKUP.matcher(text);
-      while (lookup.find()) {
-        lookups.add(lookup.group(1));
+    for (Path file : buildFiles()) {
+      collect(Files.readString(file), accessors, lookups);
+    }
+    try (Stream<Path> chapters = Files.list(TUTORIAL)) {
+      for (Path chapter : chapters.filter(path -> path.toString().endsWith(".md")).toList()) {
+        collect(buildListings(Files.readString(chapter)), accessors, lookups);
       }
     }
     assertThat(accessors).as("the accessors of the build files").isNotEmpty();
@@ -148,8 +149,76 @@ class VersionCatalogAliasesTest {
     return sections;
   }
 
-  /** The demo's Gradle build files and the tutorial's chapters, whose build listings count. */
-  private static List<Path> buildFilesAndChapters() throws IOException {
+  /**
+   * A chapter names an alias in its prose, and in a block of another language; only its build
+   * listing uses one.
+   */
+  @Test
+  void aChapterUsesAnAliasInItsBuildListingsOnly() {
+    String chapter =
+        """
+        The `libs.named.in.prose` alias is the one the next listing leaves out.
+
+        ```kotlin
+        dependencies {
+            implementation(libs.in.kotlin.listing)
+            testImplementation(platform(libs.findLibrary("junit-bom").get()))
+        }
+        ```
+
+        ```bash
+        grep libs.in.shell.block build.gradle.kts
+        ```
+
+        ```kts
+        alias(libs.plugins.in.kts.listing)
+        ```
+        """;
+    Set<String> accessors = new TreeSet<>();
+    Set<String> lookups = new TreeSet<>();
+
+    collect(buildListings(chapter), accessors, lookups);
+
+    assertThat(accessors)
+        .contains("in.kotlin.listing", "plugins.in.kts.listing")
+        .doesNotContain("named.in.prose", "in.shell.block");
+    assertThat(lookups).containsExactly("junit-bom");
+  }
+
+  /** Adds the accessor chains and the lookups by alias that {@code text} holds. */
+  private static void collect(String text, Set<String> accessors, Set<String> lookups) {
+    Matcher accessor = ACCESSOR.matcher(text);
+    while (accessor.find()) {
+      accessors.add(accessor.group(1));
+    }
+    Matcher lookup = LOOKUP.matcher(text);
+    while (lookup.find()) {
+      lookups.add(lookup.group(1));
+    }
+  }
+
+  /**
+   * The build listings of a chapter, its {@code kotlin} and {@code kts} blocks, one after the
+   * other: the code a reader copies into a build file. The other blocks and the prose are left out.
+   */
+  static String buildListings(String chapter) {
+    StringBuilder listings = new StringBuilder();
+    String block = null;
+    for (String line : chapter.lines().toList()) {
+      String stripped = line.strip();
+      if (block == null && stripped.startsWith("```")) {
+        block = stripped.substring(3).strip();
+      } else if (block != null && stripped.equals("```")) {
+        block = null;
+      } else if ("kotlin".equals(block) || "kts".equals(block)) {
+        listings.append(line).append('\n');
+      }
+    }
+    return listings.toString();
+  }
+
+  /** The demo's Gradle build files. */
+  private static List<Path> buildFiles() throws IOException {
     List<Path> files = new ArrayList<>();
     Files.walkFileTree(
         REPOSITORY,
@@ -169,9 +238,6 @@ class VersionCatalogAliasesTest {
             return FileVisitResult.CONTINUE;
           }
         });
-    try (Stream<Path> chapters = Files.list(TUTORIAL)) {
-      chapters.filter(path -> path.toString().endsWith(".md")).sorted().forEach(files::add);
-    }
     return files;
   }
 }
