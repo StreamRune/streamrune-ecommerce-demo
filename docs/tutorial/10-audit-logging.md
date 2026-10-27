@@ -834,7 +834,79 @@ The `userId` in each entry is simply what `X-User-Id` said, because the demo run
 
 ### Bonus: `AuditProjection` — event-level audit log
 
-In addition to the command audit interceptor, the demo ships an `AuditProjection` (`projections/src/main/java/org/streamrune/ecommerce/projections/AuditProjection.java`) that builds an in-memory event audit trail. Unlike `AuditCommandInterceptor`, which records at the command dispatch layer, `AuditProjection` subscribes to the event store and records every `EventEnvelope` it processes via `MultiProjectionRunner`.
+In addition to the command audit interceptor, the demo ships an `AuditProjection` that builds an in-memory event audit trail. Unlike `AuditCommandInterceptor`, which records at the command dispatch layer, `AuditProjection` subscribes to the event store and records every `EventEnvelope` it processes via `MultiProjectionRunner`. Create its entry, `projections/src/main/java/org/streamrune/ecommerce/projections/AuditEntry.java`:
+
+```java
+package org.streamrune.ecommerce.projections;
+
+import java.time.Instant;
+
+public record AuditEntry(
+    String eventId,
+    String aggregateType,
+    String aggregateId,
+    String userId,
+    String commandId,
+    String correlationId,
+    String eventType,
+    Object eventData,
+    Instant timestamp) {}
+```
+
+and the projection, `projections/src/main/java/org/streamrune/ecommerce/projections/AuditProjection.java`:
+
+```java
+package org.streamrune.ecommerce.projections;
+
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.projection.Projection;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+
+// AT_LEAST_ONCE_IDEMPOTENT, declared: this projection keeps its read model in memory, so its writes
+// can never share the runner's checkpoint transaction, and the runner hands it no
+// transaction-scoped repository. A batch can be delivered twice WITHOUT a crash — a checkpoint
+// commit that fails after process() returned (a lost connection, a failed COMMIT) is retried from
+// the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection must
+// be idempotent itself: entries are keyed by eventId and a redelivered event is ignored. (The
+// in-memory list also does not survive a restart; it is a demo of the mode, not of durability.)
+@org.streamrune.core.ProjectionConfig(
+    name = "audit",
+    deliveryMode = ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)
+public class AuditProjection implements Projection {
+  private final List<AuditEntry> entries = new CopyOnWriteArrayList<>();
+  private final Set<String> seenEventIds = ConcurrentHashMap.newKeySet();
+
+  @Override
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      var meta = envelope.metadata();
+      String eventId = meta.eventId().value();
+      if (!seenEventIds.add(eventId)) {
+        continue; // redelivered: already recorded
+      }
+      entries.add(
+          new AuditEntry(
+              eventId,
+              envelope.aggregateType().value(),
+              envelope.aggregateId().value(),
+              meta.userId() != null ? meta.userId().value() : null,
+              meta.commandId().value(),
+              meta.correlationId().value(),
+              envelope.eventType().name(),
+              envelope.event(),
+              meta.timestamp()));
+    }
+  }
+
+  public List<AuditEntry> listByAggregateType(String aggregateType) {
+    return entries.stream().filter(e -> aggregateType.equals(e.aggregateType())).toList();
+  }
+}
+```
 
 Each entry is an `AuditEntry` record capturing `eventId`, `aggregateType` and `aggregateId` (the envelope's typed parts — the projection never parses the stream id), `userId`, `commandId`, `correlationId`, `eventType`, the raw event object, and the event `timestamp`. For an event a saga caused, the `correlationId` is the saga's `streamrune:saga:<sagaId>`; for an event a request caused, it is whatever the request carried. Note that this is a **demo-local** `AuditEntry` in package `org.streamrune.ecommerce.projections` — a different type from the framework's `org.streamrune.core.audit.AuditEntry` used by the command interceptor earlier in this chapter. Same name, different package and shape; do not conflate the two. Entries are stored in a `CopyOnWriteArrayList`, making them thread-safe for concurrent reads without locking, beside a concurrent set of the event ids already recorded.
 

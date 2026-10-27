@@ -43,9 +43,10 @@ function useInvalidatingMutation<TData, TVariables>(
 /**
  * The page's own retry of a command sent with an `Idempotency-Key`: twice more
  * when no answer arrived (the request or its answer was lost) or the backend
- * failed (`5xx`). A retry sends the same variables, so the same key, and the
- * backend applies the change once whichever attempt reached it. A refusal
- * (`4xx`) is the backend's answer and is not sent again.
+ * failed (`5xx`), a command it queued for a replay (`503 QUEUED_FOR_REPLAY`)
+ * included. A retry sends the same variables, so the same key, and the
+ * backend applies the change once whichever attempt, or the replay, reached it
+ * first. A refusal (`4xx`) is the backend's answer and is not sent again.
  */
 function retryKeyedCommand(failureCount: number, error: Error): boolean {
   if (failureCount >= 2) return false;
@@ -58,7 +59,7 @@ export function useCreateProduct() {
   return useInvalidatingMutation(createProduct, [["products"]]);
 }
 
-/** The caller picks `idempotencyKey` per user action (`newIdempotencyKey`) and resends it unchanged. */
+/** The caller sends the key of the intended change (`pending-operations.ts`) with every request of it. */
 export function useAdjustStock() {
   return useInvalidatingMutation(
     ({
@@ -92,7 +93,7 @@ export function useDiscontinueProduct() {
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
-/** The caller picks `idempotencyKey` per user action (`newIdempotencyKey`) and resends it unchanged. */
+/** The caller sends the key of the intended change (`pending-operations.ts`) with every request of it. */
 export function useReceiveShipment() {
   return useInvalidatingMutation(
     ({

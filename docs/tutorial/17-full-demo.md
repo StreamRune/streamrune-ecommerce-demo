@@ -481,11 +481,11 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 - `state` is the command-bus `CircuitBreakerCommandInterceptor` (`new CircuitBreakerCommandInterceptor(3, Duration.ofSeconds(30))`). It counts genuine infrastructure failures on the command bus and opens after 3 in a row.
 - `paymentGateway` is the `PaymentGatewayCircuitBreaker` (also `3` / `30s`) wrapped around the gateway call the `PaymentProcessManager` makes.
 
-Now exercise the gateway breaker. Toggle payment failure on (an admin endpoint, so the call carries an `ADMIN`'s two headers, as the reads of this step do — Chapter 12) and place a few orders:
+Now exercise the gateway breaker. A decline does not open it: the payment-failure switch makes the gateway decline, the manager fails the payment at once, and the saga cancels the order, while `paymentGateway` stays `CLOSED` — a decline is the answer of a gateway that works. What opens it is a gateway that gives no answer. Switch the outage on (an admin endpoint, so the call carries an `ADMIN`'s two headers, as the reads of this step do — Chapter 12) and place a few orders:
 
 ```bash
-curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
-# {"failureInjected":true}
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
+# {"outage":true}
 
 for i in 1 2 3; do
   curl -s -X POST http://localhost:8080/api/orders \
@@ -494,17 +494,24 @@ for i in 1 2 3; do
 done
 ```
 
-Each order's `PaymentProcessManager` calls the gateway, which now throws, so the manager dispatches `FailPayment` and the saga cancels the order. After three consecutive gateway failures the gateway breaker opens:
+Each order's `PaymentProcessManager` calls the gateway, which gives no answer. The gateway may have taken the money, so the manager does not fail the payment: it asks the gateway for a capture of it, finds none, and lets the subscription deliver `PaymentInitiated` again, while the orders behind it wait. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
 
 ```bash
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-walk-cb-1 | jq .fulfillmentStatus
-# "FAILED"
+# "AWAITING_PAYMENT"
 ```
 
-Notice the command-bus breaker (`state`) stays `CLOSED`: the gateway failures are swallowed by the manager and converted into *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). While `paymentGateway` is `OPEN`, the manager fast-fails new payments without calling the gateway. Toggle the flag back off and, once the 30-second cooldown elapses, the next order's gateway call probes successfully and closes the breaker.
+Notice the command-bus breaker (`state`) stays `CLOSED`: a call without an answer dispatches no command, and a decline becomes *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a gateway failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). Switch the outage off: once the 30-second cooldown has passed, the next delivery is the breaker's probe, the gateway answers, the breaker closes, and the three payments are captured, so the orders are confirmed. An outage that outlasts the saga's deadline cancels its orders and voids their payments instead.
+
+```bash
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
+# {"outage":false}
+```
+
+Both switches are each backend's own: they flip the simulator of the backend that answers the request, and with two backends (below) the payment process manager may lead on the other one.
 
 ### Step 8: Forget the Customer — Verify GDPR Crypto Shredding
 
@@ -543,7 +550,7 @@ The DLQ (Chapter 14) collects commands that exhausted their retries. Check it:
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/dead-letters" | jq .
 ```
 
-In this walkthrough nothing lands in the DLQ: the gateway failures from Step 7 are handled cleanly by the saga (the `FailPayment`/`CancelOrder` commands succeed), so no command exhausts its retries. The endpoint returns an empty array `[]`. When a command *does* land in the DLQ, each entry exposes the failed `commandType`, the `errorType`/`errorMessage`, and the attempt counts (`attempts` / `dlqAttempts`). The `commandPayload` of a dead-lettered `RegisterCustomer` or `UpdateProfile` shows the customer's personal data as ciphertext: those commands carry `@Encrypted` (Chapter 6), so the queued copy is erased with the customer (Chapter 7). From the Admin page in the frontend you can re-run individual entries with the **Retry** button. `POST /api/admin/dead-letters/{id}/retry` calls `deadLetterRetryRunner.retry(new CommandId(id), force)`, which **re-dispatches the dead-lettered command through the bus** under a `DLQ_REPLAY` marker and the entry's original request context — discarding the entry on success, bumping its DLQ attempt count on failure, and returning `404` if no entry exists for that id. Without `force` it replays only an entry the command inbox can deduplicate — one whose command carried an idempotency key, such as a stock adjustment sent with `Idempotency-Key` (Chapter 14, Step 3b). For any other it answers `409` with the reason; the Admin page then asks you to check the command's effect, and either resends the retry with `?force=true` (the effect is absent) or discards the entry with `DELETE /api/admin/dead-letters/{id}` (the effect is present). The backend writes either decision to the audit log under your id before it acts on it. Like every mutating admin endpoint it requires the ADMIN role header and answers `403` without it; the Admin page sends it for the ADMIN persona. The `DeadLetterRetryRunner` bean replays keyed entries on its own schedule; an unkeyed entry waits for an operator, because its caller may already have retried it.
+In this walkthrough nothing lands in the DLQ: the outage of Step 7 holds payments without failing a command, and a declined payment's `FailPayment`/`CancelOrder` commands succeed, so no command exhausts its retries. The endpoint returns an empty array `[]`. When a command *does* land in the DLQ, each entry exposes the failed `commandType`, the `errorType`/`errorMessage`, and the attempt counts (`attempts` / `dlqAttempts`). The `commandPayload` of a dead-lettered `RegisterCustomer` or `UpdateProfile` shows the customer's personal data as ciphertext: those commands carry `@Encrypted` (Chapter 6), so the queued copy is erased with the customer (Chapter 7). From the Admin page in the frontend you can re-run individual entries with the **Retry** button. `POST /api/admin/dead-letters/{id}/retry` calls `deadLetterRetryRunner.retry(new CommandId(id), force)`, which **re-dispatches the dead-lettered command through the bus** under a `DLQ_REPLAY` marker and the entry's original request context — discarding the entry on success, bumping its DLQ attempt count on failure, and returning `404` if no entry exists for that id. Without `force` it replays only an entry the command inbox can deduplicate — one whose command carried an idempotency key, such as a stock adjustment sent with `Idempotency-Key` (Chapter 14, Step 3b). For any other it answers `409` with the reason; the Admin page then asks you to check the command's effect, and either resends the retry with `?force=true` (the effect is absent) or discards the entry with `DELETE /api/admin/dead-letters/{id}` (the effect is present). The backend writes either decision to the audit log under your id before it acts on it. Like every mutating admin endpoint it requires the ADMIN role header and answers `403` without it; the Admin page sends it for the ADMIN persona. The `DeadLetterRetryRunner` bean replays keyed entries on its own schedule; an unkeyed entry waits for an operator, because its caller may already have retried it.
 
 Verify the outbox as well — the listing is read-only (`findByStatus(PENDING)`), so it never stalls delivery:
 
@@ -577,6 +584,8 @@ The terminal prints `: connected` within a second and nothing of the events abov
 ### Two Backends on One Database
 
 Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The three process managers' subscriptions have a lease each — `payment-process-manager`, `order-cancellation` and `order-shipment` — so each of the four leases sits on one backend, and not necessarily the same one: after a restart the saga may lead on one backend and the cancellation process manager on the other. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
+
+**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free. What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty connections, well below PostgreSQL's default `max_connections` of 100; size the two pools of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
 
 **The profile.** The Compose file gets a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
 
@@ -727,6 +736,8 @@ Which backend leads shows in each one's health:
 curl -s http://localhost:8080/actuator/health | jq '.components.streamRune.details["subscription.order-fulfillment-saga"].role'
 curl -s http://localhost:8091/actuator/health | jq '.components.streamRune.details["subscription.order-fulfillment-saga"].role'
 ```
+
+**Keep the four variables on every later `docker compose up` of this stack.** Compose interpolates them when it starts a service and recreates a service whose configuration changed: a later `docker compose --profile two-backends up -d <service>` from a shell without them — to restart the frontend, say, which depends on `backend` — recreates `backend` with the defaults (a fifteen-minute deadline, no health details), and `backend-2` too when the command names it, and `scripts/two-backends-invariant.sh` then stops at its first check, the health details. Export the four in the shell you work in, or put them in an `.env` file next to `docker-compose.yml`, which Compose reads on every run.
 
 One answers `"LEADING"`, the other `"STANDBY"` — usually the backend that started first. Both serve every request: an order placed on the standby is stored by it, and the leader's saga subscription picks up its `OrderPlaced` from the shared event store.
 
@@ -1172,12 +1183,36 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover. Distinct from {@code circuitBreaker} above, which guards the command bus
+   * generally.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
     return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
+   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   *
+   * <p>The framework's in-process locker steps aside for this bean
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it.
+   */
+  @Bean(destroyMethod = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${spring.datasource.url}") String url,
+      @Value("${spring.datasource.username}") String username,
+      @Value("${spring.datasource.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   /**
@@ -1199,7 +1234,7 @@ public class StreamRuneConfig {
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
    * in plaintext.
    *
-   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).

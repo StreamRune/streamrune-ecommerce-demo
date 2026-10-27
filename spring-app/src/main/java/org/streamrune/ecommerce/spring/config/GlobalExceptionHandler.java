@@ -19,6 +19,7 @@ import org.streamrune.ecommerce.commands.CommandRefusal;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
+import org.streamrune.runtime.CommandDeadLetteredException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -82,21 +83,30 @@ public class GlobalExceptionHandler {
    * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
    * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
    * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
-   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
+   * too.
+   *
+   * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
+   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
+   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
+   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
+   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
+   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
     CommandBusOverloadedException.class,
     CommandBusClosedException.class,
     LockException.class,
-    OptimisticLockException.class
+    OptimisticLockException.class,
+    CommandDeadLetteredException.class
   })
   public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
     CommandRefusal refusal =
         CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
-    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(refusal.body());
+    ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
+    if (refusal.retryLater()) {
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+    }
+    return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
   }
 }

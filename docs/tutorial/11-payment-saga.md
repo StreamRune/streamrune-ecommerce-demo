@@ -53,7 +53,7 @@ This chapter builds the `Payment` aggregate, the `OrderFulfillmentSaga`, the `Pa
 > **What makes the saga complete in the assembled demo.** When you place an order end-to-end, the saga does not stall — it runs all the way to `COMPLETED`. Two pieces make that work:
 >
 > - **The framework routes the saga's own replies; the saga routes one outside event.** With every event of a command a saga dispatched, the command bus stores that saga's *origin* (saga type, saga id, hop count) in the event's metadata, and `SagaRunner` hands such an event to the saga its origin names. `PaymentInitiated`, `StockReserved` and the saga's own `OrderConfirmed` come back this way, with no routing code in the saga. An `OrderCancelled` that a request of the order's customer or an `ADMIN` causes carries no origin; for it `OrderFulfillmentSaga.correlateByEventData()` reads the `orderId` in the event and answers `fulfillment-<orderId>`, the saga of that order. No correlation id takes part (Step 3 says why).
-> - **A `PaymentProcessManager` drives the capture leg.** It is an `EventListener` (fed by its own `PollingEventSubscription`) that reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)`, and dispatches `CapturePayment` when the gateway succeeds or `FailPayment` when the gateway fails — inside `StreamRuneContext.continuing(event)`, so `PaymentCaptured`/`PaymentFailed` carry the origin of the saga that caused `PaymentInitiated` and reach that saga. A command it cannot dispatch is delivered again, never turned into a failed payment.
+> - **A `PaymentProcessManager` drives the capture leg.** It is an `EventListener` (fed by its own `PollingEventSubscription`) that reacts to `PaymentInitiated`, calls `PaymentGatewaySimulator.processPayment(...)`, and dispatches `CapturePayment` when the gateway takes the money or `FailPayment` when it declines — inside `StreamRuneContext.continuing(event)`, so `PaymentCaptured`/`PaymentFailed` carry the origin of the saga that caused `PaymentInitiated` and reach that saga. A call that gets no answer decides nothing: the manager asks the gateway whether it took the money and otherwise lets the event be delivered again, and a command it cannot dispatch is delivered again too, never turned into a failed payment.
 >
 > You build the `PaymentProcessManager` in Step 5b, with the circuit breaker around its gateway call that Chapter 12 explains, and wire it in Step 6.
 
@@ -596,7 +596,7 @@ The `decide()` method is a table of command against status (`[]` means no event 
 
 - **`InitiatePayment`** opens a payment once. A second initiation of an existing payment would reset it, so it is refused.
 - **`CapturePayment`** is sent only after the gateway took the money, so it is never refused for a status the money cannot undo. A capture of a payment that was voided or failed in the meantime is recorded and refunded in the same append (`PaymentDecider.LATE_CAPTURE_REASON`), in one transaction: the books show the capture and its reversal, and no step has to find the payment later. A capture of a captured or refunded payment is a redelivery and stores nothing.
-- **`FailPayment`** fails a pending payment. On any other status it stores nothing, so a gateway failure that arrives after a void, or a redelivered failure, never leaves the process that sent it with a refusal to retry.
+- **`FailPayment`** fails a pending payment. On any other status it stores nothing, so a gateway's decline that arrives after a void, or a redelivered failure, never leaves the process that sent it with a refusal to retry.
 - **`CancelPayment`** voids a pending payment, refunds a captured one for its full amount, and stores nothing for a payment that does not exist or is already settled, so it can run twice or run before the payment ever started.
 
 The `evolve()` method is a pure function — no branches beyond the exhaustive sealed-interface pattern match.
@@ -1335,7 +1335,8 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  *
  * <p>The capture leg is driven by a payment process manager (in the runtime app), which reacts to
  * {@code PaymentInitiated} by calling the payment gateway and dispatching {@code CapturePayment}
- * (success) or {@code FailPayment} (failure).
+ * (captured) or {@code FailPayment} (declined); a call without an answer decides nothing, and the
+ * saga waits for its payment.
  *
  * <p>Command targets are built with the {@code AggregateId} constructor, never {@code
  * AggregateId.of}. Every target comes from the saga's stored state — the order, payment and product
@@ -1365,8 +1366,13 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * the saga's {@code SagaRunner}, whose forward fence is on: a forward command of a step still in
  * flight when the deadline claims the saga is stored before the claim, or is refused at its commit.
  * A forward command stored before the claim is covered: the compensation's cancellation starts the
- * undo of whatever the streams hold. The timeout is {@link #DEFAULT_TIMEOUT} unless the application
- * passes one ({@code app.saga.fulfillment-timeout} in the three apps).
+ * undo of whatever the streams hold. The deadline holds until the saga applies {@code
+ * OrderConfirmed}, not until the order is confirmed: when the saga's runner applies that event late
+ * (a backlog, a lease moving to another backend), the deadline can claim a saga whose order the
+ * read model already shows {@code CONFIRMED}, and the cancellation refunds the paid order and
+ * releases its stock. It also bounds a payment the gateway gives no answer for, which the saga
+ * waits for until then. The timeout is {@link #DEFAULT_TIMEOUT} unless the application passes one
+ * ({@code app.saga.fulfillment-timeout} in the three apps).
  */
 public class OrderFulfillmentSaga
     implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {
@@ -2482,7 +2488,7 @@ Two test scenarios are worth highlighting, plus the regression tests for the can
 
 ### Step 5 — PaymentGatewaySimulator
 
-The demo uses a simple simulator rather than a real payment gateway. It has an injectable failure flag so you can demonstrate the failure/compensation path via a REST call. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`:
+The demo uses a simple simulator rather than a real payment gateway. It has two switches, which REST calls flip: one makes the gateway decline every payment, so you can watch the failure and compensation path, and the other makes it answer no call at all, an outage. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`:
 
 ```java
 package org.streamrune.ecommerce.spring.config;
@@ -2495,8 +2501,16 @@ import org.slf4j.LoggerFactory;
 import org.streamrune.core.types.LogSanitizer;
 
 /**
- * Stands in for an external payment gateway. {@link #processPayment} captures a payment, or throws
- * the way a failing gateway call would while failure injection is on.
+ * Stands in for an external payment gateway. {@link #processPayment} captures a payment, declines
+ * it while failure injection is on, and answers nothing while an outage is on.
+ *
+ * <p><b>A decline is an answer; a failed call is not.</b> A decline ({@link
+ * PaymentDeclinedException}) is the gateway's answer that it took no money: the payment fails. Any
+ * other failure of the call — a timeout, a reset connection, a {@code 5xx} — says nothing about the
+ * money, because a real gateway may have charged the payment before its answer was lost. This
+ * simulator never charges a call that fails, which is a property of the simulator and not of a
+ * gateway: the {@link PaymentProcessManager} asks {@link #hasCaptured} after a call without an
+ * answer, as it would ask a real gateway for the payment's status by its idempotency key.
  *
  * <p>The payment id is the call's idempotency key, as it would be in the idempotency-key header of
  * a real gateway's API: a second call for a payment the gateway already captured returns without
@@ -2513,9 +2527,11 @@ public class PaymentGatewaySimulator {
   private static final Logger LOG = LoggerFactory.getLogger(PaymentGatewaySimulator.class);
 
   private final AtomicBoolean failureInjected = new AtomicBoolean(false);
+  private final AtomicBoolean outage = new AtomicBoolean(false);
   private final Set<String> capturedPayments = ConcurrentHashMap.newKeySet();
   private final Set<String> refundedPayments = ConcurrentHashMap.newKeySet();
 
+  /** Whether the gateway declines every payment it has not captured. */
   public boolean isFailureInjected() {
     return failureInjected.get();
   }
@@ -2524,30 +2540,46 @@ public class PaymentGatewaySimulator {
     failureInjected.set(inject);
   }
 
+  /** Whether the gateway answers no call: every call fails without an answer. */
+  public boolean isOutage() {
+    return outage.get();
+  }
+
+  public void setOutage(boolean down) {
+    outage.set(down);
+  }
+
   /**
-   * Captures the payment, or throws while failure injection is on. A call for a payment this
-   * gateway already captured returns without charging again, whether or not failure injection is
-   * on.
+   * Captures the payment. During an outage the call fails without an answer, and while failure
+   * injection is on the gateway declines a payment it has not captured; a call for a payment this
+   * gateway already captured returns without charging again.
+   *
+   * @throws PaymentDeclinedException when the gateway declines the payment: nothing was charged
+   * @throws IllegalStateException when the gateway gives no answer; this simulator charged nothing
    */
   public void processPayment(String paymentId) {
+    if (outage.get()) {
+      throw new IllegalStateException(
+          "Simulated payment gateway outage: no answer for payment " + paymentId);
+    }
     if (capturedPayments.contains(paymentId)) {
       return;
     }
     if (failureInjected.get()) {
-      throw new RuntimeException("Simulated payment gateway failure for payment " + paymentId);
+      throw new PaymentDeclinedException(paymentId);
     }
     capturedPayments.add(paymentId);
   }
 
-  /** Whether this gateway has captured the payment. */
+  /** Whether this gateway has captured the payment: its status lookup by idempotency key. */
   public boolean hasCaptured(String paymentId) {
     return capturedPayments.contains(paymentId);
   }
 
   /**
    * Refunds a payment this gateway captured; a second refund of it refunds nothing. A refund of a
-   * payment this gateway never captured records nothing and logs a warning. Failure injection
-   * affects {@link #processPayment} only.
+   * payment this gateway never captured records nothing and logs a warning. Failure injection and
+   * the outage affect {@link #processPayment} only.
    */
   public void refund(String paymentId) {
     if (!capturedPayments.contains(paymentId)) {
@@ -2563,20 +2595,32 @@ public class PaymentGatewaySimulator {
   public boolean hasRefunded(String paymentId) {
     return refundedPayments.contains(paymentId);
   }
+
+  /** The gateway declined the payment: its answer, and no money was taken. */
+  public static final class PaymentDeclinedException extends RuntimeException {
+
+    public PaymentDeclinedException(String paymentId) {
+      super("Simulated payment gateway declined payment " + paymentId);
+    }
+  }
 }
 ```
 
-The `AtomicBoolean` makes the flag thread-safe for concurrent requests. This `processPayment(paymentId)` method is the gateway call the `PaymentProcessManager` makes when it reacts to `PaymentInitiated` (Step 5b). When the failure flag is on, the call throws — that drives the `FailPayment` branch and lets you watch the saga compensate. Chapter 12 (Circuit Breaker) wraps this same call in a breaker so repeated gateway failures stop hammering the gateway.
+The `AtomicBoolean`s make the switches thread-safe for concurrent requests. This `processPayment(paymentId)` method is the gateway call the `PaymentProcessManager` makes when it reacts to `PaymentInitiated` (Step 5b). It ends in one of three ways, and the manager tells them apart:
+
+- **It returns: the gateway took the money.** The manager records the capture.
+- **It throws `PaymentDeclinedException`: the gateway declined.** A decline is the gateway's answer, and no money was taken: the manager fails the payment, and the saga compensates. The failure switch (`failureInjected`) makes every payment a decline, so you can watch it.
+- **It throws anything else: there is no answer.** A timeout, a reset connection or a `5xx` says nothing about the money, because a real gateway may have charged the payment before its answer was lost. The outage switch makes every call fail this way. This simulator never charges a call that fails; that is a property of the simulator and not of a gateway, so the manager does not rely on it: it asks `hasCaptured`, the status lookup a real gateway offers by idempotency key, before it decides anything (Step 5b). Chapter 12 (Circuit Breaker) wraps the call in a breaker that counts these calls, so an outage stops hammering the gateway.
 
 The payment id doubles as the call's **idempotency key**, the way a real gateway's API takes an idempotency-key header: a second call for a payment the gateway already captured returns without charging again. Step 5b explains why the process manager needs that — it may call the gateway twice for the same payment.
 
-`refund(paymentId)` refunds a payment the gateway captured, and is idempotent by payment id too: a second refund of the same payment refunds nothing. A refund of a payment the gateway never captured records nothing and logs a `WARN`. Failure injection affects `processPayment` only, so a refund never fails and never holds up the subscription that also carries the captures. `hasCaptured` and `hasRefunded` are for tests. The simulator keeps its memory in the process: with two backends (Chapter 17) a refund reaches the simulator of the backend whose payment process manager leads. `PaymentGatewaySimulatorTest` covers the refund of a captured payment, of one the gateway never captured, and a refund while failure injection is on.
+`refund(paymentId)` refunds a payment the gateway captured, and is idempotent by payment id too: a second refund of the same payment refunds nothing. A refund of a payment the gateway never captured records nothing and logs a `WARN`. The two switches affect `processPayment` only, so a refund never fails and never holds up the subscription that also carries the captures. `hasCaptured` is the status lookup the manager asks after a call without an answer; `hasRefunded` is for tests. The simulator keeps its memory in the process: with two backends (Chapter 17) a refund reaches the simulator of the backend whose payment process manager leads. `PaymentGatewaySimulatorTest` covers the refund of a captured payment, of one the gateway never captured, and a refund while failure injection is on, a decline that charges nothing, and an outage that answers no call and charges nothing.
 
 ### Step 5b — PaymentProcessManager: drive the capture leg
 
 `InitiatePayment` only records that a payment is `PENDING`. Something has to actually talk to the gateway and turn the outcome into a `CapturePayment` or `FailPayment` command — that is the **payment process manager**. It is an `EventListener` that reacts to `PaymentInitiated`, calls the gateway, and dispatches the follow-up command as a *continuation of that event*, inside `StreamRuneContext.continuing(event)`. The resulting `PaymentCaptured`/`PaymentFailed` then carries the origin of the saga that caused `PaymentInitiated`, and `SagaRunner` hands it to that saga.
 
-The manager guards each gateway call with a small circuit breaker of its own, which Chapter 12 explains: after three consecutive gateway failures it opens, and the manager fails the payment without calling the gateway until a cooldown admits a probe. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`:
+The manager guards each gateway call with a small circuit breaker of its own, which Chapter 12 explains: after three consecutive calls without an answer it opens, and the manager calls the gateway no more until a cooldown admits a probe. A payment that meets the open breaker has no answer either, so it waits too; a decline is an answer from a gateway that works, and the breaker counts it as a success. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`:
 
 ```java
 package org.streamrune.ecommerce.spring.config;
@@ -2588,15 +2632,18 @@ import java.time.Instant;
  * A small circuit breaker around the payment gateway call.
  *
  * <p>The demo also has a {@code CircuitBreakerCommandInterceptor} on the command bus, but that one
- * guards <em>commands</em> and resets on any successful command — and the order-fulfillment saga
- * compensates a failed payment with a <em>successful</em> {@code FailPayment}/{@code CancelOrder},
- * which would keep resetting it. The textbook place for a breaker is around the flaky dependency
- * itself: this breaker counts only gateway-call outcomes, so consecutive gateway failures open it
- * regardless of what the saga does on the command bus.
+ * guards <em>commands</em> and resets on any successful command, and a gateway call is no command:
+ * a call without an answer dispatches nothing, and the saga's own traffic — a <em>successful</em>
+ * {@code FailPayment}/{@code CancelOrder} after a decline — would keep resetting it. The textbook
+ * place for a breaker is around the flaky dependency itself: this breaker counts only gateway-call
+ * outcomes, so consecutive gateway calls that got no answer open it regardless of what the saga
+ * does on the command bus. A decline is an answer from a gateway that works: the {@link
+ * PaymentProcessManager} records it as a success.
  *
  * <p>State machine: CLOSED → OPEN (after {@code failureThreshold} consecutive failures) → HALF_OPEN
  * (after {@code cooldown}) → CLOSED (probe success) or OPEN (probe failure). While OPEN the {@link
- * PaymentProcessManager} fast-fails the payment without calling the gateway.
+ * PaymentProcessManager} does not call the gateway: the payment has no answer, so it stays pending
+ * and its event is delivered again, unless the gateway reports a capture of it.
  *
  * <p>Single-threaded use (driven by one polling subscription); methods are {@code synchronized} for
  * safe reads from the admin endpoint.
@@ -2641,7 +2688,7 @@ public class PaymentGatewayCircuitBreaker {
     openedAt = null;
   }
 
-  /** Records a failed gateway call: opens the breaker once the threshold is reached. */
+  /** Records a gateway call without an answer: opens the breaker once the threshold is reached. */
   public synchronized void recordFailure() {
     consecutiveFailures++;
     if (consecutiveFailures >= failureThreshold || state == State.HALF_OPEN) {
@@ -2686,15 +2733,31 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * compensate.
  *
  * <ul>
- *   <li>gateway succeeds → {@code CapturePayment} → {@code PaymentCaptured} → saga reserves stock;
- *   <li>gateway fails → {@code FailPayment} → {@code PaymentFailed} → saga cancels the order.
+ *   <li>gateway captures → {@code CapturePayment} → {@code PaymentCaptured} → saga reserves stock;
+ *   <li>gateway declines → {@code FailPayment} → {@code PaymentFailed} → saga cancels the order;
+ *   <li>gateway gives no answer → nothing is decided: the event is delivered again, unless the
+ *       gateway reports that it took the money, which records the capture.
  * </ul>
  *
  * <p>It also reacts to {@code PaymentRefunded}, by refunding the payment at the gateway.
  *
- * <p>The gateway call is guarded by a {@link PaymentGatewayCircuitBreaker}: after a few consecutive
- * gateway failures the breaker opens and the manager fails the payment (dispatches {@code
- * FailPayment} without calling the gateway) until the cooldown lets a probe through.
+ * <p><b>A decline is an answer; a call without one is not.</b> Only the gateway's decline ({@link
+ * PaymentGatewaySimulator.PaymentDeclinedException}) fails the payment. Any other failure of the
+ * call — a timeout, a reset connection, a {@code 5xx} — leaves the outcome unknown: a real gateway
+ * may have taken the money before its answer was lost. The manager then asks the gateway whether it
+ * holds a capture of the payment, by the payment id that is the call's idempotency key. If it does,
+ * the capture is recorded. If it does not, {@link #onEvents} throws {@link
+ * PaymentOutcomeUnknownException}: the payment stays {@code PENDING}, the subscription delivers
+ * {@code PaymentInitiated} again after a backoff, and the gateway is asked again. The order's
+ * deadline bounds the wait: its cancellation voids the pending payment, and a capture the gateway
+ * reports after that is recorded and refunded (below). Failing the payment on an unknown outcome
+ * would cancel an order whose money the gateway may hold, and nothing would ask the gateway again.
+ *
+ * <p>The gateway call is guarded by a {@link PaymentGatewayCircuitBreaker}, which counts the calls
+ * that got no answer: after a few in a row it opens, and the manager does not call the gateway
+ * until the cooldown lets a probe through. A payment that meets the open breaker has no answer
+ * either, and is held the same way. A decline comes from a gateway that works, so the breaker
+ * counts it as a success.
  *
  * <p><b>The command continues the event.</b> Each command is dispatched inside {@link
  * StreamRuneContext#continuing(EventEnvelope) StreamRuneContext.continuing(initiated)}. The command
@@ -2705,18 +2768,17 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * nor the saga routes it. The command runs with no user and no authority: the customer who placed
  * the order did not issue it.
  *
- * <p><b>Only the gateway decides the payment.</b> A gateway failure is counted by the breaker and
- * becomes {@code FailPayment}. A failure to dispatch either command — the event store unreachable,
- * the command bus's own circuit breaker open, the bus shutting down — says nothing about the
- * payment, so it propagates out of {@link #onEvents}: the subscription keeps its checkpoint before
- * the event and delivers it again after a backoff. Treating it as a gateway failure would cancel an
- * order whose money the gateway had already taken; swallowing it would leave the payment {@code
- * PENDING} with the event already consumed. That redelivery is the command's only second attempt:
- * the bus publishes a failed command that was dispatched inside {@code continuing} to no dead
- * letter queue, whether or not a saga caused the event. An entry has no place for the causing event
- * or for a saga origin, so its replay would store the reply without them. A capture that keeps
- * failing therefore shows on the subscription and nowhere else: its poll loop logs every failed
- * attempt at {@code ERROR}.
+ * <p><b>Only the gateway decides the payment.</b> A failure to dispatch either command — the event
+ * store unreachable, the command bus's own circuit breaker open, the bus shutting down — says
+ * nothing about the payment, so it propagates out of {@link #onEvents}: the subscription keeps its
+ * checkpoint before the event and delivers it again after a backoff. Treating it as a decline would
+ * cancel an order whose money the gateway had already taken; swallowing it would leave the payment
+ * {@code PENDING} with the event already consumed. That redelivery is the command's only second
+ * attempt: the bus publishes a failed command that was dispatched inside {@code continuing} to no
+ * dead letter queue, whether or not a saga caused the event. An entry has no place for the causing
+ * event or for a saga origin, so its replay would store the reply without them. A capture that
+ * keeps failing therefore shows on the subscription and nowhere else: its poll loop logs every
+ * failed attempt at {@code ERROR}, and so does a payment the gateway gives no answer for.
  *
  * <p><b>Safe to deliver twice.</b> The subscription delivers at least once, and after a dispatch
  * failure it delivers the whole batch again:
@@ -2806,31 +2868,47 @@ public class PaymentProcessManager implements EventListener {
 
   private void capture(String paymentId, EventEnvelope initiated) {
     if (!breaker.allowRequest()) {
-      LOG.warn(
-          "Payment gateway circuit OPEN — failing payment {}",
-          LogSanitizer.sanitizeForLog(paymentId));
-      dispatch(
-          new PaymentCommand.FailPayment(paymentId, "payment gateway circuit open"),
-          failKey(paymentId),
-          initiated);
+      withoutAnAnswer(paymentId, initiated, null);
       return;
     }
     try {
       gateway.processPayment(paymentId);
-    } catch (RuntimeException gatewayFailure) {
-      breaker.recordFailure();
-      LOG.warn(
-          "Payment gateway failed for {}: {}",
-          LogSanitizer.sanitizeForLog(paymentId),
-          LogSanitizer.sanitizeForLog(gatewayFailure.getMessage()));
+    } catch (PaymentGatewaySimulator.PaymentDeclinedException declined) {
+      // The gateway answered: it works, and it took no money.
+      breaker.recordSuccess();
+      LOG.info("Payment gateway declined {}", LogSanitizer.sanitizeForLog(paymentId));
       dispatch(
-          new PaymentCommand.FailPayment(paymentId, gatewayFailure.getMessage()),
+          new PaymentCommand.FailPayment(paymentId, declined.getMessage()),
           failKey(paymentId),
           initiated);
+      return;
+    } catch (RuntimeException noAnswer) {
+      breaker.recordFailure();
+      withoutAnAnswer(paymentId, initiated, noAnswer);
       return;
     }
     breaker.recordSuccess();
     dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
+  }
+
+  /**
+   * The gateway gave no answer for the payment, or its open breaker kept the call from being made:
+   * the outcome is unknown. A capture the gateway reports is recorded; otherwise the payment stays
+   * {@code PENDING} and the event is delivered again.
+   *
+   * @param noAnswer the call's failure, or {@code null} when the breaker was open
+   * @throws PaymentOutcomeUnknownException when the gateway reports no capture of the payment
+   */
+  private void withoutAnAnswer(
+      String paymentId, EventEnvelope initiated, RuntimeException noAnswer) {
+    if (gateway.hasCaptured(paymentId)) {
+      LOG.info(
+          "The payment gateway gave no answer for payment {} but holds its capture; recording it",
+          LogSanitizer.sanitizeForLog(paymentId));
+      dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
+      return;
+    }
+    throw new PaymentOutcomeUnknownException(paymentId, noAnswer);
   }
 
   /** The capture's idempotency key: one per payment, the same on every delivery. */
@@ -2850,18 +2928,37 @@ public class PaymentProcessManager implements EventListener {
   private void dispatch(PaymentCommand command, IdempotencyKey key, EventEnvelope initiated) {
     StreamRuneContext.continuing(initiated).run(() -> commandBus.execute(command, key));
   }
+
+  /**
+   * The gateway gave no answer for a payment and holds no capture of it: the payment stays {@code
+   * PENDING}, and the subscription delivers {@code PaymentInitiated} again after a backoff.
+   */
+  public static final class PaymentOutcomeUnknownException extends RuntimeException {
+
+    PaymentOutcomeUnknownException(String paymentId, RuntimeException noAnswer) {
+      super(
+          (noAnswer == null
+                  ? "The payment gateway's circuit is open: no call for payment "
+                  : "The payment gateway gave no answer for payment ")
+              + LogSanitizer.sanitizeForLog(paymentId)
+              + ", and it holds no capture of it; the payment stays PENDING until a delivery"
+              + " gets an answer",
+          noAnswer);
+    }
+  }
 }
 ```
 
-Five details earn their keep:
+Six details earn their keep:
 
 - **The command continues the event.** `dispatch()` runs the command inside `StreamRuneContext.continuing(initiated)`. The helper binds, for the commands dispatched inside it, what the command bus writes into their events: the correlation id and the trace id of `PaymentInitiated`, its event id as the causation id, and its saga origin one hop further (hop 1: the saga's command caused `PaymentInitiated`, the process manager's command continues it). That origin is how `PaymentCaptured` and `PaymentFailed` reach the saga; neither the process manager nor the saga routes them. The command inherits no user, no authority and no baggage: the customer who placed the order did not issue it, and it runs like any command a background thread dispatches. A listener that instead builds a `RequestContext` by hand around the event's correlation id has its command refused with a `ReservedCorrelationIdException`: that id is the saga's reserved `streamrune:saga:...` id, and the bus accepts it only together with the saga's origin (Step 3). The exception is neither a `DomainException` nor an `IllegalArgumentException`, so a listener that treats a domain rejection as an answer does not swallow it.
-- **Only the gateway decides the payment.** The `try` block holds the gateway call and nothing else. A gateway failure is counted by the breaker and becomes `FailPayment`. A failure to *dispatch* a command — the event store unreachable, the command bus's own circuit breaker open (Chapter 12), the bus shutting down during a restart — says nothing about the payment, so it propagates out of `onEvents`. The polling subscription then keeps its checkpoint before the event and delivers it again after a backoff. Catching it as a gateway failure would dispatch `FailPayment` for money the gateway had already taken, and the saga would cancel an order the customer paid for. Swallowing it would leave the payment `PENDING` forever, with the event already consumed and nothing to bring it back. Redelivery is this command's only second attempt: the bus publishes a failed command that was dispatched inside `continuing` to no dead letter queue, whether or not a saga caused the event. An entry has no place for the causing event or for a saga origin, so its replay would store the reply without them, and here the saga would never receive it. A capture that keeps failing shows on the subscription and nowhere else: the poll loop logs `Poll loop 'subscription 'payment-process-manager'' failed (N consecutive failure(s)); retrying in M ms` at `ERROR` for every attempt, with the failure's stack trace.
+- **A decline is an answer; a call without one is not.** The `try` block holds the gateway call and nothing else. Only `PaymentDeclinedException` becomes `FailPayment`: the gateway answered, took no money, and works, so the breaker records a success. Any other exception leaves the outcome unknown, and so does a payment the open breaker keeps from the gateway. `withoutAnAnswer` then asks the gateway whether it holds a capture of the payment: if it does, the capture is recorded; if it does not, `onEvents` throws `PaymentOutcomeUnknownException`, the payment stays `PENDING`, and the subscription delivers `PaymentInitiated` again after a backoff, when the gateway is asked again. Failing the payment instead would cancel an order whose money the gateway may hold, and nothing would ever ask the gateway again: the subscription would have moved on. The wait is bounded by the order's deadline (Step 6): its cancellation voids the pending payment, and a capture the gateway reports after that is recorded and refunded (the fifth detail below). While the gateway gives no answer, the subscription holds every later payment behind that event, as a dispatch failure does, and the breaker keeps the gateway from being called more than once a cooldown.
+- **Only the gateway decides the payment.** A failure to *dispatch* a command — the event store unreachable, the command bus's own circuit breaker open (Chapter 12), the bus shutting down during a restart — says nothing about the payment, so it propagates out of `onEvents`. The polling subscription then keeps its checkpoint before the event and delivers it again after a backoff. Catching it as a decline would dispatch `FailPayment` for money the gateway had already taken, and the saga would cancel an order the customer paid for. Swallowing it would leave the payment `PENDING` forever, with the event already consumed and nothing to bring it back. Redelivery is this command's only second attempt: the bus publishes a failed command that was dispatched inside `continuing` to no dead letter queue, whether or not a saga caused the event. An entry has no place for the causing event or for a saga origin, so its replay would store the reply without them, and here the saga would never receive it. A capture that keeps failing shows on the subscription and nowhere else: the poll loop logs `Poll loop 'subscription 'payment-process-manager'' failed (N consecutive failure(s)); retrying in M ms` at `ERROR` for every attempt, with the failure's stack trace.
 - **Each delivery reads the payment's stream first.** The subscription delivers at least once, and after a failure it delivers the whole batch again. `settle()` reads what the payment's stream holds after `PaymentInitiated`, from the event store, and decides from that. Nothing yet: the payment is pending, and the gateway is asked. A `PaymentCaptured`: an earlier delivery recorded the capture, and there is nothing to do. A `PaymentVoided` or a `PaymentFailed` and no capture: the payment was cancelled or failed while this event waited — the manager never calls the gateway for it. A payment that is still `PENDING` may have been charged by an attempt whose capture could not be recorded; calling the gateway again is safe because the payment id is the gateway's idempotency key (Step 5). Each command goes out under a key derived from the payment id — `payment-capture:<paymentId>`, `payment-fail:<paymentId>` — which the command inbox wired in Step 6 records with the resulting event. A delivery that arrives after the command committed is an inbox hit, not a second capture.
 - **A payment cancelled while the gateway charged it.** The gateway may have taken the money in an attempt whose `CapturePayment` could not be recorded, and the order may be cancelled before the next delivery: the cancellation voids the pending payment. That delivery finds a `PaymentVoided` (or a `PaymentFailed`) and no capture, while the gateway holds a capture of the payment, and answers it with `CapturePayment` under the same key. The payment records the capture and refunds it in one append (Step 1), and the books show the money that was taken and given back.
 - **Refunds reach the gateway, and no rejection is swallowed.** On `PaymentRefunded` the manager calls `gateway.refund(paymentId)`; the payment id is the refund's idempotency key, so a redelivery refunds nothing twice. The deciders store nothing for a redelivered capture or failure (Step 1), so no rejection is expected here; one that occurs is a fault, and it propagates out of `onEvents`. The subscription delivers the event again and logs every attempt at `ERROR` until the fault is fixed.
 
-The demo pins this behaviour in `PaymentProcessManagerTest`: a failed capture or `FailPayment` dispatch makes `onEvents` throw and is applied on the next delivery, a settled payment is never sent to the gateway again, every delivery uses the same keys, and a rejection propagates (`aRejectionPropagates`). `aVoidedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` and `aFailedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` seed a payment that was voided or failed after the gateway charged it: one `CapturePayment` under `payment-capture:<paymentId>`, no second gateway call, and the stream ends with `PaymentCaptured`, `PaymentRefunded`; `aVoidedPaymentTheGatewayNeverCharged_isLeftAlone` sends nothing and charges nothing; `aRefundIsSentToTheGateway` delivers a `PaymentRefunded` twice and finds one refund at the gateway and no command. `theCommandContinuesThePaymentInitiatedEvent` reads the context the command ran under: the saga's origin at hop 1, the id of `PaymentInitiated` as the causation id, the saga's correlation id, no user. `aFailedDispatchPropagatesAndLeavesNoDeadLetter` runs the framework's own command bus over an event store that refuses one append: `onEvents` throws, the dead letter queue stays empty, and the next delivery stores `PaymentCaptured` with that origin. `aFailedDispatchForAnEventNoSagaCausedLeavesNoDeadLetterEither` repeats it for a `PaymentInitiated` without an origin, because the rule belongs to `continuing` and not to sagas: no entry, and a later delivery stores the capture once, with `PaymentInitiated` as its cause. `theSameFailureOutsideAContinuationIsDeadLettered` shows what both rest on: the bus does dead-letter that failure for a command with no continuation around it. `PaymentCaptureRetryIT` does the same against the running app and PostgreSQL. It makes the event store refuse one payment's `PaymentCaptured` after the gateway has charged it: the payment is not failed, no capture is dead-lettered, and once the store accepts the event the capture is recorded with the saga's origin and the saga confirms the order. Its second case, `aCaptureRedeliveredAfterTheOrderWasCancelled_isRecordedAndRefunded`, cancels the order while the capture is held: the payment is voided, the redelivery records the capture, and the payment ends `PaymentInitiated`, `PaymentVoided`, `PaymentCaptured`, `PaymentRefunded`, with the refund at the gateway and no stock reserved.
+The demo pins this behaviour in `PaymentProcessManagerTest`: a failed capture or `FailPayment` dispatch makes `onEvents` throw and is applied on the next delivery, a settled payment is never sent to the gateway again, every delivery uses the same keys, and a rejection propagates (`aRejectionPropagates`). A decline fails the payment and leaves the breaker closed (`aDeclineFailsThePayment_andTheBreakerCountsNoFailure`); a gateway that takes the money and then gives no answer ends with the capture recorded, never a failed payment (`aGatewayThatTookTheMoneyAndThenGaveNoAnswer_capturesThePayment_andNeverFailsIt`); a call without an answer or a charge leaves the payment pending until a later delivery gets an answer, and an open breaker holds the payment and records a capture the gateway reports. `aVoidedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` and `aFailedPaymentTheGatewayCharged_isCapturedSoThatItIsRefunded` seed a payment that was voided or failed after the gateway charged it: one `CapturePayment` under `payment-capture:<paymentId>`, no second gateway call, and the stream ends with `PaymentCaptured`, `PaymentRefunded`; `aVoidedPaymentTheGatewayNeverCharged_isLeftAlone` sends nothing and charges nothing; `aRefundIsSentToTheGateway` delivers a `PaymentRefunded` twice and finds one refund at the gateway and no command. `theCommandContinuesThePaymentInitiatedEvent` reads the context the command ran under: the saga's origin at hop 1, the id of `PaymentInitiated` as the causation id, the saga's correlation id, no user. `aFailedDispatchPropagatesAndLeavesNoDeadLetter` runs the framework's own command bus over an event store that refuses one append: `onEvents` throws, the dead letter queue stays empty, and the next delivery stores `PaymentCaptured` with that origin. `aFailedDispatchForAnEventNoSagaCausedLeavesNoDeadLetterEither` repeats it for a `PaymentInitiated` without an origin, because the rule belongs to `continuing` and not to sagas: no entry, and a later delivery stores the capture once, with `PaymentInitiated` as its cause. `theSameFailureOutsideAContinuationIsDeadLettered` shows what both rest on: the bus does dead-letter that failure for a command with no continuation around it. `PaymentCaptureRetryIT` does the same against the running app and PostgreSQL. It makes the event store refuse one payment's `PaymentCaptured` after the gateway has charged it: the payment is not failed, no capture is dead-lettered, and once the store accepts the event the capture is recorded with the saga's origin and the saga confirms the order. `aGatewayOutageHoldsThePayment_andTheOrderIsConfirmedOnceTheGatewayAnswers` switches the outage on: three deliveries without an answer open the gateway breaker, the payment holds only `PaymentInitiated` and the order is not cancelled, and once the gateway answers the payment is captured and the order confirmed. Its last case, `aCaptureRedeliveredAfterTheOrderWasCancelled_isRecordedAndRefunded`, cancels the order while the capture is held: the payment is voided, the redelivery records the capture, and the payment ends `PaymentInitiated`, `PaymentVoided`, `PaymentCaptured`, `PaymentRefunded`, with the refund at the gateway and no stock reserved.
 
 ### Step 5c — Undo a cancelled order, commit a shipped one
 
@@ -3259,7 +3356,7 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
 
 Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. When the saga subscription of its process has not started by the runner's second poll, the runner logs one `INFO` line — a subscription that starts a moment after the runner, as it does here (the subscription bean depends on this one), opens the lease first and costs no line; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
 
-**PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (the class of Step 5b). Three consecutive gateway failures open it; a 30-second cooldown then admits one probe:
+**PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (the class of Step 5b). Three consecutive calls without an answer open it; a 30-second cooldown then admits one probe:
 
 ```java
 @Bean
@@ -3356,7 +3453,7 @@ public PollingEventSubscription orderCancellationSubscription(
 
 `orderShipmentProcessManager` and `orderShipmentSubscription` are the same with `OrderShipmentProcessManager`. In Quarkus, `StreamRuneProducer` produces both managers as `@Singleton` beans over the `CommandBus`, and `EcommerceSubscriptionLifecycle` builds, starts and closes their subscriptions next to the payment process manager's; in Micronaut, `StreamRuneFactory` and its `EcommerceSubscriptionLifecycle` do the same. Both lifecycles close the two before the payment process manager's subscription.
 
-**The compensation retry sweeper every 10 seconds.** A cancellation by the order's customer or an `ADMIN` stamps a running saga `COMPENSATING` and dispatches nothing; the saga's own `CancelOrder` follows when the saga's next event arrives, its deadline passes, or the compensation retry sweeper takes the row. The sweeper takes rows older than its interval, every interval, and the framework's default is a minute. The demo sets ten seconds, so a saga stamped by a foreign cancellation is compensated within about 10 to 20 seconds. Add it under `streamrune:` in `application.yml` (Quarkus: `streamrune.saga.compensation-retry-interval=10s` in `application.properties`; its test profile keeps `1s`):
+**The compensation retry sweeper every 10 seconds.** A cancellation by the order's customer or an `ADMIN` stamps a running saga `COMPENSATING` and dispatches nothing; the saga's own `CancelOrder` follows when the saga's next event arrives, its deadline passes, or the compensation retry sweeper takes the row. The sweeper takes rows older than its interval, every interval, and the framework's default is a minute. The demo sets ten seconds, so a saga stamped by a foreign cancellation is compensated within about 10 to 20 seconds. Add it under `streamrune:` in `spring-app/src/main/resources/application.yml` (Quarkus: `streamrune.saga.compensation-retry-interval=10s` in `application.properties`; its test profile keeps `1s`):
 
 ```yaml
 streamrune:
@@ -3666,8 +3763,8 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
@@ -4745,7 +4842,7 @@ public Map<String, Boolean> injectFailure(@PathVariable String id) {
 
 Without the header the route answers `403` and the flag stays as it was.
 
-**Watch the compensation path.** With the flag on, place another order. The payment process manager calls `processPayment`, the gateway throws, and the manager dispatches `FailPayment`. The saga cancels the order and ends `FAILED`; the order cancellation process manager finds nothing to undo, because no stock was reserved and the failed payment took no money:
+**Watch the compensation path.** With the flag on, place another order. The payment process manager calls `processPayment`, the gateway declines, and the manager dispatches `FailPayment`. The saga cancels the order and ends `FAILED`; the order cancellation process manager finds nothing to undo, because no stock was reserved and the failed payment took no money:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/orders \
@@ -4854,6 +4951,8 @@ So no forward command of a fulfillment is stored after its compensation, on any 
 
 `SagaDeadlineUndoE2EIT` holds each of those steps with a database trigger that refuses one event of one stream until the test allows it. With `PaymentCaptured` refused after the gateway has charged, the deadline voids the payment and the redelivered capture is recorded and refunded: `PaymentInitiated`, `PaymentVoided`, `PaymentCaptured`, `PaymentRefunded`. With `StockReserved` refused, the step of `PaymentCaptured` is delivered again and the row still reads `AWAITING_PAYMENT` when the deadline claims it: the cancellation refunds the capture, and the reservation is never dispatched: the redelivered step finds the saga ended (a reservation already in flight at the claim would be refused by the fence). With the second line's `StockReserved` refused, the first line's reservation is released and the payment refunded, and the second line never reserves.
 
+**A deadline can cancel an order that reads `CONFIRMED`.** The deadline holds until the saga applies `OrderConfirmed`, not until the order is confirmed. When the saga's runner applies that event late — a backlog on the saga subscription, a lease moving to another backend (Chapter 17) — the deadline can claim a saga whose order the read model already shows `CONFIRMED`, with its payment captured and its stock reserved. The order decider accepts the cancellation of a confirmed order, so the compensation's `CancelOrder` cancels it, and its undo refunds the payment and releases the stock: the order ends cancelled and refunded, never paid and unshipped. A client that reads `CONFIRMED` and ships the order meets this as a `400`, the deadline's cancellation having come first; one that ships first keeps the order, because the decider refuses to cancel a shipped order. The same deadline bounds a payment the gateway gives no answer for: the saga waits for it in `AWAITING_PAYMENT`, and at the deadline the order is cancelled and the pending payment voided (Step 5b).
+
 **`streamrune.saga.forward-fence`** sets the fence of every `SagaRunner` bean that does not name it itself (`SagaRunner.Builder.forwardFence`), on all three frameworks: `auto` (the default), `on` or `off`. `auto` is on while `streamrune.subscription.single-active-consumer.enabled` is `true`, its default, and off when it is `false`. The demo keeps `auto` and leadership on, so the fence is on in all three apps; the startup log says so (`saga forward fence on on 1 SagaRunner bean(s) that name none themselves`). The same leadership gives the demo's saga runner its lease (Step 6): with two backends one delivers the saga's events and claims its deadlines, and the other stands by. The fence stays on under leadership for the overlap around a handover, when a deposed or dead leader may still finish a step the new leader also runs; a write the new leader loses to it is run again in place (Chapter 17 shows what a handover logs). Leadership is on because more than one backend can run against the demo's database — the Compose profile of Chapter 17, or two versions side by side during a rolling restart — and the fence then follows the same switch: a deployment that turns leadership off declares that one backend runs, and with it the fence. It costs one lock and one read of the saga row per forward command, inside the command's transaction, and no write. The fence needs the event store and the saga store over the same `DataSource`, which the three integrations provide; `SagaRunner.Builder.build()` refuses a runner whose command bus cannot fence against its saga rows unless the runner says `forwardFence(false)` itself.
 
 Chapter 17's checks verify the result of all of this on a database: after a two-backend run with a killed leader, and after a mix of cancelled and shipped orders in each app's tests, no order is left with money captured and not refunded, stock held for a cancelled order, or a confirmed order without its reservations ("What the invariant queries check" in Chapter 17).
@@ -4862,4 +4961,4 @@ Chapter 17's checks verify the result of all of this on a database: after a two-
 
 ## Next Up
 
-The saga now runs end-to-end — initiate payment, capture it through the `PaymentProcessManager`, reserve stock, confirm the order — and you have a `PaymentGatewaySimulator` whose failure flag you can flip to drive the compensation path. But what happens when the payment gateway goes down mid-order — not one clean failure but a string of them? You do not want the process manager calling a dead gateway on every order. Next: circuit breaker and retry. Chapter 12 wraps the manager's `processPayment` call in the `PaymentGatewayCircuitBreaker` you registered here, so repeated gateway failures open the breaker and the manager fast-fails instead of hammering a failing service.
+The saga now runs end-to-end — initiate payment, capture it through the `PaymentProcessManager`, reserve stock, confirm the order — and you have a `PaymentGatewaySimulator` whose failure flag you can flip to drive the compensation path. But what happens when the payment gateway goes down mid-order — not a decline but a string of calls without an answer? You do not want the process manager calling a dead gateway on every delivery. Next: circuit breaker and retry. Chapter 12 wraps the manager's `processPayment` call in the `PaymentGatewayCircuitBreaker` you registered here, so repeated calls without an answer open the breaker and the manager stops calling the gateway, holding the payments, until a probe gets through.

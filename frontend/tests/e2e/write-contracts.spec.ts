@@ -487,7 +487,7 @@ test.describe("Products — the commands the page sends", () => {
     ]);
   });
 
-  test("Adjust Stock and Receive Shipment send a fresh Idempotency-Key per submit, and the page's retry of a lost answer sends the same one", async ({
+  test("Adjust Stock and Receive Shipment send a new Idempotency-Key for each applied change, and the page's retry of a lost answer sends the same one", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
@@ -569,6 +569,165 @@ test.describe("Products — the commands the page sends", () => {
       { quantity: 5 },
       { quantity: 6 },
     ]);
+  });
+});
+
+/** The answer of a keyed command the backend recorded for a replay under its key. */
+const QUEUED_FOR_REPLAY = {
+  status: 503,
+  headers: { "Retry-After": "5" },
+  contentType: "application/json",
+  body: JSON.stringify({
+    reason: "QUEUED_FOR_REPLAY",
+    commandId: "cmd-queued-1",
+    message:
+      "The command is not applied yet: it is queued for a replay under its Idempotency-Key." +
+      " Send it again with the same key, or wait; a new key is a new operation.",
+  }),
+};
+
+test.describe("Products — one Idempotency-Key per intended change", () => {
+  test("Adjust Stock closed after a lost answer and opened again sends the same amount under the same key, also after a field edit", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    // The first submit and the page's two retries of it get no answer; then the backend answers.
+    let lost = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      lost++ < 3 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    await pickRowAction(page, "Adjust Stock");
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText(/Failed to fetch|API error/).first()).toBeVisible({ timeout: 15_000 });
+    expect(adjusted).toHaveLength(3);
+
+    // The admin closes the dialog and opens it again: it opens on the change without an answer.
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await pickRowAction(page, "Adjust Stock");
+    await expect(dialog.getByRole("status")).toContainText(
+      "The adjustment of +5 has no answer yet: it may have been applied."
+    );
+    await expect(dialog.getByLabel(/Delta/)).toHaveValue("5");
+    await dialog.getByLabel(/Delta/).fill("6");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByLabel(/Reason/).fill("recount");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible();
+
+    // Applied: the next adjustment is a new one, of the same amount or not.
+    await pickRowAction(page, "Adjust Stock");
+    await expect(dialog.getByRole("status")).toHaveCount(0);
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect.poll(() => adjusted.length).toBe(5);
+
+    const keys = adjusted.map((c) => c.idempotencyKey);
+    expect(new Set(keys.slice(0, 4)).size, "one intended adjustment, one key").toBe(1);
+    expect(keys[4], "an adjustment after the first was applied is a new one").not.toBe(keys[0]);
+    expect(adjusted.map((c) => c.body)).toEqual([
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5 },
+      { quantity: 5, reason: "recount" },
+      { quantity: 5 },
+    ]);
+  });
+
+  test("a 503 QUEUED_FOR_REPLAY says the change is queued and will be applied, and the dialog opened again sends it under the same key", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    // The submit and the page's two retries are queued for a replay; then the backend applies it.
+    let stockAnswers = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      stockAnswers++ < 3 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
+    );
+    let receiveAnswers = 0;
+    const received = await answerCommands(page, "/api/inventory/prod-widget/receive", (route) =>
+      receiveAnswers++ < 3
+        ? route.fulfill(QUEUED_FOR_REPLAY)
+        : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    const dialog = page.getByRole("dialog");
+    await pickRowAction(page, "Adjust Stock");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(
+      page.getByText("Queued, it will be applied (503): The command is not applied yet").first()
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(dialog).toBeHidden();
+    expect(adjusted).toHaveLength(3);
+
+    await pickRowAction(page, "Adjust Stock");
+    await expect(dialog.getByRole("status")).toContainText(
+      "The adjustment of +5 is queued and will be applied."
+    );
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    expect(new Set(adjusted.map((c) => c.idempotencyKey)).size, "one key").toBe(1);
+    expect(adjusted).toHaveLength(4);
+
+    await pickRowAction(page, "Receive Shipment");
+    await dialog.getByLabel("Quantity").fill("7");
+    await dialog.getByRole("button", { name: "Receive" }).click();
+    await expect(dialog).toBeHidden({ timeout: 15_000 });
+    await pickRowAction(page, "Receive Shipment");
+    await expect(dialog.getByRole("status")).toContainText(
+      "The shipment of +7 is queued and will be applied."
+    );
+    await expect(dialog.getByLabel("Quantity")).toHaveValue("7");
+    await dialog.getByRole("button", { name: "Receive" }).click();
+    await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
+    expect(received.map((c) => c.body)).toEqual([
+      { quantity: 7 },
+      { quantity: 7 },
+      { quantity: 7 },
+      { quantity: 7 },
+    ]);
+    expect(new Set(received.map((c) => c.idempotencyKey)).size, "one key").toBe(1);
+    expect(received[0].idempotencyKey).not.toBe(adjusted[0].idempotencyKey);
+  });
+
+  test("Start a new change makes the same amount a new adjustment with a new key", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    let answers = 0;
+    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+      answers++ < 3 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    const dialog = page.getByRole("dialog");
+    await pickRowAction(page, "Adjust Stock");
+    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(dialog).toBeHidden({ timeout: 15_000 });
+
+    // The admin means a second delivery of five, not the queued one: a new adjustment.
+    await pickRowAction(page, "Adjust Stock");
+    await dialog.getByRole("button", { name: "Start a new change" }).click();
+    await expect(dialog.getByRole("status")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible();
+
+    const keys = adjusted.map((c) => c.idempotencyKey);
+    expect(keys).toHaveLength(4);
+    expect(new Set(keys.slice(0, 3)).size).toBe(1);
+    expect(keys[3], "started as a new adjustment").not.toBe(keys[0]);
   });
 });
 
@@ -677,6 +836,37 @@ test.describe("Admin and Fulfillment — what the page reads and sends", () => {
 });
 
 test.describe("A refused command is shown", () => {
+  test("a 500 AWAITING_OPERATOR says that an operator decides", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await answerCommands(page, "/api/products/prod-widget/price", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reason: "AWAITING_OPERATOR",
+          commandId: "cmd-awaiting-1",
+          message:
+            "The command failed and is recorded for an operator, who replays or discards it." +
+            " Sending it again would apply it a second time if the operator replays it.",
+        }),
+      })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/products");
+    await pickRowAction(page, "Update Price");
+    await page.getByRole("dialog").getByLabel(/New Price/).fill("21.50");
+    await page.getByRole("dialog").getByRole("button", { name: "Update" }).click();
+
+    await expect(
+      page.getByText(
+        "Not applied: an operator decides whether it is (500): The command failed and is recorded for an operator"
+      )
+    ).toBeVisible();
+    await expect(page.getByText("Price updated")).toHaveCount(0);
+  });
+
   /** The backend's answer to a command it refused for a reason that passes. */
   function busy(route: Route, reason: string, message: string): Promise<void> {
     return route.fulfill({

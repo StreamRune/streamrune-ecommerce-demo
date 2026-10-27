@@ -139,17 +139,31 @@ An open breaker throws `CircuitBreakerOpenException` out of `commandBus.execute(
 | `CommandBusOverloadedException` | `COMMAND_BUS_OVERLOADED` | The bus's budget of in-flight asynchronous commands is used up. Only `executeAsync` has the budget, and the demo's routes call `execute`, so the demo maps it for completeness. |
 | `CommandBusClosedException` | `COMMAND_BUS_CLOSED` | The bus is closing, because the application is shutting down. Nothing was attempted. |
 | `LockException` | `AGGREGATE_LOCK_UNAVAILABLE` | The aggregate's lock could not be taken within `streamrune.lock-timeout` (5 s by default), on every attempt of the bus's retry policy: another command held it, or the locker could not reach its store. The decider never ran. |
-| `OptimisticLockException` | `AGGREGATE_VERSION_CONFLICT` | The aggregate's stream moved past the version the command was decided on, on every attempt of the bus's retry policy: another writer appended to it between the load and the append each time — a second instance whose lock is its own, or a writer outside the command bus. Nothing was written. |
+| `OptimisticLockException` | `AGGREGATE_VERSION_CONFLICT` | The aggregate's stream moved past the version the command was decided on, on every attempt of the bus's retry policy: another writer appended to it between the load and the append each time — a writer outside the command bus, or an instance that takes its locks elsewhere (an in-process lock holds in its own process only). Nothing was written. |
 
 ```json
 {"reason": "CIRCUIT_BREAKER_OPEN", "message": "The command bus refuses commands while its circuit breaker is open."}
 ```
 
-**Why `503` and not `409` for a lock or a version conflict.** `LockException` is, in its own javadoc, an acquisition failure that the command bus treats as transient and retries — not a conflict with the state of the aggregate. `409 Conflict` tells a client that its request conflicts with the resource and that it may resolve the conflict and resubmit; here nothing in the request is wrong. The aggregate is busy, or the locker's store is out of reach, and the bus has already retried before it gave up: the request will succeed unchanged once the lock is free, which is what `503` with `Retry-After` says. A version conflict is the same answer for the same reason: the bus reloads the aggregate on every attempt, the client sent no version of its own that could conflict, and the identical request succeeds once the other writer is done. Like any infrastructure failure, both commands are also recorded in the dead-letter queue (Chapter 14).
+**Why `503` and not `409` for a lock or a version conflict.** `LockException` is, in its own javadoc, an acquisition failure that the command bus treats as transient and retries — not a conflict with the state of the aggregate. `409 Conflict` tells a client that its request conflicts with the resource and that it may resolve the conflict and resubmit; here nothing in the request is wrong. The aggregate is busy, or the locker's store is out of reach, and the bus has already retried before it gave up: the request will succeed unchanged once the lock is free, which is what `503` with `Retry-After` says. A version conflict is the same answer for the same reason: the bus reloads the aggregate on every attempt, the client sent no version of its own that could conflict, and the identical request succeeds once the other writer is done. From Chapter 14 on, the bus records both commands in the dead-letter queue, like any infrastructure failure, and the answer then says that the command is pending instead (Chapter 14).
 
 `Retry-After` is a constant five seconds: the breaker does not report how long it stays open, and the other refusals have no natural duration. A genuine failure — the event store refusing the append, say — is none of the five and stays `500`.
 
-The lock timeout is the framework's `streamrune.lock-timeout`. The bus the framework auto-configures reads it; the demo builds its own bus, so it hands the builder the auto-configured `AggregateLocker` and the configured timeout: the two parameters `AggregateLocker locker` and `StreamRuneProperties properties` of the `commandBus` bean in Step 2, and its calls `.locker(locker)` and `.lockTimeout(properties.lockTimeout())` (`AggregateLocker` is in `org.streamrune.core`, `StreamRuneProperties` in `org.streamrune.spring`).
+The lock timeout is the framework's `streamrune.lock-timeout`. The bus the framework auto-configures reads it; the demo builds its own bus, so it hands the builder the `AggregateLocker` bean and the configured timeout: the two parameters `AggregateLocker locker` and `StreamRuneProperties properties` of the `commandBus` bean in Step 2, and its calls `.locker(locker)` and `.lockTimeout(properties.lockTimeout())` (`AggregateLocker` is in `org.streamrune.core`, `StreamRuneProperties` in `org.streamrune.spring`).
+
+**The lock is taken in PostgreSQL.** The framework auto-configures `LocalStripedLocker`, a lock in the memory of one process: it serializes the commands of one aggregate in that process and nothing beyond it. A second instance of the app on the same database — Chapter 17 runs two — takes its own locks, and two commands on one aggregate from the two instances both load it; the second append fails its version check, the bus reloads and decides again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT`. The demo therefore declares the `AggregateLocker` itself, as `PgAdvisoryLocker` from `streamrune-postgres`: an advisory lock per stream (`pg_advisory_xact_lock`) that every instance on the database takes, held on a connection of the locker's own pool for the whole command. The auto-configured locker is `@ConditionalOnMissingBean(AggregateLocker.class)`, so it steps aside for the bean:
+
+```java
+@Bean(destroyMethod = "close")
+public PgAdvisoryLocker aggregateLocker(
+    @Value("${spring.datasource.url}") String url,
+    @Value("${spring.datasource.username}") String username,
+    @Value("${spring.datasource.password}") String password) {
+  return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+}
+```
+
+What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it.
 
 The whole class at the end of this chapter:
 
@@ -398,12 +412,36 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover. Distinct from {@code circuitBreaker} above, which guards the command bus
+   * generally.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
     return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
+   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   *
+   * <p>The framework's in-process locker steps aside for this bean
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it.
+   */
+  @Bean(destroyMethod = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${spring.datasource.url}") String url,
+      @Value("${spring.datasource.username}") String username,
+      @Value("${spring.datasource.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   /**
@@ -416,7 +454,7 @@ public class StreamRuneConfig {
    * before validation, so a caller without the role learns nothing about the validation rules; the
    * circuit breaker comes last, so it counts only execution failures.
    *
-   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
@@ -1141,35 +1179,39 @@ public class GlobalExceptionHandler {
 }
 ```
 
-The command bus throws each of the five unwrapped, so the handler sees the exception itself. The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a handler by the thrown type, so each app has one per exception type, nested in `CommandRefusalExceptionMappers` (Quarkus) and `CommandRefusalExceptionHandlers` (Micronaut). `CommandRefusalStatusIT` in each app forces four of the refusals on the app's real command bus, in an application of its own with a lock timeout of one second: a price change stopped in its audit write while it holds the product's lock (a trigger on `audit_log` waits for an advisory lock the test holds) makes a stock adjustment of the same product wait out the lock timeout on each of three attempts; a trigger on `event_stream` that raises `unique_violation` for a price change makes the event store report the version conflict it reports when a second writer stored the version first, on every attempt; a store that refuses every price change of a product answers `500` until the breaker opens and `503` after; and a closed bus refuses the next command. Each answer is checked for the status, `Retry-After` and the body. The overloaded bus cannot be reached through the demo's routes, so a unit test in each app checks its answer.
+The command bus throws each of the five unwrapped, so the handler sees the exception itself. The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a handler by the thrown type, so each app has one per exception type, nested in `CommandRefusalExceptionMappers` (Quarkus) and `CommandRefusalExceptionHandlers` (Micronaut). `CommandRefusalStatusIT` in each app forces the refusals on the app's real command bus, in an application of its own with a lock timeout of one second. The finished app has the dead-letter queue of Chapter 14, which records a lock timeout and a version conflict, so the test reaches their own answers with a trigger on `dead_letter_queue` that refuses the entry: a trigger on `event_stream` that raises `unique_violation` for a stock adjustment makes the event store report the version conflict it reports when a second writer stored the version first, on every attempt, and the adjustment is refused with `AGGREGATE_VERSION_CONFLICT`. A store that refuses every price change of a product answers `500` until the breaker opens and `503` after, and a closed bus refuses the next command. Each answer is checked for the status, `Retry-After` and the body; the answers to a command the queue did record are Chapter 14's. The overloaded bus cannot be reached through the demo's routes, so a unit test in each app checks its answer.
 
 ### Step 3: The gateway call, and why it needs its own breaker
 
-You created `PaymentGatewaySimulator` in Chapter 11 (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`). The class holds an `AtomicBoolean failureInjected` toggle. When `failureInjected` is true, `processPayment` throws a `RuntimeException` — unless the gateway already captured that payment, because the payment id is its idempotency key:
+You created `PaymentGatewaySimulator` in Chapter 11 (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewaySimulator.java`). It has two switches. With `failureInjected` on, `processPayment` declines: it throws `PaymentDeclinedException` — unless the gateway already captured that payment, because the payment id is its idempotency key. With `outage` on, it answers no call: it throws an `IllegalStateException`, the way a call that times out or meets a `5xx` fails:
 
 ```java
 public void processPayment(String paymentId) {
+  if (outage.get()) {
+    throw new IllegalStateException(
+        "Simulated payment gateway outage: no answer for payment " + paymentId);
+  }
   if (capturedPayments.contains(paymentId)) {
     return;
   }
   if (failureInjected.get()) {
-    throw new RuntimeException("Simulated payment gateway failure for payment " + paymentId);
+    throw new PaymentDeclinedException(paymentId);
   }
   capturedPayments.add(paymentId);
 }
 ```
 
-This method is on the hot path: the `PaymentProcessManager` (Chapter 11) calls `gateway.processPayment(paymentId)` every time it reacts to a `PaymentInitiated` event. So toggling `failureInjected` on really does make payments fail, which really does drive the saga down its compensation path. That makes the payment gateway exactly the kind of flaky external dependency a circuit breaker is meant to protect.
+This method is on the hot path: the `PaymentProcessManager` (Chapter 11) calls `gateway.processPayment(paymentId)` every time it reacts to a `PaymentInitiated` event. A decline is the gateway's answer: the manager fails the payment, and the saga compensates. A call without an answer is not: the gateway may have taken the money, so the manager asks it whether it holds a capture of the payment and otherwise lets the event be delivered again, and the payment waits. That makes the payment gateway exactly the kind of flaky external dependency a circuit breaker is meant to protect: an outage would have the manager call it again on every delivery.
 
-**Why not just let the command-bus breaker handle it?** The `processPayment` failure does not, on its own, reach the command-bus breaker — the manager catches it and turns it into a *successful* `FailPayment` command, and the saga then runs a *successful* `CancelOrder`. From the command bus's point of view, those are normal successful dispatches. Worse, the command-bus breaker resets its consecutive-failure count on **any** successful command (`after()` closes the circuit), so the saga's own compensation traffic would keep clearing the counter. A breaker on the command bus can never "see" a run of gateway failures here.
+**Why not just let the command-bus breaker handle it?** A gateway call is no command, so its outcome does not, on its own, reach the command-bus breaker. A call without an answer dispatches nothing at all: `onEvents` throws, and the subscription delivers the event again. A decline becomes a *successful* `FailPayment` command, and the saga then runs a *successful* `CancelOrder`. From the command bus's point of view those are normal successful dispatches, and the command-bus breaker resets its consecutive-failure count on **any** successful command (`after()` closes the circuit), so the saga's own traffic would keep clearing the counter. A breaker on the command bus can never "see" a run of gateway calls without an answer here.
 
-The textbook fix is to put the breaker around the flaky dependency itself. `PaymentGatewayCircuitBreaker` counts only gateway-call outcomes, so consecutive gateway failures open it regardless of what the saga does on the command bus. While it is open the `PaymentProcessManager` fast-fails the payment (dispatches `FailPayment` without calling the gateway) until the cooldown admits a probe. A payment that the order's cancellation voided before the manager reached it is neither failed nor sent to the gateway: the manager reads the payment's stream first (Chapter 11, Step 5b).
+The textbook fix is to put the breaker around the flaky dependency itself. `PaymentGatewayCircuitBreaker` counts only gateway-call outcomes: a call without an answer is a failure, and consecutive failures open it regardless of what the saga does on the command bus; a decline comes from a gateway that works, and counts as a success. While it is open the `PaymentProcessManager` does not call the gateway: the payment has no answer, so it waits — a capture the gateway reports is recorded, and otherwise the event is delivered again — until the cooldown admits a probe. A payment that the order's cancellation voided before the manager reached it is neither failed nor sent to the gateway: the manager reads the payment's stream first (Chapter 11, Step 5b).
 
 Chapter 11 created that breaker, `PaymentGatewayCircuitBreaker` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/PaymentGatewayCircuitBreaker.java`, Step 5b), together with the process manager that calls it.
 
 It implements the same CLOSED → OPEN → HALF_OPEN → CLOSED state machine as the command-bus interceptor, but its inputs are explicit `recordSuccess()` / `recordFailure()` calls from the `PaymentProcessManager` rather than command outcomes. Because it is driven by a single polling subscription, plain `synchronized` methods suffice (the `synchronized` is mostly so the admin endpoint can read `state()` safely).
 
-Its bean, declared in Chapter 11, sits in `StreamRuneConfig` next to the command-bus breaker of Step 1 — three consecutive failures open it, with a 30-second cooldown:
+Its bean, declared in Chapter 11, sits in `StreamRuneConfig` next to the command-bus breaker of Step 1 — three consecutive calls without an answer open it, with a 30-second cooldown:
 
 ```java
 @Bean
@@ -1178,11 +1220,11 @@ public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
 }
 ```
 
-The `PaymentProcessManager` bean (Chapter 11, Step 6) takes this breaker as a constructor argument — the manager consults `allowRequest()` before each gateway call and reports the outcome. A breaker-open `FailPayment` of a payment that was voided in the meantime stores nothing: the payment decider fails a pending payment only, so the cancellation's void stands.
+The `PaymentProcessManager` bean (Chapter 11, Step 6) takes this breaker as a constructor argument — the manager consults `allowRequest()` before each gateway call and reports the outcome: `recordFailure()` for a call without an answer, `recordSuccess()` for a capture or a decline.
 
 ### Step 4: Add Admin Endpoints
 
-Create `spring/controller/AdminController.java`. It exposes four endpoints useful during development and operations. In later chapters this same controller gains dead-letter and outbox endpoints (and the matching `DeadLetterQueue` / `OutboxStore` constructor arguments), so the version below is intentionally a chapter-12 subset — don't copy the full controller from the finished demo yet, or you will reference beans that don't exist until Chapters 13 and 14.
+Create `spring/controller/AdminController.java`. It exposes six endpoints useful during development and operations. In later chapters this same controller gains dead-letter and outbox endpoints (and the matching `DeadLetterQueue` / `OutboxStore` constructor arguments), so the version below is intentionally a chapter-12 subset — don't copy the full controller from the finished demo yet, or you will reference beans that don't exist until Chapters 13 and 14.
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
@@ -1235,6 +1277,25 @@ public class AdminController {
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
   }
 
+  /**
+   * Switches the payment gateway's outage on or off. While it is on the gateway answers no call: a
+   * new payment stays {@code PENDING} and its event is delivered again, the gateway breaker opens
+   * after three calls without an answer, and the payments go through once it is off again.
+   */
+  @PostMapping("/payment-outage/toggle")
+  public Map<String, Boolean> togglePaymentOutage() {
+    requireAdmin();
+    boolean current = paymentGateway.isOutage();
+    paymentGateway.setOutage(!current);
+    return Map.of("outage", !current);
+  }
+
+  @GetMapping("/payment-outage")
+  public Map<String, Boolean> paymentOutageState() {
+    requireAdmin();
+    return Map.of("outage", paymentGateway.isOutage());
+  }
+
   /** Open to every caller: the answer says that the application runs and nothing else. */
   @GetMapping("/health")
   public Map<String, String> health() {
@@ -1250,7 +1311,7 @@ public class AdminController {
 
 Every route but `/health` starts with `requireAdmin()`: the controller is the operators' panel, and what it shows and switches is internal state of the running system. The check is `OwnerOrAdminAccess.requireAdmin` from Chapter 9 — the `X-User-Id` and `X-User-Role` headers in this demo, a stand-in for the gateway that would authenticate an operator in a real deployment — so a call from anyone but an `ADMIN` is answered `403`, the role without an identity included. `/health` stays open: its answer says that the application runs and nothing else.
 
-The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circuitState()` delegates to `state.get().name()` inside the command-bus interceptor; `paymentGatewayCircuitBreaker.state().name()` is the gateway breaker. Both return one of `"CLOSED"`, `"OPEN"`, or `"HALF_OPEN"` as a plain string — no dedicated DTO needed. The toggle in Step 5 exercises the **`paymentGateway`** value, not `state`.
+The `/circuit-breaker` endpoint reports **both** breakers. `circuitBreaker.circuitState()` delegates to `state.get().name()` inside the command-bus interceptor; `paymentGatewayCircuitBreaker.state().name()` is the gateway breaker. Both return one of `"CLOSED"`, `"OPEN"`, or `"HALF_OPEN"` as a plain string — no dedicated DTO needed. The two switches flip the simulator's flags: `payment-failure/toggle` makes the gateway decline, `payment-outage/toggle` makes it answer nothing. The outage in Step 5 exercises the **`paymentGateway`** value, not `state`.
 
 ### Step 5: Trip the Gateway Breaker
 
@@ -1261,11 +1322,28 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 # {"state":"CLOSED","paymentGateway":"CLOSED"}
 ```
 
-Now turn on payment failure and place a few orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which throws; the manager records the failure on the gateway breaker. After three consecutive gateway failures the gateway breaker opens:
+A decline does not open the gateway breaker: it is an answer. Turn on payment failure and place an order — the gateway declines its payment, the manager dispatches `FailPayment`, the saga cancels the order and lands in `FAILED`, and `paymentGateway` stays `CLOSED`. Switch it off again:
 
 ```bash
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
 # {"failureInjected":true}
+
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" -H "X-User-Role: CUSTOMER" -H "X-User-Id: c-1" \
+  -d '{"orderId":"cb-decline-1","customerId":"c-1","lines":[{"productId":"p-1","quantity":1}]}'
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-decline-1 | jq .fulfillmentStatus
+# "FAILED"
+
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-failure/toggle
+# {"failureInjected":false}
+```
+
+An outage opens it. Turn the outage on and place three orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which gets no answer; the manager records the failure on the gateway breaker, finds no capture at the gateway, and lets the event be delivered again. The subscription delivers the first order's `PaymentInitiated` again after a backoff, and the payments behind it wait for it. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
+
+```bash
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
+# {"outage":true}
 
 # place three orders (different ids), e.g.:
 for i in 1 2 3; do
@@ -1278,14 +1356,24 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 # {"state":"CLOSED","paymentGateway":"OPEN"}
 ```
 
-Each of those orders fails at the payment step, so their sagas land in `FAILED`:
+Nothing has decided the payments: their sagas wait for them, the orders are neither confirmed nor cancelled, and the subscription logs every delivery without an answer at `ERROR`:
 
 ```bash
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
-# "FAILED"
+# "AWAITING_PAYMENT"
 ```
 
-Note that the command-bus breaker (`state`) stays `CLOSED` throughout — exactly as Step 3 predicted. The gateway failures never surface as command-bus failures (the manager turns them into successful `FailPayment`/`CancelOrder` dispatches), so only the dedicated gateway breaker reacts. Toggle the flag back off and, after the 30-second cooldown, the next order's gateway call probes the gateway, succeeds, and closes the breaker again.
+Turn the outage off. Once the 30-second cooldown has passed, the next delivery is the breaker's probe: the gateway answers, the breaker closes, the payments are captured and the sagas carry on, so the orders end `CONFIRMED`. An outage longer than the saga's deadline (fifteen minutes) cancels its orders instead, and their pending payments are voided:
+
+```bash
+curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
+# {"outage":false}
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
+# "COMPLETED"
+```
+
+Note that the command-bus breaker (`state`) stays `CLOSED` throughout — exactly as Step 3 predicted. A gateway call is no command: a call without an answer dispatches nothing, and a decline becomes a successful `FailPayment`/`CancelOrder`, so only the dedicated gateway breaker reacts.
 
 ### Step 6: Walk the Full Lifecycle with a Test
 
@@ -1409,9 +1497,9 @@ CircuitBreakerOpenException: Circuit breaker OPEN — rejecting command: Capture
 
 **The three circuit states** map directly to a Java enum inside the interceptor. `CLOSED` is the default and permits all commands. `OPEN` blocks all commands except the first one through after the cooldown, which transitions the state to `HALF_OPEN`. `HALF_OPEN` blocks every subsequent command until the probe succeeds (close) or fails (re-open). The thread-local probe stack is the key design detail: it lets `after` and `onError` know whether the execution that is finishing is the probe or an ordinary command without adding extra synchronization.
 
-**`PaymentGatewaySimulator`** models the pattern you will use for any external service: a plain class whose `processPayment` method either succeeds silently or throws. In production you would replace the `AtomicBoolean` check with an HTTP call that sends the payment id as the gateway's idempotency key, so a call repeated after a capture the app could not record charges nothing. The breaker does not know or care whether the failure comes from a network timeout, an HTTP 500, or a thrown exception — it only sees the `recordFailure()` call the `PaymentProcessManager` makes when the call throws.
+**`PaymentGatewaySimulator`** models the pattern you will use for any external service: a plain class whose `processPayment` method succeeds silently, declines with a typed exception, or fails without an answer. In production you would replace the `AtomicBoolean` checks with an HTTP call that sends the payment id as the gateway's idempotency key, so a call repeated after a capture the app could not record charges nothing, and `hasCaptured` with the gateway's status lookup by that key. Only the gateway's decline fails a payment. A network timeout, an HTTP 500 or a reset connection is a call without an answer: the gateway may have taken the money, so the `PaymentProcessManager` asks for the payment's status and otherwise waits, and the breaker sees the `recordFailure()` call the manager makes for it.
 
-**`PaymentGatewayCircuitBreaker`** is the second breaker, and the chapter's main lesson is *where* it lives. The command-bus `CircuitBreakerCommandInterceptor` is the right tool for command-dispatch failures (event-store outages, locking errors), but it is the wrong tool for the payment gateway: the gateway failure is converted into successful compensation commands, and the interceptor resets its counter on every success. The reverse holds too: when the command-bus breaker is open, the manager's `CapturePayment` or `FailPayment` is refused, and that refusal says nothing about the gateway — the manager lets it propagate, the subscription delivers `PaymentInitiated` again after a backoff, and the gateway breaker counts nothing. A breaker wrapped directly around the flaky dependency — counting only that dependency's outcomes — is the correct design. Same state machine, different inputs (`recordSuccess()` / `recordFailure()` instead of command outcomes), driven by the single-threaded `PaymentProcessManager`.
+**`PaymentGatewayCircuitBreaker`** is the second breaker, and the chapter's main lesson is *where* it lives. The command-bus `CircuitBreakerCommandInterceptor` is the right tool for command-dispatch failures (event-store outages, locking errors), but it is the wrong tool for the payment gateway: a call without an answer dispatches no command at all, a decline is converted into successful compensation commands, and the interceptor resets its counter on every success. The reverse holds too: when the command-bus breaker is open, the manager's `CapturePayment` or `FailPayment` is refused, and that refusal says nothing about the gateway — the manager lets it propagate, the subscription delivers `PaymentInitiated` again after a backoff, and the gateway breaker counts nothing. A breaker wrapped directly around the flaky dependency — counting only that dependency's outcomes — is the correct design. Same state machine, different inputs (`recordSuccess()` / `recordFailure()` instead of command outcomes), driven by the single-threaded `PaymentProcessManager`.
 
 **A refusal is `503`, not `500`.** An open breaker, an overloaded or closing command bus, an aggregate lock that could not be taken in time and a version conflict on every attempt all refuse a command before anything is written, and the same request succeeds later. The demo answers each `503` with `Retry-After: 5` and `{"reason": ..., "message": ...}` (`CommandRefusal`); a genuine failure stays `500`.
 

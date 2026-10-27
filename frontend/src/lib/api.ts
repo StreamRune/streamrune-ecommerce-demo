@@ -41,29 +41,57 @@ function buildHeaders(): HeadersInit {
  * A request the backend refused. `status` is the HTTP status and `message`
  * what a toast shows: for `403` that the selected role may not do this, for
  * `503` that the backend is busy and the request may be sent again in a few
- * seconds, for every other status the backend's own words (a `400` carries the
- * decider's or the validation's message, e.g. "Insufficient stock for product:
- * prod-1"). The backend's words follow in every case.
+ * seconds, or that the command is queued and will be applied, for a `500` that
+ * waits for an operator that an operator decides, for every other status the
+ * backend's own words (a `400` carries the decider's or the validation's
+ * message, e.g. "Insufficient stock for product: prod-1"). The backend's words
+ * follow in every case.
  */
 export class ApiError extends Error {
   readonly status: number;
   /** The backend's own words, without the status the message starts with. */
   readonly detail: string;
+  /**
+   * The `reason` of a JSON answer, e.g. `CIRCUIT_BREAKER_OPEN`, or
+   * `QUEUED_FOR_REPLAY` for a command the backend recorded for a replay under
+   * its `Idempotency-Key`, or the `outcome` of a dead-letter retry the backend
+   * did not carry out, e.g. `READER_BEHIND`; `undefined` for an answer without
+   * one.
+   */
+  readonly reason?: string;
 
-  constructor(status: number, detail: string) {
-    super(describeRefusal(status, detail));
+  constructor(status: number, detail: string, reason?: string) {
+    super(describeRefusal(status, detail, reason));
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.reason = reason;
   }
 }
 
-function describeRefusal(status: number, detail: string): string {
+/**
+ * Whether the answer says the command is not applied yet but will be: the
+ * backend stored it for a replay under its `Idempotency-Key` (`503` with
+ * `QUEUED_FOR_REPLAY`). Sending it again with the same key is safe.
+ */
+export function isQueuedForReplay(error: unknown): boolean {
+  return error instanceof ApiError && error.reason === "QUEUED_FOR_REPLAY";
+}
+
+function describeRefusal(status: number, detail: string, reason?: string): string {
   if (status === 403) {
     return `Not allowed for the selected role (403): ${detail || "Forbidden"}`;
   }
   if (status === 400) {
     return `The backend refused the request (400): ${detail || "Bad Request"}`;
+  }
+  if (status === 503 && reason === "QUEUED_FOR_REPLAY") {
+    // The command failed and the backend recorded it with its key: a replay applies it.
+    return `Queued, it will be applied (503): ${detail}`;
+  }
+  if (status === 500 && reason === "AWAITING_OPERATOR") {
+    // The command failed and waits for an operator, who replays or discards it.
+    return `Not applied: an operator decides whether it is (500): ${detail}`;
   }
   if (status === 503) {
     // A command the backend refused for a reason that passes (an open circuit breaker, a busy
@@ -74,22 +102,27 @@ function describeRefusal(status: number, detail: string): string {
 }
 
 /**
- * What an error answer says. The apps answer a refusal with the message as
- * plain text, and a request Spring could not read with its JSON error object.
+ * What an error answer says, and its `reason` when it has one. The apps answer
+ * a refusal with the message as plain text, a refused or pending command with a
+ * JSON body that names its `reason`, and a request Spring could not read with
+ * its JSON error object.
  */
-async function refusalDetail(res: Response): Promise<string> {
+async function refusalOf(res: Response): Promise<{ detail: string; reason?: string }> {
   const text = await res.text().catch(() => "");
   if ((res.headers.get("content-type") ?? "").includes("json")) {
     try {
       const body = JSON.parse(text) as Record<string, unknown>;
-      if (body.fullyErased === false) return describeUnfinishedErasure(body);
-      const detail = body.message ?? body.detail ?? body.error;
-      if (typeof detail === "string" && detail) return detail;
+      if (body.fullyErased === false) return { detail: describeUnfinishedErasure(body) };
+      const detail = body.message ?? body.detail ?? body.error ?? body.outcome;
+      // A refused or pending command names its `reason`, a dead-letter retry its `outcome`.
+      const named = body.reason ?? body.outcome;
+      const reason = typeof named === "string" ? named : undefined;
+      if (typeof detail === "string" && detail) return { detail, reason };
     } catch {
       // not JSON after all: the text is the detail
     }
   }
-  return text || res.statusText;
+  return { detail: text || res.statusText };
 }
 
 /**
@@ -121,7 +154,8 @@ async function apiFetch<T>(
     },
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await refusalDetail(res));
+    const { detail, reason } = await refusalOf(res);
+    throw new ApiError(res.status, detail, reason);
   }
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
@@ -150,9 +184,10 @@ async function apiCommand(
 /**
  * The header of a command that changes a quantity by an amount. The backend
  * runs the command once per key: a request sent again with the same key (the
- * page's own retry after a lost answer) is answered with the first one's
- * result, and a dead-lettered command keeps its key, so the backend's retry
- * runner replays it on its schedule. Each user action sends a fresh key.
+ * page's own retry after a lost answer, the same change sent from the dialog
+ * again) is answered with the first one's result, and a dead-lettered command
+ * keeps its key, so the backend's retry runner replays it on its schedule. One
+ * intended change, one key (`pending-operations.ts`).
  */
 function idempotencyKeyHeader(idempotencyKey: string): Record<string, string> {
   return { "Idempotency-Key": idempotencyKey };

@@ -133,7 +133,10 @@ public class AdminController {
           Response.status(Response.Status.CONFLICT)
               .entity(Map.of("outcome", outcome.name(), "message", STALE_REPLAY_MESSAGE))
               .build();
-      case ADMISSION_REFUSED ->
+      // Nothing ran and the entry is untouched, so the operator tries again later: the bus admits
+      // no more work (ADMISSION_REFUSED), or this replica's code reads the command's aggregate at
+      // an older event schema than one it holds, during a rolling deployment (READER_BEHIND).
+      case ADMISSION_REFUSED, READER_BEHIND ->
           Response.status(Response.Status.SERVICE_UNAVAILABLE)
               .header("Retry-After", "5")
               .entity(Map.of("outcome", outcome.name()))
@@ -406,6 +409,27 @@ public class AdminController {
   public Map<String, Boolean> paymentFailureState() {
     requireAdmin();
     return Map.of("failureInjected", paymentGateway.isFailureInjected());
+  }
+
+  /**
+   * Switches the payment gateway's outage on or off. While it is on the gateway answers no call: a
+   * new payment stays {@code PENDING} and its event is delivered again, the gateway breaker opens
+   * after three calls without an answer, and the payments go through once it is off again.
+   */
+  @POST
+  @Path("/payment-outage/toggle")
+  public Map<String, Boolean> togglePaymentOutage() {
+    requireAdmin();
+    boolean current = paymentGateway.isOutage();
+    paymentGateway.setOutage(!current);
+    return Map.of("outage", !current);
+  }
+
+  @GET
+  @Path("/payment-outage")
+  public Map<String, Boolean> paymentOutageState() {
+    requireAdmin();
+    return Map.of("outage", paymentGateway.isOutage());
   }
 
   /** Open to every caller: the answer says that the application runs and nothing else. */

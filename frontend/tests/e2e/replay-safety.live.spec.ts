@@ -9,7 +9,10 @@
  * Either decision leaves an audit row naming the admin.
  *
  * The `Idempotency-Key` of a stock adjustment: the backend applies a request
- * sent twice with one key once.
+ * sent twice with one key once. An adjustment whose event the store refuses is
+ * queued for a replay under its key (`503 QUEUED_FOR_REPLAY`); the Adjust Stock
+ * dialog says so, and opened again it sends the same amount under the same key,
+ * so the re-send and the replays of the queued entries change the stock once.
  *
  * Backend-dependent: skipped when the backend is not reachable. Run it with
  * the stack of the README's Quick Start up (`docker compose up -d --wait`):
@@ -25,7 +28,15 @@
  * Compose database the dead-letter test is skipped, and with
  * E2E_REQUIRE_BACKEND=1 it fails instead.
  *
- * What a run leaves behind: three products of its own with their stock
+ * The queued adjustment fails because the backend cannot read the product's
+ * stream: the test raises the stored `schema_version` of its events above what
+ * the backend's upcasters reach, as a newer release would have stored them, and
+ * puts it back once the dialog has shown the answer. The command bus records
+ * that failure in the dead-letter queue and does not count it against its
+ * circuit breaker, so the page's three attempts leave the bus open for the
+ * tests that follow.
+ *
+ * What a run leaves behind: four products of its own with their stock
  * adjustments, and a DLQ_FORCED_REPLAY and a DLQ_DISCARDED row in the audit log.
  */
 
@@ -239,6 +250,74 @@ test.describe("Replay safety against a running backend", () => {
       ),
       "the discard is audited with the admin who decided it"
     ).toBe("admin-1 SUCCESS");
+  });
+
+  test("an adjustment queued for a replay is sent again from the reopened dialog under its key, and the stock changes once", async ({
+    page,
+  }) => {
+    requireComposeDatabase();
+
+    const suffix = Date.now().toString(36);
+    const productId = `prod-queued-${suffix}`;
+    await createProduct(api, productId, 10);
+    await expect.poll(() => stockOf(api, productId), SETTLED).toBe(10);
+
+    await actAs(page, "ADMIN");
+    await page.goto("/products");
+    const row = page.getByRole("row").filter({ hasText: `Replay ${productId}` });
+    await expect(row).toBeVisible(SETTLED);
+    const dialog = page.getByRole("dialog");
+
+    const shift = (by: number) =>
+      sql(
+        `UPDATE event_stream SET schema_version = schema_version + ${by}
+          WHERE aggregate_type = 'product' AND aggregate_id = '${productId}'`
+      );
+    shift(1000);
+    try {
+      await row.getByRole("button", { name: "Actions" }).click();
+      await page.getByRole("menuitem", { name: "Adjust Stock" }).click();
+      await dialog.getByLabel(/Delta/).fill("5");
+      await dialog.getByRole("button", { name: "Adjust" }).click();
+      await expect(page.getByText(/^Queued, it will be applied \(503\)/).first()).toBeVisible(
+        SETTLED
+      );
+      await expect(dialog).toBeHidden();
+    } finally {
+      shift(-1000);
+    }
+    const queued = sql(
+      `SELECT command_id FROM dead_letter_queue WHERE aggregate_id = '${productId}'`
+    )
+      .split("\n")
+      .filter((id) => id !== "");
+    expect(queued.length, "each attempt of the page is an entry under the one key").toBeGreaterThan(0);
+    expect(
+      sql(
+        `SELECT count(DISTINCT idempotency_key) FROM dead_letter_queue WHERE aggregate_id = '${productId}'`
+      )
+    ).toBe("1");
+    expect(await stockOf(api, productId), "nothing applied yet").toBe(10);
+
+    // Opened again, the dialog sends the queued adjustment under its key.
+    await row.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Adjust Stock" }).click();
+    await expect(dialog.getByRole("status")).toContainText(
+      "The adjustment of +5 is queued and will be applied."
+    );
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Stock adjusted")).toBeVisible(SETTLED);
+    await expect.poll(() => stockOf(api, productId), SETTLED).toBe(15);
+
+    // The replays of the queued entries meet the recorded result of the key: nothing more.
+    for (const commandId of queued) {
+      const replayed = await api.post(`${BACKEND_URL}/api/admin/dead-letters/${commandId}/retry`);
+      expect([200, 404], await replayed.text()).toContain(replayed.status());
+    }
+    expect(sql(`SELECT count(*) FROM dead_letter_queue WHERE aggregate_id = '${productId}'`)).toBe(
+      "0"
+    );
+    await expect.poll(() => stockOf(api, productId), SETTLED).toBe(15);
   });
 
   test("a stock adjustment sent twice with one Idempotency-Key changes the stock once", async () => {

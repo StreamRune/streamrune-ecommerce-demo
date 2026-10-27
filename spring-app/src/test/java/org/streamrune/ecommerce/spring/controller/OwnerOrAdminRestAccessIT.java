@@ -494,7 +494,8 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
           "/api/admin/outbox/failed",
           "/api/admin/saga-dead-letters",
           "/api/admin/sagas/faulted",
-          "/api/admin/payment-failure"
+          "/api/admin/payment-failure",
+          "/api/admin/payment-outage"
         }) {
       assertRefusedForEveryoneButAnAdmin("GET", path, null, customer);
       assertThat(get(path, OPERATOR, ADMIN).statusCode()).as("%s as an ADMIN", path).isEqualTo(200);
@@ -510,11 +511,13 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     String customer = uniqueId("alice");
     String none = uniqueId("none");
     String failureSwitch = get("/api/admin/payment-failure", OPERATOR, ADMIN).body();
+    String outageSwitch = get("/api/admin/payment-outage", OPERATOR, ADMIN).body();
 
     // Every POST carries a JSON body; the routes that read none ignore it.
     String body = "{\"reason\": \"sent by a refused caller\"}";
     String[][] writes = {
       {"POST", "/api/admin/payment-failure/toggle", body},
+      {"POST", "/api/admin/payment-outage/toggle", body},
       {"POST", "/api/admin/dead-letters/" + none + "/retry", body},
       {"POST", "/api/admin/outbox/failed/" + none + "/replay", body},
       {"POST", "/api/admin/outbox/failed/" + none + "/skip", body},
@@ -528,8 +531,9 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
       assertRefusedForEveryoneButAnAdmin(write[0], write[1], write[2], customer);
     }
 
-    // Two of the routes flip the payment-failure switch: no refused call did.
+    // Two of the routes flip the payment-failure switch, one the outage: no refused call did.
     assertThat(get("/api/admin/payment-failure", OPERATOR, ADMIN).body()).isEqualTo(failureSwitch);
+    assertThat(get("/api/admin/payment-outage", OPERATOR, ADMIN).body()).isEqualTo(outageSwitch);
   }
 
   // --- POST /api/products, PUT …/price, PUT …/stock, POST …/discontinue, POST /api/inventory ---

@@ -5,6 +5,7 @@ import io.smallrye.config.SmallRyeConfigBuilder;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Alternative;
+import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Singleton;
@@ -72,6 +73,7 @@ import org.streamrune.ecommerce.projections.ProductProjection;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.SseAuthorizer;
+import org.streamrune.postgres.PgAdvisoryLocker;
 import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
@@ -245,6 +247,35 @@ public class StreamRuneProducer {
   @Singleton
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
     return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
+   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   *
+   * <p>The framework's producer of the in-process locker is a {@code @DefaultBean}, which this one
+   * replaces. The locker owns its pool, which {@link #closeAggregateLocker} closes with the
+   * application.
+   */
+  @Produces
+  @Singleton
+  public PgAdvisoryLocker aggregateLocker(
+      @ConfigProperty(name = "quarkus.datasource.jdbc.url") String url,
+      @ConfigProperty(name = "quarkus.datasource.username") String username,
+      @ConfigProperty(name = "quarkus.datasource.password") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+  }
+
+  /** Closes the aggregate locker's pool when the application stops. */
+  void closeAggregateLocker(@Disposes PgAdvisoryLocker locker) {
+    locker.close();
   }
 
   /**

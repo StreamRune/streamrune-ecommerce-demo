@@ -68,10 +68,7 @@
   {"name": "org.streamrune.ecommerce.queries.dto.OrderView$OrderLineView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.CustomerView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.InventoryView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
-  {"name": "org.streamrune.ecommerce.queries.dto.SagaView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
 
-  {"name": "org.streamrune.ecommerce.queries.query.GetOrderById", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
-  {"name": "org.streamrune.ecommerce.queries.query.ListOrders", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.query.ListProducts", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.query.ComplianceReportQuery", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
 

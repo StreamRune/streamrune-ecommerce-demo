@@ -93,6 +93,11 @@ import org.streamrune.runtime.PollingEventSubscription;
  * must have exercised both outcomes of the deadline (at least one saga compensated by a timeout
  * claim, whose episode has no cause event, and at least one completed), a refund of a confirmed
  * order and a shipment.
+ *
+ * <p>The aggregate lock is held across the two backends: each locks an aggregate in PostgreSQL
+ * ({@code PgAdvisoryLocker}), so a command on one backend waits for a command on the same aggregate
+ * on the other, and commands on one product sent to both at once are serialized instead of meeting
+ * in a version conflict ({@link #theAggregateLockHoldsAcrossTheTwoBackends}).
  */
 class TwoInstanceSagaIT {
 
@@ -110,6 +115,18 @@ class TwoInstanceSagaIT {
 
   /** Every product has stock for the whole run, with two-line orders in it. */
   private static final int STOCK = 2000;
+
+  /** The shipments of one product received through both backends at once. */
+  private static final int RECEIPTS = 200;
+
+  /** The receipts in flight at a time, half of them on each backend. */
+  private static final int RECEIPT_CLIENTS = 40;
+
+  /** The advisory lock key the audit trigger waits for. */
+  private static final long HELD_AUDIT_LOCK = 7_421_010L;
+
+  /** How long the test checks that a command on the other backend waits for the held lock. */
+  private static final Duration LOCK_HELD_FOR = Duration.ofMillis(1500);
 
   /** How long a follow-up waits for its order to read {@code CONFIRMED}. */
   private static final Duration CONFIRMATION_WAIT = Duration.ofSeconds(60);
@@ -362,6 +379,148 @@ class TwoInstanceSagaIT {
    * products {@code i} and {@code i + 1} modulo the number of products; the second line takes two
    * units, so that a reservation of the wrong quantity shows.
    */
+  /**
+   * A command holds its aggregate's lock on both backends, and commands on one aggregate from both
+   * are serialized. First a price change on one backend stops in its audit write, which the command
+   * bus makes with the product's lock held (a trigger on {@code audit_log} waits for an advisory
+   * lock the test holds): a stock adjustment of the product on the other backend waits for that
+   * lock, and completes once the price change does. An in-process lock would let it through at
+   * once. Then {@value #RECEIPTS} shipments of the product are received through both backends at
+   * once, {@value #RECEIPT_CLIENTS} at a time: every one is applied, none is refused with a version
+   * conflict and none is dead-lettered.
+   */
+  @Test
+  void theAggregateLockHoldsAcrossTheTwoBackends() throws Exception {
+    createDatabase();
+    ConfigurableApplicationContext[] slots = {start(), start()};
+    int[] ports = {port(slots[0]), port(slots[1])};
+    String product = "two-lock-prod";
+    post(
+        ports[0],
+        "/api/products",
+        "ADMIN",
+        "admin-1",
+        """
+        {"productId":"%s","name":"Locked","description":"Two-instance lock",
+         "category":"General","price":10.00,"initialStock":0}
+        """
+            .formatted(product));
+
+    try (Connection holder = connect()) {
+      execute(
+          holder,
+          """
+          CREATE OR REPLACE FUNCTION audit_test_hold_row() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NEW.aggregate_id = '%s' AND NEW.command_type = 'UpdatePrice' THEN
+              PERFORM pg_advisory_xact_lock(%d);
+            END IF;
+            RETURN NEW;
+          END $$;
+          CREATE TRIGGER audit_test_hold_row BEFORE INSERT ON audit_log
+            FOR EACH ROW EXECUTE FUNCTION audit_test_hold_row();
+          """
+              .formatted(product, HELD_AUDIT_LOCK));
+      execute(holder, "SELECT pg_advisory_lock(" + HELD_AUDIT_LOCK + ")");
+      ExecutorService requests = Executors.newFixedThreadPool(2);
+      try {
+        Future<HttpResponse<String>> priceChange =
+            requests.submit(
+                () ->
+                    request(
+                        ports[0],
+                        "PUT",
+                        "/api/products/" + product + "/price",
+                        "ADMIN",
+                        "admin-1",
+                        "{\"price\": 12.00}"));
+        // Committed, then stopped in its audit write: the product's lock is held from here.
+        await()
+            .atMost(Duration.ofSeconds(30))
+            .until(
+                () ->
+                    queryInt(
+                            "SELECT count(*) FROM event_stream WHERE aggregate_id = '"
+                                + product
+                                + "' AND event_type = 'PriceUpdated'")
+                        == 1);
+
+        Future<HttpResponse<String>> adjustment =
+            requests.submit(
+                () ->
+                    request(
+                        ports[1],
+                        "PUT",
+                        "/api/products/" + product + "/stock",
+                        "ADMIN",
+                        "admin-1",
+                        "{\"quantity\": 4, \"reason\": \"recount\"}"));
+        Thread.sleep(LOCK_HELD_FOR.toMillis());
+        assertThat(adjustment.isDone())
+            .as("the other backend's adjustment waits for the lock the price change holds")
+            .isFalse();
+
+        execute(holder, "SELECT pg_advisory_unlock(" + HELD_AUDIT_LOCK + ")");
+        assertThat(priceChange.get(30, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
+        assertThat(adjustment.get(30, TimeUnit.SECONDS).statusCode())
+            .as("it runs once the lock is free")
+            .isEqualTo(200);
+      } finally {
+        // The held price change lets go of audit_log only once its lock is free.
+        execute(holder, "SELECT pg_advisory_unlock_all()");
+        requests.shutdownNow();
+        execute(holder, "DROP TRIGGER IF EXISTS audit_test_hold_row ON audit_log");
+        execute(holder, "DROP FUNCTION IF EXISTS audit_test_hold_row()");
+      }
+    }
+
+    ExecutorService clients = Executors.newFixedThreadPool(RECEIPT_CLIENTS);
+    try {
+      List<Future<HttpResponse<String>>> receipts =
+          IntStream.range(0, RECEIPTS)
+              .mapToObj(
+                  i ->
+                      clients.submit(
+                          () ->
+                              request(
+                                  ports[i % 2],
+                                  "POST",
+                                  "/api/inventory/" + product + "/receive",
+                                  "ADMIN",
+                                  "admin-1",
+                                  "{\"quantity\": 1}")))
+              .toList();
+      List<String> refused = new ArrayList<>();
+      for (var receipt : receipts) {
+        HttpResponse<String> answer = receipt.get(60, TimeUnit.SECONDS);
+        if (answer.statusCode() != 200) {
+          refused.add(answer.statusCode() + " " + answer.body());
+        }
+      }
+      assertThat(refused).as("receipts the backends did not apply").isEmpty();
+    } finally {
+      clients.shutdownNow();
+    }
+    assertThat(
+            queryInt(
+                "SELECT count(*) FROM event_stream WHERE aggregate_type = 'inventory'"
+                    + " AND aggregate_id = '"
+                    + product
+                    + "' AND event_type = 'ShipmentReceived'"))
+        .as("every receipt applied once")
+        .isEqualTo(RECEIPTS);
+    assertThat(queryInt("SELECT count(*) FROM dead_letter_queue"))
+        .as("no command dead-lettered")
+        .isZero();
+  }
+
+  private static void execute(Connection connection, String sql) throws Exception {
+    try (Statement st = connection.createStatement()) {
+      st.execute(sql);
+    }
+  }
+
   private static String orderBody(int i, String customer) {
     String line = "{\"productId\":\"two-prod-%d\",\"quantity\":%d}";
     String lines =

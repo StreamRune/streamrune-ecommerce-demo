@@ -16,10 +16,11 @@ export function newId(kind: IdKind): string {
 }
 
 /**
- * A fresh `Idempotency-Key` for one user action: a stock adjustment or a
- * received shipment. A dialog takes one when it opens and another when its
- * fields change; the page's own retry and a resubmit of the unchanged dialog
- * send it again, so the backend applies the change once.
+ * A fresh `Idempotency-Key` for one intended change: a stock adjustment or a
+ * received shipment. `pending-operations.ts` takes one when the change is
+ * first sent and sends it again with every request of the same change — the
+ * page's own retry, the same amount sent from the dialog again — until the
+ * backend's answer is final, so the backend applies the change once.
  */
 export function newIdempotencyKey(): string {
   return crypto.randomUUID();

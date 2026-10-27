@@ -37,7 +37,7 @@ dependencies {
 
 Actuator pulls in Micrometer core transitively, which is enough for the counters and timers that `MicrometerStreamRuneMetrics` registers. With Micrometer core but no registry on the classpath, Spring Boot auto-configures a `SimpleMeterRegistry` — meters are recorded in memory and surfaced at `/actuator/metrics`. The demo does **not** depend on `micrometer-registry-prometheus`, so there is no `/actuator/prometheus` endpoint. If you want Prometheus scraping, add `implementation("io.micrometer:micrometer-registry-prometheus")` first, then expose `prometheus` in the endpoint list below.
 
-The demo configures management endpoints in `src/main/resources/application.yml`, not in `application.properties` (which holds only datasource/AOT settings). It exposes the `health` and `metrics` endpoints:
+The demo configures management endpoints in `spring-app/src/main/resources/application.yml`, not in `application.properties` (which holds only datasource/AOT settings). It exposes the `health` and `metrics` endpoints:
 
 ```yaml
 management:
@@ -47,7 +47,7 @@ management:
         include: health,metrics
 ```
 
-To see the full StreamRune health detail at `/actuator/health` rather than a bare `{"status":"UP"}`, add `show-details: always` under the same `management` block:
+To see the full StreamRune health detail at `/actuator/health` rather than a bare `{"status":"UP"}`, add `show-details: always` under the same `management` block of `spring-app/src/main/resources/application.yml`:
 
 ```yaml
 management:
@@ -1045,6 +1045,7 @@ import org.streamrune.ecommerce.commands.CommandRefusal;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.LiveFeed;
 import org.streamrune.ecommerce.queries.access.LiveFeedFullException;
+import org.streamrune.runtime.CommandDeadLetteredException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -1108,22 +1109,31 @@ public class GlobalExceptionHandler {
    * circuit breaker, a command bus that admits no more commands or is closing, an aggregate lock
    * that could not be taken in time, a version conflict on every attempt. {@code 503} with {@code
    * Retry-After} and a JSON body naming the reason, the answer the Quarkus and Micronaut apps give
-   * too. A genuine failure, such as a store error, is not one of these and stays {@code 500}.
+   * too.
+   *
+   * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
+   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
+   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
+   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
+   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
+   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
     CommandBusOverloadedException.class,
     CommandBusClosedException.class,
     LockException.class,
-    OptimisticLockException.class
+    OptimisticLockException.class,
+    CommandDeadLetteredException.class
   })
   public ResponseEntity<Map<String, String>> handleCommandRefused(RuntimeException e) {
     CommandRefusal refusal =
         CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
-    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-        .header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS))
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(refusal.body());
+    ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
+    if (refusal.retryLater()) {
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+    }
+    return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
   }
 }
 ```
@@ -1152,7 +1162,7 @@ Both endpoints are already implemented in `EventExplorerController`. Verify that
 
 ### Step 6b: Switch On the Framework's Per-Stream SSE Endpoint
 
-`EventExplorerController`'s feed is the demo's own code: one stream of every event, without payloads. The framework ships a second, narrower endpoint — `GET /api/sse/{aggregateType}/{aggregateId}`, the events of **one** aggregate, each with its payload — and it needs no controller and no feeder code from you. It is off by default. Add to `application.yml`:
+`EventExplorerController`'s feed is the demo's own code: one stream of every event, without payloads. The framework ships a second, narrower endpoint — `GET /api/sse/{aggregateType}/{aggregateId}`, the events of **one** aggregate, each with its payload — and it needs no controller and no feeder code from you. It is off by default. Add to `spring-app/src/main/resources/application.yml`:
 
 ```yaml
 streamrune:
@@ -1595,12 +1605,36 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover. Distinct from {@code circuitBreaker} above, which guards the command bus
+   * generally.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
     return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
+   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   *
+   * <p>The framework's in-process locker steps aside for this bean
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it.
+   */
+  @Bean(destroyMethod = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${spring.datasource.url}") String url,
+      @Value("${spring.datasource.username}") String username,
+      @Value("${spring.datasource.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   /**
@@ -1622,7 +1656,7 @@ public class StreamRuneConfig {
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
    * in plaintext.
    *
-   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).

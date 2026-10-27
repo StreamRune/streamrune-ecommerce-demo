@@ -683,12 +683,36 @@ public class StreamRuneConfig {
 
   /**
    * Circuit breaker around the payment gateway call (used by {@link PaymentProcessManager}). Opens
-   * after 3 consecutive gateway failures, then half-opens after a 30s cooldown so a probe can
-   * recover. Distinct from {@code circuitBreaker} above, which guards the command bus generally.
+   * after 3 consecutive gateway calls without an answer, then half-opens after a 30s cooldown so a
+   * probe can recover. Distinct from {@code circuitBreaker} above, which guards the command bus
+   * generally.
    */
   @Bean
   public PaymentGatewayCircuitBreaker paymentGatewayCircuitBreaker() {
     return new PaymentGatewayCircuitBreaker(3, Duration.ofSeconds(30));
+  }
+
+  /**
+   * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
+   * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
+   * Every backend on the database takes the same lock, so a command waits for a command on the same
+   * aggregate on any backend; an in-process lock serializes the commands of one process only, and
+   * two backends writing one aggregate would meet in version conflicts, retried and in the end
+   * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
+   * of the application's pool for its load and its append, so the lock pool has the application
+   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
+   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   *
+   * <p>The framework's in-process locker steps aside for this bean
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
+   * Spring closes with it.
+   */
+  @Bean(destroyMethod = "close")
+  public PgAdvisoryLocker aggregateLocker(
+      @Value("${spring.datasource.url}") String url,
+      @Value("${spring.datasource.username}") String username,
+      @Value("${spring.datasource.password}") String password) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
   }
 
   /**
@@ -701,7 +725,7 @@ public class StreamRuneConfig {
    * before validation, so a caller without the role learns nothing about the validation rules; the
    * circuit breaker comes last, so it counts only execution failures.
    *
-   * <p>The bus takes the auto-configured {@link AggregateLocker} and {@code
+   * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
@@ -1201,7 +1225,7 @@ public class StreamRuneConfig {
 
 </details>
 
-You also need to enable the outbox and tell the app where the broker is, in `application.yml`. Add the `rabbitmq` block under the existing `spring:` key and the `outbox` block under the existing `streamrune:` key:
+You also need to enable the outbox and tell the app where the broker is, in `spring-app/src/main/resources/application.yml`. Add the `rabbitmq` block under the existing `spring:` key and the `outbox` block under the existing `streamrune:` key:
 
 ```yaml
 spring:
@@ -1792,7 +1816,7 @@ The plain RabbitMQ Java client with automatic recovery (its default, set explici
 
 A broker that goes away after the publisher connected shows the same way, with the client's own error in `lastError` (the client reconnects by itself). `OutboxBrokerDownStartupIT` in each app proves the startup case: it starts the app with a broker port nothing listens on, expects `UP` health, a command answered `200` and its entry `PENDING` with the refusal recorded and no attempt counted, then starts RabbitMQ on that port and expects the entry `DELIVERED` and on the queue once.
 
-Spring Boot adds a health check of its own for RabbitMQ with `spring-boot-starter-amqp`. It opens Spring AMQP's connection, which the app does not publish on, and would answer `DOWN` for the whole app while the broker is down — taking an app that serves out of a load balancer's rotation. Switch it off in `application.yml`; the outbox's own signals above show the outage:
+Spring Boot adds a health check of its own for RabbitMQ with `spring-boot-starter-amqp`. It opens Spring AMQP's connection, which the app does not publish on, and would answer `DOWN` for the whole app while the broker is down — taking an app that serves out of a load balancer's rotation. Switch it off in `spring-app/src/main/resources/application.yml`; the outbox's own signals above show the outage:
 
 ```yaml
 management:
@@ -2162,6 +2186,8 @@ The images copy the two JARs that `bootJar` builds, the backend's and the notifi
 Your project needs no `.dockerignore` for these `COPY` lines. The demo's repository has one that keeps every `build/` directory out of the Docker build context except the two the Dockerfiles copy from, `spring-app/build/libs` and `notifications-service/build/libs`; if you add one, re-include both (`!spring-app/build/libs`, `!notifications-service/build/libs`), or the `COPY` of a JAR fails with *file not found*.
 
 The `notifications-service` deduplicates messages by `entryId` (the AMQP `messageId` property, set by `RabbitMqOutboxPublisher` to `entry.id().value()`). If the broker delivers a message twice — because the poller restarted after publishing but before marking it `DELIVERED` — the service discards the duplicate silently.
+
+The entry id tells a delivery apart from another delivery of the same entry, not one fact from another fact. One order can publish `OrderCancelled` twice, as two entries: a customer who cancels while the saga still fulfills the order stores one, and the saga's own compensation stores the second ten to twenty seconds later (Chapter 11); a cancellation sent again stores one more each time, since the order decider appends `OrderCancelled` for a cancelled order too, so that every cancellation runs the undo. A consumer that acts on a cancellation — a refund at a payment provider, an e-mail to the customer — keys its effect by the order id, or it acts twice. The notifications service only records what arrives.
 
 ### Step 6: Verify End-to-End Delivery
 

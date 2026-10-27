@@ -29,10 +29,7 @@ import org.streamrune.ecommerce.queries.dto.CustomerView;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 import org.streamrune.ecommerce.queries.dto.ProductView;
-import org.streamrune.ecommerce.queries.dto.SagaView;
 import org.streamrune.ecommerce.queries.query.ComplianceReportQuery;
-import org.streamrune.ecommerce.queries.query.GetOrderById;
-import org.streamrune.ecommerce.queries.query.ListOrders;
 import org.streamrune.ecommerce.queries.query.ListProducts;
 
 /**
@@ -144,11 +141,8 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
       OrderView.OrderLineView.class,
       CustomerView.class,
       InventoryView.class,
-      SagaView.class,
 
       // ── query records ─────────────────────────────────────────────────────────
-      GetOrderById.class,
-      ListOrders.class,
       ListProducts.class,
       ComplianceReportQuery.class,
 

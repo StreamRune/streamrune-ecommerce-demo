@@ -239,6 +239,51 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(stockAdjustments(pid)).isOne();
   }
 
+  /**
+   * A replay on a replica whose code reads the product's stream at an older event schema than one
+   * it holds — a replica still on the previous release during a rolling deployment — fails before
+   * anything is appended ({@code READER_BEHIND}): the endpoint answers {@code 503} with {@code
+   * Retry-After}, the entry keeps its attempt count, and the replay succeeds once the stream is
+   * readable. The test raises the stored {@code schema_version} of the product's events above every
+   * version the app's upcasters reach, then puts it back.
+   */
+  @Test
+  void aReplayOnAReplicaBehindTheStoredSchema_is503_andLeavesTheEntryAsItWas() throws Exception {
+    String pid = createProduct();
+    CommandId commandId = CommandId.of(UUID.randomUUID().toString());
+    deadLetterQueue.publish(
+        new DeadLetterPublishRequest(
+            "{\"productId\":\"" + pid + "\",\"quantityChange\":5,\"reason\":\"restock\"}",
+            ProductCommand.AdjustStock.class.getName(),
+            commandId,
+            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            IllegalStateException.class.getName(),
+            "transient downstream failure",
+            3,
+            Instant.now(),
+            CorrelationId.of("corr-" + UUID.randomUUID()),
+            UserId.of("admin-1"),
+            null,
+            IdempotencyKey.scopedTo("admin-1", UUID.randomUUID().toString())));
+    Answer refused;
+    try (var ahead = new StoredSchemaAhead(dataSource, pid)) {
+      refused = send(retry(commandId, false, "ops-1"));
+    }
+    assertThat(refused.status()).as(refused.body()).isEqualTo(503);
+    assertThat(refused.retryAfter()).isEqualTo("5");
+    assertThat(refused.body()).contains("READER_BEHIND");
+
+    var entry = deadLetterQueue.find(commandId);
+    assertThat(entry).as("the entry stays for a replica that reads the stream").isPresent();
+    assertThat(entry.get().dlqAttempts()).as("the refusal is not counted").isZero();
+    assertThat(stockAdjustments(pid)).isZero();
+
+    var replayed = send(retry(commandId, false, "ops-1"));
+    assertThat(replayed.status()).as(replayed.body()).isEqualTo(200);
+    assertThat(replayed.body()).contains("REPLAYED");
+    assertThat(stockAdjustments(pid)).isOne();
+  }
+
   @Test
   void aForcedRetryOfAnUnknownEntryIs404_andAuditsNothing() throws Exception {
     CommandId commandId = CommandId.of(UUID.randomUUID().toString());
@@ -250,10 +295,16 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
 
   /** {@code PUT /stock} while the store refuses the event: the bus dead-letters the command. */
   private CommandId failedAdjustment(String pid, String key) throws Exception {
+    Answer answer;
     try (var failures = new AppendFailureInjection(dataSource)) {
       failures.failAppend(ProductState.TYPE, pid, "StockAdjusted");
-      assertThat(send(adjustStock(pid, key)).status()).isEqualTo(500);
+      answer = send(adjustStock(pid, key));
     }
+    assertThat(answer.status()).as(answer.body()).isEqualTo(key == null ? 500 : 503);
+    assertThat(answer.retryAfter()).isEqualTo(key == null ? null : "5");
+    assertThat(answer.body())
+        .contains(
+            "\"reason\":\"" + (key == null ? "AWAITING_OPERATOR" : "QUEUED_FOR_REPLAY") + "\"");
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps =
             conn.prepareStatement(
@@ -262,12 +313,53 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
       try (ResultSet rs = ps.executeQuery()) {
         assertThat(rs.next()).as("the failed adjustment is dead-lettered").isTrue();
         CommandId commandId = CommandId.of(rs.getString(1));
+        assertThat(answer.body())
+            .as("the answer names the entry")
+            .contains("\"commandId\":\"" + commandId.value() + "\"");
         if (key == null) {
           assertThat(rs.getString(2)).isNull();
         } else {
           assertThat(rs.getString(2)).as("the entry keeps the caller's key").endsWith(key);
         }
         return commandId;
+      }
+    }
+  }
+
+  /**
+   * Raises the stored {@code schema_version} of every event of one product above what the app's
+   * upcasters reach, as a newer release would have stored them; {@link #close()} puts it back.
+   */
+  private static final class StoredSchemaAhead implements AutoCloseable {
+
+    private static final int AHEAD = 1000;
+
+    private final DataSource dataSource;
+    private final String productId;
+
+    StoredSchemaAhead(DataSource dataSource, String productId) throws Exception {
+      this.dataSource = dataSource;
+      this.productId = productId;
+      shift(AHEAD);
+    }
+
+    @Override
+    public void close() throws Exception {
+      shift(-AHEAD);
+    }
+
+    private void shift(int by) throws Exception {
+      try (Connection conn = dataSource.getConnection();
+          PreparedStatement ps =
+              conn.prepareStatement(
+                  "UPDATE event_stream SET schema_version = schema_version + ?"
+                      + " WHERE aggregate_type = 'product' AND aggregate_id = ?")) {
+        ps.setInt(1, by);
+        ps.setString(2, productId);
+        assertThat(ps.executeUpdate()).isPositive();
+        if (!conn.getAutoCommit()) {
+          conn.commit();
+        }
       }
     }
   }
@@ -376,14 +468,21 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
         .header("X-User-Id", operator);
   }
 
-  private record Answer(int status, String body) {}
+  /** An answer's status, body and {@code Retry-After} header ({@code null} without one). */
+  private record Answer(int status, String body, String retryAfter) {}
 
   private Answer send(MutableHttpRequest<?> request) {
     try {
       var response = client.toBlocking().exchange(request, String.class);
-      return new Answer(response.getStatus().getCode(), response.getBody().orElse(""));
+      return new Answer(
+          response.getStatus().getCode(),
+          response.getBody().orElse(""),
+          response.getHeaders().get("Retry-After"));
     } catch (HttpClientResponseException e) {
-      return new Answer(e.getStatus().getCode(), e.getResponse().getBody(String.class).orElse(""));
+      return new Answer(
+          e.getStatus().getCode(),
+          e.getResponse().getBody(String.class).orElse(""),
+          e.getResponse().getHeaders().get("Retry-After"));
     }
   }
 

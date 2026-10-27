@@ -20,15 +20,31 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * compensate.
  *
  * <ul>
- *   <li>gateway succeeds → {@code CapturePayment} → {@code PaymentCaptured} → saga reserves stock;
- *   <li>gateway fails → {@code FailPayment} → {@code PaymentFailed} → saga cancels the order.
+ *   <li>gateway captures → {@code CapturePayment} → {@code PaymentCaptured} → saga reserves stock;
+ *   <li>gateway declines → {@code FailPayment} → {@code PaymentFailed} → saga cancels the order;
+ *   <li>gateway gives no answer → nothing is decided: the event is delivered again, unless the
+ *       gateway reports that it took the money, which records the capture.
  * </ul>
  *
  * <p>It also reacts to {@code PaymentRefunded}, by refunding the payment at the gateway.
  *
- * <p>The gateway call is guarded by a {@link PaymentGatewayCircuitBreaker}: after a few consecutive
- * gateway failures the breaker opens and the manager fails the payment (dispatches {@code
- * FailPayment} without calling the gateway) until the cooldown lets a probe through.
+ * <p><b>A decline is an answer; a call without one is not.</b> Only the gateway's decline ({@link
+ * PaymentGatewaySimulator.PaymentDeclinedException}) fails the payment. Any other failure of the
+ * call — a timeout, a reset connection, a {@code 5xx} — leaves the outcome unknown: a real gateway
+ * may have taken the money before its answer was lost. The manager then asks the gateway whether it
+ * holds a capture of the payment, by the payment id that is the call's idempotency key. If it does,
+ * the capture is recorded. If it does not, {@link #onEvents} throws {@link
+ * PaymentOutcomeUnknownException}: the payment stays {@code PENDING}, the subscription delivers
+ * {@code PaymentInitiated} again after a backoff, and the gateway is asked again. The order's
+ * deadline bounds the wait: its cancellation voids the pending payment, and a capture the gateway
+ * reports after that is recorded and refunded (below). Failing the payment on an unknown outcome
+ * would cancel an order whose money the gateway may hold, and nothing would ask the gateway again.
+ *
+ * <p>The gateway call is guarded by a {@link PaymentGatewayCircuitBreaker}, which counts the calls
+ * that got no answer: after a few in a row it opens, and the manager does not call the gateway
+ * until the cooldown lets a probe through. A payment that meets the open breaker has no answer
+ * either, and is held the same way. A decline comes from a gateway that works, so the breaker
+ * counts it as a success.
  *
  * <p><b>The command continues the event.</b> Each command is dispatched inside {@link
  * StreamRuneContext#continuing(EventEnvelope) StreamRuneContext.continuing(initiated)}. The command
@@ -39,18 +55,17 @@ import org.streamrune.ecommerce.domain.payment.PaymentEvent;
  * nor the saga routes it. The command runs with no user and no authority: the customer who placed
  * the order did not issue it.
  *
- * <p><b>Only the gateway decides the payment.</b> A gateway failure is counted by the breaker and
- * becomes {@code FailPayment}. A failure to dispatch either command — the event store unreachable,
- * the command bus's own circuit breaker open, the bus shutting down — says nothing about the
- * payment, so it propagates out of {@link #onEvents}: the subscription keeps its checkpoint before
- * the event and delivers it again after a backoff. Treating it as a gateway failure would cancel an
- * order whose money the gateway had already taken; swallowing it would leave the payment {@code
- * PENDING} with the event already consumed. That redelivery is the command's only second attempt:
- * the bus publishes a failed command that was dispatched inside {@code continuing} to no dead
- * letter queue, whether or not a saga caused the event. An entry has no place for the causing event
- * or for a saga origin, so its replay would store the reply without them. A capture that keeps
- * failing therefore shows on the subscription and nowhere else: its poll loop logs every failed
- * attempt at {@code ERROR}.
+ * <p><b>Only the gateway decides the payment.</b> A failure to dispatch either command — the event
+ * store unreachable, the command bus's own circuit breaker open, the bus shutting down — says
+ * nothing about the payment, so it propagates out of {@link #onEvents}: the subscription keeps its
+ * checkpoint before the event and delivers it again after a backoff. Treating it as a decline would
+ * cancel an order whose money the gateway had already taken; swallowing it would leave the payment
+ * {@code PENDING} with the event already consumed. That redelivery is the command's only second
+ * attempt: the bus publishes a failed command that was dispatched inside {@code continuing} to no
+ * dead letter queue, whether or not a saga caused the event. An entry has no place for the causing
+ * event or for a saga origin, so its replay would store the reply without them. A capture that
+ * keeps failing therefore shows on the subscription and nowhere else: its poll loop logs every
+ * failed attempt at {@code ERROR}, and so does a payment the gateway gives no answer for.
  *
  * <p><b>Safe to deliver twice.</b> The subscription delivers at least once, and after a dispatch
  * failure it delivers the whole batch again:
@@ -141,31 +156,47 @@ public class PaymentProcessManager implements EventListener {
 
   private void capture(String paymentId, EventEnvelope initiated) {
     if (!breaker.allowRequest()) {
-      LOG.warn(
-          "Payment gateway circuit OPEN — failing payment {}",
-          LogSanitizer.sanitizeForLog(paymentId));
-      dispatch(
-          new PaymentCommand.FailPayment(paymentId, "payment gateway circuit open"),
-          failKey(paymentId),
-          initiated);
+      withoutAnAnswer(paymentId, initiated, null);
       return;
     }
     try {
       gateway.processPayment(paymentId);
-    } catch (RuntimeException gatewayFailure) {
-      breaker.recordFailure();
-      LOG.warn(
-          "Payment gateway failed for {}: {}",
-          LogSanitizer.sanitizeForLog(paymentId),
-          LogSanitizer.sanitizeForLog(gatewayFailure.getMessage()));
+    } catch (PaymentGatewaySimulator.PaymentDeclinedException declined) {
+      // The gateway answered: it works, and it took no money.
+      breaker.recordSuccess();
+      LOG.info("Payment gateway declined {}", LogSanitizer.sanitizeForLog(paymentId));
       dispatch(
-          new PaymentCommand.FailPayment(paymentId, gatewayFailure.getMessage()),
+          new PaymentCommand.FailPayment(paymentId, declined.getMessage()),
           failKey(paymentId),
           initiated);
+      return;
+    } catch (RuntimeException noAnswer) {
+      breaker.recordFailure();
+      withoutAnAnswer(paymentId, initiated, noAnswer);
       return;
     }
     breaker.recordSuccess();
     dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
+  }
+
+  /**
+   * The gateway gave no answer for the payment, or its open breaker kept the call from being made:
+   * the outcome is unknown. A capture the gateway reports is recorded; otherwise the payment stays
+   * {@code PENDING} and the event is delivered again.
+   *
+   * @param noAnswer the call's failure, or {@code null} when the breaker was open
+   * @throws PaymentOutcomeUnknownException when the gateway reports no capture of the payment
+   */
+  private void withoutAnAnswer(
+      String paymentId, EventEnvelope initiated, RuntimeException noAnswer) {
+    if (gateway.hasCaptured(paymentId)) {
+      LOG.info(
+          "The payment gateway gave no answer for payment {} but holds its capture; recording it",
+          LogSanitizer.sanitizeForLog(paymentId));
+      dispatch(new PaymentCommand.CapturePayment(paymentId), captureKey(paymentId), initiated);
+      return;
+    }
+    throw new PaymentOutcomeUnknownException(paymentId, noAnswer);
   }
 
   /** The capture's idempotency key: one per payment, the same on every delivery. */
@@ -184,5 +215,23 @@ public class PaymentProcessManager implements EventListener {
    */
   private void dispatch(PaymentCommand command, IdempotencyKey key, EventEnvelope initiated) {
     StreamRuneContext.continuing(initiated).run(() -> commandBus.execute(command, key));
+  }
+
+  /**
+   * The gateway gave no answer for a payment and holds no capture of it: the payment stays {@code
+   * PENDING}, and the subscription delivers {@code PaymentInitiated} again after a backoff.
+   */
+  public static final class PaymentOutcomeUnknownException extends RuntimeException {
+
+    PaymentOutcomeUnknownException(String paymentId, RuntimeException noAnswer) {
+      super(
+          (noAnswer == null
+                  ? "The payment gateway's circuit is open: no call for payment "
+                  : "The payment gateway gave no answer for payment ")
+              + LogSanitizer.sanitizeForLog(paymentId)
+              + ", and it holds no capture of it; the payment stays PENDING until a delivery"
+              + " gets an answer",
+          noAnswer);
+    }
   }
 }
