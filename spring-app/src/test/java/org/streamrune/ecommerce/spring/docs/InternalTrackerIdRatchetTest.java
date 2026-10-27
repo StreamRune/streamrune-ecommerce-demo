@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -82,7 +83,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The scanned tree is declared as an input of {@code :spring-app:docsTest}, the task that runs
  * the docs tests, in {@code spring-app/build.gradle.kts}, so Gradle re-runs this test when a file
- * in another module, a chapter or a script changes.
+ * in another module, a chapter or a script changes; {@link
+ * #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()} holds that declaration to the extensions
+ * and names the walk reads.
  */
 class InternalTrackerIdRatchetTest {
 
@@ -157,7 +160,8 @@ class InternalTrackerIdRatchetTest {
   /**
    * The files without an extension that the repository publishes, scanned by name: the commit
    * template, the ignore lists, the license and notice, the code owners and the Gradle wrapper
-   * script. {@code spring-app/build.gradle.kts} declares the same names, and the Dockerfiles.
+   * script. {@code spring-app/build.gradle.kts} declares the same names, and the Dockerfiles, as
+   * the inputs of this test ({@link #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()}).
    */
   private static final Set<String> SCANNED_NAMES =
       Set.of(
@@ -180,6 +184,13 @@ class InternalTrackerIdRatchetTest {
         || name.startsWith("Dockerfile.")
         || (dot >= 0 && SCANNED_EXTENSIONS.contains(name.substring(dot + 1)));
   }
+
+  /**
+   * The scanned names Gradle's default excludes leave out of every file tree, {@code
+   * publicTextSources} included: {@code spring-app/build.gradle.kts} declares each such file by its
+   * path ({@link #theGradleInputsNameTheExtensionsAndNamesTheWalkReads()}).
+   */
+  private static final Set<String> LEFT_OUT_OF_FILE_TREES = Set.of(".gitignore");
 
   /**
    * The forbidden shapes. Each alternative is anchored on word boundaries so a longer ordinary word
@@ -847,7 +858,17 @@ class InternalTrackerIdRatchetTest {
             "frontend/playwright.config.ts")) {
       assertTrue(files.contains(file), file + " must be scanned");
     }
-    for (String withoutExtension : List.of(".gitmessage", "NOTICE", ".github/CODEOWNERS")) {
+    for (String withoutExtension :
+        List.of(
+            ".gitmessage",
+            ".gitignore",
+            ".dockerignore",
+            "LICENSE",
+            "NOTICE",
+            ".github/CODEOWNERS",
+            "gradlew",
+            "Dockerfile.backend",
+            "frontend/Dockerfile")) {
       assertTrue(
           files.contains(withoutExtension),
           "a text file without an extension must be scanned: " + withoutExtension);
@@ -862,6 +883,69 @@ class InternalTrackerIdRatchetTest {
         "internal working material is never scanned");
     assertTrue(
         files.stream().noneMatch(p -> p.contains("node_modules/")), "dependencies are not scanned");
+  }
+
+  /**
+   * The Gradle inputs of this test are the files it reads: the extensions and the names that {@code
+   * spring-app/build.gradle.kts} includes in {@code publicTextSources} are {@link
+   * #SCANNED_EXTENSIONS} and {@link #SCANNED_NAMES}, with the Dockerfiles ({@code Dockerfile} and
+   * {@code Dockerfile.*}); and every file the walk reads that Gradle's default excludes leave out
+   * of a file tree ({@link #LEFT_OUT_OF_FILE_TREES}) is declared by its path in {@code
+   * ignoreLists}. A kind of file the walk reads and the build does not declare would leave an edit
+   * of it with the result of an earlier run; one the build declares and the walk does not read
+   * would run this test again for nothing.
+   */
+  @Test
+  void theGradleInputsNameTheExtensionsAndNamesTheWalkReads() {
+    List<String> build = read(repositoryRoot().resolve("spring-app/build.gradle.kts"));
+    int start = 0;
+    while (start < build.size() && !build.get(start).startsWith("val publicTextSources")) {
+      start++;
+    }
+    assertTrue(start < build.size(), "spring-app/build.gradle.kts declares publicTextSources");
+    // "**/*.java" includes an extension, "**/NOTICE" a name.
+    Pattern included = Pattern.compile("\"\\*\\*/(\\*\\.)?([^\"*/]+)\"");
+    Set<String> extensions = new TreeSet<>();
+    Set<String> names = new TreeSet<>();
+    boolean dockerfiles = false;
+    for (String line : build.subList(start + 1, build.size())) {
+      String code = line.strip();
+      if (code.equals("}")) {
+        break;
+      }
+      Matcher include = included.matcher(code);
+      while (code.startsWith("include(") && include.find()) {
+        (include.group(1) != null ? extensions : names).add(include.group(2));
+      }
+      dockerfiles |= code.startsWith("include(") && code.contains("\"**/Dockerfile.*\"");
+    }
+    Set<String> expectedNames = new TreeSet<>(SCANNED_NAMES);
+    expectedNames.add("Dockerfile");
+    assertEquals(new TreeSet<>(SCANNED_EXTENSIONS), extensions, "the extensions of the inputs");
+    assertEquals(expectedNames, names, "the file names of the inputs");
+    assertTrue(dockerfiles, "the inputs include **/Dockerfile.*");
+
+    Set<String> declared = new TreeSet<>();
+    Pattern resolved = Pattern.compile("resolve\\(\"([^\"]+)\"\\)");
+    for (String line : build) {
+      if (line.startsWith("val ignoreLists")) {
+        Matcher path = resolved.matcher(line);
+        while (path.find()) {
+          declared.add(path.group(1));
+        }
+      }
+    }
+    Set<String> leftOut = new TreeSet<>();
+    for (Path file : publicTextFiles()) {
+      if (LEFT_OUT_OF_FILE_TREES.contains(file.getFileName().toString())) {
+        leftOut.add(relative(file));
+      }
+    }
+    assertFalse(leftOut.isEmpty(), "the walk reads the ignore lists");
+    assertEquals(leftOut, declared, "the ignore lists declared one by one in ignoreLists");
+    assertTrue(
+        build.stream().anyMatch(line -> line.strip().equals("inputs.files(ignoreLists)")),
+        "the docs tests take ignoreLists as an input");
   }
 
   private static String relative(Path file) {

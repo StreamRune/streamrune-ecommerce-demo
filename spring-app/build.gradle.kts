@@ -115,6 +115,11 @@ val publicTextSources =
         exclude("frontend/next-env.d.ts")
     }
 
+// Gradle's default excludes leave every `.gitignore` out of a file tree, publicTextSources included,
+// and the ratchet reads them: each is declared by its path. InternalTrackerIdRatchetTest holds the
+// include lines above and this list to the files its walk reads.
+val ignoreLists = files(rootDir.resolve(".gitignore"), rootDir.resolve("frontend/.gitignore"))
+
 // The docs tests (org.streamrune.ecommerce.spring.docs) whose names end in Test need no Docker: they
 // run in `docsTest`, which `check`, the root `quickCheck` and the `Shared module tests` CI job run,
 // with the public text as its input, so an edit to a chapter, a README or a comment re-runs them
@@ -136,6 +141,9 @@ val docsTest =
         inputs.files(publicTextSources)
             .withPathSensitivity(PathSensitivity.RELATIVE)
             .withPropertyName("publicTextSources")
+        inputs.files(ignoreLists)
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+            .withPropertyName("ignoreLists")
     }
 
 tasks.named<Test>("test") {
