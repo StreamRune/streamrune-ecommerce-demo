@@ -585,7 +585,7 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The three process managers' subscriptions have a lease each — `payment-process-manager`, `order-cancellation` and `order-shipment` — so each of the four leases sits on one backend, and not necessarily the same one: after a restart the saga may lead on one backend and the cancellation process manager on the other. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
 
-**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
+**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12), a wait the pool's meters show (`hikaricp.connections.pending`, tagged `pool=streamrune-advisory-lock`, Chapter 15). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
 
 **The profile.** The Compose file gets a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
 
@@ -913,6 +913,7 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -1215,15 +1216,27 @@ public class StreamRuneConfig {
    * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's in-process locker steps aside for this bean
-   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
-   * Spring closes with it.
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker takes its connections
+   * from {@link #advisoryLockPool}, a pool it does not own.
+   */
+  @Bean
+  public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
+    return new PgAdvisoryLocker(advisoryLockPool.dataSource());
+  }
+
+  /**
+   * The lock pool of {@link #aggregateLocker}, with the application pool's size, ten, and its
+   * meters in the app's registry: {@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock} answers how
+   * many of its connections the commands hold. Spring closes it with the context.
    */
   @Bean(destroyMethod = "close")
-  public PgAdvisoryLocker aggregateLocker(
+  public AdvisoryLockPool advisoryLockPool(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
-      @Value("${spring.datasource.password}") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @Value("${spring.datasource.password}") String password,
+      MeterRegistry meterRegistry) {
+    return new AdvisoryLockPool(url, username, password, 10, meterRegistry);
   }
 
   /**

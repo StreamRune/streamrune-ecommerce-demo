@@ -1,8 +1,11 @@
 package org.streamrune.ecommerce.quarkus;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import io.agroal.api.AgroalDataSource;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -18,13 +21,15 @@ import org.streamrune.core.AggregateLocker;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.quarkus.config.AdvisoryLockPool;
 import org.streamrune.postgres.PgAdvisoryLocker;
 
 /**
  * The command bus locks an aggregate in PostgreSQL ({@link PgAdvisoryLocker}): the lock holds
  * across every instance of the app on one database, as in the Spring app, whose {@code
  * TwoInstanceSagaIT} shows a command on one backend waiting for the lock a command on the other
- * holds. The framework's in-process locker steps aside for the app's.
+ * holds. The framework's in-process locker steps aside for the app's. Its connections come from the
+ * app's {@link AdvisoryLockPool}, whose meters reach Micrometer.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
@@ -33,6 +38,8 @@ class AggregateLockerWiringIT {
   @Inject AggregateLocker locker;
 
   @Inject DataSource dataSource;
+
+  @Inject MeterRegistry meterRegistry;
 
   @Inject AgroalDataSource applicationPool;
 
@@ -77,6 +84,48 @@ class AggregateLockerWiringIT {
         lock.close();
       }
     }
+  }
+
+  /**
+   * The lock pool reports itself to Micrometer as {@code hikaricp.connections.*}, tagged {@code
+   * pool=streamrune-advisory-lock}: its maximum is the application pool's size, a held lock is one
+   * of its active connections, and the gauge of the commands waiting for one and the counter of the
+   * waits that ran out are there to show its saturation.
+   */
+  @Test
+  void theLockPoolReportsItsConnectionsToMicrometer() throws Exception {
+    int applicationPoolSize =
+        applicationPool.getConfiguration().connectionPoolConfiguration().maxSize();
+    assertThat(lockPoolGauge("hikaricp.connections.max").value()).isEqualTo(applicationPoolSize);
+    assertThat(lockPoolGauge("hikaricp.connections.pending")).isNotNull();
+    assertThat(
+            meterRegistry
+                .find("hikaricp.connections.timeout")
+                .tag("pool", AdvisoryLockPool.NAME)
+                .counter())
+        .as("the waits for a lock connection that ran out")
+        .isNotNull();
+
+    try (var held =
+        locker.acquireLock(
+            StreamId.of(AggregateType.of("product"), AggregateId.of("lock-pool-meters")),
+            Duration.ofSeconds(1))) {
+      // Hikari samples the pool's state at most once a second.
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .untilAsserted(
+              () ->
+                  assertThat(lockPoolGauge("hikaricp.connections.active").value())
+                      .as("the lock connection the held lock takes")
+                      .isGreaterThanOrEqualTo(1));
+    }
+  }
+
+  /** A gauge of the lock pool, which must exist. */
+  private Gauge lockPoolGauge(String name) {
+    Gauge gauge = meterRegistry.find(name).tag("pool", AdvisoryLockPool.NAME).gauge();
+    assertThat(gauge).as("%s tagged pool=%s", name, AdvisoryLockPool.NAME).isNotNull();
+    return gauge;
   }
 
   /** The advisory locks PostgreSQL has granted, on every connection. */

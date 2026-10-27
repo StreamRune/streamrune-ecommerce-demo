@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -304,15 +305,27 @@ public class StreamRuneConfig {
    * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's in-process locker steps aside for this bean
-   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
-   * Spring closes with it.
+   * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker takes its connections
+   * from {@link #advisoryLockPool}, a pool it does not own.
+   */
+  @Bean
+  public PgAdvisoryLocker aggregateLocker(AdvisoryLockPool advisoryLockPool) {
+    return new PgAdvisoryLocker(advisoryLockPool.dataSource());
+  }
+
+  /**
+   * The lock pool of {@link #aggregateLocker}, with the application pool's size, ten, and its
+   * meters in the app's registry: {@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock} answers how
+   * many of its connections the commands hold. Spring closes it with the context.
    */
   @Bean(destroyMethod = "close")
-  public PgAdvisoryLocker aggregateLocker(
+  public AdvisoryLockPool advisoryLockPool(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
-      @Value("${spring.datasource.password}") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @Value("${spring.datasource.password}") String password,
+      MeterRegistry meterRegistry) {
+    return new AdvisoryLockPool(url, username, password, 10, meterRegistry);
   }
 
   /**

@@ -14,6 +14,8 @@ dependencies {
     implementation(project(":projections"))
     implementation("org.streamrune:streamrune-quarkus:$sr")
     implementation("org.streamrune:streamrune-postgres:$sr")
+    // The aggregate lock's pool, which the app builds with its meters (config/AdvisoryLockPool).
+    implementation(libs.hikaricp)
     // GDPR crypto-shredding: PostgresCryptoEngine (postgres-crypto) and the CryptoShreddingModule
     // + REDACTED tombstone (crypto-api). Both are on the classpath transitively via the integration,
     // but are declared here explicitly because this app's code references them directly.
