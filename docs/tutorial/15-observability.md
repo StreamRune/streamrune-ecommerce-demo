@@ -1,6 +1,6 @@
 # Chapter 15: Observability
 
-> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how to opt into `OpenTelemetryCommandInterceptor` so each command dispatch creates a trace span, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, how to serve a live SSE stream of all events using `EventExplorerController`, and how to switch on the framework's own SSE endpoint for the events of one aggregate.
+> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how to opt into `OpenTelemetryCommandInterceptor` so each command dispatch creates a trace span, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, how to watch the pool the aggregate lock takes its connections from, how to serve a live SSE stream of all events using `EventExplorerController`, and how to switch on the framework's own SSE endpoint for the events of one aggregate.
 
 ---
 
@@ -16,6 +16,7 @@ In this chapter you will:
 - Verify `MicrometerStreamRuneMetrics` records counters and timers for commands, events, and projections. Because the auto-configuration registers this bean automatically when a `MeterRegistry` is present — and actuator provides a `SimpleMeterRegistry` — the wiring reduces to verifying that the dependency is on the classpath.
 - Opt into `OpenTelemetryCommandInterceptor` as a command interceptor so that every command dispatch creates an OpenTelemetry span with the command type, command ID, and aggregate ID as attributes. The shipped demo does not wire this — it is an addition you make in Step 3.
 - Verify that `StreamRuneHealthIndicator` is registered and returns meaningful detail about the PostgreSQL connection and subscription lag.
+- Give the aggregate lock's connection pool a metrics tracker, so that its meters (`hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`) show how many commands hold a lock connection and how many wait for one.
 - Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream and a per-stream event list, both for an `ADMIN` because they show decrypted payloads, and an open SSE endpoint that announces new events in real time, without their payload.
 - Switch on the framework's own SSE endpoint, `GET /api/sse/{aggregateType}/{aggregateId}`, which streams the events of one aggregate. The framework serves it and feeds it; the application adds a property and an `SseAuthorizer` that lets in an `ADMIN` or the customer the stream belongs to, and nobody else.
 
@@ -125,6 +126,38 @@ The indicator performs these checks:
 The indicator is exposed under the bean name `streamRune` at `/actuator/health/streamRune`. The full health response at `/actuator/health` aggregates it alongside Spring's built-in `db` and `diskSpace` indicators.
 
 No additional code is required for this step. Proceed to Step 5 and return here to verify once the application is running.
+
+### Step 4b: Watch the Aggregate Lock's Pool
+
+The aggregate lock of Chapter 12 holds a connection of a pool of its own for the whole run of every command. That pool is no `DataSource` bean, so neither Spring Boot's pool meters nor its `db` check see it, and a pool whose connections are all taken shows only in the `LockException`s of the commands that waited ten seconds for one (Chapter 12, Step 2b). `PgAdvisoryLocker.withDedicatedPool` takes a fifth argument for that, a HikariCP `MetricsTrackerFactory`: given `new MicrometerMetricsTrackerFactory(meterRegistry)`, the pool reports to the app's `MeterRegistry` (the `SimpleMeterRegistry` Actuator provides). `StreamRuneConfig` imports `com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory` and `io.micrometer.core.instrument.MeterRegistry`, and the locker's bean takes the registry:
+
+```java
+@Bean(destroyMethod = "close")
+public PgAdvisoryLocker aggregateLocker(
+    @Value("${spring.datasource.url}") String url,
+    @Value("${spring.datasource.username}") String username,
+    @Value("${spring.datasource.password}") String password,
+    MeterRegistry meterRegistry) {
+  return PgAdvisoryLocker.withDedicatedPool(
+      url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+}
+```
+
+The pool's meters carry Hikari's names and the pool's name as their tag, `pool=streamrune-advisory-lock`:
+
+| Meter | Type | What it shows |
+|---|---|---|
+| `hikaricp.connections.active` | Gauge | The connections the commands hold: one for each command in flight, from its lock to its end |
+| `hikaricp.connections.idle` | Gauge | The connections free for the next command |
+| `hikaricp.connections.pending` | Gauge | The commands waiting for a connection |
+| `hikaricp.connections.max` | Gauge | The pool's size, ten |
+| `hikaricp.connections.timeout` | Counter | The waits for a connection that ran out after ten seconds |
+| `hikaricp.connections.acquire` | Timer | How long a command waited for its connection |
+| `hikaricp.connections.usage` | Timer | How long a command held it |
+
+**What saturation looks like.** `active` stands at `max` and `pending` is above zero: every lock connection is held, and the next commands wait for one. A burst that drains within the ten seconds shows as a peak of `pending` and a longer `acquire`. One that does not shows in `timeout`: each of those commands fails its attempt with a `LockException`, the bus tries it again, and once its attempts are spent it is dead-lettered (Chapter 12, Step 2b; Chapter 14), so the dead-letter gauges of Step 2 rise with it. Alert on `pending` above zero for longer than a burst lasts, and on any `timeout`. A pool that saturates under the load it must carry is too small for it: size it, and the application's pool with it, for the commands each backend runs at once, below PostgreSQL's `max_connections` (Chapter 17). The application's own pool reports the same names under its own `pool` tag, which is why the query of Step 7 names the tag.
+
+> **Quarkus and Micronaut.** Both apps hand the locker the same tracker on the app's `MeterRegistry`: `StreamRuneProducer#aggregateLocker`, whose pool has the application pool's size, twenty, and `StreamRuneFactory#aggregateLocker`, whose pool has ten. Quarkus serves the meters at `/q/metrics` in Prometheus' format (`hikaricp_connections_active{pool="streamrune-advisory-lock"}`), Micronaut at `/metrics/hikaricp.connections.active`. The `AggregateLockerWiringIT` of each app checks the meters: the pool's size, the gauge of the waiting commands, the counter of the waits that ran out, and a held lock counted as an active connection.
 
 ### Step 5: Create EventExplorerController
 
@@ -1101,11 +1134,14 @@ public class GlobalExceptionHandler {
    * too.
    *
    * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
-   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
-   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
-   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
-   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
-   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
+   * on) is pending, and the body carries its entry's {@code commandId}. What happens to the entry,
+   * {@link CommandDeadLetteredException#pendingOutcome()}, decides the answer: {@code 503} with
+   * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} while the entry is replayed under its {@code
+   * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when an
+   * operator decides about it, for a command that ran without a key or a keyed one whose entry's
+   * replays are used up or that is older than the inbox window. Spring picks this handler for the
+   * dead-lettered command's own type before it looks at the cause. A genuine failure that left no
+   * entry, such as a store error, is none of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
@@ -1120,7 +1156,7 @@ public class GlobalExceptionHandler {
         CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
     ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
     if (refusal.retryLater()) {
-      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(refusal.retryAfterSeconds()));
     }
     return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
   }
@@ -1316,6 +1352,8 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -1619,14 +1657,20 @@ public class StreamRuneConfig {
    *
    * <p>The framework's in-process locker steps aside for this bean
    * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
-   * Spring closes with it.
+   * Spring closes with it. The pool reports to the app's {@code MeterRegistry} through Hikari's
+   * Micrometer tracker: {@code hikaricp.connections.*}, tagged {@code
+   * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
+   * commands wait for one ({@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
-      @Value("${spring.datasource.password}") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @Value("${spring.datasource.password}") String password,
+      MeterRegistry meterRegistry) {
+    return PgAdvisoryLocker.withDedicatedPool(
+        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   /**
@@ -1646,7 +1690,9 @@ public class StreamRuneConfig {
    * encrypts the {@code @Encrypted} fields of {@code RegisterCustomer} and {@code UpdateProfile}
    * under the customer's key: the queued copy of the customer's personal data is ciphertext and is
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
-   * in plaintext.
+   * in plaintext. The queue keeps one entry for a keyed command: one that fails again under its key
+   * is answered from the entry its earlier send stored, queued for replay or awaiting an operator
+   * by the policy and the inbox window the runner replays by, which the bus takes too.
    *
    * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
@@ -1676,6 +1722,10 @@ public class StreamRuneConfig {
         .interceptors(audit, auth, validation, circuitBreaker)
         .deadLetterQueue(deadLetterQueue)
         .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+        // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+        // its key is told whether the entry stored for the key is still replayed.
+        .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+        .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
         .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
         .register(
             ProductState.TYPE,
@@ -1896,13 +1946,16 @@ public class StreamRuneConfig {
    * turns {@code DOWN} if the runner's poll thread dies, instead of reporting {@code UP} while
    * dead-letter entries stop being replayed.
    *
-   * <p>The runner keeps the default policy, which replays on its schedule only the entries the
-   * command inbox can deduplicate: those of commands that ran under an idempotency key. An entry of
-   * an unkeyed command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}),
-   * because its caller may already have retried it successfully. {@code metrics} counts those
-   * entries ({@code streamrune.dlq.awaiting_operator}) and the operator retries refused as older
-   * than the inbox window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries
-   * every {@code app.dead-letter.poll-interval} (60 seconds unless configured).
+   * <p>The runner takes the default policy, which {@link #commandBus} takes as well, with the same
+   * inbox window, so that the bus answers a keyed command that fails again under its key by the
+   * rules this runner replays by; the framework warns at startup when the two differ. The policy
+   * replays on its schedule only the entries the command inbox can deduplicate: those of commands
+   * that ran under an idempotency key. An entry of an unkeyed command waits for an operator ({@code
+   * POST /api/admin/dead-letters/{id}/retry}), because its caller may already have retried it
+   * successfully. {@code metrics} counts those entries ({@code streamrune.dlq.awaiting_operator})
+   * and the operator retries refused as older than the inbox window ({@code
+   * streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Bean
   public DeadLetterRetryRunner deadLetterRetryRunner(
@@ -1923,6 +1976,8 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The policy and the window the command bus answers a keyed re-send by.
+            .policy(DeadLetterRetryPolicy.DEFAULT)
             // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
@@ -2402,6 +2457,14 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.delivery_retried 
 
 `streamrune.saga.delivery_retried`, tagged `saga.type`, counts the saga steps the runner ran again in place because its write of the saga row lost the compare-and-swap to another writer — a twin delivery, a deadline claim, another backend. The step reads the row that won and routes the event on it, without a backoff and without the subscription redelivering the page; one sample per run again, at most two per event (`streamrune.saga.cas_conflicts` counts the conflicts themselves). It needs no alert. With the saga subscription leading on one backend the writers rarely meet: a few samples around a handover, when a deposed leader may still finish a step the new one runs, or when a deadline falls inside a step. Like the fence counter, it is registered on its first sample.
 
+**Metrics — the aggregate lock's pool:**
+
+```bash
+curl -s "http://localhost:8080/actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock" | jq .
+```
+
+The tag picks the lock pool of Step 4b out of the two pools that report `hikaricp.connections.active`; without it the endpoint adds the application pool's connections in, and `availableTags` lists both pools. With the application idle the value is `0.0`: a command holds a lock connection only while it runs. `hikaricp.connections.pending` and `hikaricp.connections.timeout`, queried with the same tag, are the two to watch for saturation, and stay at `0.0` while ten connections cover the commands in flight.
+
 **Paginated event list:**
 
 ```bash
@@ -2547,6 +2610,8 @@ Two details of the wire. Lines that start with a colon are comments, which an SS
 **`OpenTelemetryCommandInterceptor`** implements `CommandInterceptor` and uses the `opentelemetry-api` facade — it has no SDK dependency and works with any OpenTelemetry SDK implementation. For each command it creates a span named `command/<CommandType>` of kind `INTERNAL`, sets `streamrune.command.type`, `streamrune.command.id`, `streamrune.aggregate.type`, `streamrune.aggregate.id`, and `streamrune.stream.id` as span attributes when the span starts (a failed command's span carries its stream too), and closes the span with `OK` or `ERROR` status. Each span and the scope that makes it current sit on a per-thread stack, because `before()`, `after()`, and `onError()` are called on the same thread that invoked `CommandBus.execute()`, and a command dispatched from inside another command's callback opens a nested span on that thread. `StreamRuneAutoConfiguration` registers the interceptor automatically when an `OpenTelemetry` bean is present.
 
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
+
+**The aggregate lock's pool** reports to Micrometer once `withDedicatedPool` is handed `new MicrometerMetricsTrackerFactory(meterRegistry)`, HikariCP's tracker for a `MeterRegistry`; the locker still owns the pool and closes it. Its meters reach `/actuator/metrics` as `hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`: `active` at `max` with `pending` above zero is a saturated pool, and `timeout` counts the waits for a connection that ran out, each one an attempt of a command that failed with `LockException`.
 
 **`EventExplorerController`** provides the `GET /api/events` paginated global stream, `GET /api/events/{aggregateType}/{aggregateId}` per-stream event list, and `GET /api/events/sse` live SSE stream. The first two return event payloads as the event store reads them — decrypted — and answer only to an `ADMIN`; that check is a demo shortcut on two client-supplied headers, and a real deployment puts such an endpoint behind real authentication. The SSE endpoint is open, and because it cannot ask who is calling it names no stream and carries no payload: `LiveFeed` runs one reader per app for at most 100 connections: a connection begins at the head of the global stream, the reader polls `EventStore.readGlobalStream` once a second, and each event stored from then on goes to every connected client as an unnamed `ServerSentEvent<String>` with the global offset as the SSE `id` field and a `LiveFeedFrame` — the global offset, the aggregate type, the event type and the timestamp — as its data. A connection is never served the store's history, and its reader ends when the client leaves or the app stops. A view that wants the detail reads it from the guarded endpoints. `Flux.create` bridges the imperative polling thread to the reactive `Flux` the controller returns.
 

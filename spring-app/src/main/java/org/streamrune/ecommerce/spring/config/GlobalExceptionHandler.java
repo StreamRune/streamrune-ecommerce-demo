@@ -86,11 +86,14 @@ public class GlobalExceptionHandler {
    * too.
    *
    * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
-   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
-   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
-   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
-   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
-   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
+   * on) is pending, and the body carries its entry's {@code commandId}. What happens to the entry,
+   * {@link CommandDeadLetteredException#pendingOutcome()}, decides the answer: {@code 503} with
+   * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} while the entry is replayed under its {@code
+   * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when an
+   * operator decides about it, for a command that ran without a key or a keyed one whose entry's
+   * replays are used up or that is older than the inbox window. Spring picks this handler for the
+   * dead-lettered command's own type before it looks at the cause. A genuine failure that left no
+   * entry, such as a store error, is none of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
@@ -105,7 +108,7 @@ public class GlobalExceptionHandler {
         CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
     ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
     if (refusal.retryLater()) {
-      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(refusal.retryAfterSeconds()));
     }
     return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
   }

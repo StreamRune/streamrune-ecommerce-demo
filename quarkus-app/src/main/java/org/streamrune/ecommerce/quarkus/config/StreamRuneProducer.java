@@ -1,5 +1,7 @@
 package org.streamrune.ecommerce.quarkus.config;
 
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import jakarta.annotation.Priority;
@@ -72,6 +74,7 @@ import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
+import org.streamrune.integration.DeadLetterUnkeyedReplaySetting;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.postgres.PgAdvisoryLocker;
 import org.streamrune.postgres.PostgresAuditStore;
@@ -266,7 +269,9 @@ public class StreamRuneProducer {
    *
    * <p>The framework's producer of the in-process locker is a {@code @DefaultBean}, which this one
    * replaces. The locker owns its pool, which {@link #closeAggregateLocker} closes with the
-   * application.
+   * application. The pool reports to the app's {@code MeterRegistry} through Hikari's Micrometer
+   * tracker: {@code /q/metrics} serves its meters in Prometheus' format, {@code
+   * hikaricp_connections_active{pool="streamrune-advisory-lock"}} among them.
    */
   @Produces
   @Singleton
@@ -275,8 +280,14 @@ public class StreamRuneProducer {
       @ConfigProperty(name = "quarkus.datasource.username") String username,
       @ConfigProperty(name = "quarkus.datasource.password") String password,
       @ConfigProperty(name = "quarkus.datasource.jdbc.max-size", defaultValue = "20")
-          int applicationPoolSize) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, applicationPoolSize);
+          int applicationPoolSize,
+      MeterRegistry meterRegistry) {
+    return PgAdvisoryLocker.withDedicatedPool(
+        url,
+        username,
+        password,
+        applicationPoolSize,
+        new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   /** Closes the aggregate locker's pool when the application stops. */
@@ -639,8 +650,13 @@ public class StreamRuneProducer {
    * the command and replay it as the customer's data. If the customer was forgotten while the entry
    * waited, the fields decrypt to {@code [REDACTED]} and the runner does not replay the command.
    *
-   * <p>{@code OPERATOR_ONLY}: on its schedule the runner replays only the entries the command inbox
-   * can deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
+   * <p>The policy is the one the framework builds the command bus with, from {@code
+   * streamrune.dead-letter.*} (five replays, the first a minute after the failure, unless
+   * configured), and the inbox window is the bus's too: the bus answers a keyed command that fails
+   * again under its key by the rules this runner replays by, and the framework warns at startup
+   * when the two differ. {@code OPERATOR_ONLY} ({@code streamrune.dead-letter.unkeyed-replay}
+   * unless configured): on its schedule the runner replays only the entries the command inbox can
+   * deduplicate, those of commands that ran under an idempotency key. An entry of an unkeyed
    * command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}), because its
    * caller may already have retried it successfully. {@code metrics} counts those entries ({@code
    * streamrune.dlq.awaiting_operator}) and the operator retries refused as older than the inbox
@@ -666,13 +682,14 @@ public class StreamRuneProducer {
         .registerCommand(CustomerCommand.class)
         .registerCommand(PaymentCommand.class)
         .registerCommand(InventoryCommand.class)
+        // The policy of streamrune.dead-letter.*, which the framework builds its command bus with.
         .policy(
             new DeadLetterRetryPolicy(
-                5,
-                Duration.ofSeconds(60),
+                properties.deadLetter().maxRetries(),
+                Duration.ofMillis(properties.deadLetter().retryIntervalMs()),
                 2.0,
                 false,
-                DeadLetterRetryPolicy.UnkeyedReplay.OPERATOR_ONLY))
+                DeadLetterUnkeyedReplaySetting.parse(properties.deadLetter().unkeyedReplay())))
         // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
         .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
         .metrics(metrics.isResolvable() ? metrics.get() : null)

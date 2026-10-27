@@ -117,7 +117,7 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
       // A backend still on the previous release, during a rolling deployment of an event-schema
       // change: nothing ran, and the entry waits for a backend that reads the events.
       toast.error(
-        "This backend reads the command's events at an older schema version than they were stored with: the entry is unchanged; it is replayed once an upgraded backend runs it"
+        "This backend reads the command's events at an older schema version than they were stored with: the entry keeps its attempt count and is replayed again after its backoff, once an upgraded backend runs it"
       );
       return true;
     }

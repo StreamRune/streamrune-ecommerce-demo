@@ -22,7 +22,7 @@ import org.streamrune.runtime.CommandDeadLetteredException;
 
 /**
  * The answer to each refusal the command bus reports, and to a command it dead-lettered. {@code
- * CommandRefusalStatusIT} forces three of the refusals and both dead-lettered answers through the
+ * CommandRefusalStatusIT} forces three of the refusals and the dead-lettered answers through the
  * app's routes; the fourth refusal, the bus's admission budget, applies only to {@code
  * executeAsync}, which no route calls, so its answer is checked here.
  */
@@ -49,18 +49,34 @@ class GlobalExceptionHandlerRefusalTest {
   }
 
   @Test
-  void aDeadLetteredCommandIsAnsweredByWhetherItHasAKey_notByItsCause() {
+  void aDeadLetteredCommandIsAnsweredByWhatHappensToItsEntry_notByItsCause() {
     ResponseEntity<?> queued =
         handler.handleCommandRefused(
             deadLettered(IdempotencyKey.scopedTo("admin-1", "k-1"), new LockException("timeout")));
-    assertRefused(queued, "QUEUED_FOR_REPLAY");
+    assertThat(queued.getStatusCode().value()).isEqualTo(503);
+    assertThat(queued.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+        .as("no sooner than the retry runner looks for due entries")
+        .isEqualTo("60");
+    assertThat(queued.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
     assertThat(queued.getBody())
         .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
-        .containsEntry("commandId", "cmd-dl-1");
+        .containsEntry("reason", "QUEUED_FOR_REPLAY")
+        .containsEntry("commandId", "cmd-dl-1")
+        .containsKey("message");
 
-    ResponseEntity<?> awaiting =
+    assertAwaitingOperator(
         handler.handleCommandRefused(
-            deadLettered(null, new EventStoreException("connection reset")));
+            deadLettered(null, new EventStoreException("connection reset"))));
+    assertAwaitingOperator(
+        handler.handleCommandRefused(
+            deadLettered(
+                IdempotencyKey.scopedTo("admin-1", "k-1"),
+                CommandDeadLetteredException.PendingOutcome.AWAITING_OPERATOR,
+                new LockException("timeout"))));
+  }
+
+  /** {@code 500} without {@code Retry-After}, the entry's {@code commandId} in the body. */
+  private static void assertAwaitingOperator(ResponseEntity<?> awaiting) {
     assertThat(awaiting.getStatusCode().value()).isEqualTo(500);
     assertThat(awaiting.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isNull();
     assertThat(awaiting.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
@@ -78,6 +94,20 @@ class GlobalExceptionHandlerRefusalTest {
         CommandId.of("cmd-dl-1"),
         StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
         key,
+        cause);
+  }
+
+  /** A keyed command whose entry has {@code outcome}, as a re-send under its key is answered. */
+  private static CommandDeadLetteredException deadLettered(
+      IdempotencyKey key,
+      CommandDeadLetteredException.PendingOutcome outcome,
+      RuntimeException cause) {
+    return new CommandDeadLetteredException(
+        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        CommandId.of("cmd-dl-1"),
+        StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
+        key,
+        outcome,
         cause);
   }
 

@@ -161,7 +161,7 @@ test.describe("Admin page — dead-letter Retry", () => {
     await page.getByRole("button", { name: "Retry" }).click();
 
     await expect(
-      page.getByText(/reads the command's events at an older schema.*the entry is unchanged/)
+      page.getByText(/reads the command's events at an older schema.*the entry keeps its attempt count/)
     ).toBeVisible();
     await expect(page.getByText(/The backend is busy/)).toHaveCount(0);
     expect(sent).toHaveLength(1);

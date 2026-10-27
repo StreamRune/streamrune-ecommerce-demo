@@ -2,19 +2,27 @@ package org.streamrune.ecommerce.spring.docs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -41,6 +49,13 @@ import org.yaml.snakeyaml.Yaml;
  * fails when the process ends first or does not get there within {@value #START_TIMEOUT_SECONDS}
  * seconds, and the failure names the chapter and quotes Spring's report.
  *
+ * <p><b>Started is not enough.</b> A bean can start and its thread die after it: a subscription
+ * whose first poll fails, a runner that refuses its configuration at its first use. So a started
+ * project runs on for one polling interval ({@link #POLLING_INTERVAL}), and then its health is
+ * asked once: the chapter fails when the answer is not {@code UP}, or when the log shows a line at
+ * {@code ERROR} or Spring's {@code APPLICATION FAILED} report by then, the lines up to the started
+ * line included ({@link #errors}).
+ *
  * <p><b>The reader's {@code application.yml}.</b> Chapter 1 lists it in full, and later chapters
  * add to it with fragments: a {@code yaml} block whose introducing line names {@value
  * #APPLICATION_YML}. The test merges every fragment up to the chapter into the file, key by key, a
@@ -57,6 +72,25 @@ class TutorialChaptersStartIT {
   private static final String APPLICATION_YML = "spring-app/src/main/resources/application.yml";
 
   private static final long START_TIMEOUT_SECONDS = 120;
+
+  /** The line of the log that says the project started. */
+  private static final String STARTED = "Started SpringEcommerceApplication in ";
+
+  /**
+   * How long a started project runs before its health is asked: the polling interval of the
+   * chapters' subscriptions ({@code SubscriptionConfig.pollingOnly(Duration.ofMillis(500))}), by
+   * when each of them has polled once.
+   */
+  private static final Duration POLLING_INTERVAL = Duration.ofMillis(500);
+
+  /** A line of the log at level {@code ERROR}, in Spring Boot's console format. */
+  private static final Pattern ERROR_LINE = Pattern.compile("^\\S+\\s+ERROR\\s+\\d+\\s+---");
+
+  /** The port of the started project's web server, from its log. */
+  private static final Pattern PORT = Pattern.compile("Tomcat started on port (\\d+)");
+
+  private static final HttpClient HTTP =
+      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
   private static final Path REPOSITORY = Path.of("..").toAbsolutePath().normalize();
 
@@ -116,7 +150,8 @@ class TutorialChaptersStartIT {
   /**
    * Starts the project of {@code chapter} and stops it again.
    *
-   * @return {@code null} when it started, otherwise what Spring reported
+   * @return {@code null} when it started and, one polling interval later, is {@code UP} with no
+   *     error in its log, otherwise what is wrong
    */
   private static String start(Path chapter, Path classes, String classpath, Path out)
       throws Exception {
@@ -134,6 +169,7 @@ class TutorialChaptersStartIT {
                 classes + File.pathSeparator + classpath,
                 APPLICATION,
                 "--server.port=0",
+                "--management.endpoint.health.show-details=always",
                 "--spring.datasource.url=" + databaseUrl(database),
                 "--spring.datasource.username=" + postgres.getUsername(),
                 "--spring.datasource.password=" + postgres.getPassword(),
@@ -154,8 +190,8 @@ class TutorialChaptersStartIT {
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(START_TIMEOUT_SECONDS);
       while (System.nanoTime() < deadline) {
         String text = Files.readString(log);
-        if (text.contains("Started SpringEcommerceApplication in ")) {
-          return null;
+        if (text.contains(STARTED)) {
+          return afterTheStart(text, log);
         }
         if (!process.isAlive()) {
           return "the application stopped: " + report(Files.readString(log));
@@ -169,6 +205,85 @@ class TutorialChaptersStartIT {
         process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
       }
     }
+  }
+
+  /**
+   * Lets a started project run one polling interval, asks its health once and reads its log again.
+   *
+   * @param started the log as it stood when it showed the started line
+   * @return {@code null} when the health is {@code UP} and the log shows no error, otherwise what
+   *     is wrong
+   */
+  private static String afterTheStart(String started, Path log) throws Exception {
+    Matcher port = PORT.matcher(started);
+    if (!port.find()) {
+      return "the log names no port of the web server: " + report(started);
+    }
+    Thread.sleep(POLLING_INTERVAL.toMillis());
+    HttpResponse<String> health;
+    try {
+      health =
+          HTTP.send(
+              HttpRequest.newBuilder(
+                      URI.create("http://localhost:" + port.group(1) + "/actuator/health"))
+                  .timeout(Duration.ofSeconds(10))
+                  .build(),
+              HttpResponse.BodyHandlers.ofString());
+    } catch (IOException e) {
+      return "the health check got no answer (" + e + "): " + report(Files.readString(log));
+    }
+    String errors = errors(Files.readString(log));
+    if (errors != null) {
+      return "the log shows errors: " + errors;
+    }
+    String status;
+    try {
+      status = new ObjectMapper().readTree(health.body()).path("status").asText();
+    } catch (IOException e) {
+      status = "unreadable";
+    }
+    if (health.statusCode() != 200 || !status.equals("UP")) {
+      return "the health is "
+          + status
+          + " ("
+          + health.statusCode()
+          + ") one polling interval after the start: "
+          + health.body();
+    }
+    return null;
+  }
+
+  /**
+   * The lines of {@code log} at {@code ERROR} and the start of Spring's {@code APPLICATION FAILED}
+   * report, the first five of them, or {@code null} when it has none. A message that contains the
+   * word is no error: the level is read where Spring Boot's console format writes it.
+   */
+  static String errors(String log) {
+    List<String> lines =
+        log.lines()
+            .filter(line -> ERROR_LINE.matcher(line).find() || line.contains("APPLICATION FAILED"))
+            .map(String::strip)
+            .limit(5)
+            .toList();
+    return lines.isEmpty() ? null : String.join(" | ", lines);
+  }
+
+  @Test
+  void aLineAtErrorOrSpringsFailureReportIsAnError() {
+    String info =
+        "2026-10-27T12:00:00.000+01:00  INFO 4242 --- [           main] o.s.b.SpringApplication"
+            + "                  : Starting SpringEcommerceApplication";
+    String warn =
+        "2026-10-27T12:00:00.001+01:00  WARN 4242 --- [           main] o.s.r.PollingEventSubscription"
+            + "           : an ERROR in a message is no error";
+    String error =
+        "2026-10-27T12:00:00.002+01:00 ERROR 4242 --- [       poll-1] o.s.r.PollingEventSubscription"
+            + "           : poll failed";
+
+    assertThat(errors(info + "\n" + warn)).isNull();
+    assertThat(errors(info + "\n" + error + "\n" + warn)).endsWith(": poll failed");
+    assertThat(errors(info + "\n***************************\nAPPLICATION FAILED TO START"))
+        .isEqualTo("APPLICATION FAILED TO START");
   }
 
   /** Spring's failure report when the log has one, otherwise the end of the log. */

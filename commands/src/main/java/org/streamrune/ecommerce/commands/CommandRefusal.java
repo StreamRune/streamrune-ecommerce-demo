@@ -12,14 +12,14 @@ import org.streamrune.runtime.CommandDeadLetteredException;
 
 /**
  * A command the framework did not apply, for a reason that passes or with an outcome that is still
- * pending, and how the three apps answer it: a status, {@code Retry-After: 5} when the client may
- * send the request again, and a JSON body that names the reason and says what happened, {@code
+ * pending, and how the three apps answer it: a status, {@code Retry-After} when the client may send
+ * the request again, and a JSON body that names the reason and says what happened, {@code
  * {"reason": "CIRCUIT_BREAKER_OPEN", "message": "..."}}. Every other failure keeps its own answer:
  * a broken business rule is {@code 400}, a refused caller {@code 403}, and a genuine failure that
  * left nothing behind, a store error with no dead-letter queue to record it, {@code 500}.
  *
- * <p>The five refusals are answered {@code 503 Service Unavailable} with {@code Retry-After}: the
- * same request succeeds later.
+ * <p>The five refusals are answered {@code 503 Service Unavailable} with {@code Retry-After:}
+ * {@value #RETRY_AFTER_SECONDS}: the same request succeeds later.
  *
  * <ul>
  *   <li>{@link CircuitBreakerOpenException} — the command bus's circuit breaker is open (or
@@ -52,21 +52,27 @@ import org.streamrune.runtime.CommandDeadLetteredException;
  *       for projections and saga rows are thrown on the threads of subscriptions.
  * </ul>
  *
- * <p>{@link CommandDeadLetteredException} is not a refusal: the command failed, the bus stored its
- * entry in the dead-letter queue, and a replay of the entry can still apply it. Its outcome is
- * pending, and the answer says what the client does about it, whatever the failure was, a lock
- * timeout and a version conflict included. The body carries the entry's {@code commandId}.
+ * <p>{@link CommandDeadLetteredException} is not a refusal: the command failed, its entry is in the
+ * dead-letter queue, and a replay of the entry can still apply it. Its outcome is pending, and the
+ * answer says what the client does about it, whatever the failure was, a lock timeout and a version
+ * conflict included: what happens to the entry, the exception's {@code pendingOutcome()}, decides
+ * it. The body carries the entry's {@code commandId}. The queue keeps one entry for a keyed
+ * command: a send under the key that fails again stores nothing new and is answered from the entry
+ * the first one stored.
  *
  * <ul>
- *   <li><b>A keyed command</b> ({@code Idempotency-Key}) is queued for replay under its key: the
- *       retry runner replays it on its schedule. {@code 503} with {@code Retry-After} and {@code
- *       QUEUED_FOR_REPLAY}: the client sends the request again with the same key, or waits. The
- *       command inbox runs the command once, whichever of the two comes first. A new key is a new
- *       operation, and the replay applies the first one beside it.
- *   <li><b>An unkeyed command</b> waits for an operator, who replays or discards the entry: nothing
- *       pairs a replay with a request the client sends again, so the two would apply the command
- *       twice. {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After}: the client
- *       does not send it again on its own.
+ *   <li><b>Queued for replay</b> ({@code QUEUED_FOR_REPLAY}): a command that ran under an {@code
+ *       Idempotency-Key}, whose entry the retry runner replays on its schedule under the key.
+ *       {@code 503} with {@code Retry-After:} {@value #QUEUED_RETRY_AFTER_SECONDS}: the client
+ *       waits for the replay, or sends the request again with the same key. The command inbox runs
+ *       the command once, whichever of the two comes first. A new key is a new operation, and the
+ *       replay applies the first one beside it.
+ *   <li><b>Awaiting an operator</b> ({@code AWAITING_OPERATOR}), who replays or discards the entry:
+ *       a command that ran without a key, since nothing pairs a replay with a request the client
+ *       sends again and the two would apply the command twice, and a keyed command whose entry the
+ *       schedule does not replay, its replays used up or its command first received longer ago than
+ *       the command-inbox window. {@code 500} without {@code Retry-After}: the client does not send
+ *       it again on its own, and a send under the key meanwhile is answered the same.
  * </ul>
  *
  * <p>Neither is {@code 202 Accepted}: a client takes a {@code 2xx} for done and never sends the
@@ -81,6 +87,15 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
 
   /** How long a client waits before it sends a refused command again, in seconds. */
   public static final int RETRY_AFTER_SECONDS = 5;
+
+  /**
+   * How long a client waits before it sends a command queued for replay again, in seconds. The
+   * retry runner polls for due entries once a minute ({@code app.dead-letter.poll-interval}) and an
+   * entry is due after the policy's initial delay, so a send before then finds the entry still
+   * queued and gains nothing; waiting for the replay applies the command as a send under the same
+   * key does.
+   */
+  public static final int QUEUED_RETRY_AFTER_SECONDS = 60;
 
   /** What refused the command, or what happens to it now; the body's {@code reason}. */
   public enum Reason {
@@ -134,11 +149,20 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
   }
 
   /**
-   * Whether the client may send the request again: the answer then carries {@code Retry-After:}
-   * {@value #RETRY_AFTER_SECONDS}. A command that awaits an operator is not sent again.
+   * Whether the client may send the request again: the answer then carries {@code Retry-After}
+   * ({@link #retryAfterSeconds()}). A command that awaits an operator is not sent again.
    */
   public boolean retryLater() {
     return status() == 503;
+  }
+
+  /**
+   * The answer's {@code Retry-After}, in seconds, when {@link #retryLater()}: {@value
+   * #QUEUED_RETRY_AFTER_SECONDS} for a command queued for replay, {@value #RETRY_AFTER_SECONDS} for
+   * a refusal.
+   */
+  public int retryAfterSeconds() {
+    return reason == Reason.QUEUED_FOR_REPLAY ? QUEUED_RETRY_AFTER_SECONDS : RETRY_AFTER_SECONDS;
   }
 
   /**
@@ -154,19 +178,25 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
     return body;
   }
 
+  /** The answer to a dead-lettered command, by what happens to its entry. */
   private static CommandRefusal pending(CommandDeadLetteredException deadLettered) {
     String commandId = deadLettered.commandId().value();
-    return deadLettered.idempotencyKey() != null
-        ? new CommandRefusal(
-            Reason.QUEUED_FOR_REPLAY,
-            "The command is not applied yet: it is queued for a replay under its Idempotency-Key."
-                + " Send it again with the same key, or wait; a new key is a new operation.",
-            commandId)
-        : new CommandRefusal(
-            Reason.AWAITING_OPERATOR,
-            "The command failed and is recorded for an operator, who replays or discards it."
-                + " Sending it again would apply it a second time if the operator replays it.",
-            commandId);
+    return switch (deadLettered.pendingOutcome()) {
+      case QUEUED_FOR_REPLAY ->
+          new CommandRefusal(
+              Reason.QUEUED_FOR_REPLAY,
+              "The command is not applied yet: it is queued for a replay under its Idempotency-Key."
+                  + " Wait for the replay, or send it again with the same key; a new key is a new"
+                  + " operation.",
+              commandId);
+      case AWAITING_OPERATOR ->
+          new CommandRefusal(
+              Reason.AWAITING_OPERATOR,
+              "The command failed and is recorded for an operator, who replays or discards it: it"
+                  + " ran without a key, or its entry's replays are used up or it is older than the"
+                  + " inbox window. Do not send it again until then.",
+              commandId);
+    };
   }
 
   private static Optional<CommandRefusal> refusal(Reason reason, String message) {

@@ -163,7 +163,7 @@ public PgAdvisoryLocker aggregateLocker(
 }
 ```
 
-What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten (Hikari's default) — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it. A command can wait once more before that: when every connection of the lock pool is taken, up to ten seconds for one of them, the pool's connection timeout that `withDedicatedPool` sets. Either wait that runs out is a `LockException` (Step 2b).
+What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten (Hikari's default) — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. Chapter 15 gives the pool a metrics tracker, so that its meters show how many of its connections the commands hold and how many commands wait for one. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it. A command can wait once more before that: when every connection of the lock pool is taken, up to ten seconds for one of them, the pool's connection timeout that `withDedicatedPool` sets. Either wait that runs out is a `LockException` (Step 2b).
 
 The whole class at the end of this chapter:
 
@@ -1342,7 +1342,7 @@ curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost
 # {"failureInjected":false}
 ```
 
-An outage opens it. Turn the outage on and place three orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which gets no answer; the manager records the failure on the gateway breaker, finds no capture at the gateway, and lets the event be delivered again. The subscription delivers the first order's `PaymentInitiated` again after a backoff, and the payments behind it wait for it. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
+An outage opens it. Turn the outage on and place three orders. Each order drives the saga to `InitiatePayment`; the `PaymentProcessManager` calls `processPayment`, which gets no answer; the manager records the failure on the gateway breaker, finds no capture at the gateway, and lets the event be delivered again. The subscription delivers the first order's `PaymentInitiated` again after a backoff, and the payments and the refunds behind it wait for it: the subscription carries `PaymentRefunded` too. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
 
 ```bash
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
@@ -1366,7 +1366,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 # "AWAITING_PAYMENT"
 ```
 
-Turn the outage off. Once the 30-second cooldown has passed, the next delivery is the breaker's probe: the gateway answers, the breaker closes, the payments are captured and the sagas carry on, so the orders end `CONFIRMED`. An outage longer than the saga's deadline (fifteen minutes) cancels its orders instead, and their pending payments are voided:
+Turn the outage off. The breaker's probe is the first delivery after its 30-second cooldown, and every delivery without an answer doubled the subscription's wait before the next one, up to a minute, so the probe comes within about a minute and a half (the subscription's backoff, up to a minute, plus the cooldown): the gateway answers, the breaker closes, the payments are captured and the sagas carry on, so the orders end `CONFIRMED`. Until then the saga still reads `AWAITING_PAYMENT`; repeat the query. An outage longer than the saga's deadline (fifteen minutes) cancels its orders instead, and their pending payments are voided:
 
 ```bash
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle

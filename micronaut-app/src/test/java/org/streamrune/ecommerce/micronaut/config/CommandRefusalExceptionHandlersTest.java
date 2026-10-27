@@ -53,19 +53,38 @@ class CommandRefusalExceptionHandlersTest {
   }
 
   @Test
-  void aDeadLetteredCommandIsAnsweredByWhetherItHasAKey_notByItsCause() {
+  void aDeadLetteredCommandIsAnsweredByWhatHappensToItsEntry_notByItsCause() {
     HttpResponse<Map<String, String>> queued =
         new CommandRefusalExceptionHandlers.CommandDeadLettered()
             .handle(
                 null,
                 deadLettered(
                     IdempotencyKey.scopedTo("admin-1", "k-1"), new LockException("timeout")));
-    assertRefused(queued, "QUEUED_FOR_REPLAY");
-    assertThat(queued.body()).containsEntry("commandId", "cmd-dl-1");
+    assertThat(queued.getStatus().getCode()).isEqualTo(503);
+    assertThat(queued.getHeaders().get("Retry-After"))
+        .as("no sooner than the retry runner looks for due entries")
+        .isEqualTo("60");
+    assertThat(queued.getContentType()).contains(MediaType.APPLICATION_JSON_TYPE);
+    assertThat(queued.body())
+        .containsEntry("reason", "QUEUED_FOR_REPLAY")
+        .containsEntry("commandId", "cmd-dl-1")
+        .containsKey("message");
 
-    HttpResponse<Map<String, String>> awaiting =
+    assertAwaitingOperator(
         new CommandRefusalExceptionHandlers.CommandDeadLettered()
-            .handle(null, deadLettered(null, new EventStoreException("connection reset")));
+            .handle(null, deadLettered(null, new EventStoreException("connection reset"))));
+    assertAwaitingOperator(
+        new CommandRefusalExceptionHandlers.CommandDeadLettered()
+            .handle(
+                null,
+                deadLettered(
+                    IdempotencyKey.scopedTo("admin-1", "k-1"),
+                    CommandDeadLetteredException.PendingOutcome.AWAITING_OPERATOR,
+                    new LockException("timeout"))));
+  }
+
+  /** 500 without {@code Retry-After}, the entry's {@code commandId} in the body. */
+  private static void assertAwaitingOperator(HttpResponse<Map<String, String>> awaiting) {
     assertThat(awaiting.getStatus().getCode()).isEqualTo(500);
     assertThat(awaiting.getHeaders().get("Retry-After")).isNull();
     assertThat(awaiting.getContentType()).contains(MediaType.APPLICATION_JSON_TYPE);
@@ -82,6 +101,20 @@ class CommandRefusalExceptionHandlersTest {
         CommandId.of("cmd-dl-1"),
         StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
         key,
+        cause);
+  }
+
+  /** A keyed command whose entry has {@code outcome}, as a re-send under its key is answered. */
+  private static CommandDeadLetteredException deadLettered(
+      IdempotencyKey key,
+      CommandDeadLetteredException.PendingOutcome outcome,
+      RuntimeException cause) {
+    return new CommandDeadLetteredException(
+        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        CommandId.of("cmd-dl-1"),
+        StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
+        key,
+        outcome,
         cause);
   }
 

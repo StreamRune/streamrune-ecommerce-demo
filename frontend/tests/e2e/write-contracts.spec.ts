@@ -575,14 +575,14 @@ test.describe("Products — the commands the page sends", () => {
 /** The answer of a keyed command the backend recorded for a replay under its key. */
 const QUEUED_FOR_REPLAY = {
   status: 503,
-  headers: { "Retry-After": "5" },
+  headers: { "Retry-After": "60" },
   contentType: "application/json",
   body: JSON.stringify({
     reason: "QUEUED_FOR_REPLAY",
     commandId: "cmd-queued-1",
     message:
       "The command is not applied yet: it is queued for a replay under its Idempotency-Key." +
-      " Send it again with the same key, or wait; a new key is a new operation.",
+      " Wait for the replay, or send it again with the same key; a new key is a new operation.",
   }),
 };
 

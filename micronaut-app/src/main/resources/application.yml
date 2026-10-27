@@ -29,6 +29,9 @@ micronaut:
           # command again; a browser hides the header from another origin unless it is exposed.
           exposed-headers:
             - Retry-After
+          # The caller is two request headers, never a cookie, so no answer allows credentials, as
+          # in the Spring and Quarkus apps.
+          allow-credentials: false
   endpoints:
     health:
       enabled: true

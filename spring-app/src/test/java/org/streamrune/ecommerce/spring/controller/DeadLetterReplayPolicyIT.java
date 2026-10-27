@@ -320,7 +320,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
       answer =
           key == null
               ? answer.expectHeader().doesNotExist("Retry-After")
-              : answer.expectHeader().valueEquals("Retry-After", "5");
+              : answer.expectHeader().valueEquals("Retry-After", "60");
       answer
           .expectBody()
           .jsonPath("$.reason")

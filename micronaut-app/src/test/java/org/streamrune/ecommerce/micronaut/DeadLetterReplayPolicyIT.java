@@ -301,7 +301,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
       answer = send(adjustStock(pid, key));
     }
     assertThat(answer.status()).as(answer.body()).isEqualTo(key == null ? 500 : 503);
-    assertThat(answer.retryAfter()).isEqualTo(key == null ? null : "5");
+    assertThat(answer.retryAfter()).isEqualTo(key == null ? null : "60");
     assertThat(answer.body())
         .contains(
             "\"reason\":\"" + (key == null ? "AWAITING_OPERATOR" : "QUEUED_FOR_REPLAY") + "\"");

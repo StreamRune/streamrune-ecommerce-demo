@@ -494,7 +494,7 @@ for i in 1 2 3; do
 done
 ```
 
-Each order's `PaymentProcessManager` calls the gateway, which gives no answer. The gateway may have taken the money, so the manager does not fail the payment: it asks the gateway for a capture of it, finds none, and lets the subscription deliver `PaymentInitiated` again, while the orders behind it wait. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
+Each order's `PaymentProcessManager` calls the gateway, which gives no answer. The gateway may have taken the money, so the manager does not fail the payment: it asks the gateway for a capture of it, finds none, and lets the subscription deliver `PaymentInitiated` again, while the other orders' payments, and any refund, wait behind it. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
 
 ```bash
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
@@ -504,7 +504,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 # "AWAITING_PAYMENT"
 ```
 
-Notice the command-bus breaker (`state`) stays `CLOSED`: a call without an answer dispatches no command, and a decline becomes *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a gateway failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). Switch the outage off: once the 30-second cooldown has passed, the next delivery is the breaker's probe, the gateway answers, the breaker closes, and the three payments are captured, so the orders are confirmed. An outage that outlasts the saga's deadline cancels its orders and voids their payments instead.
+Notice the command-bus breaker (`state`) stays `CLOSED`: a call without an answer dispatches no command, and a decline becomes *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a gateway failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). Switch the outage off: within about a minute and a half (the subscription's backoff, up to a minute, plus the cooldown), the next delivery is the breaker's probe, the gateway answers, the breaker closes, and the three payments are captured, so the orders are confirmed. An outage that outlasts the saga's deadline cancels its orders and voids their payments instead.
 
 ```bash
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
@@ -585,7 +585,7 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The three process managers' subscriptions have a lease each — `payment-process-manager`, `order-cancellation` and `order-shipment` — so each of the four leases sits on one backend, and not necessarily the same one: after a restart the saga may lead on one backend and the cancellation process manager on the other. The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
 
-**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
+**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12), a wait the pool's meters show (`hikaricp.connections.pending`, tagged `pool=streamrune-advisory-lock`, Chapter 15). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
 
 **The profile.** The Compose file gets a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
 
@@ -825,6 +825,10 @@ public VirtualThreadCommandBus commandBus(
           .interceptors(audit, auth, validation, circuitBreaker)
           .deadLetterQueue(deadLetterQueue)
           .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+          // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+          // its key is told whether the entry stored for the key is still replayed.
+          .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+          .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
           .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
           .register(
               ProductState.TYPE,
@@ -913,6 +917,8 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -1216,14 +1222,20 @@ public class StreamRuneConfig {
    *
    * <p>The framework's in-process locker steps aside for this bean
    * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
-   * Spring closes with it.
+   * Spring closes with it. The pool reports to the app's {@code MeterRegistry} through Hikari's
+   * Micrometer tracker: {@code hikaricp.connections.*}, tagged {@code
+   * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
+   * commands wait for one ({@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
-      @Value("${spring.datasource.password}") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @Value("${spring.datasource.password}") String password,
+      MeterRegistry meterRegistry) {
+    return PgAdvisoryLocker.withDedicatedPool(
+        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   /**
@@ -1243,7 +1255,9 @@ public class StreamRuneConfig {
    * encrypts the {@code @Encrypted} fields of {@code RegisterCustomer} and {@code UpdateProfile}
    * under the customer's key: the queued copy of the customer's personal data is ciphertext and is
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
-   * in plaintext.
+   * in plaintext. The queue keeps one entry for a keyed command: one that fails again under its key
+   * is answered from the entry its earlier send stored, queued for replay or awaiting an operator
+   * by the policy and the inbox window the runner replays by, which the bus takes too.
    *
    * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
@@ -1280,6 +1294,10 @@ public class StreamRuneConfig {
             .interceptors(audit, auth, validation, circuitBreaker)
             .deadLetterQueue(deadLetterQueue)
             .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+            // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+            // its key is told whether the entry stored for the key is still replayed.
+            .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
             .register(
                 ProductState.TYPE,
@@ -1504,13 +1522,16 @@ public class StreamRuneConfig {
    * turns {@code DOWN} if the runner's poll thread dies, instead of reporting {@code UP} while
    * dead-letter entries stop being replayed.
    *
-   * <p>The runner keeps the default policy, which replays on its schedule only the entries the
-   * command inbox can deduplicate: those of commands that ran under an idempotency key. An entry of
-   * an unkeyed command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}),
-   * because its caller may already have retried it successfully. {@code metrics} counts those
-   * entries ({@code streamrune.dlq.awaiting_operator}) and the operator retries refused as older
-   * than the inbox window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries
-   * every {@code app.dead-letter.poll-interval} (60 seconds unless configured).
+   * <p>The runner takes the default policy, which {@link #commandBus} takes as well, with the same
+   * inbox window, so that the bus answers a keyed command that fails again under its key by the
+   * rules this runner replays by; the framework warns at startup when the two differ. The policy
+   * replays on its schedule only the entries the command inbox can deduplicate: those of commands
+   * that ran under an idempotency key. An entry of an unkeyed command waits for an operator ({@code
+   * POST /api/admin/dead-letters/{id}/retry}), because its caller may already have retried it
+   * successfully. {@code metrics} counts those entries ({@code streamrune.dlq.awaiting_operator})
+   * and the operator retries refused as older than the inbox window ({@code
+   * streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Bean
   public DeadLetterRetryRunner deadLetterRetryRunner(
@@ -1531,6 +1552,8 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The policy and the window the command bus answers a keyed re-send by.
+            .policy(DeadLetterRetryPolicy.DEFAULT)
             // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))

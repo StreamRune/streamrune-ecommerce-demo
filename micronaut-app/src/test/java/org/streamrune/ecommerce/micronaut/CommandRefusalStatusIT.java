@@ -18,6 +18,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.MethodOrderer;
@@ -25,17 +26,20 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
  * A command the framework refuses for a reason that passes is answered {@code 503} with {@code
  * Retry-After: 5} and a JSON body naming the reason. A command the bus dead-lettered is pending,
- * whatever it failed on, and the answer carries its entry's {@code commandId}: {@code 503} with
- * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} when it was sent with an {@code
- * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it
- * was not. The Spring and Quarkus apps answer the same. An answer with {@code Retry-After} exposes
- * it to the frontend's origin, whose page reads it to wait that long before it sends the request
- * again.
+ * whatever it failed on, and the answer carries its entry's {@code commandId} and says what happens
+ * to the entry: {@code 503} with {@code Retry-After: 60} and {@code QUEUED_FOR_REPLAY} while it is
+ * replayed under the request's {@code Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR}
+ * and no {@code Retry-After} when an operator decides about it: for a request sent without a key,
+ * and for a keyed request sent again once its entry's replays are used up. The Spring and Quarkus
+ * apps answer the same. An answer with {@code Retry-After} exposes it to the frontend's origin,
+ * whose page reads it to wait that long before it sends the request again. No answer allows
+ * credentials.
  *
  * <p>Each condition is forced on the app's real command bus, in this class's own application
  * context: the tests leave its circuit breaker open and its bus closed, which no other test class
@@ -54,6 +58,10 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       {@code OptimisticLockException}, as it does when a second writer stored the version first.
  *       The bus tries the command on every attempt of its retry policy and dead-letters it, keyed
  *       or not, with the two answers above; nothing is written.
+ *   <li><b>A keyed entry left to an operator.</b> With the same version conflict, a keyed stock
+ *       adjustment is queued for replay; once its entry's replays are marked used up, the same
+ *       request sent again stores no second entry and is answered {@code AWAITING_OPERATOR} with
+ *       the first entry's {@code commandId}.
  *   <li><b>An entry that cannot be stored.</b> With the same version conflict and a trigger on
  *       {@code dead_letter_queue} that refuses the entry, nothing is pending: the conflict itself
  *       reaches the caller, refused with {@code AGGREGATE_VERSION_CONFLICT}, key or no key.
@@ -63,6 +71,8 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       CIRCUIT_BREAKER_OPEN}.
  *   <li><b>A closed command bus.</b> Once the bus is closed, as on shutdown, a command is refused
  *       with {@code COMMAND_BUS_CLOSED}.
+ *   <li><b>A preflight.</b> The question a browser asks before the page sends a keyed stock
+ *       adjustment is answered for the frontend's origin, without credentials.
  * </ol>
  */
 @MicronautTest(transactional = false)
@@ -95,6 +105,8 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
   @Inject DataSource dataSource;
 
   @Inject VirtualThreadCommandBus commandBus;
+
+  @Inject StreamRuneMicronautProperties properties;
 
   @Test
   @Order(1)
@@ -155,8 +167,41 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
     }
   }
 
+  /**
+   * A keyed command whose entry the retry schedule does not replay, its replays used up, waits for
+   * an operator: a send under its key that fails again stores no second entry and is answered
+   * {@code 500} with {@code AWAITING_OPERATOR} and the {@code commandId} of the entry the first
+   * send stored, without {@code Retry-After}.
+   */
   @Test
   @Order(3)
+  void aKeyedSendAgainstAnEntryLeftToAnOperatorAwaitsTheOperator() throws Exception {
+    String productId = "m-refusal-exhausted-" + System.nanoTime();
+    assertThat(createProduct(productId).statusCode()).isEqualTo(200);
+    String stock = "/api/products/" + productId + "/stock";
+    String recount = "{\"quantity\": 4, \"reason\": \"recount\"}";
+
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "StockAdjusted")) {
+      HttpResponse<String> first = send("PUT", stock, recount, "exhausted-key-1");
+      assertQueuedForReplay(first, "exhausted-key-1");
+      String entry = jsonBody(first).path("commandId").asText();
+      useUpReplays(entry, properties.deadLetterMaxRetries());
+
+      HttpResponse<String> again = send("PUT", stock, recount, "exhausted-key-1");
+      assertThat(again.statusCode()).as("status of %s", again.body()).isEqualTo(500);
+      assertThat(again.headers().firstValue("Retry-After")).isEmpty();
+      JsonNode body = jsonBody(again);
+      assertThat(body.path("reason").asText()).isEqualTo("AWAITING_OPERATOR");
+      assertThat(body.path("commandId").asText())
+          .as("the entry the first send stored")
+          .isEqualTo(entry);
+      assertThat(entriesUnderKey("exhausted-key-1")).as("one entry for the key").isOne();
+      assertThat(eventCount(productId, "StockAdjusted")).as("nothing was written").isZero();
+    }
+  }
+
+  @Test
+  @Order(4)
   void aFailureWhoseEntryCannotBeStoredIsAnsweredAsTheFailure() throws Exception {
     String productId = "m-refusal-unstored-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
@@ -177,7 +222,7 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
   }
 
   @Test
-  @Order(4)
+  @Order(5)
   void anOpenCircuitBreakerRefusesWithRetryAfterAfterTheFailuresThatOpenedIt() throws Exception {
     String productId = "m-refusal-breaker-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
@@ -203,11 +248,27 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
   }
 
   @Test
-  @Order(5)
+  @Order(6)
   void aClosedCommandBusRefusesWithRetryAfter() {
     commandBus.close();
 
     assertRefused(createProduct("m-refusal-closed-" + System.nanoTime()), "COMMAND_BUS_CLOSED");
+  }
+
+  /**
+   * Before the page sends a command, the browser asks whether it may: a preflight with the method
+   * and the headers of the request, here a keyed stock adjustment's. The answer admits the
+   * frontend's origin and allows no credentials.
+   */
+  @Test
+  @Order(7)
+  void aPreflightAdmitsTheFrontendsOrigin_andAllowsNoCredentials() throws Exception {
+    HttpResponse<String> answer = preflight("/api/products/m-refusal-preflight/stock", "PUT");
+
+    assertThat(answer.statusCode()).as("status of the preflight").isEqualTo(200);
+    assertThat(answer.headers().firstValue("Access-Control-Allow-Origin"))
+        .contains(FRONTEND_ORIGIN);
+    assertNoCredentialsAllowed(answer);
   }
 
   private static void assertRefused(HttpResponse<String> answer, String reason) {
@@ -223,11 +284,25 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
   /**
    * The page runs on another origin, and a browser shows it a response header outside the CORS
    * safelist only when the answer exposes it: without that the page cannot read how long to wait.
+   * The answer allows no credentials ({@link #assertNoCredentialsAllowed}).
    */
   private static void assertRetryAfterReadable(HttpResponse<String> answer) {
     assertThat(answer.headers().firstValue("Access-Control-Expose-Headers"))
         .as("Access-Control-Expose-Headers of the answer to %s", FRONTEND_ORIGIN)
         .hasValueSatisfying(exposed -> assertThat(exposed).containsIgnoringCase("Retry-After"));
+    assertNoCredentialsAllowed(answer);
+  }
+
+  /**
+   * A browser shows another origin the answer to a request it sent with its cookies or its HTTP
+   * authentication only when the answer says {@code Access-Control-Allow-Credentials: true}. The
+   * demo's caller is two request headers, not a cookie, so no answer says it: an identity the
+   * browser sends on its own never makes an answer readable to another origin.
+   */
+  private static void assertNoCredentialsAllowed(HttpResponse<String> answer) {
+    assertThat(answer.headers().firstValue("Access-Control-Allow-Credentials"))
+        .as("Access-Control-Allow-Credentials of the answer to %s", FRONTEND_ORIGIN)
+        .isNotEqualTo(Optional.of("true"));
   }
 
   /**
@@ -236,7 +311,9 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
    */
   private void assertQueuedForReplay(HttpResponse<String> answer, String key) throws Exception {
     assertThat(answer.statusCode()).as("status of %s", answer.body()).isEqualTo(503);
-    assertThat(answer.headers().firstValue("Retry-After")).contains("5");
+    assertThat(answer.headers().firstValue("Retry-After"))
+        .as("no sooner than the retry runner looks for due entries")
+        .contains("60");
     assertRetryAfterReadable(answer);
     JsonNode body = jsonBody(answer);
     assertThat(body.path("reason").asText()).isEqualTo("QUEUED_FOR_REPLAY");
@@ -298,6 +375,20 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
             .formatted(productId));
   }
 
+  /** The preflight a browser sends before a {@code method} request of the page to {@code path}. */
+  private HttpResponse<String> preflight(String path, String method) throws Exception {
+    return http.send(
+        HttpRequest.newBuilder(server.getURI().resolve(path))
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .header("Origin", FRONTEND_ORIGIN)
+            .header("Access-Control-Request-Method", method)
+            .header(
+                "Access-Control-Request-Headers",
+                "content-type,idempotency-key,x-user-id,x-user-role")
+            .build(),
+        HttpResponse.BodyHandlers.ofString());
+  }
+
   private HttpResponse<String> send(String method, String path, String json) {
     return send(method, path, json, null);
   }
@@ -319,6 +410,32 @@ class CommandRefusalStatusIT extends AbstractIntegrationTest {
           HttpResponse.BodyHandlers.ofString());
     } catch (Exception e) {
       throw new IllegalStateException(e);
+    }
+  }
+
+  /** Marks the entry's replays as used up, so the retry schedule replays it no more. */
+  private void useUpReplays(String commandId, int maxRetries) throws Exception {
+    try (var conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "UPDATE dead_letter_queue SET dlq_attempts = ? WHERE command_id = ?")) {
+      ps.setInt(1, maxRetries);
+      ps.setString(2, commandId);
+      assertThat(ps.executeUpdate()).as("the entry %s", commandId).isOne();
+    }
+  }
+
+  /** The entries stored under {@code key}. */
+  private long entriesUnderKey(String key) throws Exception {
+    try (var conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "SELECT count(*) FROM dead_letter_queue WHERE idempotency_key LIKE ?")) {
+      ps.setString(1, "%|" + key);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
     }
   }
 

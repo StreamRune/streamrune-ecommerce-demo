@@ -2,6 +2,8 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
@@ -305,14 +307,20 @@ public class StreamRuneConfig {
    *
    * <p>The framework's in-process locker steps aside for this bean
    * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which
-   * Spring closes with it.
+   * Spring closes with it. The pool reports to the app's {@code MeterRegistry} through Hikari's
+   * Micrometer tracker: {@code hikaricp.connections.*}, tagged {@code
+   * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
+   * commands wait for one ({@code
+   * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
-      @Value("${spring.datasource.password}") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @Value("${spring.datasource.password}") String password,
+      MeterRegistry meterRegistry) {
+    return PgAdvisoryLocker.withDedicatedPool(
+        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
   }
 
   /**
@@ -332,7 +340,9 @@ public class StreamRuneConfig {
    * encrypts the {@code @Encrypted} fields of {@code RegisterCustomer} and {@code UpdateProfile}
    * under the customer's key: the queued copy of the customer's personal data is ciphertext and is
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
-   * in plaintext.
+   * in plaintext. The queue keeps one entry for a keyed command: one that fails again under its key
+   * is answered from the entry its earlier send stored, queued for replay or awaiting an operator
+   * by the policy and the inbox window the runner replays by, which the bus takes too.
    *
    * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
@@ -369,6 +379,10 @@ public class StreamRuneConfig {
             .interceptors(audit, auth, validation, circuitBreaker)
             .deadLetterQueue(deadLetterQueue)
             .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+            // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+            // its key is told whether the entry stored for the key is still replayed.
+            .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+            .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
             .register(
                 ProductState.TYPE,
@@ -593,13 +607,16 @@ public class StreamRuneConfig {
    * turns {@code DOWN} if the runner's poll thread dies, instead of reporting {@code UP} while
    * dead-letter entries stop being replayed.
    *
-   * <p>The runner keeps the default policy, which replays on its schedule only the entries the
-   * command inbox can deduplicate: those of commands that ran under an idempotency key. An entry of
-   * an unkeyed command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}),
-   * because its caller may already have retried it successfully. {@code metrics} counts those
-   * entries ({@code streamrune.dlq.awaiting_operator}) and the operator retries refused as older
-   * than the inbox window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries
-   * every {@code app.dead-letter.poll-interval} (60 seconds unless configured).
+   * <p>The runner takes the default policy, which {@link #commandBus} takes as well, with the same
+   * inbox window, so that the bus answers a keyed command that fails again under its key by the
+   * rules this runner replays by; the framework warns at startup when the two differ. The policy
+   * replays on its schedule only the entries the command inbox can deduplicate: those of commands
+   * that ran under an idempotency key. An entry of an unkeyed command waits for an operator ({@code
+   * POST /api/admin/dead-letters/{id}/retry}), because its caller may already have retried it
+   * successfully. {@code metrics} counts those entries ({@code streamrune.dlq.awaiting_operator})
+   * and the operator retries refused as older than the inbox window ({@code
+   * streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Bean
   public DeadLetterRetryRunner deadLetterRetryRunner(
@@ -620,6 +637,8 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The policy and the window the command bus answers a keyed re-send by.
+            .policy(DeadLetterRetryPolicy.DEFAULT)
             // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))

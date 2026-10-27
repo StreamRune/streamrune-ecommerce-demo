@@ -38,7 +38,7 @@ public PostgresDeadLetterQueue deadLetterQueue(DataSource ds) {
 }
 ```
 
-The queue on its own records nothing: the command bus writes to it only when the bus is given it. Open the `commandBus` bean and add two parameters, the queue and the crypto engine from chapter 6, and two builder calls, `.deadLetterQueue(deadLetterQueue)` and `.objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))`. The bean now reads:
+The queue on its own records nothing: the command bus writes to it only when the bus is given it. Open the `commandBus` bean and add two parameters, the queue and the crypto engine from chapter 6, and four builder calls: `.deadLetterQueue(deadLetterQueue)`, `.objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))`, and the two rules the retry runner of Step 3 replays by, `.deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)` and `.inboxRetentionMaxAge(properties.inbox().retentionMaxAge())`. The bean now reads:
 
 ```java
 @Bean
@@ -64,6 +64,10 @@ public VirtualThreadCommandBus commandBus(
       .interceptors(audit, auth, validation, circuitBreaker)
       .deadLetterQueue(deadLetterQueue)
       .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+      // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+      // its key is told whether the entry stored for the key is still replayed.
+      .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+      .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
       .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
       .register(
           ProductState.TYPE,
@@ -130,7 +134,9 @@ public VirtualThreadCommandBus commandBus(
 }
 ```
 
-From now on a command that fails on infrastructure — a database or network error, a lock it could not take within the lock timeout on any attempt, a version conflict on every attempt — is recorded in `dead_letter_queue`, and the bus tells its caller so: it throws `CommandDeadLetteredException` in place of the failure, which is its cause, with the entry's id as `commandId()` and the command's idempotency key, if it ran under one, as `idempotencyKey()`. The command is not applied, and a replay of the entry can still apply it: its outcome is pending, not final. Step 3b gives the stock adjustment its key and shows how the app answers such a command. The other refusals of Chapter 12, Step 2b — an open circuit breaker (`CIRCUIT_BREAKER_OPEN`), a closing bus (`COMMAND_BUS_CLOSED`), an overloaded one (`COMMAND_BUS_OVERLOADED`) — are never recorded: nothing was attempted, and they keep their `503`. The lock's and the version conflict's own answers, `AGGREGATE_LOCK_UNAVAILABLE` and `AGGREGATE_VERSION_CONFLICT`, remain for a command whose entry could not be stored, when the failure itself reaches the caller. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. Two kinds of command never reach this queue, whatever fails: a command a saga sends, and a command a listener dispatches inside `StreamRuneContext.continuing(event)` — the payment process manager's `CapturePayment`, the order cancellation process manager's `ReleaseStock` and `CancelPayment`, the order shipment process manager's `ConfirmReservation`, and just as much a continuation of an event no saga caused — because an entry has no place for the causing event or for the saga origin such a command carries, so a replay would store its events without them. Their caller retries instead: the saga handles its own failures, and a listener's command is run again by the redelivery of the event it reacts to (chapter 11, Step 5b).
+From now on a command that fails on infrastructure — a database or network error, a lock it could not take within the lock timeout on any attempt, a version conflict on every attempt — is recorded in `dead_letter_queue`, and the bus tells its caller so: it throws `CommandDeadLetteredException` in place of the failure, which is its cause, with the entry's id as `commandId()`, the command's idempotency key, if it ran under one, as `idempotencyKey()`, and what happens to the entry as `pendingOutcome()`: `QUEUED_FOR_REPLAY` while the retry runner of Step 3 replays it on its schedule, `AWAITING_OPERATOR` when an operator decides — for an unkeyed command, and for a keyed one whose entry has used up the policy's replays or was first received longer ago than the command-inbox window. The command is not applied, and a replay of the entry can still apply it: its outcome is pending, not final. Step 3b gives the stock adjustment its key and shows how the app answers such a command. The other refusals of Chapter 12, Step 2b — an open circuit breaker (`CIRCUIT_BREAKER_OPEN`), a closing bus (`COMMAND_BUS_CLOSED`), an overloaded one (`COMMAND_BUS_OVERLOADED`) — are never recorded: nothing was attempted, and they keep their `503`. The lock's and the version conflict's own answers, `AGGREGATE_LOCK_UNAVAILABLE` and `AGGREGATE_VERSION_CONFLICT`, remain for a command whose entry could not be stored, when the failure itself reaches the caller. A business rejection is not: a `DomainException` (for example "Customer not found") or an `IllegalArgumentException` is the domain's final answer, and replaying it later would only repeat it. Two kinds of command never reach this queue, whatever fails: a command a saga sends, and a command a listener dispatches inside `StreamRuneContext.continuing(event)` — the payment process manager's `CapturePayment`, the order cancellation process manager's `ReleaseStock` and `CancelPayment`, the order shipment process manager's `ConfirmReservation`, and just as much a continuation of an event no saga caused — because an entry has no place for the causing event or for the saga origin such a command carries, so a replay would store its events without them. Their caller retries instead: the saga handles its own failures, and a listener's command is run again by the redelivery of the event it reacts to (chapter 11, Step 5b).
+
+**One entry per keyed command.** Before the bus stores an entry for a keyed command, it looks the key up. When the queue holds an entry of the same command under the key — a send under the key failed and was recorded already — the bus stores nothing and answers with that entry: its `commandId` and its outcome. A client that sends a keyed request again and again during an outage leaves one entry, not one per request, and each answer says whether that entry is still replayed: an entry whose replays are used up, or that is older than the inbox window, waits for an operator, and a send against it is answered `AWAITING_OPERATOR`, a `500`. The bus judges the entry by the retry runner's rules, which is why it takes the runner's policy and inbox window, `.deadLetterRetryPolicy(...)` and `.inboxRetentionMaxAge(...)`; the runner logs a `WARN` at startup when its bus answers by other ones. An unkeyed command stores an entry for every send that fails: nothing tells two of its sends apart from two operations.
 
 The bus stores the command as JSON, written by the mapper you pass to `.objectMapper(...)`. `DeadLetterRetryRunner.createObjectMapper(cryptoEngine)` registers the `CryptoShreddingModule`, so the `@Encrypted` fields of `RegisterCustomer` and `UpdateProfile` (chapter 6) are stored as ciphertext under the customer's key, and the forget flow (chapter 7) erases them with the events. Do not pass the application's `ObjectMapper` bean here: it has no crypto module, and the queue would hold the customer's name, email, address and phone in plaintext.
 
@@ -138,7 +144,7 @@ The bus stores the command as JSON, written by the mapper you pass to `.objectMa
 
 `DeadLetterRetryRunner` polls the `DeadLetterQueue` on a virtual thread, deserializes each stored command, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments a DLQ attempt counter so that poison messages eventually stop being retried.
 
-**Which entries the schedule replays.** A command lands in the queue because its first attempt failed on infrastructure, and the caller saw that failure. The caller may send the request again on its own, and that retry may succeed. A replay of the dead-letter entry afterwards is then a second execution of the same request: for `AdjustStock`, which changes the stock *by* a quantity, a second, silent change of the stock. The runner cannot tell this case from a command that never ran. It can rely on one thing: the command inbox (Chapter 11, Step 6). A command the caller sent with an idempotency key keeps that key in its entry, and the runner replays it under the same key, so if the caller's own retry already ran, the inbox answers the replay with the recorded result and nothing runs twice. The default policy (`DeadLetterRetryPolicy.DEFAULT`, `UnkeyedReplay.OPERATOR_ONLY`) therefore replays on the schedule only the entries of keyed commands. An entry of an unkeyed command waits for an operator, who checks whether its effect is there and then replays it on purpose or discards it (Step 5); an entry nobody decides about is removed by the retention sweeper after `streamrune.dead-letter.retention-max-age` (7 days, the inbox's window). Step 3b gives the demo's stock adjustment and shipment receipt their keys.
+**Which entries the schedule replays.** A command lands in the queue because its first attempt failed on infrastructure, and the caller saw that failure. The caller may send the request again on its own, and that retry may succeed. A replay of the dead-letter entry afterwards is then a second execution of the same request: for `AdjustStock`, which changes the stock *by* a quantity, a second, silent change of the stock. The runner cannot tell this case from a command that never ran. It can rely on one thing: the command inbox (Chapter 11, Step 6). A command the caller sent with an idempotency key keeps that key in its entry, and the runner replays it under the same key, so if the caller's own retry already ran, the inbox answers the replay with the recorded result and nothing runs twice. The default policy (`DeadLetterRetryPolicy.DEFAULT`, `UnkeyedReplay.OPERATOR_ONLY`) therefore replays on the schedule only the entries of keyed commands. The bean passes it as `.policy(DeadLetterRetryPolicy.DEFAULT)`, the policy the command bus of Step 2 answers a keyed re-send by. An entry of an unkeyed command waits for an operator, who checks whether its effect is there and then replays it on purpose or discards it (Step 5); an entry nobody decides about is removed by the retention sweeper after `streamrune.dead-letter.retention-max-age` (7 days, the inbox's window). Step 3b gives the demo's stock adjustment and shipment receipt their keys.
 
 You must tell the runner which Java types to use when deserializing each command type. The DLQ entry stores the command's fully-qualified class name (`Class#getName()`) — the **concrete** class, e.g. `InventoryCommand$ReceiveShipment` — and `registerCommand` keys each class by that same name, so the runner resolves a stored entry with one exact lookup. Two commands with the same simple name in different packages never collide. You do not have to list every concrete command: registering a sealed root such as `InventoryCommand.class` also registers every command it permits, recursively. The demo registers the five sealed command roots, the same roots the command bus routes to deciders, so a dead-lettered command of any of the five aggregates resolves.
 
@@ -162,6 +168,8 @@ public DeadLetterRetryRunner deadLetterRetryRunner(
           .registerCommand(CustomerCommand.class)
           .registerCommand(PaymentCommand.class)
           .registerCommand(InventoryCommand.class)
+          // The policy and the window the command bus answers a keyed re-send by.
+          .policy(DeadLetterRetryPolicy.DEFAULT)
           // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
           .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
           .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
@@ -230,7 +238,7 @@ public class EcommerceNativeHints implements RuntimeHintsRegistrar {
 
 and annotate `StreamRuneConfig` with `@ImportRuntimeHints(EcommerceNativeHints.class)` (import `org.springframework.context.annotation.ImportRuntimeHints`), next to `@Configuration`. A JVM run ignores both; Chapter 17 builds the native image that reads them.
 
-A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (5 attempts, 60 s initial backoff, `OPERATOR_ONLY`, the inbox window, the metrics bean, `app.dead-letter.poll-interval`, the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean and the crypto-aware mapper by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse a `StockAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
+A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (the policy the framework builds their command bus with, from `streamrune.dead-letter.*`: 5 attempts, 60 s initial backoff and `OPERATOR_ONLY` unless configured; the inbox window; the metrics bean; `app.dead-letter.poll-interval`; the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean, the crypto-aware mapper and the runner's policy and inbox window by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse a `StockAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
 
 Without `.pollInterval(...)` the runner polls every minute. The batch size defaults to 10, configurable with `.batchSize(20)`.
 
@@ -468,16 +476,17 @@ done
 
 **One key per intended change.** The key belongs to the change you mean, not to a request: the block mints `KEY` once for the restock of five, and every request of that restock carries it. A request that fails is sent again with the same key. A new key would be a new restock.
 
-**A failure that left an entry is pending.** The key is what makes a failed adjustment safe to replay: the bus stores it with the dead-letter entry, the runner replays the entry under it, and a request sent again with the same key meets the replay in the command inbox — whichever comes first runs the command, and the other is answered with the recorded result. So a `5xx` to a keyed request does not say "not applied, start over": the command may be queued for a replay that applies it. A request sent under a new key is a second operation, which the replay applies beside the first one: the stock goes up by ten. The answer therefore says what happened. `CommandRefusal` (Chapter 12) answers `CommandDeadLetteredException` before it looks at anything else, whatever the command failed on — a lock timeout or a version conflict that left an entry is pending as well:
+**A failure that left an entry is pending.** The key is what makes a failed adjustment safe to replay: the bus stores it with the dead-letter entry, the runner replays the entry under it, and a request sent again with the same key meets the replay in the command inbox — whichever comes first runs the command, and the other is answered with the recorded result. So a `5xx` to a keyed request does not say "not applied, start over": the command may be queued for a replay that applies it. A request sent under a new key is a second operation, which the replay applies beside the first one: the stock goes up by ten. The answer therefore says what happened. `CommandRefusal` (Chapter 12) answers `CommandDeadLetteredException` before it looks at anything else, whatever the command failed on — a lock timeout or a version conflict that left an entry is pending as well — and by what happens to the entry, the exception's `pendingOutcome()`:
 
 | What the bus did | Status | Body | What the client does |
 |---|---|---|---|
-| Dead-lettered a keyed command | `503` with `Retry-After: 5` | `{"reason": "QUEUED_FOR_REPLAY", "commandId": ..., "message": ...}` | Sends it again with the same key, or waits for the replay. Either way the command runs once. |
-| Dead-lettered an unkeyed command | `500`, no `Retry-After` | `{"reason": "AWAITING_OPERATOR", "commandId": ..., "message": ...}` | Does not send it again: an operator replays or discards the entry (Step 5), and a request sent as well would apply it a second time. |
+| Dead-lettered a keyed command whose entry the runner replays (`QUEUED_FOR_REPLAY`) | `503` with `Retry-After: 60` | `{"reason": "QUEUED_FOR_REPLAY", "commandId": ..., "message": ...}` | Waits for the replay, or sends it again with the same key. Either way the command runs once. |
+| Dead-lettered an unkeyed command (`AWAITING_OPERATOR`) | `500`, no `Retry-After` | `{"reason": "AWAITING_OPERATOR", "commandId": ..., "message": ...}` | Does not send it again: an operator replays or discards the entry (Step 5), and a request sent as well would apply it a second time. |
+| Answered a keyed command sent again, which failed again, from the entry an operator holds: its replays are used up, or it is older than the inbox window (`AWAITING_OPERATOR`) | `500`, no `Retry-After` | `{"reason": "AWAITING_OPERATOR", "commandId": ..., "message": ...}`, the entry's `commandId` | Waits for the operator, who replays or discards the entry; the queue keeps the one entry for the key. |
 | Refused it without an entry (Chapter 12, Step 2b) | `503` with `Retry-After: 5` | `{"reason": "CIRCUIT_BREAKER_OPEN", ...}` and the others | Sends it again later. |
 | Failed without an entry: a business rejection, a store error with the entry's write failing too | `400`, or `500` | the error | Treats a `400` as final; a `500` says nothing was recorded. |
 
-Neither answer is `202 Accepted`: a client takes a `2xx` for done and never sends the request again, while a replay can fail in its turn and be kept for an operator. The `commandId` is the entry's id, the one `POST /api/admin/dead-letters/{id}/retry` takes (Step 5). The unkeyed answer is a `500` without `Retry-After` rather than a `503`: a client that retries every `503` on its own would send the command again while the entry waits, and an operator's replay would then apply it twice.
+Neither answer is `202 Accepted`: a client takes a `2xx` for done and never sends the request again, while a replay can fail in its turn and be kept for an operator. The `commandId` is the entry's id, the one `POST /api/admin/dead-letters/{id}/retry` takes (Step 5). An answer that awaits an operator is a `500` without `Retry-After` rather than a `503`: a client that retries every `503` on its own would send the command again while the entry waits, and for an unkeyed command an operator's replay would then apply it twice. The queued answer's `Retry-After` is a minute, not the five seconds of a refusal: the retry runner polls for due entries once a minute (`app.dead-letter.poll-interval`) and an entry is due after the policy's initial delay, so a request sent again sooner finds the entry still queued and gains nothing; waiting for the replay applies the command as a send under the same key does. A send under the key that fails again stores nothing: the bus answers it from the entry the queue holds (Step 2).
 
 `CommandDeadLetteredException` is in `streamrune-runtime`. Add it to `commands/build.gradle.kts`, inside the `dependencies { }` block:
 
@@ -503,14 +512,14 @@ import org.streamrune.runtime.CommandDeadLetteredException;
 
 /**
  * A command the framework did not apply, for a reason that passes or with an outcome that is still
- * pending, and how the three apps answer it: a status, {@code Retry-After: 5} when the client may
- * send the request again, and a JSON body that names the reason and says what happened, {@code
+ * pending, and how the three apps answer it: a status, {@code Retry-After} when the client may send
+ * the request again, and a JSON body that names the reason and says what happened, {@code
  * {"reason": "CIRCUIT_BREAKER_OPEN", "message": "..."}}. Every other failure keeps its own answer:
  * a broken business rule is {@code 400}, a refused caller {@code 403}, and a genuine failure that
  * left nothing behind, a store error with no dead-letter queue to record it, {@code 500}.
  *
- * <p>The five refusals are answered {@code 503 Service Unavailable} with {@code Retry-After}: the
- * same request succeeds later.
+ * <p>The five refusals are answered {@code 503 Service Unavailable} with {@code Retry-After:}
+ * {@value #RETRY_AFTER_SECONDS}: the same request succeeds later.
  *
  * <ul>
  *   <li>{@link CircuitBreakerOpenException} — the command bus's circuit breaker is open (or
@@ -543,21 +552,27 @@ import org.streamrune.runtime.CommandDeadLetteredException;
  *       for projections and saga rows are thrown on the threads of subscriptions.
  * </ul>
  *
- * <p>{@link CommandDeadLetteredException} is not a refusal: the command failed, the bus stored its
- * entry in the dead-letter queue, and a replay of the entry can still apply it. Its outcome is
- * pending, and the answer says what the client does about it, whatever the failure was, a lock
- * timeout and a version conflict included. The body carries the entry's {@code commandId}.
+ * <p>{@link CommandDeadLetteredException} is not a refusal: the command failed, its entry is in the
+ * dead-letter queue, and a replay of the entry can still apply it. Its outcome is pending, and the
+ * answer says what the client does about it, whatever the failure was, a lock timeout and a version
+ * conflict included: what happens to the entry, the exception's {@code pendingOutcome()}, decides
+ * it. The body carries the entry's {@code commandId}. The queue keeps one entry for a keyed
+ * command: a send under the key that fails again stores nothing new and is answered from the entry
+ * the first one stored.
  *
  * <ul>
- *   <li><b>A keyed command</b> ({@code Idempotency-Key}) is queued for replay under its key: the
- *       retry runner replays it on its schedule. {@code 503} with {@code Retry-After} and {@code
- *       QUEUED_FOR_REPLAY}: the client sends the request again with the same key, or waits. The
- *       command inbox runs the command once, whichever of the two comes first. A new key is a new
- *       operation, and the replay applies the first one beside it.
- *   <li><b>An unkeyed command</b> waits for an operator, who replays or discards the entry: nothing
- *       pairs a replay with a request the client sends again, so the two would apply the command
- *       twice. {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After}: the client
- *       does not send it again on its own.
+ *   <li><b>Queued for replay</b> ({@code QUEUED_FOR_REPLAY}): a command that ran under an {@code
+ *       Idempotency-Key}, whose entry the retry runner replays on its schedule under the key.
+ *       {@code 503} with {@code Retry-After:} {@value #QUEUED_RETRY_AFTER_SECONDS}: the client
+ *       waits for the replay, or sends the request again with the same key. The command inbox runs
+ *       the command once, whichever of the two comes first. A new key is a new operation, and the
+ *       replay applies the first one beside it.
+ *   <li><b>Awaiting an operator</b> ({@code AWAITING_OPERATOR}), who replays or discards the entry:
+ *       a command that ran without a key, since nothing pairs a replay with a request the client
+ *       sends again and the two would apply the command twice, and a keyed command whose entry the
+ *       schedule does not replay, its replays used up or its command first received longer ago than
+ *       the command-inbox window. {@code 500} without {@code Retry-After}: the client does not send
+ *       it again on its own, and a send under the key meanwhile is answered the same.
  * </ul>
  *
  * <p>Neither is {@code 202 Accepted}: a client takes a {@code 2xx} for done and never sends the
@@ -572,6 +587,15 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
 
   /** How long a client waits before it sends a refused command again, in seconds. */
   public static final int RETRY_AFTER_SECONDS = 5;
+
+  /**
+   * How long a client waits before it sends a command queued for replay again, in seconds. The
+   * retry runner polls for due entries once a minute ({@code app.dead-letter.poll-interval}) and an
+   * entry is due after the policy's initial delay, so a send before then finds the entry still
+   * queued and gains nothing; waiting for the replay applies the command as a send under the same
+   * key does.
+   */
+  public static final int QUEUED_RETRY_AFTER_SECONDS = 60;
 
   /** What refused the command, or what happens to it now; the body's {@code reason}. */
   public enum Reason {
@@ -625,11 +649,20 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
   }
 
   /**
-   * Whether the client may send the request again: the answer then carries {@code Retry-After:}
-   * {@value #RETRY_AFTER_SECONDS}. A command that awaits an operator is not sent again.
+   * Whether the client may send the request again: the answer then carries {@code Retry-After}
+   * ({@link #retryAfterSeconds()}). A command that awaits an operator is not sent again.
    */
   public boolean retryLater() {
     return status() == 503;
+  }
+
+  /**
+   * The answer's {@code Retry-After}, in seconds, when {@link #retryLater()}: {@value
+   * #QUEUED_RETRY_AFTER_SECONDS} for a command queued for replay, {@value #RETRY_AFTER_SECONDS} for
+   * a refusal.
+   */
+  public int retryAfterSeconds() {
+    return reason == Reason.QUEUED_FOR_REPLAY ? QUEUED_RETRY_AFTER_SECONDS : RETRY_AFTER_SECONDS;
   }
 
   /**
@@ -645,19 +678,25 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
     return body;
   }
 
+  /** The answer to a dead-lettered command, by what happens to its entry. */
   private static CommandRefusal pending(CommandDeadLetteredException deadLettered) {
     String commandId = deadLettered.commandId().value();
-    return deadLettered.idempotencyKey() != null
-        ? new CommandRefusal(
-            Reason.QUEUED_FOR_REPLAY,
-            "The command is not applied yet: it is queued for a replay under its Idempotency-Key."
-                + " Send it again with the same key, or wait; a new key is a new operation.",
-            commandId)
-        : new CommandRefusal(
-            Reason.AWAITING_OPERATOR,
-            "The command failed and is recorded for an operator, who replays or discards it."
-                + " Sending it again would apply it a second time if the operator replays it.",
-            commandId);
+    return switch (deadLettered.pendingOutcome()) {
+      case QUEUED_FOR_REPLAY ->
+          new CommandRefusal(
+              Reason.QUEUED_FOR_REPLAY,
+              "The command is not applied yet: it is queued for a replay under its Idempotency-Key."
+                  + " Wait for the replay, or send it again with the same key; a new key is a new"
+                  + " operation.",
+              commandId);
+      case AWAITING_OPERATOR ->
+          new CommandRefusal(
+              Reason.AWAITING_OPERATOR,
+              "The command failed and is recorded for an operator, who replays or discards it: it"
+                  + " ran without a key, or its entry's replays are used up or it is older than the"
+                  + " inbox window. Do not send it again until then.",
+              commandId);
+    };
   }
 
   private static Optional<CommandRefusal> refusal(Reason reason, String message) {
@@ -741,11 +780,14 @@ public class GlobalExceptionHandler {
    * too.
    *
    * <p>A command the bus dead-lettered ({@link CommandDeadLetteredException}, whatever it failed
-   * on) is pending, and the body carries its entry's {@code commandId}: {@code 503} with {@code
-   * Retry-After} and {@code QUEUED_FOR_REPLAY} when it ran under an {@code Idempotency-Key}, {@code
-   * 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it did not. Spring picks
-   * this handler for the dead-lettered command's own type before it looks at the cause. A genuine
-   * failure that left no entry, such as a store error, is none of these and stays {@code 500}.
+   * on) is pending, and the body carries its entry's {@code commandId}. What happens to the entry,
+   * {@link CommandDeadLetteredException#pendingOutcome()}, decides the answer: {@code 503} with
+   * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} while the entry is replayed under its {@code
+   * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when an
+   * operator decides about it, for a command that ran without a key or a keyed one whose entry's
+   * replays are used up or that is older than the inbox window. Spring picks this handler for the
+   * dead-lettered command's own type before it looks at the cause. A genuine failure that left no
+   * entry, such as a store error, is none of these and stays {@code 500}.
    */
   @ExceptionHandler({
     CircuitBreakerOpenException.class,
@@ -760,7 +802,7 @@ public class GlobalExceptionHandler {
         CommandRefusal.of(e).orElseThrow(() -> new IllegalStateException("not a refusal", e));
     ResponseEntity.BodyBuilder answer = ResponseEntity.status(refusal.status());
     if (refusal.retryLater()) {
-      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(CommandRefusal.RETRY_AFTER_SECONDS));
+      answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(refusal.retryAfterSeconds()));
     }
     return answer.contentType(MediaType.APPLICATION_JSON).body(refusal.body());
   }
@@ -1253,7 +1295,7 @@ public class AdminController {
 | `NOT_DEDUPLICATED` | `409 Conflict` with a message | The command carries no idempotency key: if its caller already retried it, a replay applies it twice. |
 | `STALE_REPLAY_BLOCKED` | `409 Conflict` with a message | A keyed entry older than the inbox window. |
 | `ADMISSION_REFUSED` | `503` with `Retry-After: 5` | The command bus admits no more work. Nothing ran; the entry is unchanged. |
-| `READER_BEHIND` | `503` with `Retry-After: 5` | This backend's code reads the command's aggregate at an older event schema than one the aggregate holds — a backend still on the previous release during a rolling deployment of an event-schema change. Nothing was appended, and the entry is unchanged: its attempt is not counted, so the deployment can neither exhaust nor discard it. It replays on a backend that reads the event, by the schedule or a later retry. |
+| `READER_BEHIND` | `503` with `Retry-After: 5` | This backend's code reads the command's aggregate at an older event schema than one the aggregate holds — a backend still on the previous release during a rolling deployment of an event-schema change. Nothing was appended, and the entry keeps its attempt count, so the deployment can neither exhaust nor discard it: only the time of its last replay changes, and it is replayed again after its backoff, by the schedule or a later retry, until a backend that reads the event runs it. |
 | `FAILED` | `500` | The command failed again; the entry's attempt count went up. |
 
 Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
@@ -1655,7 +1697,9 @@ public class StreamRuneConfig {
    * encrypts the {@code @Encrypted} fields of {@code RegisterCustomer} and {@code UpdateProfile}
    * under the customer's key: the queued copy of the customer's personal data is ciphertext and is
    * erased with the customer. {@link #legacyObjectMapper} has no crypto module and would store it
-   * in plaintext.
+   * in plaintext. The queue keeps one entry for a keyed command: one that fails again under its key
+   * is answered from the entry its earlier send stored, queued for replay or awaiting an operator
+   * by the policy and the inbox window the runner replays by, which the bus takes too.
    *
    * <p>The bus takes the {@link AggregateLocker} bean, {@link #aggregateLocker}, and {@code
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
@@ -1685,6 +1729,10 @@ public class StreamRuneConfig {
         .interceptors(audit, auth, validation, circuitBreaker)
         .deadLetterQueue(deadLetterQueue)
         .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
+        // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
+        // its key is told whether the entry stored for the key is still replayed.
+        .deadLetterRetryPolicy(DeadLetterRetryPolicy.DEFAULT)
+        .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
         .snapshotPolicy(SnapshotPolicy.everyNEvents(5))
         .register(
             ProductState.TYPE,
@@ -1905,13 +1953,16 @@ public class StreamRuneConfig {
    * turns {@code DOWN} if the runner's poll thread dies, instead of reporting {@code UP} while
    * dead-letter entries stop being replayed.
    *
-   * <p>The runner keeps the default policy, which replays on its schedule only the entries the
-   * command inbox can deduplicate: those of commands that ran under an idempotency key. An entry of
-   * an unkeyed command waits for an operator ({@code POST /api/admin/dead-letters/{id}/retry}),
-   * because its caller may already have retried it successfully. {@code metrics} counts those
-   * entries ({@code streamrune.dlq.awaiting_operator}) and the operator retries refused as older
-   * than the inbox window ({@code streamrune.dlq.stale_replay_blocked}). It looks for due entries
-   * every {@code app.dead-letter.poll-interval} (60 seconds unless configured).
+   * <p>The runner takes the default policy, which {@link #commandBus} takes as well, with the same
+   * inbox window, so that the bus answers a keyed command that fails again under its key by the
+   * rules this runner replays by; the framework warns at startup when the two differ. The policy
+   * replays on its schedule only the entries the command inbox can deduplicate: those of commands
+   * that ran under an idempotency key. An entry of an unkeyed command waits for an operator ({@code
+   * POST /api/admin/dead-letters/{id}/retry}), because its caller may already have retried it
+   * successfully. {@code metrics} counts those entries ({@code streamrune.dlq.awaiting_operator})
+   * and the operator retries refused as older than the inbox window ({@code
+   * streamrune.dlq.stale_replay_blocked}). It looks for due entries every {@code
+   * app.dead-letter.poll-interval} (60 seconds unless configured).
    */
   @Bean
   public DeadLetterRetryRunner deadLetterRetryRunner(
@@ -1932,6 +1983,8 @@ public class StreamRuneConfig {
             .registerCommand(CustomerCommand.class)
             .registerCommand(PaymentCommand.class)
             .registerCommand(InventoryCommand.class)
+            // The policy and the window the command bus answers a keyed re-send by.
+            .policy(DeadLetterRetryPolicy.DEFAULT)
             // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
