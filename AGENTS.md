@@ -177,9 +177,10 @@ In `frontend/`, after `npm ci`:
   (`.gitmessage`, the ignore lists, `LICENSE`, `NOTICE`, `CODEOWNERS`, `gradlew`, the Dockerfiles)
   to this, with the framework repository's rules: it rejects tracker, review and audit labels (a
   work-item, audit-round or review-area label at the front of an identifier, a test name or a string
-  id included, in either letter case and in test sources too), references to private review
-  material, the words that narrate an earlier behaviour (outside test sources and code samples; its
-  javadoc lists them), a reviewer named by role, work deferred to the project roadmap, and a space
+  id included, in either letter case and in test sources too, or glued inside a camel-case name),
+  references to private review material, the words that narrate an earlier behaviour (outside
+  test sources and code samples; its javadoc lists them), a reviewer named by role, work deferred
+  to the project roadmap, and a space
   before a period in prose (the comments of a `.java` file and the markdown outside fenced blocks),
   and it reads a phrase across a line break. Its failure names the rule and the line of every
   offender.
