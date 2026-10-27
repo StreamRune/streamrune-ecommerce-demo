@@ -133,7 +133,7 @@ val docsTest =
         group = "verification"
         description =
             "Runs the docs tests that need no Docker: the tutorial's listings, steps and ledger, " +
-                "and the public-text ratchet."
+                "the version catalog's aliases and the public-text ratchet."
         testClassesDirs = testSourceSet.output.classesDirs
         classpath = testSourceSet.runtimeClasspath
         useJUnitPlatform { includeEngines("junit-jupiter") }

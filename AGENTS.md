@@ -51,7 +51,7 @@ runs its tests, with `--enable-preview`.
 | `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck`, the tests of `domain`, `commands`, `queries` and `projections` and the docs tests (`:spring-app:docsTest`, section 5) and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | about 20 seconds when the docs tests run, a few seconds when they are up to date |
 | `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
-| `./gradlew :spring-app:docsTest` | The tutorial tests and the public-text ratchet (section 5), without Docker; `--tests "*TutorialLedgerTest"` narrows it to one | about 15 seconds |
+| `./gradlew :spring-app:docsTest` | The tutorial tests, the catalog test and the public-text ratchet (section 5), without Docker; `--tests "*TutorialLedgerTest"` narrows it to one | about 15 seconds |
 | `./gradlew :spring-app:test --tests "*TutorialChaptersStartIT"` | The tutorial test that starts every chapter's project. Needs Docker. | about 2 minutes |
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
@@ -159,7 +159,9 @@ In `frontend/`, after `npm ci`:
   against the repository's files (an earlier Compose listing is the file with the later chapters'
   services left out; every Compose or Dockerfile block is one of them);
   `TutorialCatalogListingTest` checks chapter 1's excerpt of `gradle/libs.versions.toml` against
-  the catalog; `TutorialMetricNamesTest` checks that every meter name the tutorial and the README
+  the catalog, and `VersionCatalogAliasesTest` that every alias and version of the catalog is used
+  by a build file of the demo or a build listing of the tutorial (the Flyway pair is kept on
+  purpose); `TutorialMetricNamesTest` checks that every meter name the tutorial and the README
   give is one the framework registers; `TutorialInterceptorOrderTest` checks every interceptor
   chain the tutorial shows against the framework's order; `TutorialSettingsListingTest` checks that
   chapter 1's `settings.gradle.kts` listings are the demo's own file, apart from the `include(...)`
