@@ -494,7 +494,7 @@ for i in 1 2 3; do
 done
 ```
 
-Each order's `PaymentProcessManager` calls the gateway, which gives no answer. The gateway may have taken the money, so the manager does not fail the payment: it asks the gateway for a capture of it, finds none, and lets the subscription deliver `PaymentInitiated` again, while the orders behind it wait. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
+Each order's `PaymentProcessManager` calls the gateway, which gives no answer. The gateway may have taken the money, so the manager does not fail the payment: it asks the gateway for a capture of it, finds none, and lets the subscription deliver `PaymentInitiated` again, while the other orders' payments, and any refund, wait behind it. After three calls without an answer the gateway breaker opens, and the manager stops calling the gateway:
 
 ```bash
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/circuit-breaker
@@ -504,7 +504,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/ap
 # "AWAITING_PAYMENT"
 ```
 
-Notice the command-bus breaker (`state`) stays `CLOSED`: a call without an answer dispatches no command, and a decline becomes *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a gateway failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). Switch the outage off: once the 30-second cooldown has passed, the next delivery is the breaker's probe, the gateway answers, the breaker closes, and the three payments are captured, so the orders are confirmed. An outage that outlasts the saga's deadline cancels its orders and voids their payments instead.
+Notice the command-bus breaker (`state`) stays `CLOSED`: a call without an answer dispatches no command, and a decline becomes *successful* `FailPayment`/`CancelOrder` commands, so the command bus never sees a gateway failure — and even if it did, its counter resets on every successful command. This is exactly why the demo puts a dedicated breaker around the gateway (Chapter 12 walks through the reasoning). Switch the outage off: within about a minute and a half (the subscription's backoff, up to a minute, plus the cooldown), the next delivery is the breaker's probe, the gateway answers, the breaker closes, and the three payments are captured, so the orders are confirmed. An outage that outlasts the saga's deadline cancels its orders and voids their payments instead.
 
 ```bash
 curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/admin/payment-outage/toggle
