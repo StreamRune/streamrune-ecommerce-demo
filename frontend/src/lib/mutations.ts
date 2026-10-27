@@ -55,9 +55,10 @@ function useInvalidatingMutation<TData, TVariables>(
  *   closing bus): once more, after its `Retry-After`. The backend wrote nothing,
  *   and an attempt before then would meet the same refusal.
  * - **`QUEUED_FOR_REPLAY`**: not again. The backend recorded the change for a
- *   replay; another attempt at once would most likely fail the same way, leave
- *   one more entry and count once more toward the command bus's circuit
- *   breaker, which opens after three failures in a row. The dialog keeps the
+ *   replay; another attempt at once would most likely fail the same way, be
+ *   answered from the one entry the backend keeps for the key, and count once
+ *   more toward the command bus's circuit breaker, which opens after three
+ *   failures in a row. The dialog keeps the
  *   key, and the user's own send of the same change is the deliberate re-send.
  * - **Any other `4xx`**: not again. It is the backend's answer.
  */

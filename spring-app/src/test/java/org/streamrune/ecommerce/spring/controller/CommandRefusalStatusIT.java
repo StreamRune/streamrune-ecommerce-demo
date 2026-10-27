@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 import org.streamrune.ecommerce.spring.SpringEcommerceApplication;
@@ -33,11 +34,13 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 /**
  * A command the framework refuses for a reason that passes is answered {@code 503} with {@code
  * Retry-After: 5} and a JSON body naming the reason. A command the bus dead-lettered is pending,
- * whatever it failed on, and the answer carries its entry's {@code commandId}: {@code 503} with
- * {@code Retry-After} and {@code QUEUED_FOR_REPLAY} when it was sent with an {@code
- * Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR} and no {@code Retry-After} when it
- * was not. An answer with {@code Retry-After} exposes it to the frontend's origin, whose page reads
- * it to wait that long before it sends the request again. No answer allows credentials.
+ * whatever it failed on, and the answer carries its entry's {@code commandId} and says what happens
+ * to the entry: {@code 503} with {@code Retry-After: 60} and {@code QUEUED_FOR_REPLAY} while it is
+ * replayed under the request's {@code Idempotency-Key}, {@code 500} with {@code AWAITING_OPERATOR}
+ * and no {@code Retry-After} when an operator decides about it: for a request sent without a key,
+ * and for a keyed request sent again once its entry's replays are used up. An answer with {@code
+ * Retry-After} exposes it to the frontend's origin, whose page reads it to wait that long before it
+ * sends the request again. No answer allows credentials.
  *
  * <p>Each condition is forced on the app's real command bus, in a Spring context of its own on a
  * database of its own ({@code command_refusals}): the tests leave its circuit breaker open and its
@@ -58,6 +61,10 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       {@code OptimisticLockException}, as it does when a second writer stored the version first.
  *       The bus tries the command on every attempt of its retry policy and dead-letters it, keyed
  *       or not, with the two answers above; nothing is written.
+ *   <li><b>A keyed entry left to an operator.</b> With the same version conflict, a keyed stock
+ *       adjustment is queued for replay; once its entry's replays are marked used up, the same
+ *       request sent again stores no second entry and is answered {@code AWAITING_OPERATOR} with
+ *       the first entry's {@code commandId}.
  *   <li><b>An entry that cannot be stored.</b> With the same version conflict and a trigger on
  *       {@code dead_letter_queue} that refuses the entry, nothing is pending: the conflict itself
  *       reaches the caller, refused with {@code AGGREGATE_VERSION_CONFLICT}, key or no key.
@@ -192,8 +199,46 @@ class CommandRefusalStatusIT {
     }
   }
 
+  /**
+   * A keyed command whose entry the retry schedule does not replay, its replays used up, waits for
+   * an operator: a send under its key that fails again stores no second entry and is answered
+   * {@code 500} with {@code AWAITING_OPERATOR} and the {@code commandId} of the entry the first
+   * send stored, without {@code Retry-After}.
+   */
   @Test
   @Order(3)
+  void aKeyedSendAgainstAnEntryLeftToAnOperatorAwaitsTheOperator() throws Exception {
+    String productId = "refusal-exhausted-" + System.nanoTime();
+    assertThat(createProduct(productId).statusCode()).isEqualTo(200);
+    String stock = "/api/products/" + productId + "/stock";
+    String recount = "{\"quantity\": 4, \"reason\": \"recount\"}";
+    DataSource dataSource = app.getBean(DataSource.class);
+
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "StockAdjusted")) {
+      HttpResponse<String> first = send("PUT", stock, recount, "exhausted-key-1");
+      assertQueuedForReplay(first, dataSource, "exhausted-key-1");
+      String entry = jsonBody(first).path("commandId").asText();
+      useUpReplays(dataSource, entry, DeadLetterRetryPolicy.DEFAULT.maxRetries());
+
+      HttpResponse<String> again = send("PUT", stock, recount, "exhausted-key-1");
+      assertThat(again.statusCode()).as("status of %s", again.body()).isEqualTo(500);
+      assertThat(again.headers().firstValue("Retry-After")).isEmpty();
+      JsonNode body = jsonBody(again);
+      assertThat(body.path("reason").asText()).isEqualTo("AWAITING_OPERATOR");
+      assertThat(body.path("commandId").asText())
+          .as("the entry the first send stored")
+          .isEqualTo(entry);
+      assertThat(entriesUnderKey(dataSource, "exhausted-key-1"))
+          .as("one entry for the key")
+          .isOne();
+      assertThat(eventCount(dataSource, productId, "StockAdjusted"))
+          .as("nothing was written")
+          .isZero();
+    }
+  }
+
+  @Test
+  @Order(4)
   void aFailureWhoseEntryCannotBeStoredIsAnsweredAsTheFailure() throws Exception {
     String productId = "refusal-unstored-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
@@ -217,7 +262,7 @@ class CommandRefusalStatusIT {
   }
 
   @Test
-  @Order(4)
+  @Order(5)
   void anOpenCircuitBreakerRefusesWithRetryAfterAfterTheFailuresThatOpenedIt() throws Exception {
     String productId = "refusal-breaker-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
@@ -243,7 +288,7 @@ class CommandRefusalStatusIT {
   }
 
   @Test
-  @Order(5)
+  @Order(6)
   void aClosedCommandBusRefusesWithRetryAfter() {
     app.getBean(VirtualThreadCommandBus.class).close();
 
@@ -256,7 +301,7 @@ class CommandRefusalStatusIT {
    * frontend's origin and allows no credentials.
    */
   @Test
-  @Order(6)
+  @Order(7)
   void aPreflightAdmitsTheFrontendsOrigin_andAllowsNoCredentials() throws Exception {
     HttpResponse<String> answer = preflight("/api/products/refusal-preflight/stock", "PUT");
 
@@ -307,7 +352,9 @@ class CommandRefusalStatusIT {
   private static void assertQueuedForReplay(
       HttpResponse<String> answer, DataSource dataSource, String key) throws Exception {
     assertThat(answer.statusCode()).as("status of %s", answer.body()).isEqualTo(503);
-    assertThat(answer.headers().firstValue("Retry-After")).contains("5");
+    assertThat(answer.headers().firstValue("Retry-After"))
+        .as("no sooner than the retry runner looks for due entries")
+        .contains("60");
     assertRetryAfterReadable(answer);
     JsonNode body = jsonBody(answer);
     assertThat(body.path("reason").asText()).isEqualTo("QUEUED_FOR_REPLAY");
@@ -413,6 +460,33 @@ class CommandRefusalStatusIT {
           HttpResponse.BodyHandlers.ofString());
     } catch (Exception e) {
       throw new IllegalStateException(e);
+    }
+  }
+
+  /** Marks the entry's replays as used up, so the retry schedule replays it no more. */
+  private static void useUpReplays(DataSource dataSource, String commandId, int maxRetries)
+      throws Exception {
+    try (var conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "UPDATE dead_letter_queue SET dlq_attempts = ? WHERE command_id = ?")) {
+      ps.setInt(1, maxRetries);
+      ps.setString(2, commandId);
+      assertThat(ps.executeUpdate()).as("the entry %s", commandId).isOne();
+    }
+  }
+
+  /** The entries stored under {@code key}. */
+  private static long entriesUnderKey(DataSource dataSource, String key) throws Exception {
+    try (var conn = dataSource.getConnection();
+        PreparedStatement ps =
+            conn.prepareStatement(
+                "SELECT count(*) FROM dead_letter_queue WHERE idempotency_key LIKE ?")) {
+      ps.setString(1, "%|" + key);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
     }
   }
 

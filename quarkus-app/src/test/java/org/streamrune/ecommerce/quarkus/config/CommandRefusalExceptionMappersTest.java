@@ -51,18 +51,36 @@ class CommandRefusalExceptionMappersTest {
   }
 
   @Test
-  void aDeadLetteredCommandIsAnsweredByWhetherItHasAKey_notByItsCause() {
+  void aDeadLetteredCommandIsAnsweredByWhatHappensToItsEntry_notByItsCause() {
     Response queued =
         new CommandRefusalExceptionMappers.CommandDeadLettered()
             .toResponse(
                 deadLettered(
                     IdempotencyKey.scopedTo("admin-1", "k-1"), new LockException("timeout")));
-    assertRefused(queued, "QUEUED_FOR_REPLAY");
-    assertThat(body(queued)).containsEntry("commandId", "cmd-dl-1");
+    assertThat(queued.getStatus()).isEqualTo(503);
+    assertThat(queued.getHeaderString("Retry-After"))
+        .as("no sooner than the retry runner looks for due entries")
+        .isEqualTo("60");
+    assertThat(queued.getMediaType().toString()).isEqualTo("application/json");
+    assertThat(body(queued))
+        .containsEntry("reason", "QUEUED_FOR_REPLAY")
+        .containsEntry("commandId", "cmd-dl-1")
+        .containsKey("message");
 
-    Response awaiting =
+    assertAwaitingOperator(
         new CommandRefusalExceptionMappers.CommandDeadLettered()
-            .toResponse(deadLettered(null, new EventStoreException("connection reset")));
+            .toResponse(deadLettered(null, new EventStoreException("connection reset"))));
+    assertAwaitingOperator(
+        new CommandRefusalExceptionMappers.CommandDeadLettered()
+            .toResponse(
+                deadLettered(
+                    IdempotencyKey.scopedTo("admin-1", "k-1"),
+                    CommandDeadLetteredException.PendingOutcome.AWAITING_OPERATOR,
+                    new LockException("timeout"))));
+  }
+
+  /** 500 without {@code Retry-After}, the entry's {@code commandId} in the body. */
+  private static void assertAwaitingOperator(Response awaiting) {
     assertThat(awaiting.getStatus()).isEqualTo(500);
     assertThat(awaiting.getHeaderString("Retry-After")).isNull();
     assertThat(awaiting.getMediaType().toString()).isEqualTo("application/json");
@@ -79,6 +97,20 @@ class CommandRefusalExceptionMappersTest {
         CommandId.of("cmd-dl-1"),
         StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
         key,
+        cause);
+  }
+
+  /** A keyed command whose entry has {@code outcome}, as a re-send under its key is answered. */
+  private static CommandDeadLetteredException deadLettered(
+      IdempotencyKey key,
+      CommandDeadLetteredException.PendingOutcome outcome,
+      RuntimeException cause) {
+    return new CommandDeadLetteredException(
+        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        CommandId.of("cmd-dl-1"),
+        StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
+        key,
+        outcome,
         cause);
   }
 

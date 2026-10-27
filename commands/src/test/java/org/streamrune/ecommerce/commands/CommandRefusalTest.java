@@ -61,6 +61,7 @@ class CommandRefusalTest {
         .isEqualTo("The command bus admits no more commands now.");
     assertThat(refusal.status()).isEqualTo(503);
     assertThat(refusal.retryLater()).isTrue();
+    assertThat(refusal.retryAfterSeconds()).isEqualTo(CommandRefusal.RETRY_AFTER_SECONDS);
     assertThat(CommandRefusal.RETRY_AFTER_SECONDS).isEqualTo(5);
   }
 
@@ -78,8 +79,14 @@ class CommandRefusalTest {
       assertThat(answer.reason())
           .as("dead-lettered after %s", cause)
           .isEqualTo(Reason.QUEUED_FOR_REPLAY);
-      assertThat(answer.status()).as("not applied yet: send it again with the key").isEqualTo(503);
+      assertThat(answer.status())
+          .as("not applied yet: wait, or send it again with the key")
+          .isEqualTo(503);
       assertThat(answer.retryLater()).isTrue();
+      assertThat(answer.retryAfterSeconds())
+          .as("no sooner than the retry runner looks for due entries")
+          .isEqualTo(CommandRefusal.QUEUED_RETRY_AFTER_SECONDS)
+          .isEqualTo(60);
       assertThat(List.copyOf(answer.body().keySet()))
           .containsExactly("reason", "commandId", "message");
       assertThat(answer.body().get("commandId")).isEqualTo("cmd-dl-1");
@@ -103,6 +110,33 @@ class CommandRefusalTest {
       assertThat(answer.body().get("commandId")).isEqualTo("cmd-dl-1");
       assertThat(answer.body().get("message")).contains("operator");
     }
+  }
+
+  /**
+   * A keyed command whose entry the retry schedule does not replay — its replays are used up, or it
+   * is older than the command-inbox window — awaits an operator as an unkeyed one does: the answer
+   * follows the entry's outcome, not the key.
+   */
+  @Test
+  void aDeadLetteredKeyedCommandWhoseEntryTheScheduleDoesNotReplayAwaitsAnOperator() {
+    CommandRefusal answer =
+        CommandRefusal.of(
+                new CommandDeadLetteredException(
+                    new ProductCommand.AdjustStock("p-1", 5, "restock"),
+                    CommandId.of("cmd-dl-1"),
+                    PRODUCT,
+                    IdempotencyKey.scopedTo("admin-1", "k-1"),
+                    CommandDeadLetteredException.PendingOutcome.AWAITING_OPERATOR,
+                    new EventStoreException("store down")))
+            .orElseThrow();
+
+    assertThat(answer.reason()).isEqualTo(Reason.AWAITING_OPERATOR);
+    assertThat(answer.status()).isEqualTo(500);
+    assertThat(answer.retryLater()).as("no Retry-After: an operator decides").isFalse();
+    assertThat(List.copyOf(answer.body().keySet()))
+        .containsExactly("reason", "commandId", "message");
+    assertThat(answer.body().get("commandId")).isEqualTo("cmd-dl-1");
+    assertThat(answer.body().get("message")).contains("operator");
   }
 
   @Test

@@ -294,7 +294,7 @@ class DeadLetterReplayPolicyIT {
       answered =
           adjustStock(pid, key)
               .statusCode(key == null ? 500 : 503)
-              .header("Retry-After", key == null ? nullValue() : equalTo("5"))
+              .header("Retry-After", key == null ? nullValue() : equalTo("60"))
               .body("reason", equalTo(key == null ? "AWAITING_OPERATOR" : "QUEUED_FOR_REPLAY"))
               .extract()
               .path("commandId");
