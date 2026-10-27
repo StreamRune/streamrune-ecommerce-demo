@@ -16,7 +16,7 @@ framework, and each application adds only the HTTP transport and the wiring.
 | `commands/` | The deciders: domain logic without I/O | no |
 | `queries/` | The read-model views and the owner-or-admin access rule | no |
 | `projections/` | The projections that build the views, and the reads as one caller may see them | no |
-| `spring-app/` | The Spring Boot application, port 8080 | yes |
+| `spring-app/` | The Spring Boot application, port 8080 | yes (the docs tests, `docsTest`, do not) |
 | `micronaut-app/` | The Micronaut application, port 8081 | yes |
 | `quarkus-app/` | The Quarkus application, port 8082 | yes |
 | `notifications-service/` | A Spring Boot service that consumes the integration events the outbox publishes to RabbitMQ, port 8090 | yes |
@@ -174,12 +174,13 @@ In `frontend/`, after `npm ci`:
   scripts, the build files and the files without an extension the repository publishes
   (`.gitmessage`, the ignore lists, `LICENSE`, `NOTICE`, `CODEOWNERS`, `gradlew`, the Dockerfiles)
   to this, with the framework repository's rules: it rejects tracker, review and audit labels (a
-  work-item label at the front of a test name or a string id included, in test sources too),
-  references to private review material, the words that narrate an earlier behaviour (outside test
-  sources and code samples; its javadoc lists them), a reviewer named by role, work deferred to the
-  project roadmap, and a space before a period in prose (the comments of a `.java` file and the
-  markdown outside fenced blocks), and it reads a phrase across a line break. Its failure names the
-  rule and the line of every offender.
+  work-item, audit-round or review-area label at the front of an identifier, a test name or a string
+  id included, in either letter case and in test sources too), references to private review
+  material, the words that narrate an earlier behaviour (outside test sources and code samples; its
+  javadoc lists them), a reviewer named by role, work deferred to the project roadmap, and a space
+  before a period in prose (the comments of a `.java` file and the markdown outside fenced blocks),
+  and it reads a phrase across a line break. Its failure names the rule and the line of every
+  offender.
 
 ## 6. Pitfalls
 
