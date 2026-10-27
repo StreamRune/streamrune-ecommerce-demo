@@ -103,8 +103,9 @@ val publicTextSources =
     fileTree(rootDir) {
         include("**/*.java", "**/*.md", "**/*.kts", "**/*.gradle", "**/*.toml", "**/*.properties")
         include("**/*.yml", "**/*.yaml", "**/*.sql", "**/*.sh", "**/*.xml", "**/*.json", "**/*.txt")
-        include("**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.css")
-        include("**/Dockerfile", "**/Dockerfile.*")
+        include("**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.css", "**/*.bat")
+        include("**/Dockerfile", "**/Dockerfile.*", "**/.gitmessage", "**/.gitignore")
+        include("**/.dockerignore", "**/LICENSE", "**/NOTICE", "**/CODEOWNERS", "**/gradlew")
         exclude("**/build/**", "**/out/**", "**/bin/**", "**/.gradle/**", "**/.kotlin/**")
         exclude("**/.worktrees/**", "**/.idea/**", "**/.vscode/**", "**/.settings/**")
         exclude("**/node_modules/**", "**/.next/**", "**/coverage/**", "**/test-results/**")
