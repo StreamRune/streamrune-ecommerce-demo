@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.quarkus;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.agroal.api.AgroalDataSource;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -9,6 +10,8 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.AggregateLocker;
@@ -31,6 +34,8 @@ class AggregateLockerWiringIT {
 
   @Inject DataSource dataSource;
 
+  @Inject AgroalDataSource applicationPool;
+
   @Test
   void theCommandBusLocksAnAggregateInPostgreSql() throws Exception {
     assertThat(locker)
@@ -45,6 +50,32 @@ class AggregateLockerWiringIT {
       assertThat(advisoryLocks())
           .as("the lock is an advisory lock every instance on the database sees")
           .isGreaterThan(before);
+    }
+  }
+
+  /**
+   * A command holds its lock connection for its whole run and borrows a connection of the
+   * application's pool for its load and its append, so the lock pool has the application pool's
+   * size: as many commands as that pool serves hold their locks at once, and none waits for a
+   * connection of the lock pool.
+   */
+  @Test
+  void theLockPoolHoldsAsManyLocksAsTheApplicationPoolHasConnections() throws Exception {
+    int applicationPoolSize =
+        applicationPool.getConfiguration().connectionPoolConfiguration().maxSize();
+    List<AutoCloseable> held = new ArrayList<>();
+    try {
+      for (int i = 0; i < applicationPoolSize; i++) {
+        held.add(
+            locker.acquireLock(
+                StreamId.of(AggregateType.of("product"), AggregateId.of("lock-pool-" + i)),
+                Duration.ofSeconds(1)));
+      }
+      assertThat(held).hasSize(applicationPoolSize);
+    } finally {
+      for (AutoCloseable lock : held) {
+        lock.close();
+      }
     }
   }
 

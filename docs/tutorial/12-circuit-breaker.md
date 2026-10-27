@@ -163,7 +163,7 @@ public PgAdvisoryLocker aggregateLocker(
 }
 ```
 
-What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it.
+What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten (Hikari's default) — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it. A command can wait once more before that: when every connection of the lock pool is taken, up to ten seconds for one of them, the pool's connection timeout that `withDedicatedPool` sets. Either wait that runs out is a `LockException` (Step 2b).
 
 The whole class at the end of this chapter:
 
@@ -429,8 +429,11 @@ public class StreamRuneConfig {
    * two backends writing one aggregate would meet in version conflicts, retried and in the end
    * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
    * of the application's pool for its load and its append, so the lock pool has the application
-   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
-   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   * pool's size, ten (Hikari's default, as the demo sets none): as many commands as the application
+   * pool serves at once. Each backend opens both pools, which together stay below PostgreSQL's
+   * {@code max_connections}. A command waits for its lock up to {@code streamrune.lock-timeout},
+   * and before that, when every connection of the lock pool is taken, up to ten seconds for one of
+   * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's in-process locker steps aside for this bean
    * ({@code @ConditionalOnMissingBean(AggregateLocker.class)}). The locker owns its pool, which

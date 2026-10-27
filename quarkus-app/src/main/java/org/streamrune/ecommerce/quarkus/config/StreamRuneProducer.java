@@ -257,8 +257,12 @@ public class StreamRuneProducer {
    * two backends writing one aggregate would meet in version conflicts, retried and in the end
    * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
    * of the application's pool for its load and its append, so the lock pool has the application
-   * pool's size, ten: as many commands as the application pool serves at once. Each backend opens
-   * both pools, which together stay below PostgreSQL's {@code max_connections}.
+   * pool's size, {@code quarkus.datasource.jdbc.max-size} (twenty, Agroal's default, as the demo
+   * sets none): as many commands as the application pool serves at once. Each backend opens both
+   * pools, which together stay below PostgreSQL's {@code max_connections}. A command waits for its
+   * lock up to {@code streamrune.lock-timeout}, and before that, when every connection of the lock
+   * pool is taken, up to ten seconds for one of them (the pool's connection timeout); either wait
+   * that runs out is a {@code LockException}.
    *
    * <p>The framework's producer of the in-process locker is a {@code @DefaultBean}, which this one
    * replaces. The locker owns its pool, which {@link #closeAggregateLocker} closes with the
@@ -269,8 +273,10 @@ public class StreamRuneProducer {
   public PgAdvisoryLocker aggregateLocker(
       @ConfigProperty(name = "quarkus.datasource.jdbc.url") String url,
       @ConfigProperty(name = "quarkus.datasource.username") String username,
-      @ConfigProperty(name = "quarkus.datasource.password") String password) {
-    return PgAdvisoryLocker.withDedicatedPool(url, username, password, 10);
+      @ConfigProperty(name = "quarkus.datasource.password") String password,
+      @ConfigProperty(name = "quarkus.datasource.jdbc.max-size", defaultValue = "20")
+          int applicationPoolSize) {
+    return PgAdvisoryLocker.withDedicatedPool(url, username, password, applicationPoolSize);
   }
 
   /** Closes the aggregate locker's pool when the application stops. */
