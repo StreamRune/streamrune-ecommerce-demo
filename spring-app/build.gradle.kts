@@ -120,12 +120,13 @@ val publicTextSources =
 // include lines above and this list to the files its walk reads.
 val ignoreLists = files(rootDir.resolve(".gitignore"), rootDir.resolve("frontend/.gitignore"))
 
-// The docs tests (org.streamrune.ecommerce.spring.docs) whose names end in Test need no Docker: they
-// run in `docsTest`, which `check`, the root `quickCheck` and the `Shared module tests` CI job run,
-// with the public text as its input, so an edit to a chapter, a README or a comment re-runs them
-// and not the Testcontainers suite. TutorialChaptersStartIT, which starts each chapter's project on
-// the test PostgreSQL, stays in `test`, whose input the chapters are.
-val docsTests = "org.streamrune.ecommerce.spring.docs.*Test"
+// The docs tests (org.streamrune.ecommerce.spring.docs) whose class names end in Test need no
+// Docker: they run in `docsTest`, which `check`, the root `quickCheck` and the `Shared module tests`
+// CI job run, with the public text as its input, so an edit to a chapter, a README or a comment
+// re-runs them and not the Testcontainers suite. TutorialChaptersStartIT, which starts each
+// chapter's project on the test PostgreSQL, stays in `test`, whose input the chapters are. The
+// split is by class file: a test method whose name ends in Test does not move its class.
+val docsTestClasses = "org/streamrune/ecommerce/spring/docs/*Test.class"
 val testSourceSet = sourceSets["test"]
 val docsTest =
     tasks.register<Test>("docsTest") {
@@ -137,7 +138,7 @@ val docsTest =
         classpath = testSourceSet.runtimeClasspath
         useJUnitPlatform { includeEngines("junit-jupiter") }
         jvmArgs("--enable-preview")
-        filter { includeTestsMatching(docsTests) }
+        include(docsTestClasses)
         inputs.files(publicTextSources)
             .withPathSensitivity(PathSensitivity.RELATIVE)
             .withPropertyName("publicTextSources")
@@ -149,7 +150,7 @@ val docsTest =
 tasks.named<Test>("test") {
     useJUnitPlatform()
     jvmArgs("--enable-preview")
-    filter { excludeTestsMatching(docsTests) }
+    exclude(docsTestClasses)
     inputs.files(fileTree(rootDir.resolve("docs/tutorial")) { include("*.md") })
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("tutorialChapters")
