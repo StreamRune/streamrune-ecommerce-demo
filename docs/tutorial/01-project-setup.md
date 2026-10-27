@@ -216,7 +216,6 @@ spring-boot = "4.1.1"
 spring-dependency-management = "1.1.6"
 jackson = "2.22.4"
 jakarta-validation = "3.0.2"
-jakarta-el = "4.0.2"
 assertj = "3.27.7"
 spotless = "7.1.0"
 # ... (see the full catalog in the real demo for all aliases)
@@ -224,7 +223,6 @@ spotless = "7.1.0"
 [libraries]
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jakarta-validation-api = { module = "jakarta.validation:jakarta.validation-api", version.ref = "jakarta-validation" }
-jakarta-el = { module = "org.glassfish:jakarta.el", version.ref = "jakarta-el" }
 spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "spring-boot" }
 spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux", version.ref = "spring-boot" }
 spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation", version.ref = "spring-boot" }
