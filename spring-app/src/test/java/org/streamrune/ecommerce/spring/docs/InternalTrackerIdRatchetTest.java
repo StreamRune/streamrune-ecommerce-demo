@@ -79,9 +79,9 @@ import org.junit.jupiter.api.Test;
  * <p><b>Why a test.</b> A rule that depends on remembering is not a rule: the labels and the
  * history wording creep back the next time a comment or a chapter is written from a work log.
  *
- * <p>The scanned tree is declared as an input of {@code :spring-app:test} in {@code
- * spring-app/build.gradle.kts}, so Gradle re-runs this test when a file in another module, a
- * chapter or a script changes.
+ * <p>The scanned tree is declared as an input of {@code :spring-app:docsTest}, the task that runs
+ * the docs tests, in {@code spring-app/build.gradle.kts}, so Gradle re-runs this test when a file
+ * in another module, a chapter or a script changes.
  */
 class InternalTrackerIdRatchetTest {
 

@@ -48,10 +48,11 @@ runs its tests, with `--enable-preview`.
 
 | Command | What it runs | Typical wall time |
 |---|---|---|
-| `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck` and the tests of `domain`, `commands`, `queries` and `projections` and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | under 20 seconds |
+| `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck`, the tests of `domain`, `commands`, `queries` and `projections` and the docs tests (`:spring-app:docsTest`, section 5) and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | about 20 seconds when the docs tests run, a few seconds when they are up to date |
 | `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
-| `./gradlew :spring-app:test --tests "org.streamrune.ecommerce.spring.docs.*"` | The tutorial tests (section 5). `TutorialChaptersStartIT` needs Docker; the others do not (`--tests "*docs.Tutorial*Test"`) | about 2 minutes, most of it starting every chapter's project |
+| `./gradlew :spring-app:docsTest` | The tutorial tests and the public-text ratchet (section 5), without Docker; `--tests "*TutorialLedgerTest"` narrows it to one | about 15 seconds |
+| `./gradlew :spring-app:test --tests "*TutorialChaptersStartIT"` | The tutorial test that starts every chapter's project. Needs Docker. | about 2 minutes |
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
 | the same, then `docker compose --profile two-backends up -d --build` | Adds `backend-2`, a second Spring backend on the same database (port 8091), for the two-backend runs of the README and Chapter 17 | |
@@ -78,7 +79,7 @@ In `frontend/`, after `npm ci`:
   ships), and the projections create the read-model tables on first use.
 - **CI.** The required checks of a pull request are `Spring backend integration tests`,
   `Quarkus backend integration tests`, `Micronaut backend integration tests`, `Shared module tests`
-  and `dco`. CI checks out the framework's `main` as the sibling, so a pull request is built against
+  (which also runs `spotlessCheck` and the docs tests) and `dco`. CI checks out the framework's `main` as the sibling, so a pull request is built against
   the framework's current source. The other jobs and workflows run the README's run paths (Docker
   Compose, `bootRun`, the live Playwright suite), the mocked Playwright suite and the native-image
   smoke test.
@@ -162,17 +163,23 @@ In `frontend/`, after `npm ci`:
   give is one the framework registers; `TutorialInterceptorOrderTest` checks every interceptor
   chain the tutorial shows against the framework's order; `TutorialSettingsListingTest` checks that
   chapter 1's `settings.gradle.kts` listings are the demo's own file, apart from the `include(...)`
-  modules the chapter names. The `spring-app` test task re-runs them whenever a chapter, the README
-  or another file the ratchet below reads changes.
+  modules the chapter names. These run in `:spring-app:docsTest`, without Docker (`check`,
+  `quickCheck` and the `Shared module tests` check run it), which re-runs them whenever a chapter, a
+  README or another file the ratchet below reads changes; `TutorialChaptersStartIT` needs Docker and
+  runs in `:spring-app:test`, which re-runs it when a chapter changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.
   `InternalTrackerIdRatchetTest` (same package) holds every source, the READMEs, the tutorial, the
-  scripts and the build files to this, with the framework repository's rules: it rejects tracker,
-  review and audit labels, references to private review material, the words that narrate an
-  earlier behaviour (outside test sources and code samples; its javadoc lists them), a reviewer
-  named by role, work deferred to the project roadmap, and a space before a period, and it reads a
-  phrase across a line break. Its failure names the rule and the line of every offender.
+  scripts, the build files and the files without an extension the repository publishes
+  (`.gitmessage`, the ignore lists, `LICENSE`, `NOTICE`, `CODEOWNERS`, `gradlew`, the Dockerfiles)
+  to this, with the framework repository's rules: it rejects tracker, review and audit labels (a
+  work-item label at the front of a test name or a string id included, in test sources too),
+  references to private review material, the words that narrate an earlier behaviour (outside test
+  sources and code samples; its javadoc lists them), a reviewer named by role, work deferred to the
+  project roadmap, and a space before a period in prose (the comments of a `.java` file and the
+  markdown outside fenced blocks), and it reads a phrase across a line break. Its failure names the
+  rule and the line of every offender.
 
 ## 6. Pitfalls
 

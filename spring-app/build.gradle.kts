@@ -96,8 +96,8 @@ dependencies {
 // The docs tests read the tutorial, the README and the settings file chapter 1 lists, and
 // InternalTrackerIdRatchetTest reads every public text file of the repository (sources, the
 // READMEs, the tutorial, scripts, build files): a change to any of them re-runs them. Mirrors the
-// ratchet's own walk: the same extensions, pruned directories and excluded files. The internal
-// planning directory's name is built from pieces, as in the test.
+// ratchet's own walk: the same extensions, names, pruned directories and excluded files. The
+// internal planning directory's name is built from pieces, as in the test.
 val planningDirectory = "super" + "powers"
 val publicTextSources =
     fileTree(rootDir) {
@@ -115,10 +115,36 @@ val publicTextSources =
         exclude("frontend/next-env.d.ts")
     }
 
+// The docs tests (org.streamrune.ecommerce.spring.docs) whose names end in Test need no Docker: they
+// run in `docsTest`, which `check`, the root `quickCheck` and the `Shared module tests` CI job run,
+// with the public text as its input, so an edit to a chapter, a README or a comment re-runs them
+// and not the Testcontainers suite. TutorialChaptersStartIT, which starts each chapter's project on
+// the test PostgreSQL, stays in `test`, whose input the chapters are.
+val docsTests = "org.streamrune.ecommerce.spring.docs.*Test"
+val testSourceSet = sourceSets["test"]
+val docsTest =
+    tasks.register<Test>("docsTest") {
+        group = "verification"
+        description =
+            "Runs the docs tests that need no Docker: the tutorial's listings, steps and ledger, " +
+                "and the public-text ratchet."
+        testClassesDirs = testSourceSet.output.classesDirs
+        classpath = testSourceSet.runtimeClasspath
+        useJUnitPlatform { includeEngines("junit-jupiter") }
+        jvmArgs("--enable-preview")
+        filter { includeTestsMatching(docsTests) }
+        inputs.files(publicTextSources)
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+            .withPropertyName("publicTextSources")
+    }
+
 tasks.named<Test>("test") {
     useJUnitPlatform()
     jvmArgs("--enable-preview")
-    inputs.files(publicTextSources)
+    filter { excludeTestsMatching(docsTests) }
+    inputs.files(fileTree(rootDir.resolve("docs/tutorial")) { include("*.md") })
         .withPathSensitivity(PathSensitivity.RELATIVE)
-        .withPropertyName("publicTextSources")
+        .withPropertyName("tutorialChapters")
 }
+
+tasks.named("check") { dependsOn(docsTest) }

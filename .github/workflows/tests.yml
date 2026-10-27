@@ -70,10 +70,11 @@ jobs:
             id: micronaut-app
             tasks: ':micronaut-app:test'
           # Every module that is not one of the three apps: domain, commands, queries,
-          # projections, notifications-service, and any module added later.
+          # projections, notifications-service, and any module added later; and spring-app's docs
+          # tests (the tutorial tests and the public-text ratchet), which need no Docker.
           - name: Shared module tests
             id: shared-modules
-            tasks: 'test -x :spring-app:test -x :quarkus-app:test -x :micronaut-app:test'
+            tasks: 'test :spring-app:docsTest -x :spring-app:test -x :quarkus-app:test -x :micronaut-app:test'
 
     steps:
       - uses: actions/checkout@v7
