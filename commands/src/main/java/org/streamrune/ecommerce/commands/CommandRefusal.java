@@ -89,10 +89,11 @@ public record CommandRefusal(Reason reason, String message, String commandId) {
   public static final int RETRY_AFTER_SECONDS = 5;
 
   /**
-   * How long a client waits before it sends a command queued for replay again, in seconds: the
-   * retry runner looks for due entries once a minute ({@code app.dead-letter.poll-interval}), so
-   * the replay comes no sooner, and waiting for it applies the command as a send under the same key
-   * does.
+   * How long a client waits before it sends a command queued for replay again, in seconds. The
+   * retry runner polls for due entries once a minute ({@code app.dead-letter.poll-interval}) and an
+   * entry is due after the policy's initial delay, so a send before then finds the entry still
+   * queued and gains nothing; waiting for the replay applies the command as a send under the same
+   * key does.
    */
   public static final int QUEUED_RETRY_AFTER_SECONDS = 60;
 
