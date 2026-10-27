@@ -145,7 +145,10 @@ In `frontend/`, after `npm ci`:
   as the compile test does (with `-parameters`, as the reader's Spring Boot build does) and starts
   `SpringEcommerceApplication` in a JVM of its own against a database of its own on the test
   PostgreSQL, so a bean nothing declares, two beans of one injected type or a builder that refuses
-  its configuration fails the chapter, with Spring's report. The reader's `application.yml` is
+  its configuration fails the chapter, with Spring's report. A project that starts runs on for one
+  polling interval and is asked for its health once: a health that is not `UP`, or a line at
+  `ERROR` in its log by then, fails the chapter too, so a subscription or a runner whose thread
+  dies after the start is found. The reader's `application.yml` is
   chapter 1's listing with every later `yaml` block merged into it whose introducing line names
   `spring-app/src/main/resources/application.yml`: a chapter that adds configuration names the
   file there, and after the last chapter the merged file must be the repository's, key for key.
@@ -160,20 +163,22 @@ In `frontend/`, after `npm ci`:
   services left out; every Compose or Dockerfile block is one of them);
   `TutorialCatalogListingTest` checks chapter 1's excerpt of `gradle/libs.versions.toml` against
   the catalog, and `VersionCatalogAliasesTest` that every alias and version of the catalog is used
-  by a build file of the demo or a build listing of the tutorial (the Flyway pair is kept on
-  purpose); `TutorialMetricNamesTest` checks that every meter name the tutorial and the README
-  give is one the framework registers; `TutorialInterceptorOrderTest` checks every interceptor
-  chain the tutorial shows against the framework's order; `TutorialSettingsListingTest` checks that
-  chapter 1's `settings.gradle.kts` listings are the demo's own file, apart from the `include(...)`
-  modules the chapter names. These run in `:spring-app:docsTest`, without Docker (`check`,
-  `quickCheck` and the `Shared module tests` check run it), which re-runs them whenever a chapter, a
-  README or another file the ratchet below reads changes; `TutorialChaptersStartIT` needs Docker and
-  runs in `:spring-app:test`, which re-runs it when a chapter changes.
+  by a build file of the demo or a build listing of the tutorial, a `kotlin` or `kts` block (the
+  Flyway pair is kept on purpose); `TutorialMetricNamesTest` checks that every meter name the
+  tutorial and the README give is one the framework registers; `TutorialInterceptorOrderTest`
+  checks every interceptor chain the tutorial shows against the framework's order;
+  `TutorialSettingsListingTest` checks that chapter 1's `settings.gradle.kts` listings are the
+  demo's own file, apart from the `include(...)` modules the chapter names. These run in
+  `:spring-app:docsTest`, without Docker (`check`, `quickCheck` and the `Shared module tests` check
+  run it), which re-runs them whenever a chapter, a README or another file the ratchet below reads
+  changes; `TutorialChaptersStartIT` needs Docker and runs in `:spring-app:test`, which re-runs it
+  when a chapter changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.
   `InternalTrackerIdRatchetTest` (same package) holds every source, the READMEs, the tutorial, the
-  scripts, the build files and the files without an extension the repository publishes
+  scripts, the build files, the frontend's SVG images and the files without an extension the
+  repository publishes
   (`.gitmessage`, the ignore lists, `LICENSE`, `NOTICE`, `CODEOWNERS`, `gradlew`, the Dockerfiles)
   to this, with the framework repository's rules: it rejects tracker, review and audit labels (a
   work-item, audit-round or review-area label at the front of an identifier, a test name or a string
