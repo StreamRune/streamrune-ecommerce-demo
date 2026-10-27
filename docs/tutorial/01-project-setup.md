@@ -216,7 +216,6 @@ spring-boot = "4.1.1"
 spring-dependency-management = "1.1.6"
 jackson = "2.22.4"
 jakarta-validation = "3.0.2"
-jakarta-el = "4.0.2"
 assertj = "3.27.7"
 spotless = "7.1.0"
 # ... (see the full catalog in the real demo for all aliases)
@@ -224,12 +223,6 @@ spotless = "7.1.0"
 [libraries]
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jakarta-validation-api = { module = "jakarta.validation:jakarta.validation-api", version.ref = "jakarta-validation" }
-jakarta-el = { module = "org.glassfish:jakarta.el", version.ref = "jakarta-el" }
-spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "spring-boot" }
-spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux", version.ref = "spring-boot" }
-spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation", version.ref = "spring-boot" }
-spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc", version.ref = "spring-boot" }
-spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator", version.ref = "spring-boot" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "spring-boot" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 
@@ -506,7 +499,7 @@ dependencies {
     // NoClassDefFoundError (io/opentelemetry/api/OpenTelemetry) — even though your own code never
     // touches them directly.
     implementation(libs.opentelemetry.api)
-    implementation(libs.spring.security.core)
+    implementation("org.springframework.security:spring-security-core")
 
     // Spring Boot starters
     implementation("org.springframework.boot:spring-boot-starter-web")
@@ -523,7 +516,7 @@ dependencies {
 
 > `spring-boot-starter-webflux` is added now because Chapter 15 (Server-Sent Events) streams `Flux<ServerSentEvent<String>>` from the reactive stack (Spring WebFlux and Reactor). Adding it here prevents a compilation failure when you reach that chapter.
 >
-> `opentelemetry-api` and `spring-security-core` are runtime requirements of StreamRune's Spring auto-configuration, not of your code. The `gradle/libs.versions.toml` catalog you copied from the real demo already defines both aliases (`opentelemetry` and `spring-security` versions). Omitting them compiles fine but fails at startup.
+> `opentelemetry-api` and `spring-security-core` are runtime requirements of StreamRune's Spring auto-configuration, not of your code. The `gradle/libs.versions.toml` catalog you copied from the real demo defines the `opentelemetry-api` alias, and Spring Boot's dependency management gives `spring-security-core` the version of Spring Security it manages, as it does for the starters. Omitting them compiles fine but fails at startup.
 
 ### Step 5 — Start PostgreSQL
 

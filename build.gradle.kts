@@ -61,10 +61,11 @@ subprojects {
 
 // ── quickCheck — the fast lane ───────────────────────────────────────────────────────────────
 //
-// Compiles the main and test sources of every module, runs spotlessCheck and the tests of the shared
-// modules whose tests need no Docker and, when frontend/node_modules exists, type-checks and lints
-// the frontend. The suites of the three apps and the notifications service start Testcontainers and
-// are left to `build`. A green quickCheck is a fast signal, not a substitute for `./gradlew build`.
+// Compiles the main and test sources of every module, runs spotlessCheck, the tests of the shared
+// modules whose tests need no Docker and spring-app's docsTest (the tutorial tests and the
+// public-text ratchet) and, when frontend/node_modules exists, type-checks and lints the frontend.
+// The suites of the three apps and the notifications service start Testcontainers and are left to
+// `build`. A green quickCheck is a fast signal, not a substitute for `./gradlew build`.
 val dockerFreeModules = listOf(":domain", ":commands", ":queries", ":projections")
 val frontendDir = file("frontend")
 val frontendDependencies = file("frontend/node_modules")
@@ -101,13 +102,15 @@ val frontendChecks =
 tasks.register("quickCheck") {
     group = "verification"
     description =
-        "Compiles every module, runs spotlessCheck and the tests of domain, commands, queries and " +
-            "projections, and type-checks and lints the frontend when frontend/node_modules exists."
+        "Compiles every module, runs spotlessCheck, the tests of domain, commands, queries and " +
+            "projections and the docs tests, and type-checks and lints the frontend when " +
+            "frontend/node_modules exists."
     dependsOn(
         subprojects.map { "${it.path}:compileJava" },
         subprojects.map { "${it.path}:compileTestJava" })
     dependsOn(subprojects.map { "${it.path}:spotlessCheck" })
     dependsOn(dockerFreeModules.map { "$it:test" })
+    dependsOn(":spring-app:docsTest")
     dependsOn(frontendChecks)
     val installed = frontendDependencies
     doLast {

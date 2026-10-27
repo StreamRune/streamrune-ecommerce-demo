@@ -16,7 +16,7 @@ framework, and each application adds only the HTTP transport and the wiring.
 | `commands/` | The deciders: domain logic without I/O | no |
 | `queries/` | The read-model views and the owner-or-admin access rule | no |
 | `projections/` | The projections that build the views, and the reads as one caller may see them | no |
-| `spring-app/` | The Spring Boot application, port 8080 | yes |
+| `spring-app/` | The Spring Boot application, port 8080 | yes (the docs tests, `docsTest`, do not) |
 | `micronaut-app/` | The Micronaut application, port 8081 | yes |
 | `quarkus-app/` | The Quarkus application, port 8082 | yes |
 | `notifications-service/` | A Spring Boot service that consumes the integration events the outbox publishes to RabbitMQ, port 8090 | yes |
@@ -48,10 +48,11 @@ runs its tests, with `--enable-preview`.
 
 | Command | What it runs | Typical wall time |
 |---|---|---|
-| `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck` and the tests of `domain`, `commands`, `queries` and `projections` and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | under 20 seconds |
+| `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck`, the tests of `domain`, `commands`, `queries` and `projections` and the docs tests (`:spring-app:docsTest`, section 5) and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | about 20 seconds when the docs tests run, a few seconds when they are up to date |
 | `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
-| `./gradlew :spring-app:test --tests "org.streamrune.ecommerce.spring.docs.*"` | The tutorial tests (section 5). `TutorialChaptersStartIT` needs Docker; the others do not (`--tests "*docs.Tutorial*Test"`) | about 2 minutes, most of it starting every chapter's project |
+| `./gradlew :spring-app:docsTest` | The tutorial tests, the catalog test and the public-text ratchet (section 5), without Docker; `--tests "*TutorialLedgerTest"` narrows it to one | about 15 seconds |
+| `./gradlew :spring-app:test --tests "*TutorialChaptersStartIT"` | The tutorial test that starts every chapter's project. Needs Docker. | about 2 minutes |
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
 | the same, then `docker compose --profile two-backends up -d --build` | Adds `backend-2`, a second Spring backend on the same database (port 8091), for the two-backend runs of the README and Chapter 17 | |
@@ -78,10 +79,10 @@ In `frontend/`, after `npm ci`:
   ships), and the projections create the read-model tables on first use.
 - **CI.** The required checks of a pull request are `Spring backend integration tests`,
   `Quarkus backend integration tests`, `Micronaut backend integration tests`, `Shared module tests`
-  and `dco`. CI checks out the framework's `main` as the sibling, so a pull request is built against
-  the framework's current source. The other jobs and workflows run the README's run paths (Docker
-  Compose, `bootRun`, the live Playwright suite), the mocked Playwright suite and the native-image
-  smoke test.
+  (which also runs `spotlessCheck` and the docs tests) and `dco`. CI checks out the framework's
+  `main` as the sibling, so a pull request is built against the framework's current source. The
+  other jobs and workflows run the README's run paths (Docker Compose, `bootRun`, the live
+  Playwright suite), the mocked Playwright suite and the native-image smoke test.
 
 ## 3. Conventions
 
@@ -158,21 +159,31 @@ In `frontend/`, after `npm ci`:
   against the repository's files (an earlier Compose listing is the file with the later chapters'
   services left out; every Compose or Dockerfile block is one of them);
   `TutorialCatalogListingTest` checks chapter 1's excerpt of `gradle/libs.versions.toml` against
-  the catalog; `TutorialMetricNamesTest` checks that every meter name the tutorial and the README
+  the catalog, and `VersionCatalogAliasesTest` that every alias and version of the catalog is used
+  by a build file of the demo or a build listing of the tutorial (the Flyway pair is kept on
+  purpose); `TutorialMetricNamesTest` checks that every meter name the tutorial and the README
   give is one the framework registers; `TutorialInterceptorOrderTest` checks every interceptor
   chain the tutorial shows against the framework's order; `TutorialSettingsListingTest` checks that
   chapter 1's `settings.gradle.kts` listings are the demo's own file, apart from the `include(...)`
-  modules the chapter names. The `spring-app` test task re-runs them whenever a chapter, the README
-  or another file the ratchet below reads changes.
+  modules the chapter names. These run in `:spring-app:docsTest`, without Docker (`check`,
+  `quickCheck` and the `Shared module tests` check run it), which re-runs them whenever a chapter, a
+  README or another file the ratchet below reads changes; `TutorialChaptersStartIT` needs Docker and
+  runs in `:spring-app:test`, which re-runs it when a chapter changes.
 - **Public text.** Code, comments, the tutorial, the READMEs, commit messages and pull request
   descriptions are published. Write in the present tense: say what the code does and why, not how it
   came to be. No labels from issue trackers, reviews or private notes, and no space before a period.
   `InternalTrackerIdRatchetTest` (same package) holds every source, the READMEs, the tutorial, the
-  scripts and the build files to this, with the framework repository's rules: it rejects tracker,
-  review and audit labels, references to private review material, the words that narrate an
-  earlier behaviour (outside test sources and code samples; its javadoc lists them), a reviewer
-  named by role, work deferred to the project roadmap, and a space before a period, and it reads a
-  phrase across a line break. Its failure names the rule and the line of every offender.
+  scripts, the build files and the files without an extension the repository publishes
+  (`.gitmessage`, the ignore lists, `LICENSE`, `NOTICE`, `CODEOWNERS`, `gradlew`, the Dockerfiles)
+  to this, with the framework repository's rules: it rejects tracker, review and audit labels (a
+  work-item, audit-round or review-area label at the front of an identifier, a test name or a string
+  id included, in either letter case and in test sources too, or glued inside a camel-case name),
+  references to private review material, the words that narrate an earlier behaviour (outside
+  test sources and code samples; its javadoc lists them), a reviewer named by role, work deferred
+  to the project roadmap, and a space
+  before a period in prose (the comments of a `.java` file and the markdown outside fenced blocks),
+  and it reads a phrase across a line break. Its failure names the rule and the line of every
+  offender.
 
 ## 6. Pitfalls
 
@@ -184,6 +195,11 @@ In `frontend/`, after `npm ci`:
   that a failure.
 - **`--enable-preview`.** A test or main class started from an IDE needs `--enable-preview` on its
   JVM as well.
+- **`InternalTrackerIdRatchetTest` fails outside Gradle by design.** One of its tests compares the
+  files it reads with the files Gradle declares as the inputs of `docsTest`, a list the task hands
+  over (`-Dstreamrune.publictext.declared-sources`): Gradle's default excludes leave a `.gitignore`
+  out of every file tree, so the build declares the repository's two on their own. Run it with
+  `./gradlew :spring-app:docsTest`, not from an IDE.
 - **Quarkus scopes.** The Quarkus application produces its projections as `@Singleton` beans. A
   normal-scoped or intercepted `BaseProjection` subclass also needs
   `quarkus.arc.transform-unproxyable-classes=true` (the Quarkus default), because
