@@ -515,11 +515,18 @@ class Driver:
             self.schedule(random.uniform(0.2, 5), lambda: self.send(
                 "create_product", "POST", "/api/products", admin_headers(), body, key, pid, resend=True))
         if 200 <= status < 300:
-            qty = initial or random.randint(2000, 5000)
-            self.receive(pid, qty)
+            # Orders go only to a product whose first stock arrived: a product left without it
+            # would compensate healthy orders for a reason of the driver's making.
+            self.first_receipt(pid, initial or random.randint(2000, 5000), str(uuid.uuid4()), 0)
+
+    def first_receipt(self, pid, qty, key, attempt):
+        status, _ = self.send("receive_shipment", "POST", f"/api/inventory/{pid}/receive",
+                              admin_headers(), {"quantity": qty}, key, pid, resend=attempt > 0)
+        if 200 <= status < 300:
             self.schedule(0.5, lambda: self.await_visible(
-                f"/api/products/{pid}", admin_headers(),
-                lambda: self._add("products", pid)))
+                f"/api/products/{pid}", admin_headers(), lambda: self._add("products", pid)))
+        elif attempt < 20:  # the same key again: the bus applies the receipt once
+            self.schedule(3, lambda: self.first_receipt(pid, qty, key, attempt + 1))
 
     def _add(self, attr, value):
         with self.lock:
@@ -1512,7 +1519,7 @@ def check(run, stop_apps=None):
     # (an outage fills the outbox and the pools on purpose).
     load_start = meta.get("load_start", meta["started"])
     warm_up = load_start + min(600, 0.2 * load_s)
-    quiet = windows(chaos, 30, 180) + lifecycle_windows(run)
+    quiet = windows([c for c in chaos if c["kind"] != "payment-decline"], 30, 180) + lifecycle_windows(run)
     metrics = [m for m in read_jsonl(run.dir / "metrics.jsonl")
                if m.get("phase") == "load" and warm_up <= m["t"] <= meta.get("load_end", now())
                and not in_window(m["t"], quiet)]

@@ -84,7 +84,7 @@ the connection (it is down) passes the command to the next one, as a load balanc
 | 6 % | `PUT /api/products/{id}/stock` as an `ADMIN` | keyed |
 | 4 % | `PUT /api/customers/{id}` | |
 | 3 % | `PUT /api/products/{id}/price` | |
-| 2 % | `POST /api/products`, then a keyed receipt of its first stock | |
+| 2 % | `POST /api/products`, then a keyed receipt of its first stock | the receipt is sent again under its key until it is applied; orders use the product only then |
 
 Every command carries an `Idempotency-Key` (a new UUID per operation). One in seven keyed commands is
 sent a second time with the same key and body, 0.05 to 5 seconds later, and one in twenty
@@ -152,7 +152,7 @@ every subscription is at the head of the event store, the outbox holds nothing p
     data after GC, resident memory, threads, the active and pending connections of both pools, the
     outbox and dead-letter gauges, and PostgreSQL's connections. A series whose every third is more
     than 20 % above the one before, with the last third's minimum above the first third's maximum,
-    fails the check (per backend process, so a restart starts a new series).
+    fails the check (per backend process, so a restart starts a new series). The samples of the first ten minutes and those within three minutes of a failure other than a decline window are left out.
 12. **Every `ERROR` line inside a failure window.** An `ERROR` line of a backend's log during a
     failure, or within two minutes after it or after a restart, is expected; any other fails the
     check, and the summary groups them by message.
