@@ -10,7 +10,7 @@ quarkus = "3.40.1"
 micronaut = "5.2.19"
 micronaut-serde = "3.2.4"
 micronaut-test = "5.2.0"
-micronaut-application = "4.2.1"
+micronaut-application = "5.0.2"
 micronaut-sql = "7.2.0"
 # The Micronaut Micrometer module for core 5.2 (the version the micronaut-platform 5.2 BOM pairs with
 # the serde, sql and test versions above).
