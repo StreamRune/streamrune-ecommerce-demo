@@ -165,8 +165,10 @@ every subscription is at the head of the event store, the outbox holds nothing p
     the old generation yet) counts as no reading. Each backend process is judged on its own
     samples, and each backend also on the samples of all its processes ordered by their age, so a
     leak stays visible when the failures restart every process before it has eight samples. A
-    series with fewer than eight samples is not judged; when none has eight, as in a smoke run, the
-    check reports that it judged nothing instead of passing.
+    series with fewer than eight samples is not judged, nor a PostgreSQL or store series whose
+    samples span less than twenty minutes. A smoke run (shorter than 30 minutes, with or without
+    failures) judges no trend at all, and the check then reports that it judged nothing instead of
+    passing, as it does when no series is long enough.
 12. **Every `ERROR` line inside a failure window.** An `ERROR` line of a backend's log during a
     failure, or within two minutes after it or after a restart, is expected; any other fails the
     check, and the summary groups them by message.

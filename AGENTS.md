@@ -49,7 +49,7 @@ runs its tests, with `--enable-preview`.
 | Command | What it runs | Typical wall time |
 |---|---|---|
 | `./gradlew quickCheck` | Compiles every module, runs `spotlessCheck`, the tests of `domain`, `commands`, `queries` and `projections`, the docs tests (`:spring-app:docsTest`, section 5) and the soak harness's tests (`soakHarnessTest`, needs `python3`) and, when `frontend/node_modules` exists, `npm run typecheck` and `npm run lint` in `frontend/` | about 20 seconds when the docs tests run, a few seconds when they are up to date |
-| `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, and `spotlessCheck`. Needs Docker. | about 6 minutes; the Spring application's suite is the longest |
+| `./gradlew build` | Every module's tests, the Testcontainers suites of the three applications and the notifications service included, the soak harness's tests (`soakHarnessTest`) and `spotlessCheck`. Needs Docker and `python3` (3.10 or later). | about 6 minutes; the Spring application's suite is the longest |
 | `./gradlew :spring-app:test` | One application's suite (likewise `:quarkus-app:test`, `:micronaut-app:test`). Needs Docker. | |
 | `./gradlew :spring-app:docsTest` | The tutorial tests, the catalog test and the public-text ratchet (section 5), without Docker; `--tests "*TutorialLedgerTest"` narrows it to one | about 15 seconds |
 | `./gradlew :spring-app:test --tests "*TutorialChaptersStartIT"` | The tutorial test that starts every chapter's project. Needs Docker. | about 2 minutes |

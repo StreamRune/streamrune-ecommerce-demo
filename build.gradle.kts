@@ -112,6 +112,8 @@ val soakHarnessTest =
         description = "Runs the soak harness's unit tests (python3 -m unittest in scripts/soak)."
         workingDir = file("scripts/soak")
         commandLine(python, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py")
+        // No __pycache__ next to the sources (the directory is ignored besides).
+        environment("PYTHONDONTWRITEBYTECODE", "1")
         val command = python
         doFirst {
             val onPath =

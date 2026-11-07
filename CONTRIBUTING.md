@@ -29,5 +29,9 @@ The demo builds against the framework in a sibling directory when it exists:
     git clone https://github.com/StreamRune/streamrune.git ../streamrune
     ./gradlew build
 
+The build needs a JDK 25, Docker (the applications' suites start PostgreSQL and RabbitMQ in
+containers) and Python 3.10 or later as `python3` (the unit tests of the soak harness in
+`scripts/soak`).
+
 The tutorial in `docs/tutorial/` follows the code: when you change code a chapter shows, update
 the chapter in the same pull request.

@@ -37,6 +37,7 @@ All domain logic is framework-agnostic. The three application modules (Spring Bo
 - Java 25 (with `--enable-preview`)
 - Docker (for PostgreSQL, RabbitMQ and the full-stack demo). The demo runs PostgreSQL 17 — the oldest version StreamRune supports (it requires 17 or newer and refuses an older server at startup)
 - GraalVM CE 25.0.1 (for native builds only)
+- Python 3.10 or later as `python3` on the `PATH` (`./gradlew test`, `build` and `quickCheck` run the soak harness's unit tests with it; the soak test itself, [docs/soak.md](docs/soak.md), needs it too)
 
 ## Quick Start (Docker Compose)
 

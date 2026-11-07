@@ -15,10 +15,11 @@ TESTDATA = Path(__file__).resolve().parent / "testdata"
 
 def judge_recorded(name):
     """resource_trends over a recorded run, as invariant 11 calls it: no failure windows (the
-    recorded runs had none), the load's first ten minutes left out."""
+    recorded runs have none) and the load's warm-up, min(600 s, a fifth of the load), left out."""
     run = json.loads((TESTDATA / name).read_text())
     starts = {(s["app"], s["generation"]): s["t"] for s in run["starts"]}
-    return soak.resource_trends(run["metrics"], starts, [], 600, run["load_seconds"])
+    warm_up = min(600, 0.2 * run["load_seconds"])
+    return soak.resource_trends(run["metrics"], starts, [], warm_up, run["load_seconds"])
 
 
 def synthetic_run(live_mb_at_age, restart_every, minutes=120):
@@ -46,6 +47,23 @@ def synthetic_run(live_mb_at_age, restart_every, minutes=120):
     return soak.resource_trends(metrics, starts, [], 600, minutes * 60.0)
 
 
+def smoke_shaped_run():
+    """A five-minute run without failures as a smoke run samples it, every 15 seconds: the backends
+    start a minute before the load, and everything rises, the open sagas from 10 to 250."""
+    starts = {(app, 1): -60.0 for app in ("spring-1", "spring-2", "quarkus")}
+    metrics = []
+    for i in range(21):
+        t = i * 15.0
+        apps = [{"app": app, "generation": 1, "gc_live_mb": 30.0 + 2 * i, "rss_mb": 300.0 + 10 * i,
+                 "threads": 40.0 + i, "outbox_pending": 5.0 * i, "dlq_pending": 0.0, "saga_faulted": 0.0}
+                for app in ("spring-1", "spring-2", "quarkus")]
+        metrics.append({"t": t, "phase": "load", "apps": apps,
+                        "db": {"connections": 60 + 2 * i, "idle_in_tx": i},
+                        "store": {"outbox_open": 20 * i, "dlq": i, "sagas_open": 10 + 12 * i}})
+    # check() leaves out min(600 s, a fifth of the load): 60 s of a five-minute load.
+    return soak.resource_trends(metrics, starts, [], 60, 300)
+
+
 class ResourceTrendTest(unittest.TestCase):
     def test_flags_the_quarkus_live_data_that_grows_through_a_run_without_failures(self):
         judged, grow, lines = judge_recorded("leaking-quarkus.json")
@@ -68,6 +86,30 @@ class ResourceTrendTest(unittest.TestCase):
         judged, grow, lines = synthetic_run(lambda age: 35.0 + (age % 3), restart_every=12)
         self.assertGreater(judged, 0)
         self.assertEqual([], grow, "\n".join(lines))
+
+    def test_judges_no_series_of_a_smoke_shaped_run(self):
+        judged, grow, lines = smoke_shaped_run()
+        self.assertEqual(0, judged, "\n".join(lines))
+        self.assertEqual([], grow)
+
+    def test_a_smoke_run_reports_the_trend_as_not_judged_whatever_its_series(self):
+        ok, summary, _ = soak.trend_verdict({"smoke": True}, 5, ["store sagas_open grows steadily"], [])
+        self.assertIsNone(ok)
+        self.assertIn("smoke run", summary)
+        self.assertIs(False, soak.trend_verdict({"smoke": False}, 5, ["x grows"], [])[0])
+        self.assertIsNone(soak.trend_verdict({"smoke": False}, 0, [], [])[0])
+
+    def test_a_small_gauge_that_doubles_does_not_grow(self):
+        # From 2 to 4 threads is twice as many, yet below the floor of ten.
+        self.assertIs(False, soak.grows([2.0] * 6 + [4.0] * 6, soak.GROWTH_FLOOR["threads"]))
+        self.assertIs(True, soak.grows([2.0] * 6 + [40.0] * 6, soak.GROWTH_FLOOR["threads"]))
+
+    def test_a_last_quarter_with_one_low_reading_does_not_grow(self):
+        # A G1 collection in the last quarter brings the live data back to its first level once:
+        # the median rises, the floor does not.
+        series = [100.0] * 12 + [300.0, 300.0, 100.0, 300.0]
+        self.assertIs(False, soak.grows(series, soak.GROWTH_FLOOR["gc_live_mb"]))
+        self.assertIs(True, soak.grows([100.0] * 12 + [300.0] * 4, soak.GROWTH_FLOOR["gc_live_mb"]))
 
     def test_does_not_judge_a_series_shorter_than_the_minimum(self):
         self.assertIsNone(soak.grows([1, 2, 3, 400, 500, 600, 700], 1))

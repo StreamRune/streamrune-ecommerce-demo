@@ -1272,6 +1272,10 @@ GROWTH_FLOOR = {"gc_live_mb": 50, "rss_mb": 150, "threads": 10, "outbox_pending"
                 "sagas_open": 200}
 MIN_TREND_SAMPLES = 8
 PROCESS_WARM_UP = 300  # seconds after a backend starts whose samples say nothing about a trend
+# The least time the samples of a PostgreSQL or store series span to be judged. A backend's series
+# starts after the backend's own warm-up; these run from the load's first minutes, and eight samples
+# of a smoke run, one every 15 seconds, span two minutes of a load that is still ramping up.
+MIN_GLOBAL_TREND_SPAN = 1200
 
 
 def spread(values):
@@ -1296,6 +1300,18 @@ def grows(values, floor):
     return m4 > 1.5 * m1 and m4 - m1 >= floor and min(last) > 1.5 * min(first)
 
 
+def trend_verdict(meta, judged, grow, lines):
+    """(ok, summary, details) of the resource-trend invariant. A smoke run (shorter than 30
+    minutes) judges no trend, whatever its series hold: its few minutes of a ramping load say
+    nothing about growth. ok is None when nothing is judged."""
+    if meta.get("smoke"):
+        return None, "not judged: a smoke run does not judge trends", lines
+    if not judged:
+        return (None, f"not judged: no series has {MIN_TREND_SAMPLES} samples outside the warm-up and the "
+                      "failure windows", lines)
+    return not grow, f"{judged} series judged; {len(grow)} growing", grow + lines
+
+
 def resource_trends(metrics, starts, quiet, warm_up_until, load_end):
     """Judges every resource series of a run: (number of series judged, growing ones, lines).
 
@@ -1316,14 +1332,18 @@ def resource_trends(metrics, starts, quiet, warm_up_until, load_end):
                 continue
             per_process[(a["app"], a.get("generation"))].append((m["t"] - start, a))
 
-    def judge(label, values, key):
+    def judge(label, values, key, times=None):
         nonlocal judged
+        if times is not None:
+            read = [t for t, v in zip(times, values) if v is not None]
+            if not read or read[-1] - read[0] < MIN_GLOBAL_TREND_SPAN:
+                values = [None] * len(values)  # too short a span: not judged
         if key == "gc_live_mb":  # 0 until the first collection of the old generation: no reading
             values = [v if v else None for v in values]
         verdict = grows(values, GROWTH_FLOOR[key])
         judged += verdict is not None
         n = sum(1 for v in values if v is not None)
-        state = {None: "too few samples to judge", True: "GROWING", False: "flat"}[verdict]
+        state = {None: "too few samples, or too short a span, to judge", True: "GROWING", False: "flat"}[verdict]
         lines.append(f"{label} {key}: first/middle/last {spread(values)} over {n} samples, {state}")
         if verdict:
             grow.append(f"{label} {key} grows steadily: first/middle/last {spread(values)}")
@@ -1343,7 +1363,8 @@ def resource_trends(metrics, starts, quiet, warm_up_until, load_end):
                 judge(f"{app} (its {len(lifetimes)} processes by age)", [a.get(key) for _, a in by_age], key)
     for group, keys2 in (("db", ("connections", "idle_in_tx")), ("store", ("outbox_open", "dlq", "sagas_open"))):
         for key in keys2:
-            judge(f"{'postgres' if group == 'db' else 'store'}", [m.get(group, {}).get(key) for m in kept], key)
+            judge(f"{'postgres' if group == 'db' else 'store'}", [m.get(group, {}).get(key) for m in kept], key,
+                  [m["t"] for m in kept])
     return judged, grow, lines
 
 
@@ -1615,13 +1636,7 @@ def check(run, stop_apps=None):
               if e.get("event") == "start"}
     judged, grow, lines = resource_trends(read_jsonl(run.dir / "metrics.jsonl"), starts, quiet, warm_up,
                                           meta.get("load_end", now()))
-    if judged:
-        rep.add("no steady growth of a resource", not grow, f"{judged} series judged; {len(grow)} growing",
-                grow + lines)
-    else:
-        rep.add("no steady growth of a resource", None,
-                f"not judged: no series has {MIN_TREND_SAMPLES} samples outside the warm-up and the failure "
-                "windows (a smoke run does not judge trends)", lines)
+    rep.add("no steady growth of a resource", *trend_verdict(meta, judged, grow, lines))
 
     # 12. Log scan.
     if stop_apps:
