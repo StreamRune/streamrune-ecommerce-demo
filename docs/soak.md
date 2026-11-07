@@ -7,7 +7,11 @@ soak test shows that the behaviours hold together over hours, across three backe
 frameworks on one database, while the database, the broker and the backends fail.
 
 It is not part of CI: a meaningful run takes two hours or more. A five-minute smoke run
-(`--duration 5m`) exercises every part of the harness on a compressed failure schedule.
+(`--duration 5m`) exercises the load, every failure and every invariant but the resource trend on a
+compressed failure schedule; it is too short to judge a trend, and says so. The invariants' logic
+that does not need a running stack has unit tests, `scripts/soak/test_soak.py`, which the root
+project's `test` runs (`./gradlew soakHarnessTest`, or `python3 -m unittest discover -s scripts/soak
+-p 'test_*.py'`).
 
 ## Running it
 
@@ -36,7 +40,7 @@ not start.
 | `--sse-readers` | `3` | Live streams (`GET /api/sse/order/{id}`) held open at a time. |
 | `--drain-timeout` | `10m` | How long the script waits after the load for the system to settle. |
 | `--heap` | `768m` | `-Xmx` of each backend. |
-| `--quarkus-pool-size` | `20` | `quarkus.datasource.jdbc.max-size` of the Quarkus backend; `0` keeps the Quarkus default. |
+| `--quarkus-pool-size` | `0` | `quarkus.datasource.jdbc.max-size` of the Quarkus backend; `0` keeps the app's own setting. |
 | `--no-chaos` | off | Load only, no failures. |
 | `--reuse-db`, `--keep-stack`, `--out` | off | Keep an earlier database, leave the stack running, write the files elsewhere than `build/soak`. |
 
@@ -59,11 +63,10 @@ stand by.
 
 **The connection budget.** PostgreSQL allows 100 connections. A Spring backend opens two pools of
 ten (the application's and the lock's) and a few listener connections. The Quarkus backend sizes
-its lock pool after its application pool, `quarkus.datasource.jdbc.max-size`, and Quarkus' own
-default for that key is 50: one Quarkus backend with its default holds 50 lock connections from
-the start and up to 50 more under load, which together with two Spring backends is more than 100.
-The script therefore starts the Quarkus backend with `QUARKUS_DATASOURCE_JDBC_MAX_SIZE=20`, so the
-three backends hold at most about 90 connections (`--quarkus-pool-size 0` keeps the default).
+its lock pool after its application pool, `quarkus.datasource.jdbc.max-size`, which
+`quarkus-app/src/main/resources/application.properties` sets to twenty (Quarkus' own default, 50,
+would put the three backends above 100), so the three hold at most about 90 connections.
+`--quarkus-pool-size` overrides the app's setting for a run.
 
 The notifications service is not started. The script binds a queue of its own, `soak.audit`, to the
 `streamrune.events` exchange (`integration.#`) before the backends start, reads it every 20 seconds
@@ -99,8 +102,8 @@ compensates. Beside the commands, two readers query orders, products and custome
 and `--sse-readers` threads each hold a live stream of a recent order for a minute at a time.
 
 Every command is recorded in `requests.jsonl`: time, operation, method, path, the backend that
-answered, status, latency, `Idempotency-Key`, entity id, intent, whether it is a re-send, and for
-a refusal its `reason` and `commandId`.
+answered, status, latency, `Idempotency-Key`, the caller's `X-User-Id`, entity id, intent, whether
+it is a re-send, and for a refusal its `reason` and `commandId`.
 
 ## The failure schedule
 
@@ -129,8 +132,9 @@ every subscription is at the head of the event store, the outbox holds nothing p
 2. **Keyed commands applied once per key.** Every key answered with `2xx` is in `command_inbox`,
    a key sent twice is answered the same way, and the number of `ShipmentReceived` and
    `StockAdjusted` events of every product equals the number of its inbox entries.
-3. **Every `503 QUEUED_FOR_REPLAY` applied or awaiting an operator.** Its key is in the inbox, or
-   its entry is still in `dead_letter_queue`.
+3. **Every `503 QUEUED_FOR_REPLAY` applied or awaiting an operator.** Its key, scoped to the
+   caller's `X-User-Id` as the apps store it, is in the inbox, or its entry is still in
+   `dead_letter_queue`.
 4. **No `500` without a dead-letter entry.** Every `500` carries `AWAITING_OPERATOR` and the
    `commandId` of an entry in `dead_letter_queue`.
 5. **Every saga terminal.** Every order-fulfillment saga of the run is `COMPLETED`, `COMPENSATED` or
@@ -150,9 +154,19 @@ every subscription is at the head of the event store, the outbox holds nothing p
     `projection_dead_letters` was written during a failure or within a minute after it.
 11. **No steady growth of a resource.** Every minute the script samples each backend's heap, live
     data after GC, resident memory, threads, the active and pending connections of both pools, the
-    outbox and dead-letter gauges, and PostgreSQL's connections. A series whose every third is more
-    than 20 % above the one before, with the last third's minimum above the first third's maximum,
-    fails the check (per backend process, so a restart starts a new series). The samples of the first ten minutes and those within three minutes of a failure other than a decline window are left out.
+    outbox and dead-letter gauges, and PostgreSQL's connections. The samples of the load's first ten
+    minutes, of a backend's first five, and those within three minutes of a failure other than a
+    decline window are left out. A series grows when its last quarter's median is more than one
+    and a half times its first quarter's, and higher by at least a floor per resource (50 MB of
+    live data, 150 MB of resident memory, ten threads, one dead letter), and its last quarter's
+    minimum is more than one and a half times its first quarter's. Medians and minimums, because
+    the live data after a G1 collection jumps by hundreds of megabytes between two samples, while a
+    floor that keeps rising is what a leak looks like; a live-data reading of 0 (no collection of
+    the old generation yet) counts as no reading. Each backend process is judged on its own
+    samples, and each backend also on the samples of all its processes ordered by their age, so a
+    leak stays visible when the failures restart every process before it has eight samples. A
+    series with fewer than eight samples is not judged; when none has eight, as in a smoke run, the
+    check reports that it judged nothing instead of passing.
 12. **Every `ERROR` line inside a failure window.** An `ERROR` line of a backend's log during a
     failure, or within two minutes after it or after a restart, is expected; any other fails the
     check, and the summary groups them by message.

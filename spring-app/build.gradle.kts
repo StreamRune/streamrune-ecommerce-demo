@@ -102,7 +102,7 @@ val planningDirectory = "super" + "powers"
 val publicTextSources =
     fileTree(rootDir) {
         include("**/*.java", "**/*.md", "**/*.kts", "**/*.gradle", "**/*.toml", "**/*.properties")
-        include("**/*.yml", "**/*.yaml", "**/*.sql", "**/*.sh", "**/*.xml", "**/*.json", "**/*.txt")
+        include("**/*.yml", "**/*.yaml", "**/*.sql", "**/*.sh", "**/*.py", "**/*.xml", "**/*.json", "**/*.txt")
         include("**/*.ts", "**/*.tsx", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.css", "**/*.bat")
         include("**/*.svg")
         include("**/Dockerfile", "**/Dockerfile.*", "**/.gitmessage", "**/.gitignore")

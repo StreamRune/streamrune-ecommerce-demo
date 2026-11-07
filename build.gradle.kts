@@ -62,8 +62,9 @@ subprojects {
 // ── quickCheck — the fast lane ───────────────────────────────────────────────────────────────
 //
 // Compiles the main and test sources of every module, runs spotlessCheck, the tests of the shared
-// modules whose tests need no Docker and spring-app's docsTest (the tutorial tests and the
-// public-text ratchet) and, when frontend/node_modules exists, type-checks and lints the frontend.
+// modules whose tests need no Docker, spring-app's docsTest (the tutorial tests and the public-text
+// ratchet) and the soak harness's tests and, when frontend/node_modules exists, type-checks and
+// lints the frontend.
 // The suites of the three apps and the notifications service start Testcontainers and are left to
 // `build`. A green quickCheck is a fast signal, not a substitute for `./gradlew build`.
 val dockerFreeModules = listOf(":domain", ":commands", ":queries", ":projections")
@@ -99,18 +100,45 @@ val frontendChecks =
         }
     }
 
+// ── soakHarnessTest — the soak harness's own tests ─────────────────────────────────────────────
+//
+// scripts/soak/soak.py is a Python script (docs/soak.md); its invariant logic has unit tests in
+// scripts/soak/test_soak.py that need python3 and no Docker. The root project's `test` runs them,
+// so `test`, `check`, `build` and quickCheck do, and so does the `Shared module tests` check.
+val python = if (System.getProperty("os.name").startsWith("Windows")) "python.exe" else "python3"
+val soakHarnessTest =
+    tasks.register<Exec>("soakHarnessTest") {
+        group = "verification"
+        description = "Runs the soak harness's unit tests (python3 -m unittest in scripts/soak)."
+        workingDir = file("scripts/soak")
+        commandLine(python, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py")
+        val command = python
+        doFirst {
+            val onPath =
+                System.getenv("PATH").orEmpty().split(File.pathSeparator)
+                    .any { File(it, command).canExecute() }
+            if (!onPath) {
+                throw GradleException(
+                    "$command is not on the PATH Gradle runs with; the soak harness's tests need it.")
+            }
+        }
+    }
+
+tasks.named("test") { dependsOn(soakHarnessTest) }
+
 tasks.register("quickCheck") {
     group = "verification"
     description =
         "Compiles every module, runs spotlessCheck, the tests of domain, commands, queries and " +
-            "projections and the docs tests, and type-checks and lints the frontend when " +
-            "frontend/node_modules exists."
+            "projections, the docs tests and the soak harness's tests, and type-checks and lints " +
+            "the frontend when frontend/node_modules exists."
     dependsOn(
         subprojects.map { "${it.path}:compileJava" },
         subprojects.map { "${it.path}:compileTestJava" })
     dependsOn(subprojects.map { "${it.path}:spotlessCheck" })
     dependsOn(dockerFreeModules.map { "$it:test" })
     dependsOn(":spring-app:docsTest")
+    dependsOn(soakHarnessTest)
     dependsOn(frontendChecks)
     val installed = frontendDependencies
     doLast {

@@ -25,6 +25,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import statistics
@@ -217,9 +218,9 @@ class App:
         env = dict(os.environ)
         env["MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS"] = "always"
         if self.kind == "quarkus" and self.args.quarkus_pool_size > 0:
-            # Quarkus' own default (50) for the application pool, and so for the lock pool that
-            # takes its size, opens more connections than PostgreSQL's 100 leave beside two
-            # Spring backends; docs/soak.md explains the budget.
+            # An explicit size for the application pool, and so for the lock pool that takes its
+            # size, in place of the app's own (quarkus-app's application.properties sets twenty);
+            # docs/soak.md explains the connection budget.
             env["QUARKUS_DATASOURCE_JDBC_MAX_SIZE"] = str(self.args.quarkus_pool_size)
         return env
 
@@ -239,7 +240,7 @@ class App:
     def healthy(self):
         try:
             status, body = http_call(self.port, "GET", self.health_path(), timeout=5)
-            return status == 200 and '"UP"' in body.replace(" ", "")
+            return status == 200 and json.loads(body).get("status") == "UP"
         except Exception:
             return False
 
@@ -418,7 +419,7 @@ class Driver:
                 break
         rec = {"t": t0, "ms": round((now() - t0) * 1000, 1), "op": op, "method": method,
                "path": path, "app": app_name, "status": status, "key": key, "id": entity,
-               "intent": intent, "resend": resend}
+               "intent": intent, "resend": resend, "user": hdrs.get("X-User-Id")}
         if len(tried) > 1:
             rec["tried"] = tried
         if status >= 300 or status == 0:
@@ -1073,12 +1074,7 @@ def drain(run, timeout, log):
                      (SELECT count(*) FROM projection_offset WHERE last_offset
                         < (SELECT coalesce(max(global_offset), 0) FROM event_stream)) AS subscriptions_behind,
                      (SELECT count(*) FROM outbox_events WHERE status IN ('PENDING','IN_PROGRESS')) AS outbox_open""")
-            open_keys = 0
-            if queued:
-                inbox = {r["k"] for r in sql_rows("SELECT idempotency_key AS k FROM command_inbox WHERE idempotency_key IN ("
-                                                  + ",".join("'" + ADMIN + "|" + k + "'" for k in queued) + ")")}
-                open_keys = sum(1 for k in queued if f"{ADMIN}|{k}" not in inbox)
-            status["queued_replays_open"] = open_keys
+            status["queued_replays_open"] = len(queued) - len(inbox_keys(queued))
             log.write({"t": now(), "drain": status})
             if not any(status.values()):
                 return True, status
@@ -1088,13 +1084,29 @@ def drain(run, timeout, log):
     return False, status
 
 
+def inbox_key(r):
+    """The key a request's command is stored under in command_inbox: the caller's X-User-Id, the
+    scope of every key the apps take, and the Idempotency-Key the request sent."""
+    return f"{r.get('user') or ADMIN}|{r['key']}"
+
+
 def queued_keys(run):
-    return sorted({r["key"] for r in read_jsonl(run.dir / "requests.jsonl")
+    return sorted({inbox_key(r) for r in read_jsonl(run.dir / "requests.jsonl")
                    if r.get("reason") == "QUEUED_FOR_REPLAY" and r.get("key")})
 
 
+def inbox_keys(keys):
+    """The ones of these inbox keys that command_inbox holds."""
+    found = set()
+    keys = list(keys)
+    for i in range(0, len(keys), 500):
+        chunk = ",".join("'" + k.replace("'", "''") + "'" for k in keys[i:i + 500])
+        found |= {r["k"] for r in sql_rows(f"SELECT idempotency_key AS k FROM command_inbox WHERE idempotency_key IN ({chunk})")}
+    return found
+
+
 def run_soak(args):
-    rid = datetime.datetime.now().strftime("%m%d%H%M")
+    rid = datetime.datetime.now().strftime("%m%d%H%M%S")
     run = Run(Path(args.out) / f"run-{rid}" if args.out else ROOT / "build" / "soak" / f"run-{rid}", rid)
     (run.dir / "logs").mkdir(parents=True, exist_ok=True)
     smoke = args.duration < 1800
@@ -1107,7 +1119,12 @@ def run_soak(args):
         if not (ROOT / jar).exists():
             print(f"✗ {jar} is missing: ./gradlew :spring-app:bootJar :quarkus-app:quarkusBuild", file=sys.stderr)
             return 2
-    for port in (8080, 8091, 8082):
+    if not shutil.which("docker") or subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+        print("✗ docker does not answer; start Docker first", file=sys.stderr)
+        return 2
+    # With --reuse-db a stack of an earlier run may still hold the infrastructure ports.
+    ports = (8080, 8091, 8082) if args.reuse_db else (5432, 5672, 15672, 8080, 8091, 8082)
+    for port in ports:
         with socket.socket() as s:
             if s.connect_ex(("localhost", port)) == 0:
                 print(f"✗ port {port} is taken; stop what listens there first", file=sys.stderr)
@@ -1115,7 +1132,11 @@ def run_soak(args):
 
     events = JsonLog(run.dir / "lifecycle.jsonl")
     print("Starting PostgreSQL and RabbitMQ …")
-    start_infrastructure(fresh=not args.reuse_db)
+    try:
+        start_infrastructure(fresh=not args.reuse_db)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        print(f"✗ PostgreSQL and RabbitMQ did not start: {e}", file=sys.stderr)
+        return 2
     apps = [App("spring-1", "spring", 8080, run.dir, events, args),
             App("spring-2", "spring", 8091, run.dir, events, args),
             App("quarkus", "quarkus", 8082, run.dir, events, args)]
@@ -1244,17 +1265,86 @@ def error_signature(line):
     return sig[:200]
 
 
-def trend(samples, key):
-    """(first, middle, last) and whether the series grows steadily: every third above the one
-    before by more than 20 % and the last third's minimum above the first third's maximum."""
-    vals = [s for s in samples if s is not None]
-    if len(vals) < 9:
-        return vals[:1] + vals[len(vals) // 2:len(vals) // 2 + 1] + vals[-1:], False
-    n = len(vals) // 3
-    a, b, c = vals[:n], vals[n:2 * n], vals[2 * n:]
-    ma, mb, mc = statistics.median(a), statistics.median(b), statistics.median(c)
-    growing = mb > ma * 1.2 and mc > mb * 1.2 and min(c) > max(a)
-    return (vals[0], vals[len(vals) // 2], vals[-1]), growing
+# The least rise, per series, that counts as growth: below it a doubled value is noise (a gauge at
+# 2 that reads 4). Live data after GC in MB, resident memory in MB, the rest in their own units.
+GROWTH_FLOOR = {"gc_live_mb": 50, "rss_mb": 150, "threads": 10, "outbox_pending": 200, "dlq_pending": 1,
+                "saga_faulted": 1, "connections": 10, "idle_in_tx": 5, "outbox_open": 200, "dlq": 1,
+                "sagas_open": 200}
+MIN_TREND_SAMPLES = 8
+PROCESS_WARM_UP = 300  # seconds after a backend starts whose samples say nothing about a trend
+
+
+def spread(values):
+    """(first, middle, last) of a series."""
+    vals = [v for v in values if v is not None]
+    return tuple(vals[:1] + vals[len(vals) // 2:len(vals) // 2 + 1] + vals[-1:]) if vals else ()
+
+
+def grows(values, floor):
+    """Whether a series grows steadily: None when it has fewer than MIN_TREND_SAMPLES values,
+    otherwise whether its last quarter's median is above one and a half times its first quarter's
+    and above it by at least floor, and its last quarter's minimum above one and a half times its
+    first quarter's minimum. Medians and minimums, not maximums: the live data after a G1
+    collection jumps by hundreds of megabytes between two samples, so a maximum of the first
+    quarter says nothing, while a floor that keeps rising is what a leak looks like."""
+    vals = [v for v in values if v is not None]
+    if len(vals) < MIN_TREND_SAMPLES:
+        return None
+    q = len(vals) // 4
+    first, last = vals[:q], vals[-q:]
+    m1, m4 = statistics.median(first), statistics.median(last)
+    return m4 > 1.5 * m1 and m4 - m1 >= floor and min(last) > 1.5 * min(first)
+
+
+def resource_trends(metrics, starts, quiet, warm_up_until, load_end):
+    """Judges every resource series of a run: (number of series judged, growing ones, lines).
+
+    metrics are the samples of metrics.jsonl; starts maps (backend, generation) to the time that
+    process started; quiet holds the failure windows whose samples are left out. Each backend
+    process is judged on its own samples, and each backend also on the samples of all its
+    processes ordered by their age, so that a leak whose processes are restarted before one of
+    them collects enough samples still shows: its old processes hold more than its young ones."""
+    kept = [m for m in metrics
+            if m.get("phase") == "load" and warm_up_until <= m["t"] <= load_end and not in_window(m["t"], quiet)]
+    keys = ("gc_live_mb", "rss_mb", "threads", "outbox_pending", "dlq_pending", "saga_faulted")
+    judged, grow, lines = 0, [], []
+    per_process = collections.defaultdict(list)
+    for m in kept:
+        for a in m.get("apps", []):
+            start = starts.get((a["app"], a.get("generation")))
+            if "error" in a or start is None or m["t"] - start < PROCESS_WARM_UP:
+                continue
+            per_process[(a["app"], a.get("generation"))].append((m["t"] - start, a))
+
+    def judge(label, values, key):
+        nonlocal judged
+        if key == "gc_live_mb":  # 0 until the first collection of the old generation: no reading
+            values = [v if v else None for v in values]
+        verdict = grows(values, GROWTH_FLOOR[key])
+        judged += verdict is not None
+        n = sum(1 for v in values if v is not None)
+        state = {None: "too few samples to judge", True: "GROWING", False: "flat"}[verdict]
+        lines.append(f"{label} {key}: first/middle/last {spread(values)} over {n} samples, {state}")
+        if verdict:
+            grow.append(f"{label} {key} grows steadily: first/middle/last {spread(values)}")
+
+    for (app, gen), samples in sorted(per_process.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
+        for key in keys:
+            if any(a.get(key) is not None for _, a in samples):
+                judge(f"{app}#{gen}", [a.get(key) for _, a in samples], key)
+    for app in sorted({app for app, _ in per_process}):
+        lifetimes = [g for (a, g) in per_process if a == app]
+        if len(lifetimes) < 2:
+            continue
+        by_age = sorted(((age, a) for (a2, g) in per_process if a2 == app for age, a in per_process[(a2, g)]),
+                        key=lambda x: x[0])
+        for key in keys:
+            if any(a.get(key) is not None for _, a in by_age):
+                judge(f"{app} (its {len(lifetimes)} processes by age)", [a.get(key) for _, a in by_age], key)
+    for group, keys2 in (("db", ("connections", "idle_in_tx")), ("store", ("outbox_open", "dlq", "sagas_open"))):
+        for key in keys2:
+            judge(f"{'postgres' if group == 'db' else 'store'}", [m.get(group, {}).get(key) for m in kept], key)
+    return judged, grow, lines
 
 
 def check(run, stop_apps=None):
@@ -1354,10 +1444,11 @@ def check(run, stop_apps=None):
         SELECT command_id, command_type, aggregate_id, error_type, left(error_message, 200) AS error_message,
                dlq_attempts, idempotency_key, extract(epoch FROM published_at) AS published,
                extract(epoch FROM first_attempt_at) AS first_attempt FROM dead_letter_queue""")}
-    queued = [r for r in cmds if r.get("reason") == "QUEUED_FOR_REPLAY"]
+    queued = [r for r in cmds if r.get("reason") == "QUEUED_FOR_REPLAY" and r.get("key")]
+    applied = inbox_keys({inbox_key(r) for r in queued})
     bad, awaiting = [], []
     for r in queued:
-        if r.get("key") in inbox:
+        if inbox_key(r) in applied:
             continue
         if r.get("commandId") in dlq:
             awaiting.append(f"{r['op']} {r['id']} key {r['key']}: still in the dead-letter queue")
@@ -1516,41 +1607,21 @@ def check(run, stop_apps=None):
             f"{len(dlq)} command dead letters, {len(other)} saga/projection dead letters; explained {dict(expl)}", bad)
 
     # 11. Resource trend: the samples of the load after its warm-up, outside every failure window
-    # (an outage fills the outbox and the pools on purpose).
+    # (an outage fills the outbox and the pools on purpose), per backend process and per backend.
     load_start = meta.get("load_start", meta["started"])
     warm_up = load_start + min(600, 0.2 * load_s)
     quiet = windows([c for c in chaos if c["kind"] != "payment-decline"], 30, 180) + lifecycle_windows(run)
-    metrics = [m for m in read_jsonl(run.dir / "metrics.jsonl")
-               if m.get("phase") == "load" and warm_up <= m["t"] <= meta.get("load_end", now())
-               and not in_window(m["t"], quiet)]
-    lines, grow = [], []
-    per_app = collections.defaultdict(list)
-    for m in metrics:
-        for a in m.get("apps", []):
-            per_app[(a["app"], a.get("generation"))].append(a)
-    for (app, gen), samples in sorted(per_app.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
-        if len(samples) < 3:
-            continue
-        for key in ("gc_live_mb", "heap_used_mb", "rss_mb", "threads", "app_pool_active", "lock_pool_active",
-                    "lock_pool_pending", "outbox_pending", "dlq_pending", "saga_faulted"):
-            series = [s.get(key) for s in samples]
-            if all(v is None for v in series):
-                continue
-            (vals, growing) = trend(series, key)
-            lines.append(f"{app}#{gen} {key}: start/mid/end {vals} over {len(samples)} samples" + (" GROWING" if growing else ""))
-            if growing and key in ("gc_live_mb", "threads", "rss_mb", "outbox_pending", "dlq_pending", "saga_faulted"):
-                grow.append(f"{app}#{gen} {key} grows steadily: {vals}")
-    for key in ("connections", "idle_in_tx"):
-        (vals, growing) = trend([m.get("db", {}).get(key) for m in metrics], key)
-        lines.append(f"postgres {key}: start/mid/end {vals}" + (" GROWING" if growing else ""))
-        if growing:
-            grow.append(f"postgres {key} grows steadily: {vals}")
-    for key in ("outbox_open", "dlq", "sagas_open"):
-        (vals, growing) = trend([m.get("store", {}).get(key) for m in metrics], key)
-        lines.append(f"store {key}: start/mid/end {vals}" + (" GROWING" if growing else ""))
-        if growing:
-            grow.append(f"store {key} grows steadily: {vals}")
-    rep.add("no steady growth of a resource", not grow, f"{len(metrics)} samples; {len(grow)} growing", grow + lines)
+    starts = {(e["app"], e["generation"]): e["t"] for e in read_jsonl(run.dir / "lifecycle.jsonl")
+              if e.get("event") == "start"}
+    judged, grow, lines = resource_trends(read_jsonl(run.dir / "metrics.jsonl"), starts, quiet, warm_up,
+                                          meta.get("load_end", now()))
+    if judged:
+        rep.add("no steady growth of a resource", not grow, f"{judged} series judged; {len(grow)} growing",
+                grow + lines)
+    else:
+        rep.add("no steady growth of a resource", None,
+                f"not judged: no series has {MIN_TREND_SAMPLES} samples outside the warm-up and the failure "
+                "windows (a smoke run does not judge trends)", lines)
 
     # 12. Log scan.
     if stop_apps:
@@ -1593,8 +1664,8 @@ def main():
     p.add_argument("--sse-readers", type=int, default=3, help="live streams held open at a time")
     p.add_argument("--drain-timeout", type=parse_duration, default=parse_duration("10m"))
     p.add_argument("--heap", default="768m", help="-Xmx of each backend")
-    p.add_argument("--quarkus-pool-size", type=int, default=20,
-                   help="quarkus.datasource.jdbc.max-size; 0 keeps Quarkus' default (docs/soak.md)")
+    p.add_argument("--quarkus-pool-size", type=int, default=0,
+                   help="quarkus.datasource.jdbc.max-size of the Quarkus backend; 0 keeps the app's own setting (docs/soak.md)")
     p.add_argument("--no-chaos", action="store_true", help="load only, no failures")
     p.add_argument("--reuse-db", action="store_true", help="keep the database of an earlier run")
     p.add_argument("--keep-stack", action="store_true", help="leave PostgreSQL and RabbitMQ running")
