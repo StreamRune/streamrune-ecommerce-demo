@@ -22,3 +22,6 @@ Thumbs.db
 
 # Docker
 pgdata/
+
+# Python (the soak harness in scripts/soak)
+__pycache__/

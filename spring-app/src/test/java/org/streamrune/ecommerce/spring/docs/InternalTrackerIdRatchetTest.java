@@ -69,15 +69,15 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>What is scanned.</b> Every {@code .java} file (main and test), every {@code .md} file (the
  * READMEs and the tutorial chapters), the frontend's TypeScript, JavaScript and CSS, its SVG images
- * (text, which can carry a comment), the scripts, every build file (Gradle scripts, version
- * catalog, properties, workflows, Compose and Docker files, SQL, XML, JSON, batch scripts), and the
- * files without an extension the repository publishes, by name ({@link #isScannedName}: the commit
- * template {@code .gitmessage}, the ignore lists, {@code LICENSE}, {@code NOTICE}, {@code
- * CODEOWNERS}, {@code gradlew}, the Dockerfiles), under the repository root, except build output,
- * dependencies, VCS and tool directories, the internal working material that is never published
- * ({@link #PRUNED_DIRECTORY_NAMES}, {@link #PRUNED_RELATIVE_PATHS}), and the generated files of
- * {@link #EXCLUDED_FILES}. Test sources are the {@code src/test} trees and the frontend's {@code
- * tests} directory ({@link #isTestSource}).
+ * (text, which can carry a comment), the scripts (shell and Python), every build file (Gradle
+ * scripts, version catalog, properties, workflows, Compose and Docker files, SQL, XML, JSON, batch
+ * scripts), and the files without an extension the repository publishes, by name ({@link
+ * #isScannedName}: the commit template {@code .gitmessage}, the ignore lists, {@code LICENSE},
+ * {@code NOTICE}, {@code CODEOWNERS}, {@code gradlew}, the Dockerfiles), under the repository root,
+ * except build output, dependencies, VCS and tool directories, the internal working material that
+ * is never published ({@link #PRUNED_DIRECTORY_NAMES}, {@link #PRUNED_RELATIVE_PATHS}), and the
+ * generated files of {@link #EXCLUDED_FILES}. Test sources are the {@code src/test} trees and the
+ * frontend's {@code tests} directory ({@link #isTestSource}).
  *
  * <p><b>Why a test.</b> A rule that depends on remembering is not a rule: the labels and the
  * history wording creep back the next time a comment or a chapter is written from a work log.
@@ -148,6 +148,7 @@ class InternalTrackerIdRatchetTest {
           "yaml",
           "sql",
           "sh",
+          "py",
           "bat",
           "xml",
           "json",
@@ -867,6 +868,7 @@ class InternalTrackerIdRatchetTest {
             "AGENTS.md",
             "spring-app/build.gradle.kts",
             "scripts/native-image-smoke-test.sh",
+            "scripts/soak/soak.py",
             ".github/workflows/tests.yml",
             "docker-compose.yml",
             "frontend/playwright.config.ts")) {
