@@ -380,16 +380,12 @@ class TwoInstanceSagaIT {
   }
 
   /**
-   * The body of order {@code i}: one line, or two when {@code i} is a multiple of three, at the
-   * products {@code i} and {@code i + 1} modulo the number of products; the second line takes two
-   * units, so that a reservation of the wrong quantity shows.
-   */
-  /**
    * Each projection is led by one backend: the projection runner delivers under the
    * single-active-consumer leadership, one lease per projection name, so of the two backends one
    * reads and writes each of the read models {@code products}, {@code orders}, {@code customers}
    * and {@code inventory}, and the other stands by for it. The health details of each backend list
-   * the four projections with their role.
+   * the four projections with their role. Closing the backend that leads {@code products} gives its
+   * leases back, and the other backend then leads every projection.
    */
   @Test
   void eachProjectionIsLedByOneBackend() throws Exception {
@@ -408,6 +404,23 @@ class TwoInstanceSagaIT {
                             .toList())
                     .as("the roles of the projection %s on the two backends", projection)
                     .containsExactlyInAnyOrder(LeaseRole.LEADING.name(), LeaseRole.STANDBY.name());
+              }
+            });
+
+    int leader = projectionRole(slots[0], "products").equals(LeaseRole.LEADING.name()) ? 0 : 1;
+    ConfigurableApplicationContext survivor = slots[1 - leader];
+    slots[leader].close();
+    contexts.remove(slots[leader]);
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              for (String projection : PROJECTIONS) {
+                assertThat(projectionRole(survivor, projection))
+                    .as("the role of the projection %s on the survivor", projection)
+                    .isEqualTo(LeaseRole.LEADING.name());
               }
             });
   }
@@ -554,6 +567,11 @@ class TwoInstanceSagaIT {
     }
   }
 
+  /**
+   * The body of order {@code i}: one line, or two when {@code i} is a multiple of three, at the
+   * products {@code i} and {@code i + 1} modulo the number of products; the second line takes two
+   * units, so that a reservation of the wrong quantity shows.
+   */
   private static String orderBody(int i, String customer) {
     String line = "{\"productId\":\"two-prod-%d\",\"quantity\":%d}";
     String lines =

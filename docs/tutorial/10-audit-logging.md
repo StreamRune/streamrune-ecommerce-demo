@@ -834,7 +834,7 @@ The `userId` in each entry is simply what `X-User-Id` said, because the demo run
 
 ### Bonus: `AuditProjection` — event-level audit log
 
-In addition to the command audit interceptor, the demo ships an `AuditProjection` that builds an in-memory event audit trail. Unlike `AuditCommandInterceptor`, which records at the command dispatch layer, `AuditProjection` subscribes to the event store and records every `EventEnvelope` it processes via `MultiProjectionRunner`. Create its entry, `projections/src/main/java/org/streamrune/ecommerce/projections/AuditEntry.java`:
+In addition to the command audit interceptor, the demo ships an `AuditProjection` that builds an in-memory event audit trail. Unlike `AuditCommandInterceptor`, which records at the command dispatch layer, `AuditProjection` subscribes to the event store and records every `EventEnvelope` it processes via `MultiProjectionRunner`, keeping the newest 10,000. Create its entry, `projections/src/main/java/org/streamrune/ecommerce/projections/AuditEntry.java`:
 
 ```java
 package org.streamrune.ecommerce.projections;

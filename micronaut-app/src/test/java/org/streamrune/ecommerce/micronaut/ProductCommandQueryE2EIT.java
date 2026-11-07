@@ -234,7 +234,7 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
                         String.class));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
     assertThat(ex.getResponse().getBody(String.class))
-        .contains("Command validation failed for CreateProduct");
+        .hasValue("Command validation failed for CreateProduct");
 
     assertThat(getProduct(pid).status()).isEqualTo(404);
   }
