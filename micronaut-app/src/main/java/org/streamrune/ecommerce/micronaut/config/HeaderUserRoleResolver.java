@@ -62,13 +62,8 @@ public class HeaderUserRoleResolver implements UserRoleResolver {
    * request context is bound or the entry is absent.
    */
   private static String resolveCurrentRole() {
-    if (org.streamrune.core.StreamRuneContext.CURRENT.isBound()) {
-      var ctx = org.streamrune.core.StreamRuneContext.CURRENT.get();
-      if (ctx != null) {
-        return ctx.baggage().getOrDefault("role", "GUEST");
-      }
-    }
-    return "GUEST";
+    var ctx = org.streamrune.core.StreamRuneContext.capture();
+    return ctx != null ? ctx.baggage().getOrDefault("role", "GUEST") : "GUEST";
   }
 
   private static java.util.Set<String> permissionsForRole(String role) {
