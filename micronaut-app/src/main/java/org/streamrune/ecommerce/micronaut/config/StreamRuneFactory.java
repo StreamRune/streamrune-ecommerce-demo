@@ -7,12 +7,17 @@ import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micronaut.context.annotation.Bean;
 import io.micronaut.context.annotation.Factory;
+import io.micronaut.context.annotation.Requires;
 import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
 import jakarta.inject.Singleton;
+import jakarta.validation.Validation;
 import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
+import org.hibernate.validator.HibernateValidator;
+import org.hibernate.validator.HibernateValidatorFactory;
+import org.hibernate.validator.messageinterpolation.ParameterMessageInterpolator;
 import org.streamrune.core.DeadLetterQueue;
 import org.streamrune.core.DeadLetterRetryPolicy;
 import org.streamrune.core.EventStore;
@@ -73,6 +78,7 @@ import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
 import org.streamrune.postgres.PostgresOutboxStore;
 import org.streamrune.postgres.PostgresSnapshotStorePurger;
+import org.streamrune.runtime.BeanValidationInterceptor;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 import org.streamrune.runtime.DeciderRegistration;
 import org.streamrune.runtime.SagaDeadLetterReplayer;
@@ -334,6 +340,45 @@ public class StreamRuneFactory {
       MeterRegistry meterRegistry) {
     return PgAdvisoryLocker.withDedicatedPool(
         url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+  }
+
+  /**
+   * The command bus's Bean Validation: every command is checked against the constraints its record
+   * declares ({@code @NotBlank}, {@code @PositiveOrZero}, {@code @Email}) before its decider runs,
+   * as in the Spring app, and a violation is a {@code ValidationException}, which {@link
+   * DomainExceptionHandler} answers with {@code 400}.
+   *
+   * <p>The validator is Hibernate Validator, which reads the constraints of any class by
+   * reflection. Micronaut's own validator, which the framework would hand the interceptor
+   * otherwise, knows the constraints of a type only from what its annotation processor wrote while
+   * compiling that type, and the commands are compiled in the framework-agnostic {@code domain}
+   * module: it would check none of them. The framework's interceptor steps aside for this bean
+   * ({@code @Requires(missingBeans = BeanValidationInterceptor.class)}), and this bean honours the
+   * framework's switch as that one does: {@code streamrune.validation-enabled=false} leaves the
+   * command bus without validation.
+   */
+  @Singleton
+  @Requires(property = "streamrune.validation-enabled", value = "true", defaultValue = "true")
+  public BeanValidationInterceptor validationInterceptor(HibernateValidatorFactory validators) {
+    return new BeanValidationInterceptor(validators.getValidator());
+  }
+
+  /**
+   * The Hibernate Validator factory behind {@link #validationInterceptor}, closed with the
+   * application. Messages are interpolated without an expression language ({@link
+   * ParameterMessageInterpolator}), so the app needs no EL implementation. The bean is typed as
+   * {@link HibernateValidatorFactory} only, so it stands beside the {@code ValidatorFactory} that
+   * Micronaut Validation registers instead of competing with it.
+   */
+  @Singleton
+  @Bean(typed = HibernateValidatorFactory.class, preDestroy = "close")
+  @Requires(property = "streamrune.validation-enabled", value = "true", defaultValue = "true")
+  public HibernateValidatorFactory commandValidatorFactory() {
+    return Validation.byProvider(HibernateValidator.class)
+        .configure()
+        .messageInterpolator(new ParameterMessageInterpolator())
+        .buildValidatorFactory()
+        .unwrap(HibernateValidatorFactory.class);
   }
 
   @Singleton

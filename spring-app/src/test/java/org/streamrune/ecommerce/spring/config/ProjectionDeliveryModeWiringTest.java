@@ -15,6 +15,8 @@ import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 import org.streamrune.core.DomainEvent;
@@ -22,6 +24,7 @@ import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.IdGenerator;
 import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.EventType;
@@ -38,6 +41,7 @@ import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.runtime.CacheAwareProjection;
 import org.streamrune.runtime.CacheInvalidator;
 import org.streamrune.runtime.MultiProjectionRunner;
+import org.streamrune.runtime.SubscriptionHealthContributor;
 import org.streamrune.spring.StreamRuneProperties;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.InMemoryOffsetStore;
@@ -68,6 +72,11 @@ class ProjectionDeliveryModeWiringTest {
         save(String.valueOf(e.globalOffset().value()), e.eventType().name());
       }
     }
+  }
+
+  /** A provider of a bean the context does not have, as the bean method gets one without it. */
+  private static <T> ObjectProvider<T> noBean(Class<T> type) {
+    return new DefaultListableBeanFactory().getBeanProvider(type);
   }
 
   private static CacheInvalidator invalidator() {
@@ -178,7 +187,9 @@ class ProjectionDeliveryModeWiringTest {
                         new OrderProjection(name.equals("orders") ? other : processor),
                         new CustomerProjection(name.equals("customers") ? other : processor),
                         new InventoryProjection(name.equals("inventory") ? other : processor),
-                        invalidator()))
+                        invalidator(),
+                        noBean(SubscriptionLeadership.class),
+                        noBean(SubscriptionHealthContributor.class)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'" + name + "' declares TRANSACTIONAL_LOCAL and writes to")
         .hasMessageContaining(String.valueOf(other.writeTargetIdentity()))

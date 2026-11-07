@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.quarkus;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.equalTo;
 
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -184,5 +185,32 @@ class ProductCommandQueryE2EIT {
         .post("/api/products")
         .then()
         .statusCode(400);
+  }
+
+  /**
+   * A negative initial stock passes the handler's checks, which leave {@code initialStock} open,
+   * and the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
+   * CreateProduct}) with {@code 400} and the interceptor's message, as in the Spring app. The
+   * validator is Hibernate Validator, which {@code quarkus-hibernate-validator} brings. The product
+   * is never created.
+   */
+  @Test
+  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
+    String pid = "p-negative-stock-" + System.nanoTime();
+    given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": -1}"""
+                .formatted(pid))
+        .when()
+        .post("/api/products")
+        .then()
+        .statusCode(400)
+        .body(equalTo("Command validation failed for CreateProduct"));
+
+    given().when().get("/api/products/" + pid).then().statusCode(404);
   }
 }

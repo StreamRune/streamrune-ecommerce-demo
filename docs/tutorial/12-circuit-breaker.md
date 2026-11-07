@@ -163,7 +163,7 @@ public PgAdvisoryLocker aggregateLocker(
 }
 ```
 
-What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten (Hikari's default) — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. Chapter 15 gives the pool a metrics tracker, so that its meters show how many of its connections the commands hold and how many commands wait for one. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it. A command can wait once more before that: when every connection of the lock pool is taken, up to ten seconds for one of them, the pool's connection timeout that `withDedicatedPool` sets. Either wait that runs out is a `LockException` (Step 2b).
+What it costs: a connection per command in flight, from a pool of the locker's own, held from the lock to the end of the command, and the round trip that takes the lock. The command also borrows a connection of the application's pool for its load and its append, so the lock pool has the application pool's size, ten (Hikari's default) — the commands that pool serves at once — and an instance opens both pools, which together stay below PostgreSQL's `max_connections`. The Micronaut app keeps Hikari's ten as well. The Quarkus app takes its lock pool's size from `quarkus.datasource.jdbc.max-size` and sets that key to twenty in its `application.properties`: Quarkus' own default for it is fifty, which would give one Quarkus backend up to a hundred pooled connections, all of PostgreSQL's default `max_connections`. `withDedicatedPool` builds that pool, and the locker owns it: `destroyMethod = "close"` closes it with the context. Chapter 15 gives the pool a metrics tracker, so that its meters show how many of its connections the commands hold and how many commands wait for one. With one instance the lock works as the in-process one did; `streamrune.lock-timeout` bounds the wait for it all the same (`lock_timeout` in PostgreSQL), and Chapter 17 shows the second instance waiting for it. A command can wait once more before that: when every connection of the lock pool is taken, up to ten seconds for one of them, the pool's connection timeout that `withDedicatedPool` sets. Either wait that runs out is a `LockException` (Step 2b).
 
 The whole class at the end of this chapter:
 
@@ -628,6 +628,15 @@ public class StreamRuneConfig {
         Duration.ofMillis(properties.pollingJitterMs()));
   }
 
+  /**
+   * Runs the read models' projections, each on a thread of its own.
+   *
+   * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
+   * registered under: with more than one backend on the database one of them reads the events and
+   * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
+   * lists each projection in the health details as {@code subscription.<name>}, with its {@code
+   * role}.
+   */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
@@ -637,12 +646,16 @@ public class StreamRuneConfig {
       ProductProjection productProjection,
       OrderProjection orderProjection,
       CustomerProjection customerProjection,
-      CacheInvalidator cacheInvalidator) {
+      CacheInvalidator cacheInvalidator,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
@@ -1375,6 +1388,8 @@ curl -s -X POST -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/saga/fulfillments/fulfillment-cb-1 | jq .fulfillmentStatus
 # "COMPLETED"
 ```
+
+**How long a longer outage takes to recover.** While the gateway answers nothing, the payment process manager's subscription goes no further than the first `PaymentInitiated` without an answer: every event behind it waits, the payments of the other orders and every refund, so no payment is captured or refunded until the gateway answers again, and the sagas of the orders placed meanwhile wait in `AWAITING_PAYMENT`. Each delivery without an answer doubles the subscription's wait before the next one, up to a minute (each wait is drawn between half of it and all of it), so once the outage has lasted a few minutes the subscription tries again only about once a minute. The breaker's 30-second cooldown has long run out by the time the gateway is back, so the next delivery is the probe: the payments resume within a minute of the end of the outage, the wait the subscription has left, and the backlog then drains in the order of the events — every payment captured, every waiting saga carried on, every refund made. Nothing is lost or decided twice; the cost is that minute, and the sagas the outage held. Keep the saga's deadline (`app.saga.fulfillment-timeout`, fifteen minutes) above the longest gateway outage the shop should ride out, plus that minute: an outage that outlasts it cancels the orders that waited, as above.
 
 Note that the command-bus breaker (`state`) stays `CLOSED` throughout — exactly as Step 3 predicted. A gateway call is no command: a call without an answer dispatches nothing, and a decline becomes a successful `FailPayment`/`CancelOrder`, so only the dedicated gateway breaker reacts.
 

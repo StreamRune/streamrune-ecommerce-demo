@@ -172,7 +172,7 @@ jobs:
       # frontend that is already up instead of starting its own.
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
           cache: 'npm'
           cache-dependency-path: streamrune-ecommerce-demo/frontend/package-lock.json
 
@@ -246,7 +246,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '26'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 

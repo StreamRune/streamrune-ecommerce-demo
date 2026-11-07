@@ -2519,8 +2519,13 @@ import org.streamrune.core.types.LogSanitizer;
  * already taken the money. A real gateway keeps its keys for a limited time; this simulator keeps
  * them in memory until the app stops.
  *
- * <p>Refunds are idempotent by payment id too; each process keeps its own memory, so with two
- * backends a refund reaches the simulator of the backend that leads the payment process manager.
+ * <p>Refunds are idempotent by payment id too. The simulator belongs to its process: the payments
+ * it captured, and its two switches, live in that process's memory, and another backend's simulator
+ * knows nothing of them. With two backends a refund reaches the simulator of the backend that leads
+ * the payment process manager when the {@code PaymentRefunded} is delivered; when that lease has
+ * moved to the other backend since the capture, its simulator never captured the payment, logs that
+ * it refunds nothing, and the refund is lost to the simulator alone: the payment's stream records
+ * its {@code PaymentRefunded} all the same. A real gateway keeps one record for every caller.
  */
 public class PaymentGatewaySimulator {
 
@@ -3463,6 +3468,58 @@ streamrune:
 
 The payment process manager and its subscription are what let an order run all the way to `COMPLETED` end-to-end: `OrderPlaced` → (saga) `InitiatePayment` → `PaymentInitiated` → (manager) `CapturePayment` → `PaymentCaptured` → (saga) one `ReserveStock` per line → one `StockReserved` per line → (saga) `ConfirmOrder` → `OrderConfirmed` → `COMPLETED`.
 
+**The projections under the same leadership.** The projection runner takes the same `SubscriptionLeadership` bean, and the integration's `SubscriptionHealthContributor`: `.leadership(...)` gives each projection a lease named after it — `products`, `orders` and `customers` — so with several backends on one database (Chapter 17) one of them reads the events and writes each read model, and the others stand by and serve their reads from the tables it writes. `.healthContributor(...)` lists each projection in the health details as `subscription.<name>`, with its `role`. Without the lease every backend runs every projection: the read models stay right, since a projection commits its write and its checkpoint in one transaction and a runner whose commit overlaps another's reads the page again, but each backend reads, decrypts and writes every event, and the runners contend for the checkpoint rows. One thing follows the leases: `CacheAwareProjection` (Chapter 5) evicts the query cache of the backend it runs on, after its batch commits. Every projection reads every event, so a backend that leads any one of them evicts the cached list of products when a product changes; a backend that leads none of them — usually the standby, since the backend that starts first takes every lease — evicts nothing, and serves a list of products it cached until its 60 seconds run out. The runner gets two parameters and two builder lines:
+
+```java
+/**
+ * Runs the read models' projections, each on a thread of its own.
+ *
+ * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
+ * registered under: with more than one backend on the database one of them reads the events and
+ * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
+ * lists each projection in the health details as {@code subscription.<name>}, with its {@code
+ * role}.
+ */
+@Bean(destroyMethod = "close")
+public MultiProjectionRunner projectionRunner(
+    EventStore eventStore,
+    OffsetStore offsetStore,
+    JdbcProjectionRepository projectionRepository,
+    StreamRuneProperties properties,
+    ProductProjection productProjection,
+    OrderProjection orderProjection,
+    CustomerProjection customerProjection,
+    CacheInvalidator cacheInvalidator,
+    ObjectProvider<SubscriptionLeadership> leadership,
+    ObjectProvider<SubscriptionHealthContributor> health) {
+  var runner =
+      MultiProjectionRunner.builder()
+          .eventStore(eventStore)
+          .offsetStore(offsetStore)
+          .subscriptionConfig(projectionPolling(properties))
+          .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+          .healthContributor(health.getIfAvailable())
+          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
+          // checkpoint in ONE transaction.
+          .atomicProcessor(projectionRepository)
+          .register(
+              "products",
+              new CacheAwareProjection(productProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .register(
+              "orders",
+              new CacheAwareProjection(orderProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .register(
+              "customers",
+              new CacheAwareProjection(customerProjection, cacheInvalidator),
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+          .build();
+  runner.start();
+  return runner;
+}
+```
+
 **Register the inventory.** The four inventory event types go into the `SimpleEventTypeRegistry` of the `eventTypeRegistry` bean, and `.registerState("InventoryState", InventoryState.class)` joins the snapshot registrations:
 
 ```java
@@ -3932,6 +3989,15 @@ public class StreamRuneConfig {
         Duration.ofMillis(properties.pollingJitterMs()));
   }
 
+  /**
+   * Runs the read models' projections, each on a thread of its own.
+   *
+   * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
+   * registered under: with more than one backend on the database one of them reads the events and
+   * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
+   * lists each projection in the health details as {@code subscription.<name>}, with its {@code
+   * role}.
+   */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
@@ -3941,12 +4007,16 @@ public class StreamRuneConfig {
       ProductProjection productProjection,
       OrderProjection orderProjection,
       CustomerProjection customerProjection,
-      CacheInvalidator cacheInvalidator) {
+      CacheInvalidator cacheInvalidator,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)

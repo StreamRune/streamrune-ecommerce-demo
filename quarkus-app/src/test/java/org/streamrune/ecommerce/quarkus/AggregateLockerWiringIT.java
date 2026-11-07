@@ -119,6 +119,18 @@ class AggregateLockerWiringIT {
     }
   }
 
+  /**
+   * The connection budget: the application's pool holds twenty connections, the value {@code
+   * application.properties} sets instead of Quarkus' default of fifty, and the lock pool has the
+   * same size, so the backend holds up to forty pooled connections.
+   */
+  @Test
+  void theApplicationPoolAndTheLockPoolHoldTwentyConnectionsEach() {
+    assertThat(applicationPool.getConfiguration().connectionPoolConfiguration().maxSize())
+        .isEqualTo(20);
+    assertThat(lockPoolGauge("hikaricp.connections.max").value()).isEqualTo(20);
+  }
+
   /** A gauge of the lock pool, which must exist. */
   private Gauge lockPoolGauge(String name) {
     Gauge gauge = meterRegistry.find(name).tag("pool", LOCK_POOL).gauge();

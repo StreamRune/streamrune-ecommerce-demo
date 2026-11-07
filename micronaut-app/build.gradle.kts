@@ -88,6 +88,10 @@ dependencies {
     implementation(libs.micronaut.serde.jackson)
     implementation(libs.micronaut.jdbc.hikari)
     implementation(libs.micronaut.management)
+    // The command bus's Bean Validation (StreamRuneFactory#validationInterceptor): Hibernate
+    // Validator reads the constraints of the domain's commands by reflection, which Micronaut's
+    // compile-time validator cannot for classes compiled in another module.
+    implementation(libs.hibernate.validator)
     // A MeterRegistry, so the framework's MicrometerStreamRuneMetrics records the StreamRune meters,
     // and the /metrics endpoint that lists them, as Spring's /actuator/metrics does.
     implementation(libs.micronaut.micrometer.core)
