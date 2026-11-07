@@ -42,7 +42,7 @@ opentelemetry = "1.47.0"
 jakarta-annotation = "3.0.0"
 
 # Other
-snakeyaml = "2.2"
+snakeyaml = "2.7"
 # Kept in step with the StreamRune framework build: streamrune-micronaut compiles against it, and
 # the Quarkus BOM manages the same version. micronaut-app's dependency-management plugin applies this
 # version to the framework's request for Reactor too.
