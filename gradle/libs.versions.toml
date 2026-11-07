@@ -56,7 +56,7 @@ awaitility = "4.2.2"
 
 # Build plugins
 spotless = "7.1.0"
-graalvm = "1.1.14"
+graalvm = "1.1.17"
 
 [libraries]
 # Jackson
