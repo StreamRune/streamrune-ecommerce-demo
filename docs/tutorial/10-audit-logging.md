@@ -858,10 +858,8 @@ and the projection, `projections/src/main/java/org/streamrune/ecommerce/projecti
 ```java
 package org.streamrune.ecommerce.projections;
 
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.projection.Projection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
@@ -872,23 +870,48 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 // commit that fails after process() returned (a lost connection, a failed COMMIT) is retried from
 // the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection must
 // be idempotent itself: entries are keyed by eventId and a redelivered event is ignored. (The
-// in-memory list also does not survive a restart; it is a demo of the mode, not of durability.)
+// in-memory model also does not survive a restart; it is a demo of the mode, not of durability.)
+//
+// It keeps the newest CAPACITY events and drops the oldest, so its memory stays the same however
+// long the backend that leads it runs: a model that kept every event would hold the whole event log
+// on that backend's heap. A redelivered batch is one of the newest, so the ids it carries are among
+// the kept ones; an event delivered again after it was dropped would be recorded again, as the
+// newest.
 @org.streamrune.core.ProjectionConfig(
     name = "audit",
     deliveryMode = ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)
 public class AuditProjection implements Projection {
-  private final List<AuditEntry> entries = new CopyOnWriteArrayList<>();
-  private final Set<String> seenEventIds = ConcurrentHashMap.newKeySet();
+
+  /** How many events the projection keeps unless it is told otherwise. */
+  public static final int CAPACITY = 10_000;
+
+  private final int capacity;
+
+  /** The kept entries by event id, the oldest first. */
+  private final LinkedHashMap<String, AuditEntry> entries = new LinkedHashMap<>();
+
+  public AuditProjection() {
+    this(CAPACITY);
+  }
+
+  /** A projection that keeps the newest {@code capacity} events. */
+  AuditProjection(int capacity) {
+    if (capacity < 1) {
+      throw new IllegalArgumentException("capacity must be positive, got " + capacity);
+    }
+    this.capacity = capacity;
+  }
 
   @Override
-  public void process(List<EventEnvelope> events) {
+  public synchronized void process(List<EventEnvelope> events) {
     for (var envelope : events) {
       var meta = envelope.metadata();
       String eventId = meta.eventId().value();
-      if (!seenEventIds.add(eventId)) {
+      if (entries.containsKey(eventId)) {
         continue; // redelivered: already recorded
       }
-      entries.add(
+      entries.put(
+          eventId,
           new AuditEntry(
               eventId,
               envelope.aggregateType().value(),
@@ -899,18 +922,21 @@ public class AuditProjection implements Projection {
               envelope.eventType().name(),
               envelope.event(),
               meta.timestamp()));
+      if (entries.size() > capacity) {
+        entries.pollFirstEntry();
+      }
     }
   }
 
-  public List<AuditEntry> listByAggregateType(String aggregateType) {
-    return entries.stream().filter(e -> aggregateType.equals(e.aggregateType())).toList();
+  public synchronized List<AuditEntry> listByAggregateType(String aggregateType) {
+    return entries.values().stream().filter(e -> aggregateType.equals(e.aggregateType())).toList();
   }
 }
 ```
 
-Each entry is an `AuditEntry` record capturing `eventId`, `aggregateType` and `aggregateId` (the envelope's typed parts — the projection never parses the stream id), `userId`, `commandId`, `correlationId`, `eventType`, the raw event object, and the event `timestamp`. For an event a saga caused, the `correlationId` is the saga's `streamrune:saga:<sagaId>`; for an event a request caused, it is whatever the request carried. Note that this is a **demo-local** `AuditEntry` in package `org.streamrune.ecommerce.projections` — a different type from the framework's `org.streamrune.core.audit.AuditEntry` used by the command interceptor earlier in this chapter. Same name, different package and shape; do not conflate the two. Entries are stored in a `CopyOnWriteArrayList`, making them thread-safe for concurrent reads without locking, beside a concurrent set of the event ids already recorded.
+Each entry is an `AuditEntry` record capturing `eventId`, `aggregateType` and `aggregateId` (the envelope's typed parts — the projection never parses the stream id), `userId`, `commandId`, `correlationId`, `eventType`, the raw event object, and the event `timestamp`. For an event a saga caused, the `correlationId` is the saga's `streamrune:saga:<sagaId>`; for an event a request caused, it is whatever the request carried. Note that this is a **demo-local** `AuditEntry` in package `org.streamrune.ecommerce.projections` — a different type from the framework's `org.streamrune.core.audit.AuditEntry` used by the command interceptor earlier in this chapter. Same name, different package and shape; do not conflate the two. Entries are stored in a `LinkedHashMap` keyed by event id, in the order they were recorded, and `process` and `listByAggregateType` are `synchronized`: the runner's thread writes while a reader lists. The map keeps the newest `CAPACITY` (10,000) events and drops the oldest, so the projection's memory stays the same however long the backend that leads it runs. A model that kept every event would hold the whole event log on that backend's heap, growing with every command for as long as the process lives.
 
-`AuditProjection` declares `@ProjectionConfig(name = "audit", deliveryMode = AT_LEAST_ONCE_IDEMPOTENT)` (the delivery modes are introduced in Chapter 5). It keeps its entries in memory, so they can never share the runner's checkpoint transaction, and the runner hands it no repository at all. A batch can be delivered twice even without a crash — a checkpoint commit that fails after `process` returned (a lost connection, a failed `COMMIT`) is retried from the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection dedups by `eventId`: an event whose id is already in the set is skipped. Appending blindly would break the guarantee the projection declares.
+`AuditProjection` declares `@ProjectionConfig(name = "audit", deliveryMode = AT_LEAST_ONCE_IDEMPOTENT)` (the delivery modes are introduced in Chapter 5). It keeps its entries in memory, so they can never share the runner's checkpoint transaction, and the runner hands it no repository at all. A batch can be delivered twice even without a crash — a checkpoint commit that fails after `process` returned (a lost connection, a failed `COMMIT`) is retried from the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection dedups by `eventId`: an event whose id is already in the map is skipped. A redelivered batch is among the newest events, so its ids are still kept; an event delivered again after the map dropped it would be recorded again, as the newest. Appending blindly would break the guarantee the projection declares.
 
 The projection exposes a `listByAggregateType(String aggregateType)` method that filters entries by aggregate type. If you want to expose this through a REST endpoint, inject `AuditProjection` into a controller and call `listByAggregateType("order")`. Note that `AuditProjection` is not currently registered in the Spring app's `MultiProjectionRunner` (the Quarkus and Micronaut apps discover it through its annotation) — it is provided as an extension point for an audit read model. To activate it in the Spring app, declare an `AuditProjection` bean and register it like the other four projections, but with its own mode: `.register("audit", auditProjection, ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)`. It may share the runner with the four `TRANSACTIONAL_LOCAL` read models.
 

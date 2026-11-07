@@ -21,9 +21,9 @@ import org.streamrune.spring.StreamRuneHealthIndicator;
  * per-stream Server-Sent Events endpoint is one of the framework's: it exists because the app sets
  * {@code streamrune.sse.enabled=true}.
  *
- * <p>The saga subscription and the payment process manager's subscription register themselves with
- * the subscription health contributor and add one {@code subscription.<name>} block each, with
- * their role under their lease: a single application leads both.
+ * <p>The saga subscription, the process managers' subscriptions and the four projections register
+ * themselves with the subscription health contributor and add one {@code subscription.<name>} block
+ * each, with their role under their lease: a single application leads every one of them.
  */
 class StreamRuneHealthIT extends AbstractIntegrationTest {
 
@@ -81,6 +81,17 @@ class StreamRuneHealthIT extends AbstractIntegrationTest {
                     .as(subscription)
                     .containsEntry("state", "RUNNING")
                     .containsEntry("status", "UP")
+                    .containsEntry("role", "LEADING");
+              }
+              for (String projection :
+                  new String[] {
+                    "subscription.products",
+                    "subscription.orders",
+                    "subscription.customers",
+                    "subscription.inventory"
+                  }) {
+                assertThat(block(health, projection))
+                    .as(projection)
                     .containsEntry("role", "LEADING");
               }
             });

@@ -260,12 +260,13 @@ public class StreamRuneProducer {
    * two backends writing one aggregate would meet in version conflicts, retried and in the end
    * dead-lettered. A command holds its lock connection for its whole run and borrows a connection
    * of the application's pool for its load and its append, so the lock pool has the application
-   * pool's size, {@code quarkus.datasource.jdbc.max-size} (twenty, Agroal's default, as the demo
-   * sets none): as many commands as the application pool serves at once. Each backend opens both
-   * pools, which together stay below PostgreSQL's {@code max_connections}. A command waits for its
-   * lock up to {@code streamrune.lock-timeout}, and before that, when every connection of the lock
-   * pool is taken, up to ten seconds for one of them (the pool's connection timeout); either wait
-   * that runs out is a {@code LockException}.
+   * pool's size, {@code quarkus.datasource.jdbc.max-size}: as many commands as the application pool
+   * serves at once. {@code application.properties} sets the key to twenty, since Quarkus' default
+   * of fifty would give the backend a hundred pooled connections, as many as PostgreSQL's default
+   * {@code max_connections} allows; with twenty the two pools stay below it beside two Spring
+   * backends of ten and ten. A command waits for its lock up to {@code streamrune.lock-timeout},
+   * and before that, when every connection of the lock pool is taken, up to ten seconds for one of
+   * them (the pool's connection timeout); either wait that runs out is a {@code LockException}.
    *
    * <p>The framework's producer of the in-process locker is a {@code @DefaultBean}, which this one
    * replaces. The locker owns its pool, which {@link #closeAggregateLocker} closes with the
@@ -279,8 +280,7 @@ public class StreamRuneProducer {
       @ConfigProperty(name = "quarkus.datasource.jdbc.url") String url,
       @ConfigProperty(name = "quarkus.datasource.username") String username,
       @ConfigProperty(name = "quarkus.datasource.password") String password,
-      @ConfigProperty(name = "quarkus.datasource.jdbc.max-size", defaultValue = "20")
-          int applicationPoolSize,
+      @ConfigProperty(name = "quarkus.datasource.jdbc.max-size") int applicationPoolSize,
       MeterRegistry meterRegistry) {
     return PgAdvisoryLocker.withDedicatedPool(
         url,

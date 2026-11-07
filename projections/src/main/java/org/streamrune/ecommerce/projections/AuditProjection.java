@@ -1,9 +1,7 @@
 package org.streamrune.ecommerce.projections;
 
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.projection.Projection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
@@ -14,23 +12,48 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 // commit that fails after process() returned (a lost connection, a failed COMMIT) is retried from
 // the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection must
 // be idempotent itself: entries are keyed by eventId and a redelivered event is ignored. (The
-// in-memory list also does not survive a restart; it is a demo of the mode, not of durability.)
+// in-memory model also does not survive a restart; it is a demo of the mode, not of durability.)
+//
+// It keeps the newest CAPACITY events and drops the oldest, so its memory stays the same however
+// long the backend that leads it runs: a model that kept every event would hold the whole event log
+// on that backend's heap. A redelivered batch is one of the newest, so the ids it carries are among
+// the kept ones; an event delivered again after it was dropped would be recorded again, as the
+// newest.
 @org.streamrune.core.ProjectionConfig(
     name = "audit",
     deliveryMode = ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)
 public class AuditProjection implements Projection {
-  private final List<AuditEntry> entries = new CopyOnWriteArrayList<>();
-  private final Set<String> seenEventIds = ConcurrentHashMap.newKeySet();
+
+  /** How many events the projection keeps unless it is told otherwise. */
+  public static final int CAPACITY = 10_000;
+
+  private final int capacity;
+
+  /** The kept entries by event id, the oldest first. */
+  private final LinkedHashMap<String, AuditEntry> entries = new LinkedHashMap<>();
+
+  public AuditProjection() {
+    this(CAPACITY);
+  }
+
+  /** A projection that keeps the newest {@code capacity} events. */
+  AuditProjection(int capacity) {
+    if (capacity < 1) {
+      throw new IllegalArgumentException("capacity must be positive, got " + capacity);
+    }
+    this.capacity = capacity;
+  }
 
   @Override
-  public void process(List<EventEnvelope> events) {
+  public synchronized void process(List<EventEnvelope> events) {
     for (var envelope : events) {
       var meta = envelope.metadata();
       String eventId = meta.eventId().value();
-      if (!seenEventIds.add(eventId)) {
+      if (entries.containsKey(eventId)) {
         continue; // redelivered: already recorded
       }
-      entries.add(
+      entries.put(
+          eventId,
           new AuditEntry(
               eventId,
               envelope.aggregateType().value(),
@@ -41,10 +64,13 @@ public class AuditProjection implements Projection {
               envelope.eventType().name(),
               envelope.event(),
               meta.timestamp()));
+      if (entries.size() > capacity) {
+        entries.pollFirstEntry();
+      }
     }
   }
 
-  public List<AuditEntry> listByAggregateType(String aggregateType) {
-    return entries.stream().filter(e -> aggregateType.equals(e.aggregateType())).toList();
+  public synchronized List<AuditEntry> listByAggregateType(String aggregateType) {
+    return entries.values().stream().filter(e -> aggregateType.equals(e.aggregateType())).toList();
   }
 }

@@ -1878,6 +1878,15 @@ public class StreamRuneConfig {
         Duration.ofMillis(properties.pollingJitterMs()));
   }
 
+  /**
+   * Runs the read models' projections, each on a thread of its own.
+   *
+   * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
+   * registered under: with more than one backend on the database one of them reads the events and
+   * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
+   * lists each projection in the health details as {@code subscription.<name>}, with its {@code
+   * role}.
+   */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
@@ -1888,12 +1897,16 @@ public class StreamRuneConfig {
       OrderProjection orderProjection,
       CustomerProjection customerProjection,
       InventoryProjection inventoryProjection,
-      CacheInvalidator cacheInvalidator) {
+      CacheInvalidator cacheInvalidator,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
@@ -2398,6 +2411,13 @@ Expected response shape:
           "status": "UP",
           "role": "LEADING"
         },
+        "subscription.products": {
+          "state": "RUNNING",
+          "lag": 0,
+          "errorCount": 0,
+          "status": "UP",
+          "role": "LEADING"
+        },
         "relay.outbox-relay": {
           "status": "UP",
           "started": true,
@@ -2420,7 +2440,7 @@ Expected response shape:
 
 The `details` also hold one `relay.<name>` block for each retention sweeper, for the saga compensation-retry sweeper and for the saga's timeout runner (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` and `relay.saga-timeout:` each followed by the saga state class), shortened here. The timeout runner is the application's (Chapter 11, Step 6); the integration finds the `SagaTimeoutRunner` bean and registers it like the relays it builds itself, so a timeout runner whose poll thread died turns the component `DOWN`. Once Step 6b has switched the per-stream SSE endpoint on, one more block appears, `relay.sse-event-feed`: the framework reports the feed of that endpoint like its other polling threads, `DOWN` when the thread has died, because the endpoint would go on admitting clients while no event reached them. `StreamRuneHealthIT` checks this list.
 
-Four subscriptions are registered, each with its role: `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — the saga's and those of its three process managers (Chapter 11, Steps 5b, 5c and 6). Each is built with `.healthContributor(...)`, so it registers with the auto-configured `SubscriptionHealthContributor` when it starts and adds a `subscription.<name>` block: `state` (`RUNNING`, `PAUSED`, `STOPPED`), `lag` (the events between its checkpoint and the head of the store), `errorCount`, `status`, and `role`, the subscription's role under its lease. With one backend all four read `LEADING`. With two (Chapter 17) one backend reads `LEADING` and the other `STANDBY`; a standby is `RUNNING`, has no delivery errors and shares the leader's lag — the checkpoint is shared — so it reads `UP` while some backend leads and keeps up, and `DEGRADED` on both once the shared lag crosses `streamrune.subscription.health.lag-threshold` (1000 events unless configured). A listener that keeps failing — the payment process manager on a capture the store refuses, say — still shows first in the application log, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b): the block records it too. A subscription registered with `.healthContributor(...)` wraps its listener itself, so each page the listener throws on adds one to `errorCount`, and the block reads `DEGRADED` from the first failed page; a page the listener returns from sets `errorCount` back to `0`, and the status then follows the other rules again: `DEGRADED` while the lag is at the threshold or the subscription is paused, `DOWN` only when it is stopped or has halted for good (errors alone never make it `DOWN`), otherwise `UP`. A standby delivers no page, so it reports `errorCount` `0` and counts afresh when it leads again. The checkpoint does not move past the failing event, so the block's `lag` also grows with every event stored after it, and crossing the threshold is a second reason for `DEGRADED`, independent of the errors. The demo's `MultiProjectionRunner` is built by hand without a health contributor, so it has no block here (the framework's `SseEventFeed` is not a subscription of that contributor either; it is the `relay.sse-event-feed` block above). `StreamRuneHealthIT` checks the four subscription blocks, and the Quarkus and Micronaut `ObservabilitySmokeSuiteIT` check that the four subscriptions are registered and lead. The role is `UNGATED` for a subscription that takes no lease, and `NOT_REPORTED` for a registration that reports none.
+Eight subscriptions are registered, each with its role: `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — the saga's and those of its three process managers (Chapter 11, Steps 5b, 5c and 6) — and the four projections, `products`, `orders`, `customers` and `inventory`, of which the sample shows the first (Chapter 11 gives the projection runner its lease). Each is built with `.healthContributor(...)`, so it registers with the auto-configured `SubscriptionHealthContributor` when it starts and adds a `subscription.<name>` block: `state` (`RUNNING`, `PAUSED`, `STOPPED`), `lag` (the events between its checkpoint and the head of the store), `errorCount`, `status`, and `role`, the subscription's role under its lease. With one backend all eight read `LEADING`. With two (Chapter 17) one backend reads `LEADING` and the other `STANDBY`; a standby is `RUNNING`, has no delivery errors and shares the leader's lag — the checkpoint is shared — so it reads `UP` while some backend leads and keeps up, and `DEGRADED` on both once the shared lag crosses `streamrune.subscription.health.lag-threshold` (1000 events unless configured). A listener that keeps failing — the payment process manager on a capture the store refuses, say — still shows first in the application log, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b): the block records it too. A subscription registered with `.healthContributor(...)` wraps its listener itself, so each page the listener throws on adds one to `errorCount`, and the block reads `DEGRADED` from the first failed page; a page the listener returns from sets `errorCount` back to `0`, and the status then follows the other rules again: `DEGRADED` while the lag is at the threshold or the subscription is paused, `DOWN` only when it is stopped or has halted for good (errors alone never make it `DOWN`), otherwise `UP`. A standby delivers no page, so it reports `errorCount` `0` and counts afresh when it leads again. The checkpoint does not move past the failing event, so the block's `lag` also grows with every event stored after it, and crossing the threshold is a second reason for `DEGRADED`, independent of the errors. The demo's `MultiProjectionRunner` hands the contributor to the runner of each projection, which registers under the projection's name (the framework's `SseEventFeed` is not a subscription of that contributor; it is the `relay.sse-event-feed` block above). `StreamRuneHealthIT` checks the eight subscription blocks, and the Quarkus and Micronaut `ObservabilitySmokeSuiteIT` check that the four subscriptions are registered and lead. The role is `UNGATED` for a subscription that takes no lease, and `NOT_REPORTED` for a registration that reports none.
 
 **Metrics — command counter:**
 

@@ -72,7 +72,7 @@ A few decisions worth noting:
 - `@PositiveOrZero` on `initialStock` means zero is allowed — a product can be created with no initial inventory (it would start as `OUT_OF_STOCK`). A strictly positive constraint would prevent that.
 - `@NotNull` on `price` prevents a null `Money` object. On the HTTP path the controller always builds `new Money(req.price(), "USD")` from a DTO-validated `BigDecimal`, so the command's price is never null there; this constraint is a defense-in-depth net for callers that construct the command directly. The `Money` record's own fields (`amount`, `currency`) could be validated further with `@Valid`, but for now a non-null price is sufficient.
 
-The `domain` module already has `jakarta.validation-api` on its classpath as an `implementation` dependency (added in Chapter 1, Step 3). Using `implementation` rather than `compileOnly` ensures the annotation types are available at runtime so `BeanValidationInterceptor` can read them reflectively. The validator implementation (`hibernate-validator`) lives in `spring-app` via `spring-boot-starter-validation`.
+The `domain` module already has `jakarta.validation-api` on its classpath as an `implementation` dependency (added in Chapter 1, Step 3). Using `implementation` rather than `compileOnly` ensures the annotation types are available at runtime so `BeanValidationInterceptor` can read them reflectively. The validator implementation (`hibernate-validator`) lives in `spring-app` via `spring-boot-starter-validation`; the Quarkus and Micronaut apps bring their own (Step 5).
 
 ### Step 2 — Create the BeanValidationInterceptor bean
 
@@ -241,6 +241,8 @@ Command validation failed for CreateProduct
 
 The `BeanValidationInterceptor` caught the `@PositiveOrZero` violation on `initialStock`, threw a `ValidationException`, and the `GlobalExceptionHandler`'s `handleDomainException` handler mapped it to a 400. The `Decider` was never called — no event reached the store.
 
+The Quarkus and Micronaut apps refuse the same request with the same `400` and message, from the same interceptor, which the framework puts on their command buses; each app brings the validator. On Quarkus it is Hibernate Validator, from `quarkus-hibernate-validator` in `quarkus-app/build.gradle.kts`. On Micronaut it is Micronaut Validation, which checks a type only through the type's compile-time bean introspection: the domain's records carry no Micronaut annotation, so `micronaut-app` introspects every command in its `CommandIntrospections` class (`@Introspected(classes = ...)`), and `micronaut-validation-processor`, an annotation processor of the app, writes the constraints into the introspections. Without a validator the framework logs at startup that command validation is disabled, and a command Micronaut has no introspection for is not checked at all, with one `Skipping validation for ...` warning. `ProductControllerIT` (Spring) and `ProductCommandQueryE2EIT` (Quarkus and Micronaut) send this request.
+
 ### Step 5a — Two layers of validation
 
 The two negative cases below are *also* rejected with a 400, but by a different layer — Spring's `@Valid` check on the controller DTO, which runs *before* a command is ever constructed. Send a command with a blank name:
@@ -292,7 +294,7 @@ This is defense in depth, not redundancy:
   | `CircuitBreakerOpenException`, `CommandBusOverloadedException`, `CommandBusClosedException`, `LockException`, `OptimisticLockException` — the command bus's refusals that pass | `503` with `Retry-After: 5` and `{"reason": ..., "message": ...}` | Chapter 12 |
   | `LiveFeedFullException` — the open feed is full | `503` with `Retry-After: 5`, plain text | Chapter 15 |
   | anything else, e.g. an event store failure | `500` | — |
-- The **domain module uses `implementation` for `jakarta.validation-api`** (not `compileOnly`) so that annotation types are present at runtime for the interceptor to read reflectively. The actual validator implementation (`hibernate-validator`) stays in `spring-app` — the domain jar never pulls in the validator engine.
+- The **domain module uses `implementation` for `jakarta.validation-api`** (not `compileOnly`) so that annotation types are present at runtime for the interceptor to read reflectively. The actual validator implementation stays in the applications (`hibernate-validator` through `spring-boot-starter-validation` in `spring-app`, `quarkus-hibernate-validator` in `quarkus-app`, Micronaut Validation in `micronaut-app`) — the domain jar never pulls in the validator engine.
 
 ---
 

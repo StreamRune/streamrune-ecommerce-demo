@@ -41,6 +41,7 @@ import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
 import org.streamrune.runtime.PollingEventSubscription;
+import org.streamrune.spring.StreamRuneHealthIndicator;
 
 /**
  * Two backends on one database: one leads the fulfillment saga, the other stands by and takes over
@@ -137,6 +138,10 @@ class TwoInstanceSagaIT {
    * lock does not use up the wait.
    */
   private static final int READ_MODEL_ATTEMPTS = 100;
+
+  /** The projections the app's projection runner runs, each under a lease of its own. */
+  private static final List<String> PROJECTIONS =
+      List.of("products", "orders", "customers", "inventory");
 
   private static final String ORDER_PREFIX = "two-order-";
 
@@ -379,6 +384,34 @@ class TwoInstanceSagaIT {
    * products {@code i} and {@code i + 1} modulo the number of products; the second line takes two
    * units, so that a reservation of the wrong quantity shows.
    */
+  /**
+   * Each projection is led by one backend: the projection runner delivers under the
+   * single-active-consumer leadership, one lease per projection name, so of the two backends one
+   * reads and writes each of the read models {@code products}, {@code orders}, {@code customers}
+   * and {@code inventory}, and the other stands by for it. The health details of each backend list
+   * the four projections with their role.
+   */
+  @Test
+  void eachProjectionIsLedByOneBackend() throws Exception {
+    createDatabase();
+    ConfigurableApplicationContext[] slots = {start(), start()};
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              for (String projection : PROJECTIONS) {
+                assertThat(
+                        Arrays.stream(slots)
+                            .map(context -> projectionRole(context, projection))
+                            .toList())
+                    .as("the roles of the projection %s on the two backends", projection)
+                    .containsExactlyInAnyOrder(LeaseRole.LEADING.name(), LeaseRole.STANDBY.name());
+              }
+            });
+  }
+
   /**
    * A command holds its aggregate's lock on both backends, and commands on one aggregate from both
    * are serialized. First a price change on one backend stops in its audit write, which the command
@@ -687,6 +720,18 @@ class TwoInstanceSagaIT {
         .filter(i -> role(slots[i]) == LeaseRole.LEADING)
         .findFirst()
         .orElseThrow();
+  }
+
+  /** The role of a projection on the backend, as the backend's health details report it. */
+  private static Object projectionRole(ConfigurableApplicationContext context, String projection) {
+    Map<?, ?> block =
+        (Map<?, ?>)
+            context
+                .getBean(StreamRuneHealthIndicator.class)
+                .health()
+                .getDetails()
+                .get("subscription." + projection);
+    return block == null ? null : block.get("role");
   }
 
   /** The role of the backend's saga subscription under the saga's lease, read in this process. */

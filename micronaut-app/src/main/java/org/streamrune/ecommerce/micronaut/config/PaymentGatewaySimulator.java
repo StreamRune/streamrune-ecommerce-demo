@@ -27,8 +27,13 @@ import org.streamrune.core.types.LogSanitizer;
  * already taken the money. A real gateway keeps its keys for a limited time; this simulator keeps
  * them in memory until the app stops.
  *
- * <p>Refunds are idempotent by payment id too; each process keeps its own memory, so with two
- * backends a refund reaches the simulator of the backend that leads the payment process manager.
+ * <p>Refunds are idempotent by payment id too. The simulator belongs to its process: the payments
+ * it captured, and its two switches, live in that process's memory, and another backend's simulator
+ * knows nothing of them. With two backends a refund reaches the simulator of the backend that leads
+ * the payment process manager when the {@code PaymentRefunded} is delivered; when that lease has
+ * moved to the other backend since the capture, its simulator never captured the payment, logs that
+ * it refunds nothing, and the refund is lost to the simulator alone: the payment's stream records
+ * its {@code PaymentRefunded} all the same. A real gateway keeps one record for every caller.
  */
 @Singleton
 public class PaymentGatewaySimulator {

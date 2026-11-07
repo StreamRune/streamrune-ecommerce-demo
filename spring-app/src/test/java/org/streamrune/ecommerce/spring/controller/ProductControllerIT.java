@@ -221,4 +221,32 @@ class ProductControllerIT extends AbstractIntegrationTest {
         .expectStatus()
         .is4xxClientError();
   }
+
+  /**
+   * A negative initial stock passes the request record, which leaves {@code initialStock} open, and
+   * the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
+   * CreateProduct}) with {@code 400} and the interceptor's message. The product is never created.
+   * The Quarkus and Micronaut apps answer the same request alike.
+   */
+  @Test
+  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
+    String pid = "p-negative-stock-" + System.nanoTime();
+    client
+        .post()
+        .uri("/api/products")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(
+            """
+            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": -1}"""
+                .formatted(pid))
+        .exchange()
+        .expectStatus()
+        .isBadRequest()
+        .expectBody(String.class)
+        .isEqualTo("Command validation failed for CreateProduct");
+
+    client.get().uri("/api/products/" + pid).exchange().expectStatus().isNotFound();
+  }
 }
