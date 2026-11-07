@@ -335,6 +335,14 @@ plugins {
     alias(libs.plugins.spotless) apply false
 }
 
+// StreamRune does not start on JDK 25 with the Graal JIT unless one of two workarounds is set
+// (StreamRune's production guide, "Supported JVMs"). Every JVM the build starts gets this one.
+val graalJitWorkaround =
+    listOf(
+        "-XX:+UnlockDiagnosticVMOptions",
+        "-XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache",
+    )
+
 subprojects {
     apply(plugin = "java-library")
     apply(plugin = "com.diffplug.spotless")
@@ -355,6 +363,11 @@ subprojects {
     tasks.withType<Test> {
         useJUnitPlatform()
         jvmArgs("--enable-preview")
+        jvmArgs(graalJitWorkaround)
+    }
+
+    tasks.withType<JavaExec> {
+        jvmArgs(graalJitWorkaround)
     }
 
     repositories {
@@ -392,6 +405,8 @@ subprojects {
 ```
 
 > This demo enables Java 25 preview features at compile time (`--enable-preview` on the `JavaCompile` task) and test time (`jvmArgs("--enable-preview")` on the `Test` task). The `bootRun` task does **not** set `--enable-preview` and runs fine because the demo currently uses no Java preview language features at runtime. StreamRune itself uses only finalized Java 25 features and does **not** require the flag — `--enable-preview` here is the demo's own choice, not a framework requirement.
+>
+> **On a GraalVM JDK, the JVM needs a workaround.** On JDK 25 with the Graal JIT — the JIT a GraalVM JDK, such as GraalVM CE or Oracle GraalVM, runs with — StreamRune refuses to start unless one of two workarounds is set: `-XX:-UseJVMCICompiler`, or `-XX:+UnlockDiagnosticVMOptions -XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache`. The production guide of StreamRune, section "Supported JVMs", lists the JVMs and the two workarounds. The root build file above gives the second one to every JVM Gradle starts: the tests (`Test`) and the applications' run tasks (`bootRun` and every other `JavaExec`; the demo's `quarkus-app` adds it to `quarkusDev` and `quarkusRun`). Every HotSpot JDK 25 accepts both flags, so the build sets them whatever JDK you have. A JVM you start yourself — `java -jar`, a run configuration of your IDE — needs them on its own command line when it runs on a GraalVM JDK. The Docker images of Chapter 13 run on Temurin and need none.
 >
 > The `spotless` plugin enforces Google Java Format across all subprojects. `setEnforceCheck(false)` means the format check does not fail CI by default — run `./gradlew spotlessApply` to auto-format all Java files.
 

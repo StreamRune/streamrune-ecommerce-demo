@@ -4,6 +4,20 @@ plugins {
     alias(libs.plugins.graalvm) apply false
 }
 
+// StreamRune does not start on JDK 25 with the Graal JIT (the JIT of a GraalVM JDK, the one CI
+// builds with) unless one of two workarounds is set: -XX:-UseJVMCICompiler, or the pair below. See
+// "Supported JVMs" in StreamRune's production guide. Every JVM this build starts gets the pair: the
+// tests of every module, the applications' run tasks (bootRun, run, quarkusDev, quarkusRun) and
+// Spring's AOT processing. Every HotSpot JDK 25 accepts both flags, so they are set whatever JDK
+// runs the build. A JVM started outside Gradle (java -jar, an IDE run configuration) needs them on
+// its own command line.
+val graalJitWorkaround =
+    listOf(
+        "-XX:+UnlockDiagnosticVMOptions",
+        "-XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache",
+    )
+extra["graalJitWorkaround"] = graalJitWorkaround
+
 subprojects {
     apply(plugin = "java-library")
     apply(plugin = "com.diffplug.spotless")
@@ -24,6 +38,11 @@ subprojects {
     tasks.withType<Test> {
         useJUnitPlatform()
         jvmArgs("--enable-preview")
+        jvmArgs(graalJitWorkaround)
+    }
+
+    tasks.withType<JavaExec> {
+        jvmArgs(graalJitWorkaround)
     }
 
     repositories {

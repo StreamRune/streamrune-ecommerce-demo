@@ -64,3 +64,15 @@ tasks.named<Test>("test") {
     // Quarkus uses preview APIs (ScopedValue) at runtime; tests run plain JVM.
     jvmArgs("--enable-preview")
 }
+
+// quarkusDev and quarkusRun start the application in a JVM of their own, which is neither a Test
+// nor a JavaExec task: the root build's JDK 25 workaround (graalJitWorkaround) goes there too.
+val graalJitWorkaround: List<String> by rootProject.extra
+
+tasks.withType<io.quarkus.gradle.tasks.QuarkusDev>().configureEach {
+    jvmArguments.addAll(graalJitWorkaround)
+}
+
+tasks.withType<io.quarkus.gradle.tasks.QuarkusRun>().configureEach {
+    jvmArguments.addAll(graalJitWorkaround)
+}
