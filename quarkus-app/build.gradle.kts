@@ -30,6 +30,11 @@ dependencies {
     implementation("io.quarkus:quarkus-rest-jackson")
     implementation("io.quarkus:quarkus-jdbc-postgresql")
     implementation("io.quarkus:quarkus-arc")
+    // The Bean Validation provider (Hibernate Validator): the framework's BeanValidationInterceptor
+    // checks every command against the constraints its record declares, as in the Spring app, which
+    // gets the provider from spring-boot-starter-validation. Without a provider the framework logs
+    // at startup that command validation is disabled.
+    implementation("io.quarkus:quarkus-hibernate-validator")
     // The framework's caching components (CachingUserRoleResolver, CachingQueryBus, CacheAware
     // projections) use Caffeine, which reflectively loads feature-encoded cache classes (e.g.
     // "SSMSW"). The quarkus-caffeine extension registers those for GraalVM native — without it the

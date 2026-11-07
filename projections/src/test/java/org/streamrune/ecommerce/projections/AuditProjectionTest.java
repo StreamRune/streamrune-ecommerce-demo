@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
@@ -100,5 +101,39 @@ class AuditProjectionTest {
     var projection = new AuditProjection();
     projection.process(List.of(envelope(stream(ProductState.TYPE, "a:b"), "ProductCreated")));
     assertThat(projection.listByAggregateType("product").getFirst().aggregateId()).isEqualTo("a:b");
+  }
+
+  /**
+   * The projection keeps the newest events and drops the oldest, so its memory does not grow with
+   * the event log; a redelivery of an event it keeps is still ignored.
+   */
+  @Test
+  void keepsTheNewestEventsOnly_andIgnoresARedeliveryOfTheOnesItKeeps() {
+    var projection = new AuditProjection(3);
+    var batch =
+        LongStream.rangeClosed(1, 5)
+            .mapToObj(offset -> envelope(offset, stream(ProductState.TYPE, "p-" + offset)))
+            .toList();
+    projection.process(batch);
+    projection.process(batch.subList(2, 5)); // redelivery of the three it keeps
+
+    assertThat(projection.listByAggregateType("product"))
+        .extracting(AuditEntry::aggregateId)
+        .containsExactly("p-3", "p-4", "p-5");
+  }
+
+  @Test
+  void keepsTenThousandEventsUnlessToldOtherwise() {
+    var projection = new AuditProjection();
+    var stream = stream(ProductState.TYPE, "p-1");
+    projection.process(
+        LongStream.rangeClosed(1, AuditProjection.CAPACITY + 1)
+            .mapToObj(offset -> envelope(offset, stream))
+            .toList());
+
+    assertThat(AuditProjection.CAPACITY).isEqualTo(10_000);
+    var entries = projection.listByAggregateType("product");
+    assertThat(entries).hasSize(AuditProjection.CAPACITY);
+    assertThat(entries.getFirst().correlationId()).isEqualTo("c-2");
   }
 }

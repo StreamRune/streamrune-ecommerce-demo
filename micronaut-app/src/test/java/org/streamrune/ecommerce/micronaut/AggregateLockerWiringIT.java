@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.micronaut;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.zaxxer.hikari.HikariDataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
@@ -83,6 +84,17 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
                       .as("the lock connection the held lock takes")
                       .isGreaterThanOrEqualTo(1));
     }
+  }
+
+  /**
+   * The connection budget: the application's pool holds ten connections, Hikari's default, as the
+   * app sets no size, and the lock pool has the same size, so the backend holds up to twenty pooled
+   * connections.
+   */
+  @Test
+  void theApplicationPoolAndTheLockPoolHoldTenConnectionsEach() throws Exception {
+    assertThat(dataSource.unwrap(HikariDataSource.class).getMaximumPoolSize()).isEqualTo(10);
+    assertThat(lockPoolGauge("hikaricp.connections.max").value()).isEqualTo(10);
   }
 
   /** A gauge of the lock pool, which must exist. */

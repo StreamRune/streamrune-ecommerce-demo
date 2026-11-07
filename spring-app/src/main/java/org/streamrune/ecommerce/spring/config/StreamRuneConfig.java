@@ -539,6 +539,15 @@ public class StreamRuneConfig {
         Duration.ofMillis(properties.pollingJitterMs()));
   }
 
+  /**
+   * Runs the read models' projections, each on a thread of its own.
+   *
+   * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
+   * registered under: with more than one backend on the database one of them reads the events and
+   * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
+   * lists each projection in the health details as {@code subscription.<name>}, with its {@code
+   * role}.
+   */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
@@ -549,12 +558,16 @@ public class StreamRuneConfig {
       OrderProjection orderProjection,
       CustomerProjection customerProjection,
       InventoryProjection inventoryProjection,
-      CacheInvalidator cacheInvalidator) {
+      CacheInvalidator cacheInvalidator,
+      ObjectProvider<SubscriptionLeadership> leadership,
+      ObjectProvider<SubscriptionHealthContributor> health) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
+            .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+            .healthContributor(health.getIfAvailable())
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)

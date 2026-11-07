@@ -102,13 +102,15 @@ await_confirmed() {
   echo "${status:-unknown}"
 }
 
-# The customer cancels as soon as the read model knows the order (it answers 403 until then).
+# The customer cancels as soon as the read model knows the order (it answers 403 until then). It
+# asks for up to 30 s: when the backend that leads the projections dies, the read models pause until
+# the survivor takes their leases, up to the lease's 15 s plus a polling interval.
 cancel_soon() {
   local oid="$1" customer="$2" code waited=0
   while :; do
     code=$(request_any POST "/api/orders/$oid/cancel" "$customer" CUSTOMER '{"reason":"changed my mind"}')
     [ "$code" = 200 ] && return
-    if [ "$code" != 403 ] || [ "$waited" -ge 10 ]; then
+    if [ "$code" != 403 ] || [ "$waited" -ge 30 ]; then
       echo "cancel of $oid right after placing answered $code" >> "$FAILURES"; return
     fi
     sleep 1; waited=$((waited + 1))

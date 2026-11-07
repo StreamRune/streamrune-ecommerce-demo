@@ -205,4 +205,37 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
                             .header("X-User-Id", "test-admin")));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
   }
+
+  /**
+   * A negative initial stock passes the handler's checks, which leave {@code initialStock} open,
+   * and the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
+   * CreateProduct}) with {@code 400} and the interceptor's message, as in the Spring app. The
+   * product is never created.
+   */
+  @Test
+  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
+    String pid = "m-p-negative-stock-" + System.nanoTime();
+    HttpClientResponseException ex =
+        assertThrows(
+            HttpClientResponseException.class,
+            () ->
+                client
+                    .toBlocking()
+                    .exchange(
+                        HttpRequest.POST(
+                                "/api/products",
+                                """
+                                {"productId": "%s", "name": "Widget", "price": 5.00,
+                                 "initialStock": -1}"""
+                                    .formatted(pid))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .header("X-User-Role", "ADMIN")
+                            .header("X-User-Id", "test-admin"),
+                        String.class));
+    assertThat(ex.getStatus().getCode()).isEqualTo(400);
+    assertThat(ex.getResponse().getBody(String.class))
+        .hasValue("Command validation failed for CreateProduct");
+
+    assertThat(getProduct(pid).status()).isEqualTo(404);
+  }
 }
