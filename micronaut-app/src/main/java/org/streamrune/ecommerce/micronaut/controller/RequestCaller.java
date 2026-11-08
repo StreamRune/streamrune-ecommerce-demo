@@ -16,8 +16,7 @@ final class RequestCaller {
 
   /** The request context of the current request, or {@code null} when neither place holds one. */
   static StreamRuneContext.RequestContext current() {
-    StreamRuneContext.RequestContext context =
-        StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
+    StreamRuneContext.RequestContext context = StreamRuneContext.capture();
     return context != null ? context : StreamRuneContextHelper.get();
   }
 }

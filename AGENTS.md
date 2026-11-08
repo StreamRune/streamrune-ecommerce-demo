@@ -200,6 +200,13 @@ In `frontend/`, after `npm ci`:
   that a failure.
 - **`--enable-preview`.** A test or main class started from an IDE needs `--enable-preview` on its
   JVM as well.
+- **A GraalVM JDK.** On JDK 25 with the Graal JIT, StreamRune refuses to start unless
+  `-XX:-UseJVMCICompiler` or `-XX:+UnlockDiagnosticVMOptions
+  -XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache` is set (the framework's production
+  guide, "Supported JVMs"). The root `build.gradle.kts` gives the second to every `Test` and
+  `JavaExec` task, and `quarkus-app` to `quarkusDev` and `quarkusRun`; a JVM started from an IDE or
+  with `java -jar` on a GraalVM JDK needs it on its own command line. Do not set the framework's
+  opt-out property instead.
 - **`InternalTrackerIdRatchetTest` fails outside Gradle by design.** One of its tests compares the
   files it reads with the files Gradle declares as the inputs of `docsTest`, a list the task hands
   over (`-Dstreamrune.publictext.declared-sources`): Gradle's default excludes leave a `.gitignore`

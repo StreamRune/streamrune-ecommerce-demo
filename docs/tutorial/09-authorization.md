@@ -274,13 +274,8 @@ public class HeaderUserRoleResolver implements UserRoleResolver {
    * request context is bound or the entry is absent.
    */
   private static String resolveCurrentRole() {
-    if (org.streamrune.core.StreamRuneContext.CURRENT.isBound()) {
-      var ctx = org.streamrune.core.StreamRuneContext.CURRENT.get();
-      if (ctx != null) {
-        return ctx.baggage().getOrDefault("role", "GUEST");
-      }
-    }
-    return "GUEST";
+    var ctx = org.streamrune.core.StreamRuneContext.capture();
+    return ctx != null ? ctx.baggage().getOrDefault("role", "GUEST") : "GUEST";
   }
 
   private static Set<String> permissionsForRole(String role) {
@@ -301,7 +296,7 @@ public class HeaderUserRoleResolver implements UserRoleResolver {
 }
 ```
 
-`resolveCurrentRole()` reads `StreamRuneContext.CURRENT`, which is a `ScopedValue`. If the current thread is inside a scope where `CURRENT` is bound, it returns the `role` entry from the context's baggage map. If no scope is active (for example, in a unit test that calls the resolver directly), it falls back to `"GUEST"`. The role-to-permissions mapping is kept simple and in-process for this tutorial; a production system would query a database or an identity provider.
+`resolveCurrentRole()` reads the request context with `StreamRuneContext.capture()`: the context bound to `StreamRuneContext.CURRENT`, which is a `ScopedValue`, or `null` when no scope is active. Inside a scope it returns the `role` entry from the context's baggage map; with no scope (for example, in a unit test that calls the resolver directly) it falls back to `"GUEST"`. Application code reads the bindings through `capture()` rather than through `CURRENT` itself: it is the read path the framework uses for them. The role-to-permissions mapping is kept simple and in-process for this tutorial; a production system would query a database or an identity provider.
 
 > **Why the role header is a demo shortcut — do not copy this resolver.** The `role` baggage entry is copied from the `X-User-Role` request header (Step 3), so the role is whatever the client says:
 >
@@ -328,7 +323,7 @@ You do **not** need to create a custom filter. The `streamrune-spring` auto-conf
 2. Constructs a `StreamRuneContext.RequestContext` and binds it via `ScopedValue.where(StreamRuneContext.CURRENT, ctx).call(...)`.
 3. Puts `X-User-Role` into the context's baggage map under the key `"role"` — only in the trusted-gateway mode below, the same flag that makes `X-User-Id` the identity. In any other mode the header is ignored and there is no `"role"` entry.
 
-Your `HeaderUserRoleResolver` (Step 2) reads exactly this `"role"` baggage entry via `StreamRuneContext.CURRENT.get().baggage().getOrDefault("role", "GUEST")`. The whole chain works without any filter code in your project.
+Your `HeaderUserRoleResolver` (Step 2) reads exactly this `"role"` baggage entry via `StreamRuneContext.capture()`: the `role` entry of the context's baggage, `"GUEST"` when no context is bound or the entry is absent. The whole chain works without any filter code in your project.
 
 > **What `X-Correlation-Id` is, and what the filter refuses.** A correlation id is tracing data. The filter binds the value the client sends (the first one when the header arrives more than once) and generates an id when the header is missing or blank; the id then travels into the metadata of every event and into every audit row the request causes. Nothing is addressed, authorized or deduplicated by it. One form is not the client's to send: an id that starts with `streamrune:` is reserved for the framework, which binds `streamrune:saga:<sagaId>` around the commands a saga dispatches (Chapter 11). The filter answers a request whose correlation id has that prefix with `400 Bad Request`, `Content-Type: text/plain;charset=UTF-8` and the body `The request's correlation id, trace id or user id is not acceptable`, before any command runs. It gives the same answer to a correlation id, trace id or user id that is longer than 255 characters or holds a control character. The Quarkus and Micronaut filters answer alike.
 
@@ -860,7 +855,7 @@ final class RequestCaller {
 
   /** The request context of the current request, or {@code null} when none is bound. */
   static StreamRuneContext.RequestContext current() {
-    return StreamRuneContext.CURRENT.isBound() ? StreamRuneContext.CURRENT.get() : null;
+    return StreamRuneContext.capture();
   }
 }
 ```

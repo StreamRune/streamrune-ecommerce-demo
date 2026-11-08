@@ -20,9 +20,6 @@ final class RequestCaller {
    */
   static StreamRuneContext.RequestContext of(StreamRuneRequestContextHolder holder) {
     StreamRuneContext.RequestContext context = holder != null ? holder.context() : null;
-    if (context == null && StreamRuneContext.CURRENT.isBound()) {
-      context = StreamRuneContext.CURRENT.get();
-    }
-    return context;
+    return context != null ? context : StreamRuneContext.capture();
   }
 }

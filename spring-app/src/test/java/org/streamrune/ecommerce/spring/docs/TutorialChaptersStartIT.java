@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -148,6 +149,21 @@ class TutorialChaptersStartIT {
   }
 
   /**
+   * The options of this JVM for JDK 25 with the Graal JIT, on which StreamRune does not start
+   * without a workaround (the root build's {@code graalJitWorkaround}, or {@code
+   * -XX:-UseJVMCICompiler}): the started project gets the ones this test runs with, as the reader's
+   * {@code bootRun} gets the build's.
+   */
+  private static Stream<String> graalJitWorkaround() {
+    return ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
+        .filter(
+            argument ->
+                argument.equals("-XX:+UnlockDiagnosticVMOptions")
+                    || argument.startsWith("-XX:DisableIntrinsic=")
+                    || argument.equals("-XX:-UseJVMCICompiler"));
+  }
+
+  /**
    * Starts the project of {@code chapter} and stops it again.
    *
    * @return {@code null} when it started and, one polling interval later, is {@code UP} with no
@@ -164,19 +180,22 @@ class TutorialChaptersStartIT {
     Files.write(
         arguments,
         Stream.of(
-                "--enable-preview",
-                "-cp",
-                classes + File.pathSeparator + classpath,
-                APPLICATION,
-                "--server.port=0",
-                "--management.endpoint.health.show-details=always",
-                "--spring.datasource.url=" + databaseUrl(database),
-                "--spring.datasource.username=" + postgres.getUsername(),
-                "--spring.datasource.password=" + postgres.getPassword(),
-                "--spring.rabbitmq.host=" + rabbit.getHost(),
-                "--spring.rabbitmq.port=" + rabbit.getAmqpPort(),
-                "--spring.rabbitmq.username=" + rabbit.getAdminUsername(),
-                "--spring.rabbitmq.password=" + rabbit.getAdminPassword())
+                Stream.of("--enable-preview"),
+                graalJitWorkaround(),
+                Stream.of(
+                    "-cp",
+                    classes + File.pathSeparator + classpath,
+                    APPLICATION,
+                    "--server.port=0",
+                    "--management.endpoint.health.show-details=always",
+                    "--spring.datasource.url=" + databaseUrl(database),
+                    "--spring.datasource.username=" + postgres.getUsername(),
+                    "--spring.datasource.password=" + postgres.getPassword(),
+                    "--spring.rabbitmq.host=" + rabbit.getHost(),
+                    "--spring.rabbitmq.port=" + rabbit.getAmqpPort(),
+                    "--spring.rabbitmq.username=" + rabbit.getAdminUsername(),
+                    "--spring.rabbitmq.password=" + rabbit.getAdminPassword()))
+            .flatMap(part -> part)
             .map(TutorialChaptersStartIT::quoted)
             .toList());
     Path log = out.resolve(name + ".log");

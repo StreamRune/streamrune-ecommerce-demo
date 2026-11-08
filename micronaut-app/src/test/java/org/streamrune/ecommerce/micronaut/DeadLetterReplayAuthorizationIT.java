@@ -63,9 +63,9 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     createProduct(pid);
     CommandId commandId = deadLetterDiscontinue(pid, UserId.of("admin-1"));
 
-    assertThat(StreamRuneContext.CURRENT.isBound())
+    assertThat(StreamRuneContext.capture())
         .as("the replay runs where the retry runner's poll thread runs it: with no request at all")
-        .isFalse();
+        .isNull();
     // The demo's commands carry no idempotency key: the replay is forced.
     assertThat(deadLetterRetryRunner.retry(commandId, true))
         .isEqualTo(org.streamrune.runtime.DeadLetterRetryRunner.RetryOutcome.REPLAYED);

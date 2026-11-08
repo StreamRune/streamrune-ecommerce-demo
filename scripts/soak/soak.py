@@ -190,6 +190,13 @@ def java_bin():
     return str(Path(home) / "bin" / "java") if home else "java"
 
 
+# StreamRune does not start on JDK 25 with the Graal JIT (a GraalVM JDK) unless one of two
+# workarounds is set (StreamRune's production guide, "Supported JVMs"); every backend gets the one
+# the Gradle build gives its JVMs. Every HotSpot JDK 25 accepts both flags.
+GRAAL_JIT_WORKAROUND = ["-XX:+UnlockDiagnosticVMOptions",
+                        "-XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache"]
+
+
 class App:
     def __init__(self, name, kind, port, run_dir, events, args):
         self.name, self.kind, self.port = name, kind, port
@@ -210,9 +217,11 @@ class App:
         heap = f"-Xmx{self.args.heap}"
         if self.kind == "spring":
             jar = ROOT / "spring-app/build/libs/spring-app-0.1.0-SNAPSHOT.jar"
-            return [java_bin(), "--enable-preview", heap, "-jar", str(jar), f"--server.port={self.port}"]
+            return [java_bin(), "--enable-preview", *GRAAL_JIT_WORKAROUND, heap, "-jar", str(jar),
+                    f"--server.port={self.port}"]
         jar = ROOT / "quarkus-app/build/quarkus-app/quarkus-run.jar"
-        return [java_bin(), "--enable-preview", heap, f"-Dquarkus.http.port={self.port}", "-jar", str(jar)]
+        return [java_bin(), "--enable-preview", *GRAAL_JIT_WORKAROUND, heap,
+                f"-Dquarkus.http.port={self.port}", "-jar", str(jar)]
 
     def env(self):
         env = dict(os.environ)

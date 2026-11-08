@@ -201,13 +201,8 @@ public class CustomerCommandController {
    * bound.
    */
   private static String currentRequesterId() {
-    if (StreamRuneContext.CURRENT.isBound()) {
-      var ctx = StreamRuneContext.CURRENT.get();
-      if (ctx != null && ctx.userId() != null) {
-        return ctx.userId().value();
-      }
-    }
-    return null;
+    var ctx = StreamRuneContext.capture();
+    return ctx != null && ctx.userId() != null ? ctx.userId().value() : null;
   }
 
   public record RegisterRequest(
