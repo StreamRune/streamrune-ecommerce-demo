@@ -6,11 +6,11 @@ streamrune = "1.0.0-alpha-SNAPSHOT"
 # Frameworks
 spring-boot = "4.1.1"
 spring-dependency-management = "1.1.6"
-quarkus = "3.40.1"
-micronaut = "5.2.19"
+quarkus = "3.40.1.1"
+micronaut = "5.2.21"
 micronaut-serde = "3.2.4"
 micronaut-test = "5.2.0"
-micronaut-application = "4.2.1"
+micronaut-application = "5.0.2"
 micronaut-sql = "7.2.0"
 # The Micronaut Micrometer module for core 5.2 (the version the micronaut-platform 5.2 BOM pairs with
 # the serde, sql and test versions above).
@@ -42,7 +42,7 @@ opentelemetry = "1.47.0"
 jakarta-annotation = "3.0.0"
 
 # Other
-snakeyaml = "2.2"
+snakeyaml = "2.7"
 # Kept in step with the StreamRune framework build: streamrune-micronaut compiles against it, and
 # the Quarkus BOM manages the same version. micronaut-app's dependency-management plugin applies this
 # version to the framework's request for Reactor too.
@@ -56,7 +56,7 @@ awaitility = "4.2.2"
 
 # Build plugins
 spotless = "7.1.0"
-graalvm = "1.1.14"
+graalvm = "1.1.17"
 
 [libraries]
 # Jackson
