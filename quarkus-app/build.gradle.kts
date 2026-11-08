@@ -66,7 +66,7 @@ tasks.named<Test>("test") {
 }
 
 // quarkusDev and quarkusRun start the application in a JVM of their own, which is neither a Test
-// nor a JavaExec task: the root build's JDK 25 workaround (graalJitWorkaround) goes there too.
+// nor a JavaExec task: the root build's C2 flag for JDK 25 (graalJitWorkaround) goes there too.
 val graalJitWorkaround: List<String> by rootProject.extra
 
 tasks.withType<io.quarkus.gradle.tasks.QuarkusDev>().configureEach {

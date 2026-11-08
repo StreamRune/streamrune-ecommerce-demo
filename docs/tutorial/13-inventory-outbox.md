@@ -2117,7 +2117,7 @@ Create `Dockerfile.backend` in the project root:
 # Pre-built JAR approach: run ./gradlew :spring-app:bootJar locally first,
 # then docker compose build copies the result. This avoids needing the
 # StreamRune framework source inside the Docker build context.
-# Temurin (no Graal JIT); a GraalVM JDK image needs the JVM flags of "Supported JVMs" in StreamRune's production guide.
+# Temurin (C2 JIT); a GraalVM JDK image needs -XX:-UseJVMCICompiler (StreamRune's production guide, "Supported JVMs").
 FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY spring-app/build/libs/spring-app-0.1.0-SNAPSHOT.jar app.jar

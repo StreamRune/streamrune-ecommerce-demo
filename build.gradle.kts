@@ -4,18 +4,20 @@ plugins {
     alias(libs.plugins.graalvm) apply false
 }
 
-// StreamRune does not start on JDK 25 with the Graal JIT (the JIT of a GraalVM JDK, the one CI
-// builds with) unless one of two workarounds is set: -XX:-UseJVMCICompiler, or the pair below. See
+// On JDK 25 the Graal JIT (the JIT of a GraalVM JDK, the one CI builds with) is not supported with
+// StreamRune: a GraalVM JDK must run with -XX:-UseJVMCICompiler, which selects the C2 JIT. See
 // "Supported JVMs" in StreamRune's production guide. Every JVM that runs the applications or their
-// tests gets the pair: the tests of every module, the applications' run tasks (bootRun, run,
+// tests gets the flag: the tests of every module, the applications' run tasks (bootRun, run,
 // quarkusDev, quarkusRun) and Spring's AOT processing. Gradle's own JVMs (the daemon, its workers)
-// and the native-image builder run no StreamRune command bus and do not need it. Every HotSpot JDK 25 accepts both flags, so they are set whatever JDK
-// runs the build. A JVM started outside Gradle (java -jar, an IDE run configuration) needs them on
-// its own command line.
+// and the native-image builder run no StreamRune code and do not need it. On a JDK 25 without the
+// Graal JIT (Temurin, Zulu) the flag is experimental and C2 is already the JIT, so the build passes
+// it after -XX:+UnlockExperimentalVMOptions, which every HotSpot JDK 25 accepts, and sets the pair
+// whatever JDK runs the build. A JVM started outside Gradle on a GraalVM JDK (java -jar, an IDE run
+// configuration) needs -XX:-UseJVMCICompiler on its own command line.
 val graalJitWorkaround =
     listOf(
-        "-XX:+UnlockDiagnosticVMOptions",
-        "-XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache",
+        "-XX:+UnlockExperimentalVMOptions",
+        "-XX:-UseJVMCICompiler",
     )
 extra["graalJitWorkaround"] = graalJitWorkaround
 

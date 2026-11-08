@@ -149,8 +149,8 @@ class TutorialChaptersStartIT {
   }
 
   /**
-   * The options of this JVM for JDK 25 with the Graal JIT, on which StreamRune does not start
-   * without a workaround (the root build's {@code graalJitWorkaround}, or {@code
+   * The options of this JVM that select the C2 JIT on JDK 25, where StreamRune does not support the
+   * Graal JIT (the root build's {@code graalJitWorkaround}: {@code -XX:+UnlockExperimentalVMOptions
    * -XX:-UseJVMCICompiler}): the started project gets the ones this test runs with, as the reader's
    * {@code bootRun} gets the build's.
    */
@@ -158,8 +158,7 @@ class TutorialChaptersStartIT {
     return ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
         .filter(
             argument ->
-                argument.equals("-XX:+UnlockDiagnosticVMOptions")
-                    || argument.startsWith("-XX:DisableIntrinsic=")
+                argument.equals("-XX:+UnlockExperimentalVMOptions")
                     || argument.equals("-XX:-UseJVMCICompiler"));
   }
 
