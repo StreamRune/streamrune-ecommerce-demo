@@ -17,9 +17,10 @@ project's `test` runs (`./gradlew soakHarnessTest`, or `python3 -m unittest disc
 
 From the repository root, with Docker running, a JDK 25 (`JAVA_HOME` or `java` on the `PATH`) and
 Python 3.10 or later (the script uses the standard library only). The script starts every backend
-with `-XX:+UnlockDiagnosticVMOptions -XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache`,
-the workaround StreamRune needs on JDK 25 with the Graal JIT (StreamRune's production guide,
-"Supported JVMs"), so a GraalVM JDK runs it as well as any other JDK 25:
+with `-XX:+UnlockExperimentalVMOptions -XX:-UseJVMCICompiler`: on JDK 25 the Graal JIT is not
+supported with StreamRune, and a GraalVM JDK must run with `-XX:-UseJVMCICompiler` (StreamRune's
+production guide, "Supported JVMs"); the unlock flag lets every other JDK 25 accept it. A GraalVM JDK
+runs the script as well as any other JDK 25:
 
 ```bash
 ./gradlew :spring-app:bootJar :quarkus-app:quarkusBuild

@@ -190,11 +190,11 @@ def java_bin():
     return str(Path(home) / "bin" / "java") if home else "java"
 
 
-# StreamRune does not start on JDK 25 with the Graal JIT (a GraalVM JDK) unless one of two
-# workarounds is set (StreamRune's production guide, "Supported JVMs"); every backend gets the one
-# the Gradle build gives its JVMs. Every HotSpot JDK 25 accepts both flags.
-GRAAL_JIT_WORKAROUND = ["-XX:+UnlockDiagnosticVMOptions",
-                        "-XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache"]
+# On JDK 25 the Graal JIT (a GraalVM JDK) is not supported with StreamRune: a GraalVM JDK must run
+# with -XX:-UseJVMCICompiler (StreamRune's production guide, "Supported JVMs"). Every backend gets it
+# as the Gradle build gives it to its JVMs, after -XX:+UnlockExperimentalVMOptions, without which a
+# JDK 25 that has no Graal JIT (Temurin, Zulu) refuses the flag.
+GRAAL_JIT_WORKAROUND = ["-XX:+UnlockExperimentalVMOptions", "-XX:-UseJVMCICompiler"]
 
 
 class App:
