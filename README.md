@@ -34,7 +34,7 @@ All domain logic is framework-agnostic. The three application modules (Spring Bo
 
 ## Prerequisites
 
-- Java 25 (with `--enable-preview`). On a GraalVM JDK (JDK 25 with the Graal JIT) StreamRune starts only with `-XX:-UseJVMCICompiler` or `-XX:+UnlockDiagnosticVMOptions -XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache` (StreamRune's production guide, "Supported JVMs"). The build gives the second to every JVM it starts — tests, `bootRun`, `run`, `quarkusDev` — so add it yourself only to a JVM you start outside Gradle, such as `java -jar` or an IDE run configuration
+- Java 25 (with `--enable-preview`). On a GraalVM JDK (JDK 25 with the Graal JIT) StreamRune starts only with `-XX:-UseJVMCICompiler` or `-XX:+UnlockDiagnosticVMOptions -XX:DisableIntrinsic=_scopedValueCache,_setScopedValueCache` (StreamRune's production guide, "Supported JVMs"). The build gives the second to every JVM that runs the applications or their tests — tests, `bootRun`, `run`, `quarkusDev` — so add it yourself only to a JVM you start outside Gradle, such as `java -jar` or an IDE run configuration
 - Docker (for PostgreSQL, RabbitMQ and the full-stack demo). The demo runs PostgreSQL 17 — the oldest version StreamRune supports (it requires 17 or newer and refuses an older server at startup)
 - GraalVM CE 25.0.1 (for native builds only)
 - Python 3.10 or later as `python3` on the `PATH` (`./gradlew test`, `build` and `quickCheck` run the soak harness's unit tests with it; the soak test itself, [docs/soak.md](docs/soak.md), needs it too)

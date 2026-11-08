@@ -6,9 +6,10 @@ plugins {
 
 // StreamRune does not start on JDK 25 with the Graal JIT (the JIT of a GraalVM JDK, the one CI
 // builds with) unless one of two workarounds is set: -XX:-UseJVMCICompiler, or the pair below. See
-// "Supported JVMs" in StreamRune's production guide. Every JVM this build starts gets the pair: the
-// tests of every module, the applications' run tasks (bootRun, run, quarkusDev, quarkusRun) and
-// Spring's AOT processing. Every HotSpot JDK 25 accepts both flags, so they are set whatever JDK
+// "Supported JVMs" in StreamRune's production guide. Every JVM that runs the applications or their
+// tests gets the pair: the tests of every module, the applications' run tasks (bootRun, run,
+// quarkusDev, quarkusRun) and Spring's AOT processing. Gradle's own JVMs (the daemon, its workers)
+// and the native-image builder run no StreamRune command bus and do not need it. Every HotSpot JDK 25 accepts both flags, so they are set whatever JDK
 // runs the build. A JVM started outside Gradle (java -jar, an IDE run configuration) needs them on
 // its own command line.
 val graalJitWorkaround =
