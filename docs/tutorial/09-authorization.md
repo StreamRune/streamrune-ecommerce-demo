@@ -948,7 +948,6 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
@@ -1213,16 +1212,13 @@ public class StreamRuneConfig {
 
   /**
    * How often each projection reads the event store for new events: {@code
-   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * streamrune.polling-interval} plus up to {@code streamrune.polling-jitter} of jitter, five
    * seconds and one second unless configured. They are the two properties the framework's own
    * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
    * so it hands them over itself. The integration tests set a shorter interval.
    */
   private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
-    return new SubscriptionConfig(
-        true,
-        Duration.ofMillis(properties.pollingIntervalMs()),
-        Duration.ofMillis(properties.pollingJitterMs()));
+    return new SubscriptionConfig(true, properties.pollingInterval(), properties.pollingJitter());
   }
 
   @Bean(destroyMethod = "close")

@@ -176,9 +176,9 @@ class OutboxBrokerDownStartupIT {
             "--spring.rabbitmq.username=" + rabbit.getAdminUsername(),
             "--spring.rabbitmq.password=" + rabbit.getAdminPassword(),
             "--spring.rabbitmq.listener.simple.auto-startup=false",
-            "--streamrune.outbox.flush-interval-ms=500",
+            "--streamrune.outbox.flush-interval=500ms",
             "--streamrune.projections.auto-discovery.enabled=false",
-            "--streamrune.polling-interval-ms=500",
+            "--streamrune.polling-interval=500ms",
             "--streamrune.sse.keep-alive-interval=1h");
   }
 

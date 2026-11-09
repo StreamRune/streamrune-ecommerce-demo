@@ -78,7 +78,7 @@ class OutboxBrokerDownStartupIT {
     public Map<String, String> getConfigOverrides() {
       return Map.of(
           "streamrune.outbox.enabled", "true",
-          "streamrune.outbox.flush-interval-ms", "500",
+          "streamrune.outbox.flush-interval", "500ms",
           "rabbitmq.host", "localhost",
           "rabbitmq.port", String.valueOf(freePort()),
           "quarkus.log.file.enabled", "true",

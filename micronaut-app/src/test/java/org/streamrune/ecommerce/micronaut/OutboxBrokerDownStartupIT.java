@@ -100,7 +100,7 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
     props.put("datasources.default.password", postgres.getPassword());
     props.put("datasources.default.driver-class-name", "org.postgresql.Driver");
     props.put("streamrune.outbox.enabled", "true");
-    props.put("streamrune.outbox.flush-interval-ms", "500");
+    props.put("streamrune.outbox.flush-interval", "500ms");
     props.put("rabbitmq.host", "localhost");
     props.put("rabbitmq.port", String.valueOf(brokerPort));
     props.put("rabbitmq.username", rabbit.getAdminUsername());

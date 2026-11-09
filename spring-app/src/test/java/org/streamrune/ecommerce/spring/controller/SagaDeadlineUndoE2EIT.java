@@ -106,7 +106,7 @@ class SagaDeadlineUndoE2EIT {
                 // No read model is needed: the cancellations come from the test's timeout runner,
                 // not over HTTP, and every assertion reads the event store and the saga table.
                 "--streamrune.projections.auto-discovery.enabled=false",
-                "--streamrune.polling-interval-ms=200",
+                "--streamrune.polling-interval=200ms",
                 "--streamrune.sse.keep-alive-interval=1h");
   }
 
