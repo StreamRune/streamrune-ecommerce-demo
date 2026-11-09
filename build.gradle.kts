@@ -11,9 +11,9 @@ plugins {
 // quarkusDev, quarkusRun) and Spring's AOT processing. Gradle's own JVMs (the daemon, its workers)
 // and the native-image builder run no StreamRune code and do not need it. On a JDK 25 without the
 // Graal JIT (Temurin, Zulu) the flag is experimental and C2 is already the JIT, so the build passes
-// it after -XX:+UnlockExperimentalVMOptions, which every HotSpot JDK 25 accepts, and sets the pair
-// whatever JDK runs the build. A JVM started outside Gradle on a GraalVM JDK (java -jar, an IDE run
-// configuration) needs -XX:-UseJVMCICompiler on its own command line.
+// it after -XX:+UnlockExperimentalVMOptions, which every JDK 25 HotSpot build we ran accepts, and
+// sets the pair whatever JDK runs the build. A JVM started outside Gradle on a GraalVM JDK (java -jar,
+// an IDE run configuration) needs -XX:-UseJVMCICompiler on its own command line.
 val graalJitWorkaround =
     listOf(
         "-XX:+UnlockExperimentalVMOptions",
