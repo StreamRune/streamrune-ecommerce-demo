@@ -162,7 +162,7 @@ public class EcommerceSubscriptionLifecycle {
     // that follows the lease then stops on a backend that does not lead.
     closeQuietly(orderFulfillmentSagaSubscription, "order-fulfillment-saga subscription");
     orderFulfillmentSagaSubscription = null;
-    closeQuietly(orderFulfillmentTimeoutRunner::stop, "order-fulfillment saga's timeout runner");
+    closeQuietly(orderFulfillmentTimeoutRunner, "order-fulfillment saga's timeout runner");
   }
 
   /** A started subscription that feeds the listener under a lease named after the subscription. */

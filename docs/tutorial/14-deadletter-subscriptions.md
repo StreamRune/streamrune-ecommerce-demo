@@ -2106,9 +2106,9 @@ public class StreamRuneConfig {
    * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
    * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
    * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
-   * the subscriptions below are, and stopped with the context, after the saga subscription.
+   * the subscriptions below are, and closed with the context, after the saga subscription.
    */
-  @Bean(destroyMethod = "stop")
+  @Bean(destroyMethod = "close")
   public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
       OrderFulfillmentSaga orderFulfillmentSaga,
       PostgresSagaStore sagaStore,
