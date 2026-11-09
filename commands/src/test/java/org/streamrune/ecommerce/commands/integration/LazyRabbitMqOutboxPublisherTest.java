@@ -23,7 +23,7 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher.BrokerUnreachableException;
-import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+import org.streamrune.outbox.rabbitmq.RabbitMqOutboxPublisher;
 
 /**
  * The publisher without a broker: a port nothing listens on refuses every connection. That a

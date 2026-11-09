@@ -18,7 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxPublisher;
-import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+import org.streamrune.outbox.rabbitmq.RabbitMqOutboxPublisher;
 
 /**
  * The outbox's RabbitMQ publisher, connected on its first publish instead of at startup, so the
