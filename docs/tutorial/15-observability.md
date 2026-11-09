@@ -1529,7 +1529,7 @@ public class StreamRuneConfig {
    * OutboxPoller} (so it can poll + claim pending entries).
    *
    * <p>The claim lease (2 minutes) must strictly exceed the {@link
-   * org.streamrune.rabbitmq.RabbitMqOutboxPublisher}'s in-flight horizon: {@link
+   * org.streamrune.outbox.rabbitmq.RabbitMqOutboxPublisher}'s in-flight horizon: {@link
    * RabbitMqConfig#outboxPublisher} uses the default 30s {@code publishBlockBudget} plus its own
    * 30s {@code confirmTimeout}, for a 60s horizon, plus the framework's recommended 30s margin —
    * 90s minimum. {@code OutboxPoller.Builder.build()} refuses to boot (fails fast rather than

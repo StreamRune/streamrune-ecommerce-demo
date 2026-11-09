@@ -14,7 +14,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.outbox.OutboxPublisher;
 import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
-import org.streamrune.rabbitmq.RabbitMqOutboxPublisher;
+import org.streamrune.outbox.rabbitmq.RabbitMqOutboxPublisher;
 
 /**
  * RabbitMQ topology and outbox publisher for the e-commerce demo.
