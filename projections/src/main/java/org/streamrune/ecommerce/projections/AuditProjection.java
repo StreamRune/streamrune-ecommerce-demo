@@ -61,7 +61,7 @@ public class AuditProjection implements Projection {
               meta.userId() != null ? meta.userId().value() : null,
               meta.commandId().value(),
               meta.correlationId().value(),
-              envelope.eventType().name(),
+              envelope.eventType().value(),
               envelope.event(),
               meta.timestamp()));
       if (entries.size() > capacity) {

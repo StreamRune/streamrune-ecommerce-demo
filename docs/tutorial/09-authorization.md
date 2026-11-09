@@ -958,6 +958,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
@@ -1240,15 +1241,15 @@ public class StreamRuneConfig {
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
             .register(
-                "products",
+                ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "orders",
+                ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "customers",
+                ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .build();

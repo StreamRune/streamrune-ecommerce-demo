@@ -290,12 +290,12 @@ class FulfillmentSagaRoutingIT {
   }
 
   private List<String> eventTypes(AggregateType type, String id) {
-    return events(type, id).stream().map(e -> e.eventType().name()).toList();
+    return events(type, id).stream().map(e -> e.eventType().value()).toList();
   }
 
   private EventMetadata metadataOf(AggregateType type, String id, String eventType) {
     return events(type, id).stream()
-        .filter(e -> e.eventType().name().equals(eventType))
+        .filter(e -> e.eventType().value().equals(eventType))
         .findFirst()
         .orElseThrow()
         .metadata();

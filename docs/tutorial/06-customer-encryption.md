@@ -742,11 +742,11 @@ public MultiProjectionRunner projectionRunner(
           // checkpoint in ONE transaction.
           .atomicProcessor(projectionRepository)
           .register(
-              "products",
+              ProjectionName.of("products"),
               new CacheAwareProjection(productProjection, cacheInvalidator),
               ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
           .register(
-              "customers",
+              ProjectionName.of("customers"),
               new CacheAwareProjection(customerProjection, cacheInvalidator),
               ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
           .build();
@@ -776,6 +776,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -963,11 +964,11 @@ public class StreamRuneConfig {
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
             .register(
-                "products",
+                ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "customers",
+                ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .build();

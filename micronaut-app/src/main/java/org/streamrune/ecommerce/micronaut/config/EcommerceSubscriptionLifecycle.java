@@ -13,6 +13,7 @@ import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.subscription.EventListener;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.types.SubscriptionName;
 import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
@@ -123,7 +124,7 @@ public class EcommerceSubscriptionLifecycle
     // Order-fulfillment saga subscription — mirrors Spring's orderFulfillmentSagaSubscription bean.
     orderFulfillmentSagaSubscription =
         PollingEventSubscription.builder()
-            .subscriptionName("order-fulfillment-saga")
+            .subscriptionName(SubscriptionName.of("order-fulfillment-saga"))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(java.time.Duration.ofMillis(500)))
@@ -141,7 +142,7 @@ public class EcommerceSubscriptionLifecycle
     // Payment process manager subscription — mirrors Spring's paymentProcessSubscription bean.
     paymentProcessSubscription =
         PollingEventSubscription.builder()
-            .subscriptionName("payment-process-manager")
+            .subscriptionName(SubscriptionName.of("payment-process-manager"))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(java.time.Duration.ofMillis(500)))
@@ -186,7 +187,7 @@ public class EcommerceSubscriptionLifecycle
   private PollingEventSubscription processManagerSubscription(String name, EventListener listener) {
     PollingEventSubscription subscription =
         PollingEventSubscription.builder()
-            .subscriptionName(name)
+            .subscriptionName(SubscriptionName.of(name))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(java.time.Duration.ofMillis(500)))

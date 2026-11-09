@@ -37,7 +37,7 @@ public final class LiveFeedFrame {
     Map<String, Object> frame = new LinkedHashMap<>();
     frame.put("globalOffset", event.globalOffset().value());
     frame.put("aggregateType", event.aggregateType().value());
-    frame.put("eventType", event.eventType().name());
+    frame.put("eventType", event.eventType().value());
     frame.put("timestamp", event.metadata().timestamp().toString());
     return frame;
   }

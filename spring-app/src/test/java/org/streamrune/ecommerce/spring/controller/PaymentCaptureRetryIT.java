@@ -247,7 +247,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
   }
 
   private List<String> eventTypes(AggregateType type, String id) {
-    return events(type, id).stream().map(e -> e.eventType().name()).toList();
+    return events(type, id).stream().map(e -> e.eventType().value()).toList();
   }
 
   private List<EventEnvelope> events(AggregateType type, String id) {
