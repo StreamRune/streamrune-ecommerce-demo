@@ -367,18 +367,15 @@ public MultiProjectionRunner projectionRunner(
 }
 ```
 
-`projectionPolling(properties)` says how often each projection reads the event store for new events. Add the helper next to the bean (it uses `java.time.Duration`, `org.streamrune.core.subscription.SubscriptionConfig` and `org.streamrune.spring.StreamRuneProperties`):
+`projectionPolling(properties)` says how often each projection reads the event store for new events. Add the helper next to the bean (it uses `org.streamrune.core.subscription.SubscriptionConfig` and `org.streamrune.spring.StreamRuneProperties`):
 
 ```java
 private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
-  return new SubscriptionConfig(
-      true,
-      Duration.ofMillis(properties.pollingIntervalMs()),
-      Duration.ofMillis(properties.pollingJitterMs()));
+  return new SubscriptionConfig(true, properties.pollingInterval(), properties.pollingJitter());
 }
 ```
 
-`StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval-ms` and `streamrune.polling-jitter-ms` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval-ms=500` to keep their waits short.
+`StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval` and `streamrune.polling-jitter` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval=500ms` to keep their waits short.
 
 Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own offset namespace in `PostgresOffsetStore`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
 
@@ -404,7 +401,6 @@ package org.streamrune.ecommerce.spring.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.time.Duration;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -515,16 +511,13 @@ public class StreamRuneConfig {
 
   /**
    * How often each projection reads the event store for new events: {@code
-   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * streamrune.polling-interval} plus up to {@code streamrune.polling-jitter} of jitter, five
    * seconds and one second unless configured. They are the two properties the framework's own
    * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
    * so it hands them over itself. The integration tests set a shorter interval.
    */
   private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
-    return new SubscriptionConfig(
-        true,
-        Duration.ofMillis(properties.pollingIntervalMs()),
-        Duration.ofMillis(properties.pollingJitterMs()));
+    return new SubscriptionConfig(true, properties.pollingInterval(), properties.pollingJitter());
   }
 
   @Bean(destroyMethod = "close")

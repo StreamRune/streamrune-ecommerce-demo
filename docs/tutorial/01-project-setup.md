@@ -623,7 +623,7 @@ A word on the `streamrune.*` block. No key selects the event store: `streamrune-
 
 `streamrune.projections.auto-discovery.enabled: false` turns off auto-discovery of projections on the classpath. The tutorial wires projections explicitly via `MultiProjectionRunner` (Chapter 5), so auto-discovery would conflict with the manual wiring.
 
-Every key the framework binds, with its default, is in its [configuration reference](https://github.com/StreamRune/streamrune/blob/main/docs/guide/configuration.md); the projections' catch-up polling interval, for one, is `streamrune.polling-interval-ms` (`5000` unless configured), which Chapter 5 comes back to.
+Every key the framework binds, with its default, is in its [configuration reference](https://github.com/StreamRune/streamrune/blob/main/docs/guide/configuration.md); the projections' catch-up polling interval, for one, is `streamrune.polling-interval` (`5s` unless configured), which Chapter 5 comes back to.
 
 > The real demo also ships an `application.properties` alongside this `application.yml`. It carries the same datasource defaults plus `spring.sql.init.mode=never`, which the native-image build needs at AOT processing time. You do not need it for the plain `bootRun` in this chapter; it matters only for the native build (Chapter 17, *Deploy to production*).
 

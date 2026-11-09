@@ -778,7 +778,7 @@ class TwoInstanceSagaIT {
                 "--spring.rabbitmq.username=" + rabbit.getAdminUsername(),
                 "--spring.rabbitmq.password=" + rabbit.getAdminPassword(),
                 "--streamrune.projections.auto-discovery.enabled=false",
-                "--streamrune.polling-interval-ms=200",
+                "--streamrune.polling-interval=200ms",
                 "--streamrune.sse.keep-alive-interval=1h",
                 "--app.saga.fulfillment-timeout=2s",
                 "--app.saga.timeout-poll-interval=200ms",

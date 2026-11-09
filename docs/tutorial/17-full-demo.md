@@ -559,7 +559,7 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/a
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" "http://localhost:8080/api/admin/outbox/failed" | jq .
 ```
 
-The `OutboxPoller` drains entries every 5 seconds (the default `streamrune.outbox.flush-interval-ms`, not overridden in the demo's `application.yml`), so the first list is usually empty or shows the last few seconds of entries. The second list is empty in a healthy run: on the demo's `STRICT_PER_AGGREGATE` channel a `FAILED` entry would block its order, payment or product until replayed or skipped from the admin API (Chapter 14).
+The `OutboxPoller` drains entries every 5 seconds (the default `streamrune.outbox.flush-interval`, not overridden in the demo's `application.yml`), so the first list is usually empty or shows the last few seconds of entries. The second list is empty in a healthy run: on the demo's `STRICT_PER_AGGREGATE` channel a `FAILED` entry would block its order, payment or product until replayed or skipped from the admin API (Chapter 14).
 
 ### Step 10: Browse Events in the Event Explorer
 
@@ -1444,16 +1444,13 @@ public class StreamRuneConfig {
 
   /**
    * How often each projection reads the event store for new events: {@code
-   * streamrune.polling-interval-ms} plus up to {@code streamrune.polling-jitter-ms} of jitter, five
+   * streamrune.polling-interval} plus up to {@code streamrune.polling-jitter} of jitter, five
    * seconds and one second unless configured. They are the two properties the framework's own
    * projection runner reads in the Quarkus and Micronaut apps; this app builds its runner itself,
    * so it hands them over itself. The integration tests set a shorter interval.
    */
   private static SubscriptionConfig projectionPolling(StreamRuneProperties properties) {
-    return new SubscriptionConfig(
-        true,
-        Duration.ofMillis(properties.pollingIntervalMs()),
-        Duration.ofMillis(properties.pollingJitterMs()));
+    return new SubscriptionConfig(true, properties.pollingInterval(), properties.pollingJitter());
   }
 
   /**

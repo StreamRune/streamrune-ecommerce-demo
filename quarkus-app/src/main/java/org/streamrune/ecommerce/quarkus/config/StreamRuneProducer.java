@@ -686,7 +686,7 @@ public class StreamRuneProducer {
         .policy(
             new DeadLetterRetryPolicy(
                 properties.deadLetter().maxRetries(),
-                Duration.ofMillis(properties.deadLetter().retryIntervalMs()),
+                properties.deadLetter().retryInterval(),
                 2.0,
                 false,
                 DeadLetterUnkeyedReplaySetting.parse(properties.deadLetter().unkeyedReplay())))

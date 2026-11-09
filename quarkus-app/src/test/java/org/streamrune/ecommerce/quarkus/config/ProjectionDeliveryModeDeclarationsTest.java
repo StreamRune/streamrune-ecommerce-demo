@@ -166,8 +166,8 @@ class ProjectionDeliveryModeDeclarationsTest {
             new Class<?>[] {StreamRuneQuarkusProperties.class},
             (proxy, method, args) ->
                 switch (method.getName()) {
-                  case "pollingIntervalMs" -> 5000L;
-                  case "pollingJitterMs" -> 1000L;
+                  case "pollingInterval" -> java.time.Duration.ofSeconds(5);
+                  case "pollingJitter" -> java.time.Duration.ofSeconds(1);
                   case "hashCode" -> System.identityHashCode(proxy);
                   case "equals" -> proxy == args[0];
                   case "toString" -> "properties";

@@ -6,8 +6,8 @@ import type { QueryClient, QueryKey } from "@tanstack/react-query";
  * A command is answered as soon as its events are stored, and the live feed
  * announces them within a second. The lists the pages show are read models,
  * written by projections that poll the event store: every five seconds plus
- * up to one second of jitter by default (`streamrune.polling-interval-ms` and
- * `streamrune.polling-jitter-ms` on the backend). A list read right after a
+ * up to one second of jitter by default (`streamrune.polling-interval` and
+ * `streamrune.polling-jitter` on the backend). A list read right after a
  * command, or right after the frame that announces its event, is therefore
  * often the list as it was before.
  *
