@@ -73,8 +73,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
             () -> {
               Map<String, LeaseRole> roles =
                   subscriptionHealth.health().stream()
-                      .collect(
-                          Collectors.toMap(SubscriptionHealth::name, SubscriptionHealth::role));
+                      .collect(Collectors.toMap(h -> h.name().value(), SubscriptionHealth::role));
               assertThat(roles)
                   .containsEntry("order-fulfillment-saga", LeaseRole.LEADING)
                   .containsEntry("payment-process-manager", LeaseRole.LEADING)

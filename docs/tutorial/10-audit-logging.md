@@ -287,6 +287,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
@@ -575,15 +576,15 @@ public class StreamRuneConfig {
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
             .register(
-                "products",
+                ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "orders",
+                ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "customers",
+                ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .build();
@@ -915,7 +916,7 @@ public class AuditProjection implements Projection {
               meta.userId() != null ? meta.userId().value() : null,
               meta.commandId().value(),
               meta.correlationId().value(),
-              envelope.eventType().name(),
+              envelope.eventType().value(),
               envelope.event(),
               meta.timestamp()));
       if (entries.size() > capacity) {
@@ -934,7 +935,7 @@ Each entry is an `AuditEntry` record capturing `eventId`, `aggregateType` and `a
 
 `AuditProjection` declares `@ProjectionConfig(name = "audit", deliveryMode = AT_LEAST_ONCE_IDEMPOTENT)` (the delivery modes are introduced in Chapter 5). It keeps its entries in memory, so they can never share the runner's checkpoint transaction, and the runner hands it no repository at all. A batch can be delivered twice even without a crash — a checkpoint commit that fails after `process` returned (a lost connection, a failed `COMMIT`) is retried from the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection dedups by `eventId`: an event whose id is already in the map is skipped. A redelivered batch is among the newest events, so its ids are still kept; an event delivered again after the map dropped it would be recorded again, as the newest. Appending blindly would break the guarantee the projection declares.
 
-The projection exposes a `listByAggregateType(String aggregateType)` method that filters entries by aggregate type. If you want to expose this through a REST endpoint, inject `AuditProjection` into a controller and call `listByAggregateType("order")`. Note that `AuditProjection` is not currently registered in the Spring app's `MultiProjectionRunner` (the Quarkus and Micronaut apps discover it through its annotation) — it is provided as an extension point for an audit read model. To activate it in the Spring app, declare an `AuditProjection` bean and register it like the other four projections, but with its own mode: `.register("audit", auditProjection, ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)`. It may share the runner with the four `TRANSACTIONAL_LOCAL` read models.
+The projection exposes a `listByAggregateType(String aggregateType)` method that filters entries by aggregate type. If you want to expose this through a REST endpoint, inject `AuditProjection` into a controller and call `listByAggregateType("order")`. Note that `AuditProjection` is not currently registered in the Spring app's `MultiProjectionRunner` (the Quarkus and Micronaut apps discover it through its annotation) — it is provided as an extension point for an audit read model. To activate it in the Spring app, declare an `AuditProjection` bean and register it like the other four projections, but with its own mode: `.register(ProjectionName.of("audit"), auditProjection, ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)`. It may share the runner with the four `TRANSACTIONAL_LOCAL` read models.
 
 ---
 

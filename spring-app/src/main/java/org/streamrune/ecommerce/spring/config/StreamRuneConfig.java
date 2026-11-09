@@ -22,8 +22,10 @@ import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.core.types.SubscriptionName;
 import org.streamrune.core.upcasting.EventUpcaster;
 import org.streamrune.crypto.postgres.PostgresCryptoEngine;
 import org.streamrune.ecommerce.commands.customer.CustomerDecider;
@@ -569,19 +571,19 @@ public class StreamRuneConfig {
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
             .register(
-                "products",
+                ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "orders",
+                ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "customers",
+                ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .register(
-                "inventory",
+                ProjectionName.of("inventory"),
                 new CacheAwareProjection(inventoryProjection, cacheInvalidator),
                 ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
             .build();
@@ -866,7 +868,7 @@ public class StreamRuneConfig {
       ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
-            .subscriptionName("order-fulfillment-saga")
+            .subscriptionName(SubscriptionName.of("order-fulfillment-saga"))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
@@ -910,7 +912,7 @@ public class StreamRuneConfig {
       ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
-            .subscriptionName("payment-process-manager")
+            .subscriptionName(SubscriptionName.of("payment-process-manager"))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
@@ -949,7 +951,8 @@ public class StreamRuneConfig {
       ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
-            .subscriptionName(OrderCancellationProcessManager.SUBSCRIPTION_NAME)
+            .subscriptionName(
+                SubscriptionName.of(OrderCancellationProcessManager.SUBSCRIPTION_NAME))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
@@ -982,7 +985,7 @@ public class StreamRuneConfig {
       ObjectProvider<SubscriptionHealthContributor> health) {
     var subscription =
         PollingEventSubscription.builder()
-            .subscriptionName(OrderShipmentProcessManager.SUBSCRIPTION_NAME)
+            .subscriptionName(SubscriptionName.of(OrderShipmentProcessManager.SUBSCRIPTION_NAME))
             .eventStore(eventStore)
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))

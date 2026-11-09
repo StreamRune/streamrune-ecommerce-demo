@@ -288,7 +288,7 @@ public class AdminController {
     json.put("sagaId", entry.sagaId() == null ? null : entry.sagaId().value());
     json.put("sagaType", entry.sagaType().value());
     json.put("eventOffset", entry.eventOffset().value());
-    json.put("eventType", entry.eventType().name());
+    json.put("eventType", entry.eventType().value());
     json.put("errorType", entry.errorType());
     json.put("errorMessage", entry.errorMessage());
     json.put("faultedAt", entry.faultedAt().toString());

@@ -28,7 +28,7 @@ public class AuditMemProjection extends BaseProjection {
   @Override
   public void process(List<EventEnvelope> batch) {
     for (var e : batch) {
-      save(String.valueOf(e.globalOffset().value()), e.eventType().name());
+      save(String.valueOf(e.globalOffset().value()), e.eventType().value());
     }
   }
 }

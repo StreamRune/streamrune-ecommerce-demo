@@ -50,7 +50,7 @@ final class OrderUndoProbe {
   }
 
   List<String> eventTypes(AggregateType type, String id) {
-    return events(type, id).stream().map(e -> e.eventType().name()).toList();
+    return events(type, id).stream().map(e -> e.eventType().value()).toList();
   }
 
   /** The event types of the order's payment, oldest first. */

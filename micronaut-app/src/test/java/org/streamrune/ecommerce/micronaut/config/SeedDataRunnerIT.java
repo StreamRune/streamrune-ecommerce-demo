@@ -31,7 +31,7 @@ class SeedDataRunnerIT extends AbstractIntegrationTest {
   /** How many events of one type a stream holds. */
   private long count(AggregateType type, String id, String eventType) {
     return eventStore.load(StreamId.of(type, AggregateId.of(id))).events().stream()
-        .filter(e -> e.eventType().name().equals(eventType))
+        .filter(e -> e.eventType().value().equals(eventType))
         .count();
   }
 

@@ -190,7 +190,7 @@ public class OrderFulfillmentSaga
     if (event.event() instanceof OrderEvent.OrderPlaced placed) {
       return new SagaId(OrderCommand.PlaceOrder.SAGA_ID_PREFIX + placed.orderId());
     }
-    throw new IllegalArgumentException("Not a start event: " + event.eventType().name());
+    throw new IllegalArgumentException("Not a start event: " + event.eventType().value());
   }
 
   /**

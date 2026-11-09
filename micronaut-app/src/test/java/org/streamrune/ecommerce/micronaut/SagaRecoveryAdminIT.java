@@ -370,7 +370,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
     return eventStore
         .readStream(StreamId.of(OrderState.TYPE, AggregateId.of(orderId)), Version.initial(), 100)
         .stream()
-        .map(e -> e.eventType().name())
+        .map(e -> e.eventType().value())
         .toList();
   }
 

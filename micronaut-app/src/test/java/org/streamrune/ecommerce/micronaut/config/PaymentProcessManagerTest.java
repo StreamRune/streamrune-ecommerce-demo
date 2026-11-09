@@ -626,7 +626,7 @@ class PaymentProcessManagerTest {
 
     List<String> types(StreamId streamId) {
       return store.readStream(streamId, Version.initial(), 100).stream()
-          .map(e -> e.eventType().name())
+          .map(e -> e.eventType().value())
           .toList();
     }
 
@@ -805,7 +805,7 @@ class PaymentProcessManagerTest {
 
     List<String> types(StreamId streamId) {
       return streams.getOrDefault(streamId, List.of()).stream()
-          .map(e -> e.eventType().name())
+          .map(e -> e.eventType().value())
           .toList();
     }
 

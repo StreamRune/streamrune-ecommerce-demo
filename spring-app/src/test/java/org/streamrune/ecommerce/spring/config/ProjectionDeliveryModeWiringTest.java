@@ -69,7 +69,7 @@ class ProjectionDeliveryModeWiringTest {
     @Override
     public void process(List<EventEnvelope> batch) {
       for (var e : batch) {
-        save(String.valueOf(e.globalOffset().value()), e.eventType().name());
+        save(String.valueOf(e.globalOffset().value()), e.eventType().value());
       }
     }
   }
@@ -121,19 +121,19 @@ class ProjectionDeliveryModeWiringTest {
         .atomicProcessor(processor)
         .batchSize(10)
         .register(
-            "products",
+            ProjectionName.of("products"),
             new CacheAwareProjection(new ProductProjection(processor), invalidator),
             TRANSACTIONAL_LOCAL)
         .register(
-            "orders",
+            ProjectionName.of("orders"),
             new CacheAwareProjection(new OrderProjection(processor), invalidator),
             TRANSACTIONAL_LOCAL)
         .register(
-            "customers",
+            ProjectionName.of("customers"),
             new CacheAwareProjection(new CustomerProjection(processor), invalidator),
             TRANSACTIONAL_LOCAL)
         .register(
-            "inventory",
+            ProjectionName.of("inventory"),
             new CacheAwareProjection(new InventoryProjection(processor), invalidator),
             TRANSACTIONAL_LOCAL);
   }
@@ -154,7 +154,10 @@ class ProjectionDeliveryModeWiringTest {
                     .eventStore(new InMemoryEventStore())
                     .offsetStore(processor)
                     .atomicProcessor(processor)
-                    .register("orders", new OrderProjection(other), TRANSACTIONAL_LOCAL)
+                    .register(
+                        ProjectionName.of("orders"),
+                        new OrderProjection(other),
+                        TRANSACTIONAL_LOCAL)
                     .build())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'orders' declares TRANSACTIONAL_LOCAL and writes to")
@@ -223,7 +226,10 @@ class ProjectionDeliveryModeWiringTest {
         new Version(0));
     var runner =
         demoShape(processor, events)
-            .register("audit_mem", new AuditMemProjection(memory), AT_LEAST_ONCE_IDEMPOTENT)
+            .register(
+                ProjectionName.of("audit_mem"),
+                new AuditMemProjection(memory),
+                AT_LEAST_ONCE_IDEMPOTENT)
             .build();
     runner.start();
     try {

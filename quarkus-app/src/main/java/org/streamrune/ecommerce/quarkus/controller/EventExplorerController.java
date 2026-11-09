@@ -218,7 +218,7 @@ public class EventExplorerController {
         "streamId", env.streamId().value(),
         "aggregateType", env.aggregateType().value(),
         "aggregateId", env.aggregateId().value(),
-        "eventType", env.eventType().name(),
+        "eventType", env.eventType().value(),
         "timestamp", env.metadata().timestamp().toString(),
         "payload", env.event());
   }
