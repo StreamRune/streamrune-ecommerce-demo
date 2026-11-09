@@ -3333,7 +3333,7 @@ public PollingEventSubscription orderFulfillmentSagaSubscription(
 **SagaTimeoutRunner bean** — compensates a fulfillment that has not ended by its deadline. It polls the saga store on a virtual thread of its own, independent of the event stream:
 
 ```java
-@Bean(destroyMethod = "stop")
+@Bean(destroyMethod = "close")
 public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
     OrderFulfillmentSaga orderFulfillmentSaga,
     PostgresSagaStore sagaStore,
@@ -3359,7 +3359,7 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
 }
 ```
 
-Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "stop"` stops it with the context. Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. When the saga subscription of its process has not started by the runner's second poll, the runner logs one `INFO` line — a subscription that starts a moment after the runner, as it does here (the subscription bean depends on this one), opens the lease first and costs no line; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
+Every `app.saga.timeout-poll-interval` the runner looks for fulfillments past their deadline and claims each one: it writes the row to `COMPENSATING` before it dispatches anything, then calls the saga's `compensate()` and dispatches what it returns. `sagaRunner(orderFulfillmentSagaRunner)` is required — `build()` refuses a timeout runner that names neither `sagaRunner(...)` nor `stepLock(...)` — and binds the runner to the saga runner's step lock ([Reliability under failure](#reliability-under-failure) says what that buys). `inboxRetentionMaxAge` is the deployment's `streamrune.inbox.retention-max-age`: a compensation the runner resumes after its keys may have been pruned is faulted instead of dispatched again (Chapter 14). The integration does not start an application's timeout runner, so the bean method starts it, as the subscription beans start theirs, and `destroyMethod = "close"` closes it with the context (the runner is `AutoCloseable`, like the subscriptions). Built with `.sagaRunner(...)`, it also follows the runner's lease: it looks for deadlines only while the saga subscription of its own backend leads, so it claims where the saga's steps run. When the saga subscription of its process has not started by the runner's second poll, the runner logs one `INFO` line — a subscription that starts a moment after the runner, as it does here (the subscription bean depends on this one), opens the lease first and costs no line; if no such subscription has started 15 seconds after the timeout runner did, it logs a `WARN` and reads `DEGRADED` in health. The integration does register it for liveness: the health component gains a `relay.saga-timeout:` block (Chapter 15).
 
 **PaymentGatewayCircuitBreaker bean** — the breaker the process manager wraps around the gateway call (the class of Step 5b). Three consecutive calls without an answer open it; a 30-second cooldown then admits one probe:
 
@@ -4134,9 +4134,9 @@ public class StreamRuneConfig {
    * compensation has to cover it, or it is refused at its commit. {@code inboxRetentionMaxAge} is
    * the deployment's {@code streamrune.inbox.retention-max-age}: a compensation this runner resumes
    * after its keys may have been pruned is faulted instead of dispatched again. Started here, as
-   * the subscriptions below are, and stopped with the context, after the saga subscription.
+   * the subscriptions below are, and closed with the context, after the saga subscription.
    */
-  @Bean(destroyMethod = "stop")
+  @Bean(destroyMethod = "close")
   public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
       OrderFulfillmentSaga orderFulfillmentSaga,
       PostgresSagaStore sagaStore,
@@ -4960,7 +4960,7 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 **Timeout-driven compensation is claim-first, so it can't double-compensate.** Each app runs a timeout runner for the fulfillment saga (`SagaTimeoutRunner`, Step 6). It sweeps the sagas past their deadline — `OrderFulfillmentSaga.timeout()`, which the apps set from `app.saga.fulfillment-timeout`, fifteen minutes unless configured — and compensates them. Before dispatching anything, the timeout runner first claims the saga with a CAS write to `COMPENSATING`; only the writer that wins that claim goes on to compute and dispatch compensation commands. A saga that completes normally right as the timeout sweep fires cannot be double-compensated — but not merely because "whichever writer is second loses the CAS on the terminal write": the claim happens *before* any compensation is computed, so losing it means no compensation commands were ever dispatched by that attempt in the first place, not that a second wave of commands was silently discarded after being sent.
 
-**The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it after that subscription on shutdown, since neither integration starts a timeout runner an application declares. Closing the saga subscription first gives the saga's lease back, so the timeout runner stops on a backend that does not lead. The two lifecycle classes build the saga subscription with `.sagaRunner(...)` and `.healthContributor(...)` and the subscriptions of the payment, order cancellation and order shipment process managers with `.leadership(...)` and `.healthContributor(...)`, as Spring does; their saga runners take the integration's `SubscriptionLeadership` bean in `.leadership(...)` (Micronaut's is `@Nullable`: absent when leadership is off). The Quarkus lifecycle's shutdown:
+**The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and closes it after that subscription on shutdown, since neither integration starts a timeout runner an application declares. Closing the saga subscription first gives the saga's lease back, so the timeout runner stops on a backend that does not lead. The two lifecycle classes build the saga subscription with `.sagaRunner(...)` and `.healthContributor(...)` and the subscriptions of the payment, order cancellation and order shipment process managers with `.leadership(...)` and `.healthContributor(...)`, as Spring does; their saga runners take the integration's `SubscriptionLeadership` bean in `.leadership(...)` (Micronaut's is `@Nullable`: absent when leadership is off). The Quarkus lifecycle's shutdown:
 
 ```java
 void onStop(@Observes ShutdownEvent event) {
@@ -4975,7 +4975,7 @@ void onStop(@Observes ShutdownEvent event) {
   // that follows the lease then stops on a backend that does not lead.
   closeQuietly(orderFulfillmentSagaSubscription, "order-fulfillment-saga subscription");
   orderFulfillmentSagaSubscription = null;
-  closeQuietly(orderFulfillmentTimeoutRunner::stop, "order-fulfillment saga's timeout runner");
+  closeQuietly(orderFulfillmentTimeoutRunner, "order-fulfillment saga's timeout runner");
 }
 ```
 
