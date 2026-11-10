@@ -618,8 +618,9 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
         // OrderPlaced, and evolve would replace the order's lines and total and reset a confirmed
         // or shipped order to CREATED. An id cancelled before anybody placed it is not placed
         // afterwards: its stream already says CANCELLED.
-        if (state.orderId() != null || state.status() == OrderStatus.CANCELLED)
+        if (state.orderId() != null || state.status() == OrderStatus.CANCELLED) {
           throw new DomainException("Order already exists: " + c.orderId());
+        }
         List<OrderEvent.OrderLine> eventLines =
             c.lines().stream()
                 .map(l -> new OrderEvent.OrderLine(l.productId(), l.quantity(), l.unitPrice()))
@@ -633,25 +634,28 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
 
       case OrderCommand.ConfirmOrder c -> {
         requirePlaced(state, c.orderId());
-        if (state.status() != OrderStatus.CREATED)
+        if (state.status() != OrderStatus.CREATED) {
           throw new DomainException(
               "Can only confirm CREATED orders, current status: " + state.status());
+        }
         yield List.of(new OrderEvent.OrderConfirmed(c.orderId()));
       }
 
       case OrderCommand.ShipOrder c -> {
         requirePlaced(state, c.orderId());
-        if (state.status() != OrderStatus.CONFIRMED)
+        if (state.status() != OrderStatus.CONFIRMED) {
           throw new DomainException(
               "Can only ship CONFIRMED orders, current status: " + state.status());
+        }
         yield List.of(new OrderEvent.OrderShipped(c.orderId(), state.lines()));
       }
 
       case OrderCommand.DeliverOrder c -> {
         requirePlaced(state, c.orderId());
-        if (state.status() != OrderStatus.SHIPPED)
+        if (state.status() != OrderStatus.SHIPPED) {
           throw new DomainException(
               "Can only deliver SHIPPED orders, current status: " + state.status());
+        }
         yield List.of(new OrderEvent.OrderDelivered(c.orderId()));
       }
 
@@ -662,8 +666,9 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
         // cancelled again: every OrderCancelled starts the undo of the order's money and stock,
         // and a reservation stored after an earlier undo ran is released by the undo of the next
         // one.
-        if (state.status() == OrderStatus.SHIPPED || state.status() == OrderStatus.DELIVERED)
+        if (state.status() == OrderStatus.SHIPPED || state.status() == OrderStatus.DELIVERED) {
           throw new DomainException("Cannot cancel " + state.status() + " orders");
+        }
         yield List.of(new OrderEvent.OrderCancelled(c.orderId(), c.reason(), state.lines()));
       }
     };
@@ -675,7 +680,9 @@ public class OrderDecider implements Decider<OrderCommand, OrderState, OrderEven
    * nobody placed.
    */
   private static void requirePlaced(OrderState state, String orderId) {
-    if (state.orderId() == null) throw new DomainException("Order not found: " + orderId);
+    if (state.orderId() == null) {
+      throw new DomainException("Order not found: " + orderId);
+    }
   }
 
   @Override
