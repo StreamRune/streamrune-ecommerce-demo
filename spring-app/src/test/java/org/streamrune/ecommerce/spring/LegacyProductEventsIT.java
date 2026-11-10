@@ -34,9 +34,9 @@ import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.spring.config.StreamRuneConfig;
 import org.streamrune.postgres.PostgresEventStore;
 import org.streamrune.postgres.PostgresEventStoreFactory;
-import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Tutorial chapter 4 against a real database and the demo's own event type registry and {@code
@@ -50,8 +50,8 @@ class LegacyProductEventsIT {
   private static final Path CHAPTER = Path.of("../docs/tutorial/04-event-upcasting.md");
 
   @Container
-  static final PostgreSQLContainer<?> POSTGRES =
-      new PostgreSQLContainer<>("postgres:17")
+  static final PostgreSQLContainer POSTGRES =
+      new PostgreSQLContainer("postgres:17")
           .withDatabaseName("streamrune_ecommerce")
           .withUsername("postgres")
           .withPassword("postgres");

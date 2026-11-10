@@ -40,7 +40,7 @@ import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
 import org.streamrune.runtime.BackgroundRelayHealthContributor;
 import org.streamrune.runtime.BackgroundRelayHealthContributor.ComponentHealth;
 import org.streamrune.runtime.DeadLetterRetryRunner;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * The Micronaut app starts and serves commands while RabbitMQ is down, and its outbox drains once

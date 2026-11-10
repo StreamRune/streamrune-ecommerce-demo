@@ -36,8 +36,8 @@ import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
 import org.streamrune.runtime.VirtualThreadCommandBus;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * End-to-end proof of the transactional outbox path in the Micronaut demo app, mirroring the Spring
@@ -70,8 +70,8 @@ class IntegrationOutboxE2EIT implements TestPropertyProvider {
   // Containers — started once for this test class.
   // ---------------------------------------------------------------------------
 
-  private static final PostgreSQLContainer<?> POSTGRES =
-      new PostgreSQLContainer<>("postgres:17")
+  private static final PostgreSQLContainer POSTGRES =
+      new PostgreSQLContainer("postgres:17")
           .withDatabaseName("streamrune_ecommerce")
           .withUsername("postgres")
           .withPassword("postgres");

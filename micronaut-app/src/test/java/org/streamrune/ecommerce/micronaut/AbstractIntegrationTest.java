@@ -3,7 +3,7 @@ package org.streamrune.ecommerce.micronaut;
 import io.micronaut.test.support.TestPropertyProvider;
 import java.util.Map;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Shared base for the Micronaut HTTP integration tests. Spins up a real PostgreSQL container once
@@ -30,11 +30,11 @@ public abstract class AbstractIntegrationTest implements TestPropertyProvider {
    * Singleton container started once for the entire test suite. {@code withReuse(true)} keeps the
    * datasource URL stable so Micronaut Test can cache and reuse one application context.
    */
-  protected static final PostgreSQLContainer<?> POSTGRES;
+  protected static final PostgreSQLContainer POSTGRES;
 
   static {
     POSTGRES =
-        new PostgreSQLContainer<>("postgres:17")
+        new PostgreSQLContainer("postgres:17")
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
             .withPassword("postgres")

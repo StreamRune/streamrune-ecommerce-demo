@@ -2,7 +2,7 @@ package org.streamrune.ecommerce.quarkus;
 
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import java.util.Map;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Starts a real PostgreSQL (Testcontainers) for {@code @QuarkusTest} runs and overrides the
@@ -17,12 +17,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
  */
 public class PostgresTestResource implements QuarkusTestResourceLifecycleManager {
 
-  private PostgreSQLContainer<?> postgres;
+  private PostgreSQLContainer postgres;
 
   @Override
   public Map<String, String> start() {
     postgres =
-        new PostgreSQLContainer<>("postgres:17")
+        new PostgreSQLContainer("postgres:17")
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
             .withPassword("postgres");

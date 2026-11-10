@@ -32,7 +32,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.streamrune.ecommerce.quarkus.config.RabbitMqProducer;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * The Quarkus app starts and serves commands while RabbitMQ is down, and its outbox drains once the

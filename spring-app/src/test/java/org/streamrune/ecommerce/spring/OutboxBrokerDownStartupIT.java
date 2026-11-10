@@ -30,7 +30,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.streamrune.ecommerce.spring.config.RabbitMqConfig;
 import org.streamrune.spring.StreamRuneHealthIndicator;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * The Spring app starts and serves commands while RabbitMQ is down, and its outbox drains once the
