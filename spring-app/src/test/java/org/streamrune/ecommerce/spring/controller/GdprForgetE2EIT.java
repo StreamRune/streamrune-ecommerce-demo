@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.SubjectId;
@@ -439,9 +440,9 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
     var history = eventStore.load(StreamId.of(CustomerState.TYPE, new AggregateId(cid)));
     var registered =
         history.events().stream()
-            .map(e -> e.event())
-            .filter(e -> e instanceof CustomerEvent.CustomerRegistered)
-            .map(e -> (CustomerEvent.CustomerRegistered) e)
+            .map(EventEnvelope::event)
+            .filter(CustomerEvent.CustomerRegistered.class::isInstance)
+            .map(CustomerEvent.CustomerRegistered.class::cast)
             .findFirst()
             .orElseThrow();
     assertThat(registered.name()).isEqualTo(CryptoShreddingModule.REDACTED);

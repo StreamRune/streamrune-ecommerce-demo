@@ -219,8 +219,8 @@ class TutorialChaptersStartIT {
       return "not started within " + START_TIMEOUT_SECONDS + " s: " + report(Files.readString(log));
     } finally {
       process.destroy();
-      if (!process.waitFor(20, TimeUnit.SECONDS)) {
-        process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+      if (!process.waitFor(Duration.ofSeconds(20))) {
+        process.destroyForcibly().waitFor(Duration.ofSeconds(10));
       }
     }
   }

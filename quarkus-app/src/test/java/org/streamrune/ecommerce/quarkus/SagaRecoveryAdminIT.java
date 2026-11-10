@@ -340,7 +340,7 @@ class SagaRecoveryAdminIT {
                     event,
                     SagaEnvelopes.metadataCausedBy(OrderFulfillmentState.class, sagaId))),
             Version.initial());
-    return result.globalOffsets().get(0);
+    return result.globalOffsets().getFirst();
   }
 
   private void seedDeadLetter(SagaId sagaId, GlobalOffset eventOffset) {

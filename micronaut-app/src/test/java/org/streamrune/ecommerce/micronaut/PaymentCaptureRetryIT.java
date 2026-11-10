@@ -114,7 +114,7 @@ class PaymentCaptureRetryIT extends AbstractIntegrationTest {
     assertThat(captureDeadLetters(paymentId)).isEmpty();
 
     // What brings the capture to the saga: the origin the bus stored with it.
-    EventEnvelope initiated = events(PaymentState.TYPE, paymentId).get(0);
+    EventEnvelope initiated = events(PaymentState.TYPE, paymentId).getFirst();
     EventMetadata captured = events(PaymentState.TYPE, paymentId).get(1).metadata();
     SagaId sagaId = new SagaId("fulfillment-" + orderId);
     assertThat(initiated.metadata().sagaOrigin())

@@ -149,18 +149,17 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
           .atMost(Duration.ofSeconds(10))
           .pollInterval(Duration.ofMillis(200))
           .untilAsserted(
-              () -> {
-                // The frame's data is the OrderPlaced event serialized as JSON; its id is the
-                // global offset. We assert a frame carrying the order id arrived on this stream.
-                assertThat(received)
-                    .as("SSE subscriber must receive a live frame for stream %s", oid)
-                    .anySatisfy(
-                        frame -> {
-                          assertThat(frame.data()).isNotNull();
-                          assertThat(frame.data()).contains(oid);
-                          assertThat(frame.id()).isNotNull();
-                        });
-              });
+              () ->
+                  // The frame's data is the OrderPlaced event serialized as JSON; its id is the
+                  // global offset. We assert a frame carrying the order id arrived on this stream.
+                  assertThat(received)
+                      .as("SSE subscriber must receive a live frame for stream %s", oid)
+                      .anySatisfy(
+                          frame -> {
+                            assertThat(frame.data()).isNotNull();
+                            assertThat(frame.data()).contains(oid);
+                            assertThat(frame.id()).isNotNull();
+                          }));
     } finally {
       sub.dispose();
     }

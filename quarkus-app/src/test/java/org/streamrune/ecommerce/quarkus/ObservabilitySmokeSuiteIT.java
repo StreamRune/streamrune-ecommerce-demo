@@ -399,7 +399,7 @@ class ObservabilitySmokeSuiteIT {
     List<Map<String, Object>> rows = body.getList("");
     assertThat(rows).isNotNull();
     if (!rows.isEmpty()) {
-      Map<String, Object> first = rows.get(0);
+      Map<String, Object> first = rows.getFirst();
       assertThat(first).containsKey("commandId");
       assertThat(first).containsKey("commandType");
       assertThat(first).containsKey("outcome");
@@ -468,7 +468,7 @@ class ObservabilitySmokeSuiteIT {
 
     List<Map<String, Object>> events = body.getList("");
     assertThat(events).isNotEmpty();
-    Map<String, Object> first = events.get(0);
+    Map<String, Object> first = events.getFirst();
     assertThat(first).containsKey("globalOffset");
     assertThat(first).containsKey("streamId");
     assertThat(first).containsEntry("aggregateType", "product");

@@ -193,11 +193,22 @@ class OrderPricingTest {
     ProductDecider decider = new ProductDecider();
     return InMemoryCommandBus.builder()
         .eventStore(eventStore)
-        .register(registration(ProductCommand.CreateProduct.class, c -> c.productId(), decider))
-        .register(registration(ProductCommand.UpdatePrice.class, c -> c.productId(), decider))
-        .register(registration(ProductCommand.AdjustStock.class, c -> c.productId(), decider))
         .register(
-            registration(ProductCommand.DiscontinueProduct.class, c -> c.productId(), decider))
+            registration(
+                ProductCommand.CreateProduct.class,
+                ProductCommand.CreateProduct::productId,
+                decider))
+        .register(
+            registration(
+                ProductCommand.UpdatePrice.class, ProductCommand.UpdatePrice::productId, decider))
+        .register(
+            registration(
+                ProductCommand.AdjustStock.class, ProductCommand.AdjustStock::productId, decider))
+        .register(
+            registration(
+                ProductCommand.DiscontinueProduct.class,
+                ProductCommand.DiscontinueProduct::productId,
+                decider))
         .build();
   }
 

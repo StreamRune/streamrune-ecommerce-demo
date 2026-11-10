@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
@@ -460,9 +461,9 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
     var history = eventStore.load(StreamId.of(CustomerState.TYPE, AggregateId.of(cid)));
     var registered =
         history.events().stream()
-            .map(e -> e.event())
-            .filter(e -> e instanceof CustomerEvent.CustomerRegistered)
-            .map(e -> (CustomerEvent.CustomerRegistered) e)
+            .map(EventEnvelope::event)
+            .filter(CustomerEvent.CustomerRegistered.class::isInstance)
+            .map(CustomerEvent.CustomerRegistered.class::cast)
             .findFirst()
             .orElseThrow();
     assertThat(registered.name()).isEqualTo(CryptoShreddingModule.REDACTED);

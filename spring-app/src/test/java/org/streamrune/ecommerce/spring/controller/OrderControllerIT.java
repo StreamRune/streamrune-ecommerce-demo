@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.streamrune.core.AuthorizationException;
+import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.saga.SagaId;
 import org.streamrune.core.saga.SagaStatus;
@@ -294,7 +295,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
               assertThat(v.orderId()).isEqualTo(oid);
               assertThat(v.customerId()).isEqualTo(cid);
               assertThat(v.lines()).hasSize(1);
-              assertThat(v.lines().get(0).productId()).isEqualTo(pid);
+              assertThat(v.lines().getFirst().productId()).isEqualTo(pid);
             });
   }
 
@@ -918,7 +919,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
             });
     assertThat(
             probe.events(OrderState.TYPE, oid).stream()
-                .map(e -> e.event())
+                .map(EventEnvelope::event)
                 .filter(OrderEvent.OrderCancelled.class::isInstance)
                 .map(e -> ((OrderEvent.OrderCancelled) e).reason())
                 .toList())
@@ -988,7 +989,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
             StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
             Version.initial(),
             Integer.MAX_VALUE);
-    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
+    assertThat(events.getLast().event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test
@@ -1032,9 +1033,9 @@ class OrderControllerIT extends AbstractIntegrationTest {
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);
-    assertThat(rows.get(0).outcome()).isEqualTo("FAILURE");
-    assertThat(rows.get(0).userId()).isEqualTo(cid);
-    assertThat(rows.get(0).errorMessage()).contains("Required role: ADMIN");
+    assertThat(rows.getFirst().outcome()).isEqualTo("FAILURE");
+    assertThat(rows.getFirst().userId()).isEqualTo(cid);
+    assertThat(rows.getFirst().errorMessage()).contains("Required role: ADMIN");
   }
 
   @Test

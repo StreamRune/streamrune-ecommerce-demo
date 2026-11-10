@@ -694,6 +694,7 @@ class PaymentProcessManagerTest {
       delegate.saveSnapshot(streamId, version, state, snapshotVersion);
     }
 
+    @Override
     public boolean saveSnapshot(
         StreamId streamId,
         Version version,
@@ -832,6 +833,7 @@ class PaymentProcessManagerTest {
       throw new UnsupportedOperationException();
     }
 
+    @Override
     public boolean saveSnapshot(
         StreamId streamId,
         Version version,

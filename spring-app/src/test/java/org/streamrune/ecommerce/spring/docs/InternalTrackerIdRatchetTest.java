@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -653,12 +652,12 @@ class InternalTrackerIdRatchetTest {
     String strayProse = "The sweep is done " + ".";
     assertEquals(
         "STRAY_SPACE_BEFORE_PERIOD",
-        ruleBrokenBy(chapter, classify(chapter, List.of(strayProse)).get(0), null));
+        ruleBrokenBy(chapter, classify(chapter, List.of(strayProse)).getFirst(), null));
     String strayJavadoc = "   * The sweep is done " + ".";
     assertEquals(
         "STRAY_SPACE_BEFORE_PERIOD",
         ruleBrokenBy(
-            "a/src/main/java/A.java", classify("A.java", List.of(strayJavadoc)).get(0), null));
+            "a/src/main/java/A.java", classify("A.java", List.of(strayJavadoc)).getFirst(), null));
     // A one-line javadoc and a line comment are prose too.
     for (String strayComment :
         List.of(
@@ -669,19 +668,19 @@ class InternalTrackerIdRatchetTest {
       assertEquals(
           "STRAY_SPACE_BEFORE_PERIOD",
           ruleBrokenBy(
-              "a/src/main/java/A.java", classify("A.java", List.of(strayComment)).get(0), null),
+              "a/src/main/java/A.java", classify("A.java", List.of(strayComment)).getFirst(), null),
           strayComment);
     }
     String narrationInChapter = "Until no" + "w you created the demo data by hand.";
     assertEquals(
         "HISTORY_NARRATION",
-        ruleBrokenBy(chapter, classify(chapter, List.of(narrationInChapter)).get(0), null));
+        ruleBrokenBy(chapter, classify(chapter, List.of(narrationInChapter)).getFirst(), null));
     String narrationInFrontend = "  // the cart previ" + "ously kept its own copy";
     assertEquals(
         "HISTORY_NARRATION",
         ruleBrokenBy(
             "frontend/src/lib/cart.ts",
-            classify("frontend/src/lib/cart.ts", List.of(narrationInFrontend)).get(0),
+            classify("frontend/src/lib/cart.ts", List.of(narrationInFrontend)).getFirst(),
             null));
     // A phrase broken across a line break is still one phrase, reported on the line it starts on.
     assertWrapped(
@@ -719,7 +718,8 @@ class InternalTrackerIdRatchetTest {
    */
   private static void assertWrapped(String rule, String relative, String first, String second) {
     List<Line> lines = classify(relative, List.of(first, second));
-    assertEquals(rule, ruleBrokenBy(relative, lines.get(0), lines.get(1)), first + " / " + second);
+    assertEquals(
+        rule, ruleBrokenBy(relative, lines.getFirst(), lines.get(1)), first + " / " + second);
     assertNull(ruleBrokenBy(relative, lines.get(1), null), "reported once, on the first line");
   }
 
@@ -989,7 +989,7 @@ class InternalTrackerIdRatchetTest {
 
   private static List<String> read(Path file) {
     try {
-      return Files.readAllLines(file, StandardCharsets.UTF_8);
+      return Files.readAllLines(file);
     } catch (java.nio.file.NoSuchFileException | java.nio.charset.MalformedInputException _) {
       // Another task of a parallel build replaced the file between listing and reading, or the
       // file is not UTF-8 text.

@@ -64,7 +64,7 @@ class IntegrationEventListenerIT {
 
     var items = listener.recent();
     assertThat(items).hasSize(1);
-    var received = items.get(0);
+    var received = items.getFirst();
     assertThat(received.type()).isEqualTo("OrderConfirmedIntegrationEvent");
     assertThat(received.body()).contains("o-1");
     assertThat(received.entryId()).isEqualTo("entry-1");

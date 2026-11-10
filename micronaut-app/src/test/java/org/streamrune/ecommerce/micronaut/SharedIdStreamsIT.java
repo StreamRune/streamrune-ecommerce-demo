@@ -69,8 +69,8 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
     assertThat(eventTypes(inventoryEvents))
         .contains("ShipmentReceived")
         .doesNotContain("ProductCreated");
-    assertThat(productEvents.get(0)).containsEntry("streamId", "product:" + id);
-    assertThat(inventoryEvents.get(0))
+    assertThat(productEvents.getFirst()).containsEntry("streamId", "product:" + id);
+    assertThat(inventoryEvents.getFirst())
         .containsEntry("aggregateType", "inventory")
         .containsEntry("aggregateId", id);
   }

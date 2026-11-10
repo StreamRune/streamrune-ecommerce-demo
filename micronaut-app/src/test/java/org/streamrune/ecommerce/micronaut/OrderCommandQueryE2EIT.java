@@ -278,7 +278,7 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
               assertThat(r.body().orderId()).isEqualTo(oid);
               assertThat(r.body().customerId()).isEqualTo(cid);
               assertThat(r.body().lines()).hasSize(1);
-              assertThat(r.body().lines().get(0).productId()).isEqualTo(pid);
+              assertThat(r.body().lines().getFirst().productId()).isEqualTo(pid);
             });
   }
 
@@ -801,7 +801,7 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
             StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
             Version.initial(),
             Integer.MAX_VALUE);
-    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
+    assertThat(events.getLast().event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test
@@ -849,9 +849,9 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);
-    assertThat(rows.get(0).outcome()).isEqualTo("FAILURE");
-    assertThat(rows.get(0).userId()).isEqualTo(cid);
-    assertThat(rows.get(0).errorMessage()).contains("Required role: ADMIN");
+    assertThat(rows.getFirst().outcome()).isEqualTo("FAILURE");
+    assertThat(rows.getFirst().userId()).isEqualTo(cid);
+    assertThat(rows.getFirst().errorMessage()).contains("Required role: ADMIN");
   }
 
   @Test

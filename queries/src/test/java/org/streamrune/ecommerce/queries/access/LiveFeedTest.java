@@ -301,7 +301,7 @@ class LiveFeedTest {
     }
     assertThrows(LiveFeedFullException.class, feed::admit);
 
-    clients.get(0).gone = true;
+    clients.getFirst().gone = true;
 
     awaitTrue(() -> feed.openConnections() == PLACES - 1);
     RecordingClient next = new RecordingClient();
@@ -484,8 +484,8 @@ class LiveFeedTest {
 
     awaitTrue(() -> first.signals.contains("comment: keepalive"));
     awaitTrue(() -> second.signals.contains("comment: keepalive"));
-    assertEquals("comment: connected", first.signals.get(0));
-    assertEquals("comment: connected", second.signals.get(0));
+    assertEquals("comment: connected", first.signals.getFirst());
+    assertEquals("comment: connected", second.signals.getFirst());
   }
 
   @Test

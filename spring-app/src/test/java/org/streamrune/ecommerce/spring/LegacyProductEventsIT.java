@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -187,7 +186,7 @@ class LegacyProductEventsIT {
    * event_stream}. Exactly one such block must exist.
    */
   private static String chapterInsertSql() throws IOException {
-    List<String> lines = Files.readAllLines(CHAPTER, StandardCharsets.UTF_8);
+    List<String> lines = Files.readAllLines(CHAPTER);
     List<String> blocks = new ArrayList<>();
     StringBuilder current = null;
     for (String line : lines) {

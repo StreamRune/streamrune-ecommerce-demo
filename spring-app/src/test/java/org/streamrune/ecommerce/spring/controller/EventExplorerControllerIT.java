@@ -113,7 +113,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
               assertThat(events).isNotNull();
               // each event should have the expected keys
               if (!events.isEmpty()) {
-                Map<String, Object> first = events.get(0);
+                Map<String, Object> first = events.getFirst();
                 assertThat(first)
                     .containsKeys("globalOffset", "streamId", "eventType", "timestamp");
               }

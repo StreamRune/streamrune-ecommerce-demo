@@ -14,6 +14,7 @@ import java.sql.ResultSet;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.DeadLetterQueue;
+import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CommandId;
@@ -84,7 +85,7 @@ class CustomerCommandDeadLetterIT {
                 Version.initial(),
                 Integer.MAX_VALUE)
             .stream()
-            .map(e -> e.event())
+            .map(EventEnvelope::event)
             .filter(CustomerEvent.CustomerRegistered.class::isInstance)
             .map(CustomerEvent.CustomerRegistered.class::cast)
             .toList();
