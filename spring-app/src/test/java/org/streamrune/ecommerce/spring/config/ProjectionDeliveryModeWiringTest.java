@@ -232,13 +232,11 @@ class ProjectionDeliveryModeWiringTest {
                 AT_LEAST_ONCE_IDEMPOTENT)
             .build();
     runner.start();
-    try {
+    try (runner) {
       Awaitility.await()
           .atMost(Duration.ofSeconds(10))
           .until(
               () -> memory.findById(ProjectionName.of("audit_mem"), "1", String.class).isPresent());
-    } finally {
-      runner.close();
     }
     assertThat(processor.hasReadModels(ProjectionName.of("audit_mem")))
         .as("nothing the at-least-once projection writes lands in the processor's store")
