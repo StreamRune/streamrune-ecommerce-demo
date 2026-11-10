@@ -60,7 +60,7 @@ class TutorialInterceptorOrderTest {
         Matcher m = CHAIN.matcher(lines.get(i));
         while (m.find()) {
           String args = m.group(1).strip();
-          if (args.isEmpty() || args.equals("...")) {
+          if (args.isEmpty() || "...".equals(args)) {
             continue; // a prose mention of the builder call, not a chain
           }
           String where = file.getFileName() + ":" + (i + 1) + " .interceptors(" + args + ")";

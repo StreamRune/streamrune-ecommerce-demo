@@ -45,7 +45,7 @@ public final class CommandRefusalExceptionHandlers {
         CommandRefusal.of(refused)
             .orElseThrow(() -> new IllegalStateException("not a refusal", refused));
     MutableHttpResponse<Map<String, String>> answer =
-        HttpResponse.<Map<String, String>>status(HttpStatus.valueOf(refusal.status()));
+        HttpResponse.status(HttpStatus.valueOf(refusal.status()));
     if (refusal.retryLater()) {
       answer.header(HttpHeaders.RETRY_AFTER, String.valueOf(refusal.retryAfterSeconds()));
     }

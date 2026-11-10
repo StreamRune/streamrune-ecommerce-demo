@@ -105,10 +105,10 @@ class ProjectionDeliveryModeDeclarationsTest {
   private static List<Projection> demoProjections(
       ProjectionRepository processor, ProjectionRepository other, String misplaced) {
     return List.of(
-        new DiscoverableProductProjection(misplaced.equals("products") ? other : processor),
-        new DiscoverableOrderProjection(misplaced.equals("orders") ? other : processor),
-        new CustomerViewProjection(misplaced.equals("customers") ? other : processor),
-        new DiscoverableInventoryProjection(misplaced.equals("inventory") ? other : processor),
+        new DiscoverableProductProjection("products".equals(misplaced) ? other : processor),
+        new DiscoverableOrderProjection("orders".equals(misplaced) ? other : processor),
+        new CustomerViewProjection("customers".equals(misplaced) ? other : processor),
+        new DiscoverableInventoryProjection("inventory".equals(misplaced) ? other : processor),
         new AuditProjection());
   }
 

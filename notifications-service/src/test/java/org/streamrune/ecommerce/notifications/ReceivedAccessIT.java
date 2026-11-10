@@ -86,7 +86,7 @@ class ReceivedAccessIT {
     await()
         .atMost(10, SECONDS)
         .until(
-            () -> listener.recent().stream().anyMatch(r -> r.entryId().equals("entry-access-2")));
+            () -> listener.recent().stream().anyMatch(r -> "entry-access-2".equals(r.entryId())));
 
     HttpResponse<String> anonymous = get("/health", null, null);
     assertThat(anonymous.statusCode()).isEqualTo(200);

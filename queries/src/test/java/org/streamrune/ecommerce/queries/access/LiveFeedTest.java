@@ -429,7 +429,7 @@ class LiveFeedTest {
     awaitTrue(() -> client.signals.contains("event 1 CustomerRegistered"));
     assertEquals(1, feed.registeredClients());
     assertEquals(0, feed.pendingPlaces());
-    assertTrue(client.signals.stream().noneMatch(s -> s.equals("ended") || s.startsWith("failed")));
+    assertTrue(client.signals.stream().noneMatch(s -> "ended".equals(s) || s.startsWith("failed")));
     assertPlacesAddUp();
   }
 
@@ -505,7 +505,7 @@ class LiveFeedTest {
     awaitTrue(() -> staying.signals.contains("event 1 CustomerRegistered"));
     assertEquals(sentToTheOneThatLeft, leaving.signals.size());
     assertTrue(
-        leaving.signals.stream().noneMatch(s -> s.equals("ended") || s.startsWith("failed")));
+        leaving.signals.stream().noneMatch(s -> "ended".equals(s) || s.startsWith("failed")));
   }
 
   // --- when the reader runs ---
@@ -647,7 +647,7 @@ class LiveFeedTest {
     Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
     Thread.setDefaultUncaughtExceptionHandler(
         (thread, thrown) -> {
-          if (thread.getName().equals(LiveFeed.READER_THREAD_NAME)) {
+          if (LiveFeed.READER_THREAD_NAME.equals(thread.getName())) {
             uncaught.set(thrown);
           }
         });
@@ -740,9 +740,9 @@ class LiveFeedTest {
               EventStore.class.getClassLoader(),
               new Class<?>[] {EventStore.class},
               (proxy, method, arguments) -> {
-                if (method.getName().equals("lastGlobalOffset")) {
+                if ("lastGlobalOffset".equals(method.getName())) {
                   headReads.incrementAndGet();
-                } else if (method.getName().equals("readGlobalStream")) {
+                } else if ("readGlobalStream".equals(method.getName())) {
                   streamReads.incrementAndGet();
                   holdIfAskedTo("readGlobalStream");
                 }
@@ -756,7 +756,7 @@ class LiveFeedTest {
                 } catch (InvocationTargetException e) {
                   throw e.getCause();
                 }
-                if (method.getName().equals("lastGlobalOffset")) {
+                if ("lastGlobalOffset".equals(method.getName())) {
                   holdIfAskedTo("lastGlobalOffset");
                 }
                 return answer;
@@ -817,7 +817,7 @@ class LiveFeedTest {
   /** The number of live threads with the name of the feed's reader. */
   private static long readerThreads() {
     return Thread.getAllStackTraces().keySet().stream()
-        .filter(thread -> thread.getName().equals(LiveFeed.READER_THREAD_NAME))
+        .filter(thread -> LiveFeed.READER_THREAD_NAME.equals(thread.getName()))
         .count();
   }
 
@@ -828,7 +828,7 @@ class LiveFeedTest {
 
   private static List<String> withoutKeepAlives(RecordingClient client) {
     List<String> signals = new ArrayList<>(client.signals);
-    signals.removeIf(signal -> signal.equals("comment: keepalive"));
+    signals.removeIf("comment: keepalive"::equals);
     return signals;
   }
 

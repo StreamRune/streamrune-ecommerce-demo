@@ -160,11 +160,15 @@ class IntegrationOutboxE2EIT implements TestPropertyProvider {
   @AfterEach
   void closeTestConsumer() {
     try {
-      if (testChannel != null) testChannel.close();
+      if (testChannel != null) {
+        testChannel.close();
+      }
     } catch (Exception ignored) {
     }
     try {
-      if (testConnection != null) testConnection.close();
+      if (testConnection != null) {
+        testConnection.close();
+      }
     } catch (Exception ignored) {
     }
     receivedMessages.clear();

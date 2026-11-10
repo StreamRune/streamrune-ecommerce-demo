@@ -93,7 +93,7 @@ class TutorialStackFilesListingTest {
           compose |= lines.get(end).startsWith("services:");
           end++;
         }
-        if (language.equals("dockerfile") || (language.equals("yaml") && compose)) {
+        if ("dockerfile".equals(language) || ("yaml".equals(language) && compose)) {
           blocks.add(chapter.getFileName() + ":" + (i + 2));
         }
         i = end;

@@ -183,7 +183,7 @@ class InternalTrackerIdRatchetTest {
   static boolean isScannedName(String name) {
     int dot = name.lastIndexOf('.');
     return SCANNED_NAMES.contains(name)
-        || name.equals("Dockerfile")
+        || "Dockerfile".equals(name)
         || name.startsWith("Dockerfile.")
         || (dot >= 0 && SCANNED_EXTENSIONS.contains(name.substring(dot + 1)));
   }
@@ -927,7 +927,7 @@ class InternalTrackerIdRatchetTest {
     boolean dockerfiles = false;
     for (String line : build.subList(start + 1, build.size())) {
       String code = line.strip();
-      if (code.equals("}")) {
+      if ("}".equals(code)) {
         break;
       }
       Matcher include = included.matcher(code);

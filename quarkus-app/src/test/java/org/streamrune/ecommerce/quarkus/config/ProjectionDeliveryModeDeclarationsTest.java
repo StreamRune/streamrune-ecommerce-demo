@@ -104,13 +104,13 @@ class ProjectionDeliveryModeDeclarationsTest {
       ProjectionRepository processor, ProjectionRepository other, String misplaced) {
     return List.of(
         new StreamRuneProducer.DiscoverableProductProjection(
-            misplaced.equals("products") ? other : processor),
+            "products".equals(misplaced) ? other : processor),
         new StreamRuneProducer.DiscoverableOrderProjection(
-            misplaced.equals("orders") ? other : processor),
+            "orders".equals(misplaced) ? other : processor),
         new StreamRuneProducer.DiscoverableCustomerProjection(
-            misplaced.equals("customers") ? other : processor),
+            "customers".equals(misplaced) ? other : processor),
         new StreamRuneProducer.DiscoverableInventoryProjection(
-            misplaced.equals("inventory") ? other : processor),
+            "inventory".equals(misplaced) ? other : processor),
         new AuditProjection());
   }
 

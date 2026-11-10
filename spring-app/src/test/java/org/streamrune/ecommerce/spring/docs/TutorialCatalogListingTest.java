@@ -43,7 +43,7 @@ class TutorialCatalogListingTest {
         .containsExactly("[versions]", "[libraries]", "[plugins]");
     for (Map.Entry<String, List<String>> section : excerpt.entrySet()) {
       List<String> lines = new ArrayList<>(section.getValue());
-      lines.removeIf(line -> line.isBlank() || line.equals(ELLIPSIS));
+      lines.removeIf(line -> line.isBlank() || ELLIPSIS.equals(line));
       assertThat(catalog.get(section.getKey()))
           .as("the lines chapter 1 shows in %s, in the catalog's order", section.getKey())
           .containsSubsequence(lines);

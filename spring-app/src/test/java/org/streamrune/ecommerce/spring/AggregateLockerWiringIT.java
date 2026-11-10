@@ -72,7 +72,7 @@ class AggregateLockerWiringIT extends AbstractIntegrationTest {
     assertThat(lockPool.path("name").asText()).isEqualTo("hikaricp.connections.active");
     List<String> pools = new ArrayList<>();
     for (JsonNode tag : metric("hikaricp.connections.active").path("availableTags")) {
-      if (tag.path("tag").asText().equals("pool")) {
+      if ("pool".equals(tag.path("tag").asText())) {
         tag.path("values").forEach(value -> pools.add(value.asText()));
       }
     }

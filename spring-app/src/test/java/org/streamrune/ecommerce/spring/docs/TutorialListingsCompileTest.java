@@ -252,7 +252,7 @@ class TutorialListingsCompileTest {
     List<Listing> listings = new ArrayList<>();
     for (Path chapter : chapters()) {
       for (Listing listing : completeFiles(chapter)) {
-        if (listing.className().equals(CONFIGURATION)) {
+        if (CONFIGURATION.equals(listing.className())) {
           listings.add(listing);
         }
       }
@@ -594,7 +594,7 @@ class TutorialListingsCompileTest {
     List<String> lines = Files.readAllLines(chapter);
     List<Block> blocks = new ArrayList<>();
     for (int i = 0; i < lines.size(); i++) {
-      if (!lines.get(i).strip().equals("```java")) {
+      if (!"```java".equals(lines.get(i).strip())) {
         continue;
       }
       int first = i + 1;

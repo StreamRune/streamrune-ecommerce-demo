@@ -102,7 +102,7 @@ class EcommerceDomainReflectionConfigTest {
     assertThat(EcommerceIntegrationEventMapper.class.getDeclaredClasses())
         .as("the nested DTO records the registration reaches")
         .anyMatch(
-            nested -> nested.getSimpleName().equals("ProductCreatedDto") && nested.isRecord());
+            nested -> "ProductCreatedDto".equals(nested.getSimpleName()) && nested.isRecord());
   }
 
   @Test

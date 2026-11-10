@@ -37,8 +37,8 @@ public class PaymentGatewayCircuitBreaker {
   private final Duration cooldown;
 
   private State state = State.CLOSED;
-  private int consecutiveFailures = 0;
-  private Instant openedAt = null;
+  private int consecutiveFailures;
+  private Instant openedAt;
 
   /** Initialised with threshold=3 and cooldown=30 s, mirroring the Spring configuration. */
   public PaymentGatewayCircuitBreaker() {

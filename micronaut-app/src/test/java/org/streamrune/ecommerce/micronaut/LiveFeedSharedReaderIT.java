@@ -348,7 +348,7 @@ class LiveFeedSharedReaderIT extends AbstractIntegrationTest {
   /** The number of live threads with the name of the feed's reader. */
   private static long readerThreads() {
     return Thread.getAllStackTraces().keySet().stream()
-        .filter(thread -> thread.getName().equals(LiveFeed.READER_THREAD_NAME))
+        .filter(thread -> LiveFeed.READER_THREAD_NAME.equals(thread.getName()))
         .count();
   }
 

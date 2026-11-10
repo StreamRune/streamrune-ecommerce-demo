@@ -178,7 +178,7 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
 
     ComponentHealth relay =
         relayHealth.components().stream()
-            .filter(component -> component.name().equals("outbox-relay"))
+            .filter(component -> "outbox-relay".equals(component.name()))
             .findFirst()
             .orElseThrow();
     assertThat(relay.status()).isEqualTo(BackgroundRelayHealthContributor.Status.UP);

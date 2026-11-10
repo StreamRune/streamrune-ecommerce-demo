@@ -115,7 +115,7 @@ class TutorialSettingsListingTest {
 
   private static int includeEnd(List<String> lines) {
     for (int i = includeStart(lines); i < lines.size(); i++) {
-      if (lines.get(i).strip().equals(")")) {
+      if (")".equals(lines.get(i).strip())) {
         return i;
       }
     }

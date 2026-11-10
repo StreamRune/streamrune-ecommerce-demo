@@ -156,7 +156,7 @@ class LegacyProductEventsIT {
     // Every row is also part of the global stream that projections and sagas read.
     List<EventEnvelope> global = store.readGlobalStream(GlobalOffset.initial(), 100);
     assertThat(global)
-        .filteredOn(e -> e.streamId().value().equals("product:p-legacy"))
+        .filteredOn(e -> "product:p-legacy".equals(e.streamId().value()))
         .singleElement()
         .satisfies(
             e -> {
@@ -194,7 +194,7 @@ class LegacyProductEventsIT {
         if (line.stripTrailing().endsWith("<<'SQL'")) {
           current = new StringBuilder();
         }
-      } else if (line.strip().equals("SQL")) {
+      } else if ("SQL".equals(line.strip())) {
         blocks.add(current.toString());
         current = null;
       } else {
