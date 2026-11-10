@@ -20,8 +20,9 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
         // replace the first customer's profile. A forgotten customer's id is not refused here but
         // one step later, by the key store: it never issues a key for an erased subject again, so
         // the event's encrypted fields cannot be written and the caller gets 410 Gone.
-        if (state.customerId() != null && state.status() != CustomerStatus.FORGOTTEN)
+        if (state.customerId() != null && state.status() != CustomerStatus.FORGOTTEN) {
           throw new DomainException("Customer already registered: " + c.customerId());
+        }
         yield List.of(
             new CustomerEvent.CustomerRegistered(
                 c.customerId(), c.name(), c.email(), c.address(), c.phone()));
@@ -30,9 +31,12 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
       case CustomerCommand.UpdateProfile c -> {
         // An id no customer registered is refused, as ForgetCustomer refuses it below: personal
         // data stored under such an id could never be erased.
-        if (state.customerId() == null) throw new DomainException("Customer not found");
-        if (state.status() == CustomerStatus.FORGOTTEN)
+        if (state.customerId() == null) {
+          throw new DomainException("Customer not found");
+        }
+        if (state.status() == CustomerStatus.FORGOTTEN) {
           throw new DomainException("Cannot update a forgotten customer");
+        }
         yield List.of(
             new CustomerEvent.ProfileUpdated(
                 c.customerId(),
@@ -43,10 +47,13 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
       }
 
       case CustomerCommand.RequestDataExport c -> {
-        if (state.customerId() == null) throw new DomainException("Customer not found");
+        if (state.customerId() == null) {
+          throw new DomainException("Customer not found");
+        }
         // Nothing is left to export, and the stream of an erased customer takes no further event.
-        if (state.status() == CustomerStatus.FORGOTTEN)
+        if (state.status() == CustomerStatus.FORGOTTEN) {
           throw new DomainException("Cannot export the data of a forgotten customer");
+        }
         yield List.of(new CustomerEvent.DataExportRequested(c.customerId()));
       }
 
@@ -54,11 +61,15 @@ public class CustomerDecider implements Decider<CustomerCommand, CustomerState, 
         // An id no customer registered is refused: the forget endpoint shreds the key after this
         // command, and a shred records a permanent tombstone, so a customer could never register
         // under that id afterwards.
-        if (state.customerId() == null) throw new DomainException("Customer not found");
+        if (state.customerId() == null) {
+          throw new DomainException("Customer not found");
+        }
         // Already forgotten: record nothing and succeed. The endpoint shreds the key after this
         // command, so a request that failed after the event was recorded is finished by sending
         // it again; refusing the repeat would leave the key in place for good.
-        if (state.status() == CustomerStatus.FORGOTTEN) yield List.of();
+        if (state.status() == CustomerStatus.FORGOTTEN) {
+          yield List.of();
+        }
         yield List.of(new CustomerEvent.CustomerForgotten(c.customerId()));
       }
     };

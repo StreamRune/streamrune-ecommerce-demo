@@ -23,10 +23,13 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
   public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
     return switch (cmd) {
       case InventoryCommand.ReserveStock c -> {
-        if (c.quantity() <= 0)
+        if (c.quantity() <= 0) {
           throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
-        if (state.reservationOf(c.orderId()).isPresent()) yield List.of();
-        if (state.available() < c.quantity())
+        }
+        if (state.reservationOf(c.orderId()).isPresent()) {
+          yield List.of();
+        }
+        if (state.available() < c.quantity()) {
           throw new DomainException(
               "Insufficient stock for "
                   + c.productId()
@@ -34,6 +37,7 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
                   + state.available()
                   + ", requested="
                   + c.quantity());
+        }
         yield List.of(
             new InventoryEvent.StockReserved(
                 c.productId(), c.orderId(), c.quantity(), state.available() - c.quantity()));
@@ -41,7 +45,9 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
 
       case InventoryCommand.ReleaseStock c -> {
         OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
+        if (held.isEmpty()) {
+          yield List.of();
+        }
         yield List.of(
             new InventoryEvent.StockReleased(
                 c.productId(), c.orderId(), held.getAsInt(), state.available() + held.getAsInt()));
@@ -49,7 +55,9 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
 
       case InventoryCommand.ConfirmReservation c -> {
         OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
+        if (held.isEmpty()) {
+          yield List.of();
+        }
         yield List.of(
             new InventoryEvent.ReservationConfirmed(c.productId(), c.orderId(), held.getAsInt()));
       }

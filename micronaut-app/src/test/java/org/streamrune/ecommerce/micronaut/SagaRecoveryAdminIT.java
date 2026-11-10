@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.micronaut;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.micronaut.core.type.Argument;
 import io.micronaut.http.HttpRequest;
@@ -244,7 +245,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
             HttpRequest.DELETE(
                 "/api/admin/saga-dead-letters?sagaId=fulfillment-any&eventOffset=1"))) {
       var refused =
-          org.junit.jupiter.api.Assertions.assertThrows(
+          assertThrows(
               HttpClientResponseException.class, () -> client.toBlocking().exchange(request));
       assertThat(refused.getStatus().getCode()).as(request.getPath()).isEqualTo(403);
     }
@@ -316,7 +317,7 @@ class SagaRecoveryAdminIT extends AbstractIntegrationTest {
                     event,
                     SagaEnvelopes.metadataCausedBy(OrderFulfillmentState.class, sagaId))),
             Version.initial());
-    return result.globalOffsets().get(0);
+    return result.globalOffsets().getFirst();
   }
 
   private void seedDeadLetter(SagaId sagaId, GlobalOffset eventOffset) {

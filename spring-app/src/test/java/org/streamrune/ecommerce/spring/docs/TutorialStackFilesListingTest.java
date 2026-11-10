@@ -36,7 +36,7 @@ class TutorialStackFilesListingTest {
       List.of("docker-compose.yml", "Dockerfile.backend", "notifications-service/Dockerfile");
 
   @Test
-  void everyListingOfAStackFileIsTheRepositorysFileSoFar() throws IOException {
+  void everyListingOfAStackFileIsTheRepositorysFileSoFar() throws Exception {
     List<String> problems = new ArrayList<>();
     Set<String> read = new HashSet<>();
     for (String name : FILES) {
@@ -93,7 +93,7 @@ class TutorialStackFilesListingTest {
           compose |= lines.get(end).startsWith("services:");
           end++;
         }
-        if (language.equals("dockerfile") || (language.equals("yaml") && compose)) {
+        if ("dockerfile".equals(language) || ("yaml".equals(language) && compose)) {
           blocks.add(chapter.getFileName() + ":" + (i + 2));
         }
         i = end;

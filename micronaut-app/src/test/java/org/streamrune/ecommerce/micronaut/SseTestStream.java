@@ -72,7 +72,7 @@ final class SseTestStream implements AutoCloseable {
       String data = null;
       try (Stream<String> lines = response.body()) {
         for (String line : (Iterable<String>) lines::iterator) {
-          if (line.equals(OPENING_COMMENT)) {
+          if (OPENING_COMMENT.equals(line)) {
             subscribed.complete(null);
           }
           if (line.startsWith("id:")) {

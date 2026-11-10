@@ -523,7 +523,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
   public List<PaymentEvent> decide(PaymentCommand cmd, PaymentState state) {
     return switch (cmd) {
       case PaymentCommand.InitiatePayment c -> {
-        if (exists(state)) throw new DomainException("Payment already exists: " + c.paymentId());
+        if (exists(state)) {
+          throw new DomainException("Payment already exists: " + c.paymentId());
+        }
         yield List.of(new PaymentEvent.PaymentInitiated(c.paymentId(), c.orderId(), c.amount()));
       }
 
@@ -548,7 +550,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
       }
 
       case PaymentCommand.CancelPayment c -> {
-        if (!exists(state)) yield List.of();
+        if (!exists(state)) {
+          yield List.of();
+        }
         yield switch (state.status()) {
           case PENDING ->
               List.of(new PaymentEvent.PaymentVoided(c.paymentId(), state.orderId(), c.reason()));
@@ -568,7 +572,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
   }
 
   private static void requireExists(PaymentState state, String paymentId) {
-    if (!exists(state)) throw new DomainException("Payment not found: " + paymentId);
+    if (!exists(state)) {
+      throw new DomainException("Payment not found: " + paymentId);
+    }
   }
 
   @Override
@@ -986,10 +992,13 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
   public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
     return switch (cmd) {
       case InventoryCommand.ReserveStock c -> {
-        if (c.quantity() <= 0)
+        if (c.quantity() <= 0) {
           throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
-        if (state.reservationOf(c.orderId()).isPresent()) yield List.of();
-        if (state.available() < c.quantity())
+        }
+        if (state.reservationOf(c.orderId()).isPresent()) {
+          yield List.of();
+        }
+        if (state.available() < c.quantity()) {
           throw new DomainException(
               "Insufficient stock for "
                   + c.productId()
@@ -997,6 +1006,7 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
                   + state.available()
                   + ", requested="
                   + c.quantity());
+        }
         yield List.of(
             new InventoryEvent.StockReserved(
                 c.productId(), c.orderId(), c.quantity(), state.available() - c.quantity()));
@@ -1004,7 +1014,9 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
 
       case InventoryCommand.ReleaseStock c -> {
         OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
+        if (held.isEmpty()) {
+          yield List.of();
+        }
         yield List.of(
             new InventoryEvent.StockReleased(
                 c.productId(), c.orderId(), held.getAsInt(), state.available() + held.getAsInt()));
@@ -1012,7 +1024,9 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
 
       case InventoryCommand.ConfirmReservation c -> {
         OptionalInt held = state.reservationOf(c.orderId());
-        if (held.isEmpty()) yield List.of();
+        if (held.isEmpty()) {
+          yield List.of();
+        }
         yield List.of(
             new InventoryEvent.ReservationConfirmed(c.productId(), c.orderId(), held.getAsInt()));
       }
@@ -1854,7 +1868,7 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_PAYMENT);
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(PaymentCommand.InitiatePayment.class);
+    assertThat(commands.getFirst().command()).isInstanceOf(PaymentCommand.InitiatePayment.class);
   }
 
   @Test
@@ -1882,8 +1896,8 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_INVENTORY);
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    var reserve = (InventoryCommand.ReserveStock) commands.get(0).command();
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    var reserve = (InventoryCommand.ReserveStock) commands.getFirst().command();
     assertThat(reserve.productId()).isEqualTo("prod-1");
     assertThat(reserve.quantity()).isEqualTo(2);
   }
@@ -2275,8 +2289,8 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, failed);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(OrderCommand.CancelOrder.class);
-    var cancel = (OrderCommand.CancelOrder) commands.get(0).command();
+    assertThat(commands.getFirst().command()).isInstanceOf(OrderCommand.CancelOrder.class);
+    var cancel = (OrderCommand.CancelOrder) commands.getFirst().command();
     assertThat(cancel.orderId()).isEqualTo("o-1");
   }
 
@@ -2432,8 +2446,8 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, captured);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    assertThat(commands.getFirst().aggregateId().value()).isEqualTo(raw);
   }
 
   @Test
@@ -2460,8 +2474,8 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, captured);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    assertThat(commands.getFirst().aggregateId().value()).isEqualTo(raw);
   }
 }
 ```
@@ -2665,8 +2679,8 @@ public class PaymentGatewayCircuitBreaker {
   private final Duration cooldown;
 
   private State state = State.CLOSED;
-  private int consecutiveFailures = 0;
-  private Instant openedAt = null;
+  private int consecutiveFailures;
+  private Instant openedAt;
 
   public PaymentGatewayCircuitBreaker(int failureThreshold, Duration cooldown) {
     this.failureThreshold = failureThreshold;

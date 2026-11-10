@@ -186,7 +186,7 @@ class TutorialLedgerTest {
   private static final Set<String> SHELL = Set.of("bash", "sh", "shell", "console", "text", "");
 
   @Test
-  void everyStepUsesOnlyWhatTheChaptersUpToItIntroduce() throws IOException {
+  void everyStepUsesOnlyWhatTheChaptersUpToItIntroduce() throws Exception {
     Map<String, Entry> ledger = new LinkedHashMap<>();
     LEDGER.forEach(entry -> ledger.put(entry.key(), entry));
 
@@ -221,7 +221,7 @@ class TutorialLedgerTest {
   }
 
   @Test
-  void everyLedgerEntryIsIntroducedWhereTheLedgerSays() throws IOException {
+  void everyLedgerEntryIsIntroducedWhereTheLedgerSays() throws Exception {
     List<Chapter> chapters = chapters();
     Map<String, Entry> ledger = new LinkedHashMap<>();
     LEDGER.forEach(entry -> ledger.put(entry.key(), entry));
@@ -234,7 +234,7 @@ class TutorialLedgerTest {
           switch (entry.how()) {
             case CREATED ->
                 chapter.requests().stream()
-                    .anyMatch(r -> r.method().equals("POST") && createdId(r).equals(entry.key()));
+                    .anyMatch(r -> "POST".equals(r.method()) && createdId(r).equals(entry.key()));
             case LISTED -> chapter.namesInAMainListing(entry.key());
             case CONTROLLER ->
                 mappedByChapter.get(entry.chapter() - 1).containsKey(normalized(entry.key()))
@@ -263,7 +263,7 @@ class TutorialLedgerTest {
   private static List<String> uses(Request request, Map<String, Entry> ledger) {
     List<String> keys = new ArrayList<>();
     keys.add("port " + request.port());
-    if (request.path().isEmpty() || request.path().equals("/")) {
+    if (request.path().isEmpty() || "/".equals(request.path())) {
       return keys;
     }
     Optional<Entry> endpoint =
@@ -281,7 +281,7 @@ class TutorialLedgerTest {
     List<String> template = segments(endpoint.get().key().split(" ", 2)[1]);
     List<String> actual = segments(request.path());
     for (int i = 0; i < template.size(); i++) {
-      if (template.get(i).startsWith("{") && !template.get(i).equals("{*}")) {
+      if (template.get(i).startsWith("{") && !"{*}".equals(template.get(i))) {
         addId(keys, actual.get(i));
       }
     }
@@ -293,7 +293,7 @@ class TutorialLedgerTest {
     }
     for (String header : request.headers()) {
       String name = header.split(":", 2)[0].strip();
-      if (!name.equalsIgnoreCase("Content-Type") && !name.equalsIgnoreCase("Accept")) {
+      if (!"Content-Type".equalsIgnoreCase(name) && !"Accept".equalsIgnoreCase(name)) {
         keys.add("header " + name);
       }
     }
@@ -395,7 +395,7 @@ class TutorialLedgerTest {
    */
   @Test
   void aListedIdIsNamedByAListingOfTheApplication_notByATestFixture(@TempDir Path dir)
-      throws IOException {
+      throws Exception {
     Path chapter = dir.resolve("99-listed.md");
     Files.writeString(
         chapter,
@@ -519,7 +519,7 @@ class TutorialLedgerTest {
           } else {
             if (SHELL.contains(language)) {
               requests.addAll(Shell.requests(block, blockStart, unread));
-            } else if (language.equals("java")) {
+            } else if ("java".equals(language)) {
               String source = String.join("\n", block);
               if (!block.isEmpty() && block.getFirst().startsWith("package ")) {
                 files.put(fileOf(block), source);

@@ -17,8 +17,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * Shared base class for HTTP integration tests. Spins up real PostgreSQL and RabbitMQ containers
@@ -91,7 +91,7 @@ public abstract class AbstractIntegrationTest {
    * tells Testcontainers not to stop the container between test classes, keeping the Spring context
    * key (datasource URL) stable so Spring can cache and reuse a single application context.
    */
-  public static final PostgreSQLContainer<?> POSTGRES;
+  public static final PostgreSQLContainer POSTGRES;
 
   /**
    * Singleton RabbitMQ container: the broker the outbox publisher delivers to and {@link
@@ -102,7 +102,7 @@ public abstract class AbstractIntegrationTest {
 
   static {
     POSTGRES =
-        new PostgreSQLContainer<>("postgres:17")
+        new PostgreSQLContainer("postgres:17")
             .withDatabaseName("streamrune_ecommerce")
             .withUsername("postgres")
             .withPassword("postgres")

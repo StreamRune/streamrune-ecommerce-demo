@@ -3,7 +3,7 @@ package org.streamrune.ecommerce.quarkus;
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import java.time.Duration;
 import java.util.Map;
-import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * Starts a real RabbitMQ broker (Testcontainers) for {@code @QuarkusTest} runs that exercise the

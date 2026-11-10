@@ -34,7 +34,7 @@ class TutorialCatalogListingTest {
       "# ... (see the full catalog in the real demo for all aliases)";
 
   @Test
-  void everyLineOfTheCatalogExcerptIsALineOfTheCatalogInItsSection() throws IOException {
+  void everyLineOfTheCatalogExcerptIsALineOfTheCatalogInItsSection() throws Exception {
     Map<String, List<String>> excerpt = sections(listingAfter(INTRO));
     Map<String, List<String>> catalog = sections(Files.readAllLines(CATALOG));
 
@@ -43,7 +43,7 @@ class TutorialCatalogListingTest {
         .containsExactly("[versions]", "[libraries]", "[plugins]");
     for (Map.Entry<String, List<String>> section : excerpt.entrySet()) {
       List<String> lines = new ArrayList<>(section.getValue());
-      lines.removeIf(line -> line.isBlank() || line.equals(ELLIPSIS));
+      lines.removeIf(line -> line.isBlank() || ELLIPSIS.equals(line));
       assertThat(catalog.get(section.getKey()))
           .as("the lines chapter 1 shows in %s, in the catalog's order", section.getKey())
           .containsSubsequence(lines);
@@ -51,7 +51,7 @@ class TutorialCatalogListingTest {
   }
 
   @Test
-  void theExcerptStatesTheFrameworkAndSpringBootVersions() throws IOException {
+  void theExcerptStatesTheFrameworkAndSpringBootVersions() throws Exception {
     List<String> versions = sections(listingAfter(INTRO)).get("[versions]");
 
     assertThat(versions)

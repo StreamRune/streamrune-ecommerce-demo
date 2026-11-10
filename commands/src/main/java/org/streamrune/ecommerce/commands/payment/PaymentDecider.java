@@ -25,7 +25,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
   public List<PaymentEvent> decide(PaymentCommand cmd, PaymentState state) {
     return switch (cmd) {
       case PaymentCommand.InitiatePayment c -> {
-        if (exists(state)) throw new DomainException("Payment already exists: " + c.paymentId());
+        if (exists(state)) {
+          throw new DomainException("Payment already exists: " + c.paymentId());
+        }
         yield List.of(new PaymentEvent.PaymentInitiated(c.paymentId(), c.orderId(), c.amount()));
       }
 
@@ -50,7 +52,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
       }
 
       case PaymentCommand.CancelPayment c -> {
-        if (!exists(state)) yield List.of();
+        if (!exists(state)) {
+          yield List.of();
+        }
         yield switch (state.status()) {
           case PENDING ->
               List.of(new PaymentEvent.PaymentVoided(c.paymentId(), state.orderId(), c.reason()));
@@ -70,7 +74,9 @@ public class PaymentDecider implements Decider<PaymentCommand, PaymentState, Pay
   }
 
   private static void requireExists(PaymentState state, String paymentId) {
-    if (!exists(state)) throw new DomainException("Payment not found: " + paymentId);
+    if (!exists(state)) {
+      throw new DomainException("Payment not found: " + paymentId);
+    }
   }
 
   @Override

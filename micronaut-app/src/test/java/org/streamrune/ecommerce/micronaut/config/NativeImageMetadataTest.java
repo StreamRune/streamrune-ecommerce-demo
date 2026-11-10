@@ -63,7 +63,7 @@ class NativeImageMetadataTest {
   }
 
   @Test
-  void lists_the_sealed_command_roots_the_dead_letter_runner_expands() throws IOException {
+  void lists_the_sealed_command_roots_the_dead_letter_runner_expands() throws Exception {
     assertThat(typesInReachabilityMetadata())
         .contains(
             ProductCommand.class.getName(),
@@ -115,7 +115,7 @@ class NativeImageMetadataTest {
    * EcommerceIntegrationEventMapper$ProductCreatedDto", until they were registered).
    */
   @Test
-  void registers_the_outbox_mappers_nested_integration_dtos() throws IOException {
+  void registers_the_outbox_mappers_nested_integration_dtos() throws Exception {
     Set<String> registered = namesInReflectConfig();
     List<String> dtos = new ArrayList<>();
     for (Class<?> nested : EcommerceIntegrationEventMapper.class.getDeclaredClasses()) {

@@ -1,5 +1,7 @@
 package org.streamrune.ecommerce.queries.access;
 
+import java.io.Serial;
+
 /**
  * The caller may not read or change what the request names: thrown by {@link OwnerOrAdminAccess}
  * and by the guarded reads built on it. Each application answers it with {@code 403 Forbidden},
@@ -10,7 +12,7 @@ package org.streamrune.ecommerce.queries.access;
  */
 public final class AccessRefusedException extends RuntimeException {
 
-  private static final long serialVersionUID = 1L;
+  @Serial private static final long serialVersionUID = 1L;
 
   public AccessRefusedException(String message) {
     super(message);

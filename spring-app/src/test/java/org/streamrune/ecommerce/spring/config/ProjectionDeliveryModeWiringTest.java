@@ -186,10 +186,10 @@ class ProjectionDeliveryModeWiringTest {
                         new InMemoryOffsetStore(),
                         processor,
                         defaultProperties(),
-                        new ProductProjection(name.equals("products") ? other : processor),
-                        new OrderProjection(name.equals("orders") ? other : processor),
-                        new CustomerProjection(name.equals("customers") ? other : processor),
-                        new InventoryProjection(name.equals("inventory") ? other : processor),
+                        new ProductProjection("products".equals(name) ? other : processor),
+                        new OrderProjection("orders".equals(name) ? other : processor),
+                        new CustomerProjection("customers".equals(name) ? other : processor),
+                        new InventoryProjection("inventory".equals(name) ? other : processor),
                         invalidator(),
                         noBean(SubscriptionLeadership.class),
                         noBean(SubscriptionHealthContributor.class)))
@@ -232,13 +232,11 @@ class ProjectionDeliveryModeWiringTest {
                 AT_LEAST_ONCE_IDEMPOTENT)
             .build();
     runner.start();
-    try {
+    try (runner) {
       Awaitility.await()
           .atMost(Duration.ofSeconds(10))
           .until(
               () -> memory.findById(ProjectionName.of("audit_mem"), "1", String.class).isPresent());
-    } finally {
-      runner.close();
     }
     assertThat(processor.hasReadModels(ProjectionName.of("audit_mem")))
         .as("nothing the at-least-once projection writes lands in the processor's store")

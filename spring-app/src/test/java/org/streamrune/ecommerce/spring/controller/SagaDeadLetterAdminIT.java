@@ -107,7 +107,7 @@ class SagaDeadLetterAdminIT extends AbstractIntegrationTest {
                     event,
                     SagaEnvelopes.metadataCausedBy(OrderFulfillmentState.class, sagaId))),
             Version.initial());
-    return result.globalOffsets().get(0);
+    return result.globalOffsets().getFirst();
   }
 
   /** Loads the order-fulfillment saga row through the type-scoped read. */

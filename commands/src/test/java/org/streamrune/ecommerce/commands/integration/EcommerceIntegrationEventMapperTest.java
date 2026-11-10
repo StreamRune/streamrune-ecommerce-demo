@@ -70,7 +70,7 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries = mapper.toOutbox(envelope);
 
     assertThat(entries).hasSize(1);
-    OutboxEntry entry = entries.get(0);
+    OutboxEntry entry = entries.getFirst();
     assertThat(entry.payloadType()).isNotBlank();
     assertThat(entry.streamId()).isEqualTo(stream(OrderState.TYPE, "order-42"));
     assertThat(entry.payload()).contains("order-42");
@@ -87,7 +87,7 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries = mapper.toOutbox(envelope(event, stream));
 
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream);
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream);
   }
 
   @Test
@@ -108,7 +108,7 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries = mapper.toOutbox(envelope);
 
     assertThat(entries).hasSize(1);
-    assertPiiAbsent(entries.get(0).payload());
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -117,8 +117,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(OrderState.TYPE, "order-5")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(OrderState.TYPE, "order-5"));
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(OrderState.TYPE, "order-5"));
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -127,8 +127,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(OrderState.TYPE, "order-6")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(OrderState.TYPE, "order-6"));
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(OrderState.TYPE, "order-6"));
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -137,8 +137,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(OrderState.TYPE, "order-7")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).payload()).contains("order-7");
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().payload()).contains("order-7");
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   // --- excluded order events ---
@@ -177,9 +177,9 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-1")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-1"));
-    assertThat(entries.get(0).payload()).contains("pay-1");
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-1"));
+    assertThat(entries.getFirst().payload()).contains("pay-1");
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -188,8 +188,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-2")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-2"));
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-2"));
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -198,7 +198,7 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-3")));
     assertThat(entries).hasSize(1);
-    assertPiiAbsent(entries.get(0).payload());
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -207,11 +207,11 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(PaymentState.TYPE, "pay-1")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-1"));
-    assertThat(entries.get(0).payloadType()).isEqualTo("PaymentVoided");
-    assertThat(entries.get(0).payload())
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(PaymentState.TYPE, "pay-1"));
+    assertThat(entries.getFirst().payloadType()).isEqualTo("PaymentVoided");
+    assertThat(entries.getFirst().payload())
         .isEqualTo("{\"paymentId\":\"pay-1\",\"reason\":\"Customer changed mind\"}");
-    assertPiiAbsent(entries.get(0).payload());
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   // --- excluded payment event ---
@@ -233,9 +233,9 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-1")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(ProductState.TYPE, "prod-1"));
-    assertThat(entries.get(0).payload()).contains("prod-1");
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(ProductState.TYPE, "prod-1"));
+    assertThat(entries.getFirst().payload()).contains("prod-1");
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -245,8 +245,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-2")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(ProductState.TYPE, "prod-2"));
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(ProductState.TYPE, "prod-2"));
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -255,7 +255,7 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-3")));
     assertThat(entries).hasSize(1);
-    assertPiiAbsent(entries.get(0).payload());
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   @Test
@@ -264,8 +264,8 @@ class EcommerceIntegrationEventMapperTest {
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-4")));
     assertThat(entries).hasSize(1);
-    assertThat(entries.get(0).streamId()).isEqualTo(stream(ProductState.TYPE, "prod-4"));
-    assertPiiAbsent(entries.get(0).payload());
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream(ProductState.TYPE, "prod-4"));
+    assertPiiAbsent(entries.getFirst().payload());
   }
 
   // ---------------------------------------------------------------------------

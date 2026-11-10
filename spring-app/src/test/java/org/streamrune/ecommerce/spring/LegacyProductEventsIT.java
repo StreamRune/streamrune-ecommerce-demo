@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -34,9 +33,9 @@ import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.spring.config.StreamRuneConfig;
 import org.streamrune.postgres.PostgresEventStore;
 import org.streamrune.postgres.PostgresEventStoreFactory;
-import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Tutorial chapter 4 against a real database and the demo's own event type registry and {@code
@@ -50,8 +49,8 @@ class LegacyProductEventsIT {
   private static final Path CHAPTER = Path.of("../docs/tutorial/04-event-upcasting.md");
 
   @Container
-  static final PostgreSQLContainer<?> POSTGRES =
-      new PostgreSQLContainer<>("postgres:17")
+  static final PostgreSQLContainer POSTGRES =
+      new PostgreSQLContainer("postgres:17")
           .withDatabaseName("streamrune_ecommerce")
           .withUsername("postgres")
           .withPassword("postgres");
@@ -97,7 +96,7 @@ class LegacyProductEventsIT {
   }
 
   @Test
-  void aProductCreatedBeforeTheUpcasterWasRegisteredKeepsItsCategory() throws SQLException {
+  void aProductCreatedBeforeTheUpcasterWasRegisteredKeepsItsCategory() throws Exception {
     StreamId streamId = StreamId.of(ProductState.TYPE, AggregateId.of("p-gadget"));
     var created =
         new ProductEvent.ProductCreated(
@@ -137,8 +136,7 @@ class LegacyProductEventsIT {
   }
 
   @Test
-  void theChaptersHandInsertedLegacyRowIsReadByTheAggregateAndTheGlobalStream()
-      throws IOException, SQLException {
+  void theChaptersHandInsertedLegacyRowIsReadByTheAggregateAndTheGlobalStream() throws Exception {
     try (Connection conn = dataSource.getConnection();
         Statement statement = conn.createStatement()) {
       statement.execute(chapterInsertSql());
@@ -157,7 +155,7 @@ class LegacyProductEventsIT {
     // Every row is also part of the global stream that projections and sagas read.
     List<EventEnvelope> global = store.readGlobalStream(GlobalOffset.initial(), 100);
     assertThat(global)
-        .filteredOn(e -> e.streamId().value().equals("product:p-legacy"))
+        .filteredOn(e -> "product:p-legacy".equals(e.streamId().value()))
         .singleElement()
         .satisfies(
             e -> {
@@ -187,7 +185,7 @@ class LegacyProductEventsIT {
    * event_stream}. Exactly one such block must exist.
    */
   private static String chapterInsertSql() throws IOException {
-    List<String> lines = Files.readAllLines(CHAPTER, StandardCharsets.UTF_8);
+    List<String> lines = Files.readAllLines(CHAPTER);
     List<String> blocks = new ArrayList<>();
     StringBuilder current = null;
     for (String line : lines) {
@@ -195,7 +193,7 @@ class LegacyProductEventsIT {
         if (line.stripTrailing().endsWith("<<'SQL'")) {
           current = new StringBuilder();
         }
-      } else if (line.strip().equals("SQL")) {
+      } else if ("SQL".equals(line.strip())) {
         blocks.add(current.toString());
         current = null;
       } else {

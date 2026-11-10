@@ -158,8 +158,8 @@ class TutorialChaptersStartIT {
     return ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
         .filter(
             argument ->
-                argument.equals("-XX:+UnlockExperimentalVMOptions")
-                    || argument.equals("-XX:-UseJVMCICompiler"));
+                "-XX:+UnlockExperimentalVMOptions".equals(argument)
+                    || "-XX:-UseJVMCICompiler".equals(argument));
   }
 
   /**
@@ -219,8 +219,8 @@ class TutorialChaptersStartIT {
       return "not started within " + START_TIMEOUT_SECONDS + " s: " + report(Files.readString(log));
     } finally {
       process.destroy();
-      if (!process.waitFor(20, TimeUnit.SECONDS)) {
-        process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+      if (!process.waitFor(Duration.ofSeconds(20))) {
+        process.destroyForcibly().waitFor(Duration.ofSeconds(10));
       }
     }
   }
@@ -260,7 +260,7 @@ class TutorialChaptersStartIT {
     } catch (IOException e) {
       status = "unreadable";
     }
-    if (health.statusCode() != 200 || !status.equals("UP")) {
+    if (health.statusCode() != 200 || !"UP".equals(status)) {
       return "the health is "
           + status
           + " ("
@@ -323,7 +323,7 @@ class TutorialChaptersStartIT {
     List<String> lines = Files.readAllLines(chapter);
     List<Map<String, Object>> fragments = new ArrayList<>();
     for (int i = 0; i < lines.size(); i++) {
-      if (!lines.get(i).strip().equals("```yaml")) {
+      if (!"```yaml".equals(lines.get(i).strip())) {
         continue;
       }
       int intro = i - 1;

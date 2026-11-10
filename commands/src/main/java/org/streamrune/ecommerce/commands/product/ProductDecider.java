@@ -18,8 +18,9 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
       case ProductCommand.CreateProduct c -> {
         // A product id is created once. Without this check a second CreateProduct would append
         // another ProductCreated, and evolve would replace the product's name, price and stock.
-        if (state.productId() != null)
+        if (state.productId() != null) {
           throw new DomainException("Product already exists: " + c.productId());
+        }
         yield List.of(
             new ProductEvent.ProductCreated(
                 c.productId(),
@@ -38,16 +39,18 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
       case ProductCommand.AdjustStock c -> {
         requireCreated(state, c.productId());
         int newStock = state.stock() + c.quantityChange();
-        if (newStock < 0)
+        if (newStock < 0) {
           throw new DomainException("Insufficient stock for product: " + c.productId());
+        }
         yield List.of(
             new ProductEvent.StockAdjusted(c.productId(), state.stock(), newStock, c.reason()));
       }
 
       case ProductCommand.DiscontinueProduct c -> {
         requireCreated(state, c.productId());
-        if (state.status() == ProductStatus.DISCONTINUED)
+        if (state.status() == ProductStatus.DISCONTINUED) {
           throw new DomainException("Product already discontinued: " + c.productId());
+        }
         yield List.of(new ProductEvent.ProductDiscontinued(c.productId()));
       }
     };
@@ -58,7 +61,9 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
    * a price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
    */
   private static void requireCreated(ProductState state, String productId) {
-    if (state.productId() == null) throw new DomainException("Product not found: " + productId);
+    if (state.productId() == null) {
+      throw new DomainException("Product not found: " + productId);
+    }
   }
 
   @Override

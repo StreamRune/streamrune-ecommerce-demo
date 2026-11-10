@@ -543,7 +543,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
 
     assertThat(rows).isNotNull();
     if (!rows.isEmpty()) {
-      Map<String, Object> first = rows.get(0);
+      Map<String, Object> first = rows.getFirst();
       assertThat(first).containsKey("commandId");
       assertThat(first).containsKey("commandType");
       assertThat(first).containsKey("outcome");
@@ -613,7 +613,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                 Argument.listOf(Argument.mapOf(String.class, Object.class)));
 
     assertThat(events).isNotEmpty();
-    Map<String, Object> first = events.get(0);
+    Map<String, Object> first = events.getFirst();
     assertThat(first).containsKey("globalOffset");
     assertThat(first).containsKey("streamId");
     assertThat(first).containsEntry("aggregateType", "product");

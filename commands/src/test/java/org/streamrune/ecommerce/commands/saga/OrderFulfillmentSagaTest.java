@@ -184,7 +184,7 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_PAYMENT);
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(PaymentCommand.InitiatePayment.class);
+    assertThat(commands.getFirst().command()).isInstanceOf(PaymentCommand.InitiatePayment.class);
   }
 
   @Test
@@ -212,8 +212,8 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.AWAITING_INVENTORY);
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    var reserve = (InventoryCommand.ReserveStock) commands.get(0).command();
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    var reserve = (InventoryCommand.ReserveStock) commands.getFirst().command();
     assertThat(reserve.productId()).isEqualTo("prod-1");
     assertThat(reserve.quantity()).isEqualTo(2);
   }
@@ -605,8 +605,8 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, failed);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(OrderCommand.CancelOrder.class);
-    var cancel = (OrderCommand.CancelOrder) commands.get(0).command();
+    assertThat(commands.getFirst().command()).isInstanceOf(OrderCommand.CancelOrder.class);
+    var cancel = (OrderCommand.CancelOrder) commands.getFirst().command();
     assertThat(cancel.orderId()).isEqualTo("o-1");
   }
 
@@ -762,8 +762,8 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, captured);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    assertThat(commands.getFirst().aggregateId().value()).isEqualTo(raw);
   }
 
   @Test
@@ -790,7 +790,7 @@ class OrderFulfillmentSagaTest {
     var commands = saga.handle(state, captured);
 
     assertThat(commands).hasSize(1);
-    assertThat(commands.get(0).command()).isInstanceOf(InventoryCommand.ReserveStock.class);
-    assertThat(commands.get(0).aggregateId().value()).isEqualTo(raw);
+    assertThat(commands.getFirst().command()).isInstanceOf(InventoryCommand.ReserveStock.class);
+    assertThat(commands.getFirst().aggregateId().value()).isEqualTo(raw);
   }
 }

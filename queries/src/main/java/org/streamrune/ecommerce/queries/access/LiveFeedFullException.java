@@ -1,5 +1,7 @@
 package org.streamrune.ecommerce.queries.access;
 
+import java.io.Serial;
+
 /**
  * The open live feed has no place for another connection: thrown by {@link LiveFeed#admit} when
  * {@link LiveFeed#MAX_CONNECTIONS} clients are connected. Each application answers it with {@code
@@ -12,7 +14,7 @@ package org.streamrune.ecommerce.queries.access;
  */
 public final class LiveFeedFullException extends RuntimeException {
 
-  private static final long serialVersionUID = 1L;
+  @Serial private static final long serialVersionUID = 1L;
 
   public LiveFeedFullException(int places) {
     super(

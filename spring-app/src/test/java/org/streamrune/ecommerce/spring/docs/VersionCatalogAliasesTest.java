@@ -77,7 +77,7 @@ class VersionCatalogAliasesTest {
       Pattern.compile("\\bfind(?:Library|Plugin|Bundle|Version)\\(\"([a-z0-9-]+)\"\\)");
 
   @Test
-  void everyAliasAndVersionOfTheCatalogIsUsed() throws IOException {
+  void everyAliasAndVersionOfTheCatalogIsUsed() throws Exception {
     Map<String, Map<String, String>> catalog = sections(Files.readAllLines(CATALOG));
     Set<String> accessors = new TreeSet<>();
     Set<String> lookups = new TreeSet<>();
@@ -94,7 +94,7 @@ class VersionCatalogAliasesTest {
     List<String> unused = new ArrayList<>();
     Set<String> usedVersions = new TreeSet<>();
     for (String section : List.of("libraries", "plugins", "bundles")) {
-      String prefix = section.equals("libraries") ? "" : section + ".";
+      String prefix = "libraries".equals(section) ? "" : section + ".";
       catalog
           .getOrDefault(section, Map.of())
           .forEach(
@@ -208,7 +208,7 @@ class VersionCatalogAliasesTest {
       String stripped = line.strip();
       if (block == null && stripped.startsWith("```")) {
         block = stripped.substring(3).strip();
-      } else if (block != null && stripped.equals("```")) {
+      } else if (block != null && "```".equals(stripped)) {
         block = null;
       } else if ("kotlin".equals(block) || "kts".equals(block)) {
         listings.append(line).append('\n');

@@ -209,7 +209,7 @@ class OutboxAdminIT extends AbstractIntegrationTest {
             .filter(b -> b.contains(agg))
             .toList();
     assertThat(order).hasSize(2);
-    assertThat(order.get(0)).contains("\"seq\": 0");
+    assertThat(order.getFirst()).contains("\"seq\": 0");
     assertThat(order.get(1)).contains("\"seq\": 1");
     client
         .post()

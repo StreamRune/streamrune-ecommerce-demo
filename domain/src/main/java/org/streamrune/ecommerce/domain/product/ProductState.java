@@ -25,8 +25,12 @@ public record ProductState(
   }
 
   public static ProductStatus statusForStock(int stock) {
-    if (stock <= 0) return ProductStatus.OUT_OF_STOCK;
-    if (stock < LOW_STOCK_THRESHOLD) return ProductStatus.LOW_STOCK;
+    if (stock <= 0) {
+      return ProductStatus.OUT_OF_STOCK;
+    }
+    if (stock < LOW_STOCK_THRESHOLD) {
+      return ProductStatus.LOW_STOCK;
+    }
     return ProductStatus.AVAILABLE;
   }
 }

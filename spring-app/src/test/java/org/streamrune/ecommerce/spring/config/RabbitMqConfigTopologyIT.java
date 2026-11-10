@@ -20,9 +20,9 @@ import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.integration.LazyRabbitMqOutboxPublisher;
 import org.streamrune.ecommerce.domain.order.OrderState;
-import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 /**
  * The outbox publisher's own connection declares the integration topology, so its first publish

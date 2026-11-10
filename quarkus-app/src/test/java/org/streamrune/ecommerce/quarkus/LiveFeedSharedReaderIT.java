@@ -71,7 +71,7 @@ class LiveFeedSharedReaderIT {
         awaitFrameAt(feed, third);
       }
 
-      List<Long> expected = between(feeds.get(0).offsets(), first, third);
+      List<Long> expected = between(feeds.getFirst().offsets(), first, third);
       assertThat(expected).as("the three events, in the order they were stored").contains(first);
       assertThat(expected).containsSubsequence(first, second, third);
       for (LiveFeedTestClient feed : feeds) {
@@ -206,9 +206,9 @@ class LiveFeedSharedReaderIT {
                 .until(() -> feed.offsets().contains(offset));
           }
         }
-        assertThat(between(feeds.get(1).offsets(), stored.get(0), stored.get(2)))
+        assertThat(between(feeds.get(1).offsets(), stored.getFirst(), stored.get(2)))
             .as("the two clients that read are sent the same frames in the same order")
-            .isEqualTo(between(feeds.get(0).offsets(), stored.get(0), stored.get(2)))
+            .isEqualTo(between(feeds.getFirst().offsets(), stored.getFirst(), stored.get(2)))
             .containsSubsequence(stored);
         assertThat(stalled.isClosed()).isFalse();
       } finally {
@@ -351,7 +351,7 @@ class LiveFeedSharedReaderIT {
   /** The number of live threads with the name of the feed's reader. */
   private static long readerThreads() {
     return Thread.getAllStackTraces().keySet().stream()
-        .filter(thread -> thread.getName().equals(LiveFeed.READER_THREAD_NAME))
+        .filter(thread -> LiveFeed.READER_THREAD_NAME.equals(thread.getName()))
         .count();
   }
 

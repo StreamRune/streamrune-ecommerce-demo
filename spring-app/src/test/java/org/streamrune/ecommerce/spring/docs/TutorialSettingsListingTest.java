@@ -39,7 +39,7 @@ class TutorialSettingsListingTest {
   private static final Pattern MODULE = Pattern.compile("\"([a-z0-9-]+)\"");
 
   @Test
-  void theCompositeBuildBlockIsCopiedFromTheDemo() throws IOException {
+  void theCompositeBuildBlockIsCopiedFromTheDemo() throws Exception {
     String block = String.join("\n", listingAfter(BLOCK_INTRO));
 
     assertThat(Files.readString(SETTINGS))
@@ -48,7 +48,7 @@ class TutorialSettingsListingTest {
   }
 
   @Test
-  void theWholeFileListingIsTheDemosFileApartFromItsIncludeList() throws IOException {
+  void theWholeFileListingIsTheDemosFileApartFromItsIncludeList() throws Exception {
     List<String> listing = listingAfter(FILE_INTRO);
     List<String> settings = Files.readAllLines(SETTINGS);
 
@@ -58,7 +58,7 @@ class TutorialSettingsListingTest {
   }
 
   @Test
-  void theListingLeavesOutExactlyTheModulesTheNoteNames() throws IOException {
+  void theListingLeavesOutExactlyTheModulesTheNoteNames() throws Exception {
     Set<String> listed = modules(includeOf(listingAfter(FILE_INTRO)));
     Set<String> demo = modules(includeOf(Files.readAllLines(SETTINGS)));
     String note =
@@ -115,7 +115,7 @@ class TutorialSettingsListingTest {
 
   private static int includeEnd(List<String> lines) {
     for (int i = includeStart(lines); i < lines.size(); i++) {
-      if (lines.get(i).strip().equals(")")) {
+      if (")".equals(lines.get(i).strip())) {
         return i;
       }
     }

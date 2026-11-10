@@ -13,9 +13,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Testcontainers
@@ -64,7 +64,7 @@ class IntegrationEventListenerIT {
 
     var items = listener.recent();
     assertThat(items).hasSize(1);
-    var received = items.get(0);
+    var received = items.getFirst();
     assertThat(received.type()).isEqualTo("OrderConfirmedIntegrationEvent");
     assertThat(received.body()).contains("o-1");
     assertThat(received.entryId()).isEqualTo("entry-1");

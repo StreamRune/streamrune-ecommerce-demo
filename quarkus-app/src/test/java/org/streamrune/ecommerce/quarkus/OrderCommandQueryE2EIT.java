@@ -248,7 +248,7 @@ class OrderCommandQueryE2EIT {
               assertThat(v.orderId()).isEqualTo(oid);
               assertThat(v.customerId()).isEqualTo(cid);
               assertThat(v.lines()).hasSize(1);
-              assertThat(v.lines().get(0).productId()).isEqualTo(pid);
+              assertThat(v.lines().getFirst().productId()).isEqualTo(pid);
             });
   }
 
@@ -666,7 +666,7 @@ class OrderCommandQueryE2EIT {
   }
 
   @Test
-  void cancellingTwiceRefundsOnce() throws SQLException {
+  void cancellingTwiceRefundsOnce() throws Exception {
     String oid = "q-o-cancel-twice-" + System.nanoTime();
     String cid = "q-o-cancel-twice-cust-" + System.nanoTime();
     String pid = "q-prod-cancel-twice-" + System.nanoTime();
@@ -755,7 +755,7 @@ class OrderCommandQueryE2EIT {
             StreamId.of(OrderState.TYPE, AggregateId.of(oid)),
             Version.initial(),
             Integer.MAX_VALUE);
-    assertThat(events.get(events.size() - 1).event()).isInstanceOf(OrderEvent.OrderShipped.class);
+    assertThat(events.getLast().event()).isInstanceOf(OrderEvent.OrderShipped.class);
   }
 
   @Test
@@ -777,7 +777,7 @@ class OrderCommandQueryE2EIT {
    * FAILURE} row that names the caller and the missing role, as on the Spring and Micronaut apps.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws Exception {
     String oid = "q-o-ship-noadmin-" + System.nanoTime();
     String cid = "q-o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "q-prod-ship-noadmin-" + System.nanoTime();
@@ -799,9 +799,9 @@ class OrderCommandQueryE2EIT {
 
     List<AuditRow> rows = auditRows(oid, "ShipOrder");
     assertThat(rows).hasSize(1);
-    assertThat(rows.get(0).outcome()).isEqualTo("FAILURE");
-    assertThat(rows.get(0).userId()).isEqualTo(cid);
-    assertThat(rows.get(0).errorMessage()).contains("Required role: ADMIN");
+    assertThat(rows.getFirst().outcome()).isEqualTo("FAILURE");
+    assertThat(rows.getFirst().userId()).isEqualTo(cid);
+    assertThat(rows.getFirst().errorMessage()).contains("Required role: ADMIN");
   }
 
   @Test

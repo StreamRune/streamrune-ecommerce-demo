@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.micronaut;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.MediaType;
@@ -86,7 +87,7 @@ class DeadLetterReplayAuthorizationIT extends AbstractIntegrationTest {
     // Unkeyed: nothing deduplicates the replay against a retry by its caller, so a plain click
     // is refused until the operator confirms with force.
     var refused =
-        org.junit.jupiter.api.Assertions.assertThrows(
+        assertThrows(
             io.micronaut.http.client.exceptions.HttpClientResponseException.class,
             () ->
                 client

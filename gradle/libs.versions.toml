@@ -50,7 +50,7 @@ reactor = "3.8.7"
 
 # Testing
 junit = "6.1.3"
-testcontainers = "1.21.4"
+testcontainers = "2.0.5"
 assertj = "3.27.7"
 awaitility = "4.2.2"
 
@@ -107,9 +107,9 @@ reactor-core = { module = "io.projectreactor:reactor-core", version.ref = "react
 # Testing
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
-testcontainers-postgresql = { module = "org.testcontainers:postgresql", version.ref = "testcontainers" }
-testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
-testcontainers-rabbitmq = { module = "org.testcontainers:rabbitmq", version.ref = "testcontainers" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql", version.ref = "testcontainers" }
+testcontainers-junit = { module = "org.testcontainers:testcontainers-junit-jupiter", version.ref = "testcontainers" }
+testcontainers-rabbitmq = { module = "org.testcontainers:testcontainers-rabbitmq", version.ref = "testcontainers" }
 awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
 
 [plugins]

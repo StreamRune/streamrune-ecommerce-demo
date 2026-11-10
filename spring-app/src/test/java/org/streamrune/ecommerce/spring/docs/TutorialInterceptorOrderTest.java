@@ -2,7 +2,6 @@ package org.streamrune.ecommerce.spring.docs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -45,7 +44,7 @@ class TutorialInterceptorOrderTest {
   private static final Pattern CHAIN = Pattern.compile("\\.interceptors\\(([^)]*)\\)");
 
   @Test
-  void everyInterceptorChainIsInTheCanonicalOrder() throws IOException {
+  void everyInterceptorChainIsInTheCanonicalOrder() throws Exception {
     List<Path> files = new ArrayList<>();
     try (Stream<Path> chapters = Files.list(TUTORIAL)) {
       chapters.filter(p -> p.toString().endsWith(".md")).sorted().forEach(files::add);
@@ -60,7 +59,7 @@ class TutorialInterceptorOrderTest {
         Matcher m = CHAIN.matcher(lines.get(i));
         while (m.find()) {
           String args = m.group(1).strip();
-          if (args.isEmpty() || args.equals("...")) {
+          if (args.isEmpty() || "...".equals(args)) {
             continue; // a prose mention of the builder call, not a chain
           }
           String where = file.getFileName() + ":" + (i + 1) + " .interceptors(" + args + ")";

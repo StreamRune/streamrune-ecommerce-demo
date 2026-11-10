@@ -37,8 +37,8 @@ public class PaymentGatewayCircuitBreaker {
   private final Duration cooldown;
 
   private State state = State.CLOSED;
-  private int consecutiveFailures = 0;
-  private Instant openedAt = null;
+  private int consecutiveFailures;
+  private Instant openedAt;
 
   public PaymentGatewayCircuitBreaker() {
     this(3, Duration.ofSeconds(30));
