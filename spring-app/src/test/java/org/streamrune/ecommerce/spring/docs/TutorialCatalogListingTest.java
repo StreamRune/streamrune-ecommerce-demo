@@ -34,7 +34,7 @@ class TutorialCatalogListingTest {
       "# ... (see the full catalog in the real demo for all aliases)";
 
   @Test
-  void everyLineOfTheCatalogExcerptIsALineOfTheCatalogInItsSection() throws IOException {
+  void everyLineOfTheCatalogExcerptIsALineOfTheCatalogInItsSection() throws Exception {
     Map<String, List<String>> excerpt = sections(listingAfter(INTRO));
     Map<String, List<String>> catalog = sections(Files.readAllLines(CATALOG));
 
@@ -51,7 +51,7 @@ class TutorialCatalogListingTest {
   }
 
   @Test
-  void theExcerptStatesTheFrameworkAndSpringBootVersions() throws IOException {
+  void theExcerptStatesTheFrameworkAndSpringBootVersions() throws Exception {
     List<String> versions = sections(listingAfter(INTRO)).get("[versions]");
 
     assertThat(versions)

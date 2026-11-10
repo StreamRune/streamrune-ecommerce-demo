@@ -121,7 +121,7 @@ class TutorialListingsCompileTest {
   private static final Pattern COMMENT_OR_ANNOTATION = Pattern.compile("^\\s*(?:@|/\\*\\*|\\*|//)");
 
   @Test
-  void everyChapterCompilesFromTheListingsOfItsChaptersAlone(@TempDir Path out) throws IOException {
+  void everyChapterCompilesFromTheListingsOfItsChaptersAlone(@TempDir Path out) throws Exception {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     assertThat(javac).as("the tests run on a JDK with a Java compiler").isNotNull();
     String classpath = frameworkAndLibraries();
@@ -154,7 +154,7 @@ class TutorialListingsCompileTest {
   }
 
   @Test
-  void everyImportAFragmentShowsResolvesInItsChapter(@TempDir Path out) throws IOException {
+  void everyImportAFragmentShowsResolvesInItsChapter(@TempDir Path out) throws Exception {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     assertThat(javac).as("the tests run on a JDK with a Java compiler").isNotNull();
     String classpath = frameworkAndLibraries();
@@ -210,7 +210,7 @@ class TutorialListingsCompileTest {
    * chapters before built, wiring and all.
    */
   @Test
-  void aBeanMethodAChapterShowsIsAnExcerptOfItsListingOfTheClass() throws IOException {
+  void aBeanMethodAChapterShowsIsAnExcerptOfItsListingOfTheClass() throws Exception {
     List<String> fragments = new ArrayList<>();
     for (Path chapter : chapters()) {
       List<Block> blocks = blocks(chapter);
@@ -248,7 +248,7 @@ class TutorialListingsCompileTest {
    * ones between fails here.
    */
   @Test
-  void eachListingOfTheSpringConfigurationGrowsOutOfTheOneBefore() throws IOException {
+  void eachListingOfTheSpringConfigurationGrowsOutOfTheOneBefore() throws Exception {
     List<Listing> listings = new ArrayList<>();
     for (Path chapter : chapters()) {
       for (Listing listing : completeFiles(chapter)) {
@@ -390,7 +390,7 @@ class TutorialListingsCompileTest {
    * such a listing with its first line missing, and every check here would pass it over.
    */
   @Test
-  void aBlockThatDeclaresAFileOfTheRepositoryStartsWithItsPackage() throws IOException {
+  void aBlockThatDeclaresAFileOfTheRepositoryStartsWithItsPackage() throws Exception {
     Set<String> files = repositoryTypeNames();
     List<String> blocks = new ArrayList<>();
     for (Path chapter : chapters()) {
@@ -437,7 +437,7 @@ class TutorialListingsCompileTest {
   }
 
   @Test
-  void theLastListingOfEveryFileIsTheRepositorysFile() throws IOException {
+  void theLastListingOfEveryFileIsTheRepositorysFile() throws Exception {
     Map<String, Listing> last = new LinkedHashMap<>();
     for (Path chapter : chapters()) {
       completeFiles(chapter).forEach(listing -> last.put(listing.className(), listing));
@@ -474,7 +474,7 @@ class TutorialListingsCompileTest {
    * second.
    */
   @Test
-  void theChaptersCompileWithoutTheDemosClasses(@TempDir Path out) throws IOException {
+  void theChaptersCompileWithoutTheDemosClasses(@TempDir Path out) throws Exception {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     assertThat(javac).as("the tests run on a JDK with a Java compiler").isNotNull();
     String testClasspath = System.getProperty("java.class.path");

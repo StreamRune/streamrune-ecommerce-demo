@@ -186,7 +186,7 @@ class TutorialLedgerTest {
   private static final Set<String> SHELL = Set.of("bash", "sh", "shell", "console", "text", "");
 
   @Test
-  void everyStepUsesOnlyWhatTheChaptersUpToItIntroduce() throws IOException {
+  void everyStepUsesOnlyWhatTheChaptersUpToItIntroduce() throws Exception {
     Map<String, Entry> ledger = new LinkedHashMap<>();
     LEDGER.forEach(entry -> ledger.put(entry.key(), entry));
 
@@ -221,7 +221,7 @@ class TutorialLedgerTest {
   }
 
   @Test
-  void everyLedgerEntryIsIntroducedWhereTheLedgerSays() throws IOException {
+  void everyLedgerEntryIsIntroducedWhereTheLedgerSays() throws Exception {
     List<Chapter> chapters = chapters();
     Map<String, Entry> ledger = new LinkedHashMap<>();
     LEDGER.forEach(entry -> ledger.put(entry.key(), entry));
@@ -395,7 +395,7 @@ class TutorialLedgerTest {
    */
   @Test
   void aListedIdIsNamedByAListingOfTheApplication_notByATestFixture(@TempDir Path dir)
-      throws IOException {
+      throws Exception {
     Path chapter = dir.resolve("99-listed.md");
     Files.writeString(
         chapter,

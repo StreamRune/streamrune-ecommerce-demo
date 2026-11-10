@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.micronaut.serde.ObjectMapper;
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Set;
@@ -75,7 +74,7 @@ class DomainEventSerializationTest {
   }
 
   @Test
-  void micronautSerializationWritesEveryEventAsJacksonDoes() throws IOException {
+  void micronautSerializationWritesEveryEventAsJacksonDoes() throws Exception {
     ObjectMapper micronaut = ObjectMapper.getDefault();
     var jackson = new com.fasterxml.jackson.databind.ObjectMapper();
 

@@ -77,7 +77,7 @@ class VersionCatalogAliasesTest {
       Pattern.compile("\\bfind(?:Library|Plugin|Bundle|Version)\\(\"([a-z0-9-]+)\"\\)");
 
   @Test
-  void everyAliasAndVersionOfTheCatalogIsUsed() throws IOException {
+  void everyAliasAndVersionOfTheCatalogIsUsed() throws Exception {
     Map<String, Map<String, String>> catalog = sections(Files.readAllLines(CATALOG));
     Set<String> accessors = new TreeSet<>();
     Set<String> lookups = new TreeSet<>();

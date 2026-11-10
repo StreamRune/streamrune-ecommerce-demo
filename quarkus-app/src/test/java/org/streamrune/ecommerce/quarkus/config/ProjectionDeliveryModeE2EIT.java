@@ -81,7 +81,7 @@ class ProjectionDeliveryModeE2EIT {
   }
 
   @Test
-  void anAtLeastOnceProjectionOverMemory_runsBesideTheTransactionalFour() throws SQLException {
+  void anAtLeastOnceProjectionOverMemory_runsBesideTheTransactionalFour() throws Exception {
     int before = AuditMemProjection.MEMORY.rowCount(AUDIT_MEM);
     String pid = "q-p-mode-" + System.nanoTime();
     createProduct(pid, "ModeWidget", 12.50, 10);

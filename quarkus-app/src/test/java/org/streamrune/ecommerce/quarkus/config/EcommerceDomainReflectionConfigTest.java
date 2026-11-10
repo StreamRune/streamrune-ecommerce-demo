@@ -56,7 +56,7 @@ class EcommerceDomainReflectionConfigTest {
   }
 
   @Test
-  void lists_the_sealed_command_roots_the_dead_letter_runner_expands() throws IOException {
+  void lists_the_sealed_command_roots_the_dead_letter_runner_expands() throws Exception {
     assertThat(typesInReachabilityMetadata())
         .contains(
             ProductCommand.class.getName(),
@@ -67,7 +67,7 @@ class EcommerceDomainReflectionConfigTest {
   }
 
   @Test
-  void lists_the_sealed_supertype_of_every_type_registered_for_reflection() throws IOException {
+  void lists_the_sealed_supertype_of_every_type_registered_for_reflection() throws Exception {
     Set<String> listed = typesInReachabilityMetadata();
     List<String> missing = new ArrayList<>();
     for (Class<?> type : registeredForReflection()) {

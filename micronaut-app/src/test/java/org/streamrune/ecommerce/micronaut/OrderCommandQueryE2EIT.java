@@ -709,7 +709,7 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
   }
 
   @Test
-  void cancellingTwiceRefundsOnce() throws SQLException {
+  void cancellingTwiceRefundsOnce() throws Exception {
     String oid = "m-o-cancel-twice-" + System.nanoTime();
     String cid = "m-o-cancel-twice-cust-" + System.nanoTime();
     String pid = "m-prod-cancel-twice-" + System.nanoTime();
@@ -823,7 +823,7 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
    * FAILURE} row that names the caller and the missing role, as on the Spring and Quarkus apps.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws Exception {
     String oid = "m-o-ship-noadmin-" + System.nanoTime();
     String cid = "m-o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "m-prod-ship-noadmin-" + System.nanoTime();

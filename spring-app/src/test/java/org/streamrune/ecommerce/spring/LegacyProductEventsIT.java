@@ -96,7 +96,7 @@ class LegacyProductEventsIT {
   }
 
   @Test
-  void aProductCreatedBeforeTheUpcasterWasRegisteredKeepsItsCategory() throws SQLException {
+  void aProductCreatedBeforeTheUpcasterWasRegisteredKeepsItsCategory() throws Exception {
     StreamId streamId = StreamId.of(ProductState.TYPE, AggregateId.of("p-gadget"));
     var created =
         new ProductEvent.ProductCreated(
@@ -136,8 +136,7 @@ class LegacyProductEventsIT {
   }
 
   @Test
-  void theChaptersHandInsertedLegacyRowIsReadByTheAggregateAndTheGlobalStream()
-      throws IOException, SQLException {
+  void theChaptersHandInsertedLegacyRowIsReadByTheAggregateAndTheGlobalStream() throws Exception {
     try (Connection conn = dataSource.getConnection();
         Statement statement = conn.createStatement()) {
       statement.execute(chapterInsertSql());

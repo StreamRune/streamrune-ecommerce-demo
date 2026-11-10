@@ -2,6 +2,7 @@ package org.streamrune.ecommerce.micronaut;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.micronaut.core.type.Argument;
 import io.micronaut.http.HttpRequest;
@@ -479,7 +480,7 @@ class GdprForgetE2EIT extends AbstractIntegrationTest {
          "address": "x", "phone": "y"}"""
             .formatted(cid);
     HttpClientResponseException gone =
-        org.junit.jupiter.api.Assertions.assertThrows(
+        assertThrows(
             HttpClientResponseException.class,
             () ->
                 client

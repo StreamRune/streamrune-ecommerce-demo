@@ -666,7 +666,7 @@ class OrderCommandQueryE2EIT {
   }
 
   @Test
-  void cancellingTwiceRefundsOnce() throws SQLException {
+  void cancellingTwiceRefundsOnce() throws Exception {
     String oid = "q-o-cancel-twice-" + System.nanoTime();
     String cid = "q-o-cancel-twice-cust-" + System.nanoTime();
     String pid = "q-prod-cancel-twice-" + System.nanoTime();
@@ -777,7 +777,7 @@ class OrderCommandQueryE2EIT {
    * FAILURE} row that names the caller and the missing role, as on the Spring and Micronaut apps.
    */
   @Test
-  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws SQLException {
+  void shipOrderWithoutAdminRoleReturns403AndIsAuditedAsAFailure() throws Exception {
     String oid = "q-o-ship-noadmin-" + System.nanoTime();
     String cid = "q-o-ship-noadmin-cust-" + System.nanoTime();
     String pid = "q-prod-ship-noadmin-" + System.nanoTime();

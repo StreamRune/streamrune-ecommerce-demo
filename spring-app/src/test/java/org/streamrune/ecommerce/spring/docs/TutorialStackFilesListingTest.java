@@ -36,7 +36,7 @@ class TutorialStackFilesListingTest {
       List.of("docker-compose.yml", "Dockerfile.backend", "notifications-service/Dockerfile");
 
   @Test
-  void everyListingOfAStackFileIsTheRepositorysFileSoFar() throws IOException {
+  void everyListingOfAStackFileIsTheRepositorysFileSoFar() throws Exception {
     List<String> problems = new ArrayList<>();
     Set<String> read = new HashSet<>();
     for (String name : FILES) {

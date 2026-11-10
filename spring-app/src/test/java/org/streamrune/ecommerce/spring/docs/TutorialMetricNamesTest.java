@@ -60,7 +60,7 @@ class TutorialMetricNamesTest {
           "_bucket");
 
   @Test
-  void everyMeterNameInTheDocsIsOneTheFrameworkRegisters() throws IOException {
+  void everyMeterNameInTheDocsIsOneTheFrameworkRegisters() throws Exception {
     Set<String> meters = meterNames();
     Set<String> families =
         meters.stream().map(n -> n.split("\\.")[1]).collect(Collectors.toCollection(TreeSet::new));
