@@ -88,15 +88,16 @@ Because the auto-configured `micrometerStreamRuneMetrics` bean method is annotat
 
 ### Step 3: Wire OpenTelemetryCommandInterceptor
 
-`OpenTelemetryCommandInterceptor` implements `CommandInterceptor`. Its `before()` method starts an OpenTelemetry span named `command/<CommandType>` with `streamrune.command.type`, `streamrune.command.id`, and `streamrune.aggregate.id` as span attributes. Its `after()` method adds `streamrune.stream.id`, the stream the command committed to, and closes the span with `OK` status; `onError()` records the exception and closes it with `ERROR` status. Every attribute key carries the `streamrune.` prefix; `TraceAttributes` in `streamrune-runtime` lists them, so filter traces on `streamrune.command.type`, not `command.type`.
+`OpenTelemetryCommandInterceptor` implements `CommandInterceptor`. Its `before()` method starts an OpenTelemetry span named `command/<CommandType>` with `streamrune.command.type`, `streamrune.command.id`, `streamrune.aggregate.type`, `streamrune.aggregate.id` and `streamrune.stream.id` as span attributes, so a command that fails before committing carries its stream too. Its `after()` method closes the span with `OK` status; `onError()` records the exception's type and its own message (never the messages of its causes) and closes the span with `ERROR` status. Every attribute key carries the `streamrune.` prefix; `TraceAttributes` in `streamrune-core` (`org.streamrune.core.tracing`) lists them, so filter traces on `streamrune.command.type`, not `command.type`.
 
 `StreamRuneAutoConfiguration` registers this interceptor automatically (with `@Order(ORDER_OPEN_TELEMETRY)`, so it sits outermost) whenever an `io.opentelemetry.api.OpenTelemetry` bean is present. The shipped demo's `StreamRuneConfig` defines **no** `OpenTelemetry` bean and does **not** add the interceptor to its hand-wired `commandBus` — so distributed tracing is an opt-in addition. Because the demo wires its `commandBus` by hand (rather than relying on `StreamRuneAutoConfiguration`), the auto-configured interceptor would not be picked up even if an `OpenTelemetry` bean existed. To trace commands, declare the interceptor bean yourself and inject it into the `commandBus` constructor (next). This step is optional, and the listings of this chapter leave it out, as the demo does. The bean method returns:
 
 ```java
-new OpenTelemetryCommandInterceptor(io.opentelemetry.api.OpenTelemetry.noop())
+new OpenTelemetryCommandInterceptor(
+    OpenTelemetryTracing.of(io.opentelemetry.api.OpenTelemetry.noop(), TracingSettings.allEnabled()))
 ```
 
-The no-op `OpenTelemetry` keeps the wiring simple while you learn the mechanics. In production, replace `OpenTelemetry.noop()` with a configured SDK instance that exports spans to your collector. The interceptor itself is SDK-agnostic — it depends only on the `opentelemetry-api` artifact, not on any SDK.
+`OpenTelemetryTracing.of` (`org.streamrune.runtime`) is the one place that takes an `OpenTelemetry`; the interceptor takes the `StreamRuneTracing` it returns, and `TracingSettings` (also `org.streamrune.runtime`) can switch tracing off as a whole or per area. The no-op `OpenTelemetry` keeps the wiring simple while you learn the mechanics. In production, replace `OpenTelemetry.noop()` with a configured SDK instance that exports spans to your collector. The interceptor itself is SDK-agnostic — it depends only on the `opentelemetry-api` artifact, not on any SDK.
 
 Once registered, the interceptor must be added to the `VirtualThreadCommandBus` interceptor chain. You already built the `commandBus` bean in the command-bus chapter — it declares the four existing interceptors as constructor parameters and wires them through `.interceptors(...)`, followed by the command inbox (chapter 11), the dead-letter queue (chapter 14), `.snapshotPolicy(...)` and one `.register(...)` call per aggregate. To add the interceptor, do **not** replace that bean — make two surgical edits:
 

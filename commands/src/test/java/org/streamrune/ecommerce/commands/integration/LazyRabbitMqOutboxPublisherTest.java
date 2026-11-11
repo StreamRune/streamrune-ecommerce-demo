@@ -17,6 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
+import org.streamrune.core.outbox.OutboxEntrySpans;
 import org.streamrune.core.outbox.OutboxPublisher.BatchResult;
 import org.streamrune.core.outbox.OutboxPublisher.FailureKind;
 import org.streamrune.core.types.AggregateId;
@@ -62,7 +63,8 @@ class LazyRabbitMqOutboxPublisherTest {
   void aBrokerThatCannotBeReachedFailsEveryEntryAsATransportFailure() {
     List<OutboxEntry> batch = List.of(entry("e-1"), entry("e-2"));
 
-    BatchResult result = publisher.publishBatch(batch, Instant.now().plusSeconds(30));
+    BatchResult result =
+        publisher.publishBatch(batch, Instant.now().plusSeconds(30), OutboxEntrySpans.NONE);
 
     assertThat(result.confirmed()).isEmpty();
     assertThat(result.failed()).containsOnlyKeys(OutboxEntryId.of("e-1"), OutboxEntryId.of("e-2"));
@@ -104,7 +106,7 @@ class LazyRabbitMqOutboxPublisherTest {
   void aStoppingRelayAttemptsNothing() {
     Thread.currentThread().interrupt();
 
-    BatchResult result = publisher.publishBatch(List.of(entry("e-1")), null);
+    BatchResult result = publisher.publishBatch(List.of(entry("e-1")), null, OutboxEntrySpans.NONE);
 
     assertThat(Thread.currentThread().isInterrupted()).as("the interrupt is kept").isTrue();
     assertThat(result.confirmed()).isEmpty();
@@ -114,7 +116,8 @@ class LazyRabbitMqOutboxPublisherTest {
   @Test
   void aBatchPastItsDeadlineAttemptsNothing() {
     BatchResult result =
-        publisher.publishBatch(List.of(entry("e-1")), Instant.now().minusMillis(1));
+        publisher.publishBatch(
+            List.of(entry("e-1")), Instant.now().minusMillis(1), OutboxEntrySpans.NONE);
 
     assertThat(result.confirmed()).isEmpty();
     assertThat(result.failed()).isEmpty();
@@ -196,7 +199,7 @@ class LazyRabbitMqOutboxPublisherTest {
     publisher.close();
     assertThat(publisher.isConnected()).isFalse();
 
-    BatchResult result = publisher.publishBatch(List.of(entry("e-1")), null);
+    BatchResult result = publisher.publishBatch(List.of(entry("e-1")), null, OutboxEntrySpans.NONE);
 
     assertThat(result.failed().get(OutboxEntryId.of("e-1")))
         .isInstanceOf(BrokerUnreachableException.class)
@@ -207,7 +210,8 @@ class LazyRabbitMqOutboxPublisherTest {
   private static void assertFailsWithinTheBound(LazyRabbitMqOutboxPublisher publisher) {
     long start = System.nanoTime();
     BatchResult result =
-        publisher.publishBatch(List.of(entry("e-1")), Instant.now().plusSeconds(60));
+        publisher.publishBatch(
+            List.of(entry("e-1")), Instant.now().plusSeconds(60), OutboxEntrySpans.NONE);
     Duration took = Duration.ofNanos(System.nanoTime() - start);
 
     assertThat(took)
