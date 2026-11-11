@@ -1312,6 +1312,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
+import org.streamrune.core.outbox.OutboxEntrySpans;
 import org.streamrune.core.outbox.OutboxPublisher;
 import org.streamrune.outbox.rabbitmq.RabbitMqOutboxPublisher;
 
@@ -1453,20 +1454,18 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
     connected().publish(entry);
   }
 
-  @Override
-  public BatchResult publishBatch(List<OutboxEntry> entries) {
-    return publishBatch(entries, null);
-  }
-
   /**
    * Publishes the batch through the {@link RabbitMqOutboxPublisher}, connecting first when there is
    * no connection yet. A connection that cannot be opened fails every entry with the same {@link
    * BrokerUnreachableException}. When the thread is interrupted (the relay stops) or the deadline
    * has passed before a connection is opened, no entry is attempted and none is in either bucket,
-   * as the {@link OutboxPublisher} contract asks of entries a batch never reached.
+   * as the {@link OutboxPublisher} contract asks of entries a batch never reached. It hands {@code
+   * spans} on to the delegate, so each entry the delegate publishes gets its own span when tracing
+   * is on.
    */
   @Override
-  public BatchResult publishBatch(List<OutboxEntry> entries, Instant deadline) {
+  public BatchResult publishBatch(
+      List<OutboxEntry> entries, Instant deadline, OutboxEntrySpans spans) {
     if (entries.isEmpty()) {
       return NOTHING_ATTEMPTED;
     }
@@ -1490,7 +1489,7 @@ public final class LazyRabbitMqOutboxPublisher implements OutboxPublisher, AutoC
         return new BatchResult(Set.of(), failed);
       }
     }
-    return publisher.publishBatch(entries, deadline);
+    return publisher.publishBatch(entries, deadline, spans);
   }
 
   /**

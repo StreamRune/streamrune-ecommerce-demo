@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.amqp.autoconfigure.RabbitProperties;
 import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
+import org.streamrune.core.outbox.OutboxEntrySpans;
 import org.streamrune.core.outbox.OutboxPublisher;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
@@ -106,7 +107,8 @@ class RabbitMqConfigTopologyIT {
                       "{\"orderId\":\"topology-ord-2\"}",
                       "OrderConfirmed",
                       StreamId.of(OrderState.TYPE, AggregateId.of("topology-ord-2")))),
-              Instant.now().plusSeconds(30));
+              Instant.now().plusSeconds(30),
+              OutboxEntrySpans.NONE);
 
       Exception failure = result.failed().get(OutboxEntryId.of("topology-entry-2"));
       assertThat(failure)
