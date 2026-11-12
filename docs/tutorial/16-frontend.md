@@ -85,6 +85,10 @@ services:
       RABBITMQ_PASSWORD: guest
       APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+      # The export of the spans (false unless set): with true, the backend sends them over OTLP to
+      # the jaeger service of the tracing profile.
+      MANAGEMENT_TRACING_EXPORT_ENABLED: ${MANAGEMENT_TRACING_EXPORT_ENABLED:-false}
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     # The backend starts without the broker: its outbox publisher connects on the first publish.
     # Waiting for the broker lets the first integration events go out at once.
     depends_on:
@@ -117,6 +121,18 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+  # Jaeger, started only with the tracing profile, and the backends' spans exported to it:
+  #   MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
+  # Its UI is http://localhost:16686. It takes OTLP over gRPC on 4317 and over HTTP on 4318, where
+  # an app started outside Compose sends its spans too, and keeps the traces in memory.
+  jaeger:
+    profiles: ["tracing"]
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
 
 volumes:
   pgdata:

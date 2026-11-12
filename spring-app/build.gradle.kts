@@ -78,8 +78,9 @@ dependencies {
     implementation("org.streamrune:streamrune-runtime:$sr")
     implementation("org.streamrune:streamrune-rabbitmq-outbox:$sr")
     implementation("org.springframework.boot:spring-boot-starter-amqp")
-    // Required for AOT: StreamRuneAutoConfiguration references these optional classes.
+    // The OpenTelemetry API at the version Spring Boot manages, the one of the SDK below.
     implementation(libs.opentelemetry.api)
+    // Required for AOT: StreamRuneAutoConfiguration references this optional class.
     implementation("org.springframework.security:spring-security-core")
     // Tracing: Spring Boot's OpenTelemetry SDK bean, which the framework's StreamRuneTracing traces
     // through, Micrometer's bridge to it (each HTTP request is the parent span of its command) and
