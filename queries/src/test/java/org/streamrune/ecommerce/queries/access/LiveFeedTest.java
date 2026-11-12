@@ -846,7 +846,6 @@ class LiveFeedTest {
                 IdGenerator.generateEventId(),
                 IdGenerator.generateCommandId(),
                 null,
-                null,
                 CorrelationId.of("corr-" + customerId),
                 null,
                 UserId.of(customerId),

@@ -133,7 +133,6 @@ class OrderProjectionPaymentStatusTest {
             IdGenerator.generateEventId(),
             IdGenerator.generateCommandId(),
             null,
-            null,
             CorrelationId.of("c-" + at),
             null,
             UserId.of("u-1"),

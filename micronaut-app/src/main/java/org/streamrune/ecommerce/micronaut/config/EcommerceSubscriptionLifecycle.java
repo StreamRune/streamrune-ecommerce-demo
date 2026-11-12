@@ -47,10 +47,10 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  *
  * <p>The subscriptions of the payment, order cancellation and order shipment process managers each
  * deliver under a lease named after them, {@code payment-process-manager}, {@code
- * order-cancellation} and {@code order-shipment}, over the same leadership ({@code null} when
- * single-active-consumer leadership is off: every backend then delivers). Every subscription
- * registers with the {@link SubscriptionHealthContributor}, so the health check lists it with its
- * {@code role}: {@code LEADING} or {@code STANDBY}.
+ * order-cancellation} and {@code order-shipment}, over the same leadership ({@code
+ * SubscriptionLeadership.NOOP} when single-active-consumer leadership is off: every backend then
+ * delivers). Every subscription registers with the {@link SubscriptionHealthContributor}, so the
+ * health check lists it with its {@code role}: {@code LEADING} or {@code STANDBY}.
  *
  * <p>It also starts and closes the demo's own {@link DeadLetterRetryRunner} (see {@code
  * StreamRuneFactory#deadLetterRetryRunner}): an application-supplied runner replaces the
@@ -105,7 +105,7 @@ public class EcommerceSubscriptionLifecycle
     this.orderCancellationProcessManager = orderCancellationProcessManager;
     this.orderShipmentProcessManager = orderShipmentProcessManager;
     this.deadLetterRetryRunner = deadLetterRetryRunner;
-    this.leadership = leadership;
+    this.leadership = leadership != null ? leadership : SubscriptionLeadership.NOOP;
     this.health = health;
   }
 

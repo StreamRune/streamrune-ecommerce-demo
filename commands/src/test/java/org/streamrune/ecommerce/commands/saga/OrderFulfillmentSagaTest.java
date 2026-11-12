@@ -58,7 +58,6 @@ class OrderFulfillmentSagaTest {
             new EventId(UUID.randomUUID().toString()),
             new CommandId(UUID.randomUUID().toString()),
             null,
-            null,
             new CorrelationId(correlationId),
             null,
             null,

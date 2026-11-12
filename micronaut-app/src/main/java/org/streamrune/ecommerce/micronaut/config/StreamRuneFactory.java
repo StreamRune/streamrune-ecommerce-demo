@@ -614,7 +614,7 @@ public class StreamRuneFactory {
                 DeadLetterUnkeyedReplaySetting.parse(properties.deadLetterUnkeyedReplay())))
         // The window the inbox sweeper prunes with: a keyed entry older than it is refused.
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
-        .metrics(metrics)
+        .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         .pollInterval(pollInterval)
         .build();
   }
@@ -668,9 +668,9 @@ public class StreamRuneFactory {
         // Poison events (routing/decider failures) are quarantined here instead of blocking the
         // subscription.
         .sagaDeadLetterStore(sagaDeadLetterStore)
-        .metrics(metrics)
+        .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         // One backend delivers this saga type; the others stand by.
-        .leadership(leadership)
+        .leadership(leadership != null ? leadership : SubscriptionLeadership.NOOP)
         .build();
   }
 
@@ -709,7 +709,7 @@ public class StreamRuneFactory {
         .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
         .sagaRunner(orderFulfillmentSagaRunner)
         .pollInterval(pollInterval)
-        .metrics(metrics)
+        .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
         .build();
   }
@@ -744,7 +744,7 @@ public class StreamRuneFactory {
         .eventStore(eventStore)
         .sagaRunner(orderFulfillmentSagaRunner)
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
-        .metrics(metrics)
+        .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         .build();
   }
 

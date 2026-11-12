@@ -51,7 +51,6 @@ class AuditProjectionTest {
             IdGenerator.generateEventId(),
             IdGenerator.generateCommandId(),
             null,
-            null,
             CorrelationId.of("c-" + offset),
             null,
             UserId.of("u-1"),
