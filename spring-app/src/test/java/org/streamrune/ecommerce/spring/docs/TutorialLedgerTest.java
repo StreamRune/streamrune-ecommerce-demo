@@ -57,6 +57,7 @@ class TutorialLedgerTest {
           port(8080, 1, "the application"),
           port(15672, 13, "the RabbitMQ management UI"),
           port(8090, 13, "the notifications service"),
+          port(16686, 15, "Jaeger's UI and query API, the tracing profile"),
           port(3000, 16, "the frontend"),
           port(8091, 17, "the second backend of the two-backends profile"),
           // Request headers
@@ -68,6 +69,7 @@ class TutorialLedgerTest {
           framework("GET /actuator/health", 1, "Spring Boot Actuator"),
           framework("GET /actuator/metrics/{*}", 15, "Spring Boot Actuator"),
           framework("GET /api/sse/{type}/{id}", 15, "streamrune.sse.enabled"),
+          framework("GET /api/v3/services", 15, "Jaeger's query API"),
           // Endpoints of the demo's controllers
           controller("POST /api/products", 2),
           controller("GET /api/products", 2),
@@ -157,6 +159,7 @@ class TutorialLedgerTest {
           created("o-fail-1", 14),
           created("o-obs-1", 15),
           created("o-obs-2", 15),
+          created("o-trace-1", 15),
           created("ord-1", 17),
           named("fulfillment-ord-1", 17, "the fulfillment saga of order ord-1"),
           created("ord-2", 17),

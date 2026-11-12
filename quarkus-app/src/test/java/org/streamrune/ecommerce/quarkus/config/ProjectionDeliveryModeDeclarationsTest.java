@@ -17,6 +17,7 @@ import org.streamrune.core.projection.AtomicBatchProcessor;
 import org.streamrune.core.projection.Projection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.projections.AuditProjection;
 import org.streamrune.quarkus.ProjectionProducer;
@@ -132,7 +133,8 @@ class ProjectionDeliveryModeDeclarationsTest {
             instance(List.of()),
             instance(List.of()),
             properties(),
-            emptyConfig());
+            emptyConfig(),
+            StreamRuneTracing.NOOP);
   }
 
   /** A CDI Instance over a fixed list of beans: only what discovery calls is answered. */

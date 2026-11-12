@@ -13,6 +13,7 @@ import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.subscription.EventListener;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.SubscriptionName;
 import org.streamrune.ecommerce.commands.order.OrderCancellationProcessManager;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
@@ -50,7 +51,9 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  * order-cancellation} and {@code order-shipment}, over the same leadership ({@code
  * SubscriptionLeadership.NOOP} when single-active-consumer leadership is off: every backend then
  * delivers). Every subscription registers with the {@link SubscriptionHealthContributor}, so the
- * health check lists it with its {@code role}: {@code LEADING} or {@code STANDBY}.
+ * health check lists it with its {@code role}: {@code LEADING} or {@code STANDBY}. Every
+ * subscription also takes the integration's {@link StreamRuneTracing} bean, and starts a {@code
+ * subscription/<name>/deliver} span for each batch it delivers.
  *
  * <p>It also starts and closes the demo's own {@link DeadLetterRetryRunner} (see {@code
  * StreamRuneFactory#deadLetterRetryRunner}): an application-supplied runner replaces the
@@ -80,6 +83,7 @@ public class EcommerceSubscriptionLifecycle
   private final DeadLetterRetryRunner deadLetterRetryRunner;
   private final SubscriptionLeadership leadership;
   private final SubscriptionHealthContributor health;
+  private final StreamRuneTracing tracing;
 
   private PollingEventSubscription orderFulfillmentSagaSubscription;
   private PollingEventSubscription paymentProcessSubscription;
@@ -96,7 +100,8 @@ public class EcommerceSubscriptionLifecycle
       OrderShipmentProcessManager orderShipmentProcessManager,
       DeadLetterRetryRunner deadLetterRetryRunner,
       @Nullable SubscriptionLeadership leadership,
-      SubscriptionHealthContributor health) {
+      SubscriptionHealthContributor health,
+      StreamRuneTracing tracing) {
     this.eventStore = eventStore;
     this.offsetStore = offsetStore;
     this.orderFulfillmentSagaRunner = orderFulfillmentSagaRunner;
@@ -107,6 +112,7 @@ public class EcommerceSubscriptionLifecycle
     this.deadLetterRetryRunner = deadLetterRetryRunner;
     this.leadership = leadership != null ? leadership : SubscriptionLeadership.NOOP;
     this.health = health;
+    this.tracing = tracing;
   }
 
   /**
@@ -131,6 +137,7 @@ public class EcommerceSubscriptionLifecycle
             // Delivers under the saga runner's lease, and takes it.
             .sagaRunner(orderFulfillmentSagaRunner)
             .healthContributor(health)
+            .tracing(tracing)
             .build();
     orderFulfillmentSagaSubscription.start();
     LOG.info("StreamRune: started order-fulfillment-saga subscription");
@@ -149,6 +156,7 @@ public class EcommerceSubscriptionLifecycle
             .listener(paymentProcessManager)
             .leadership(leadership)
             .healthContributor(health)
+            .tracing(tracing)
             .build();
     paymentProcessSubscription.start();
     LOG.info("StreamRune: started payment-process-manager subscription");
@@ -194,6 +202,7 @@ public class EcommerceSubscriptionLifecycle
             .listener(listener)
             .leadership(leadership)
             .healthContributor(health)
+            .tracing(tracing)
             .build();
     subscription.start();
     LOG.info("StreamRune: started {} subscription", name);

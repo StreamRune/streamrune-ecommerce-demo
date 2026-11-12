@@ -17,6 +17,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.metrics.MetricNames;
+import org.streamrune.core.tracing.TraceAttributes;
 
 /**
  * Every StreamRune meter name the tutorial and the README give, dotted ({@code
@@ -28,7 +29,9 @@ import org.streamrune.core.metrics.MetricNames;
  * <p>A dotted name counts as a meter name when its second segment is one a {@link MetricNames}
  * constant uses ({@code commands}, {@code events}, {@code outbox}, ...). Configuration properties
  * share some of those namespaces; they are told apart by their shape: a property segment contains a
- * hyphen ({@code streamrune.outbox.retention-max-age}) or the key ends in {@code .enabled}.
+ * hyphen ({@code streamrune.outbox.retention-max-age}) or the key ends in {@code .enabled}. The
+ * attribute keys of the framework's spans share them too ({@code streamrune.outbox.entry.id}): a
+ * {@link TraceAttributes} constant is a span's attribute, not a meter.
  */
 class TutorialMetricNamesTest {
 
@@ -62,6 +65,7 @@ class TutorialMetricNamesTest {
   @Test
   void everyMeterNameInTheDocsIsOneTheFrameworkRegisters() throws Exception {
     Set<String> meters = meterNames();
+    Set<String> spanAttributes = spanAttributeKeys();
     Set<String> families =
         meters.stream().map(n -> n.split("\\.")[1]).collect(Collectors.toCollection(TreeSet::new));
 
@@ -74,7 +78,9 @@ class TutorialMetricNamesTest {
         Matcher dotted = DOTTED.matcher(lines.get(i));
         while (dotted.find()) {
           String name = dotted.group();
-          if (!families.contains(name.split("\\.")[1]) || name.endsWith(".enabled")) {
+          if (!families.contains(name.split("\\.")[1])
+              || name.endsWith(".enabled")
+              || spanAttributes.contains(name)) {
             continue;
           }
           checked.add(where + name);
@@ -123,6 +129,21 @@ class TutorialMetricNamesTest {
       }
     }
     return names;
+  }
+
+  /** The attribute keys of the framework's spans, the {@link TraceAttributes} constants. */
+  private static Set<String> spanAttributeKeys() {
+    Set<String> keys = new TreeSet<>();
+    for (Field field : TraceAttributes.class.getFields()) {
+      if (Modifier.isStatic(field.getModifiers()) && field.getType() == String.class) {
+        try {
+          keys.add((String) field.get(null));
+        } catch (IllegalAccessException e) {
+          throw new AssertionError(e);
+        }
+      }
+    }
+    return keys;
   }
 
   private static List<Path> docs() throws IOException {

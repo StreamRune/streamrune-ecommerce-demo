@@ -596,6 +596,8 @@ Everything so far ran one backend. A production service runs several against one
 | `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
 | `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | `management.endpoint.health.show-details` | `never` | With `always`, `/actuator/health` lists each subscription with its `role`: `LEADING` or `STANDBY` (Chapter 15) |
 
+`backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, where the saga's steps show on whichever backend leads it.
+
 Replace `docker-compose.yml` with the demo's file, the last version of it:
 
 ```yaml
@@ -652,6 +654,10 @@ services:
       # The details of /actuator/health (never unless set): with always, they list each
       # subscription with its role under its lease — LEADING or STANDBY.
       MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
+      # The export of the spans (false unless set): with true, the backend sends them over OTLP to
+      # the jaeger service of the tracing profile.
+      MANAGEMENT_TRACING_EXPORT_ENABLED: ${MANAGEMENT_TRACING_EXPORT_ENABLED:-false}
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     # The backend starts without the broker: its outbox publisher connects on the first publish.
     # Waiting for the broker lets the first integration events go out at once.
     depends_on:
@@ -686,6 +692,8 @@ services:
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
       APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
       MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
+      MANAGEMENT_TRACING_EXPORT_ENABLED: ${MANAGEMENT_TRACING_EXPORT_ENABLED:-false}
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     depends_on:
       postgres:
         condition: service_healthy
@@ -716,6 +724,18 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+  # Jaeger, started only with the tracing profile, and the backends' spans exported to it:
+  #   MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
+  # Its UI is http://localhost:16686. It takes OTLP over gRPC on 4317 and over HTTP on 4318, where
+  # an app started outside Compose sends its spans too, and keeps the traces in memory.
+  jaeger:
+    profiles: ["tracing"]
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
 
 volumes:
   pgdata:
@@ -814,6 +834,7 @@ public VirtualThreadCommandBus commandBus(
     PostgresCryptoEngine cryptoEngine,
     AggregateLocker locker,
     StreamRuneProperties properties,
+    StreamRuneTracing tracing,
     @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
   var bus =
       VirtualThreadCommandBus.builder()
@@ -825,6 +846,7 @@ public VirtualThreadCommandBus commandBus(
           // unless the bus has a commandInbox wired in.
           .commandInbox(commandInbox)
           .interceptors(audit, auth, validation, circuitBreaker)
+          .tracing(tracing)
           .deadLetterQueue(deadLetterQueue)
           .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
           // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
@@ -938,6 +960,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.SagaType;
@@ -1231,15 +1254,21 @@ public class StreamRuneConfig {
    * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
    * commands wait for one ({@code
    * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
+   *
+   * <p>{@code traced(tracing)} returns the locker on the same pool that starts a {@code
+   * lock/acquire} span around each acquisition, through the integration's {@link StreamRuneTracing}
+   * bean: the bus below is the app's own, and a bus does not trace a locker it is given.
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
       @Value("${spring.datasource.password}") String password,
-      MeterRegistry meterRegistry) {
+      MeterRegistry meterRegistry,
+      StreamRuneTracing tracing) {
     return PgAdvisoryLocker.withDedicatedPool(
-        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+            url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry))
+        .traced(tracing);
   }
 
   /**
@@ -1268,6 +1297,11 @@ public class StreamRuneConfig {
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
    *
+   * <p>{@code tracing(...)} takes the integration's {@link StreamRuneTracing} bean and adds the
+   * framework's {@code OpenTelemetryCommandInterceptor} ahead of the listed interceptors, so the
+   * {@code command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is
+   * {@code StreamRuneTracing.NOOP} and traces nothing.
+   *
    * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
    * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays
    * every command a saga dispatches, so that a saga's deadline can pass while its forward command
@@ -1285,6 +1319,7 @@ public class StreamRuneConfig {
       PostgresCryptoEngine cryptoEngine,
       AggregateLocker locker,
       StreamRuneProperties properties,
+      StreamRuneTracing tracing,
       @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
     var bus =
         VirtualThreadCommandBus.builder()
@@ -1296,6 +1331,7 @@ public class StreamRuneConfig {
             // unless the bus has a commandInbox wired in.
             .commandInbox(commandInbox)
             .interceptors(audit, auth, validation, circuitBreaker)
+            .tracing(tracing)
             .deadLetterQueue(deadLetterQueue)
             .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
             // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
@@ -1462,7 +1498,8 @@ public class StreamRuneConfig {
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
    * lists each projection in the health details as {@code subscription.<name>}, with its {@code
-   * role}.
+   * role}. {@code tracing(...)} starts a {@code projection/<name>/process} span for each batch a
+   * projection processes.
    */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
@@ -1476,7 +1513,8 @@ public class StreamRuneConfig {
       InventoryProjection inventoryProjection,
       CacheInvalidator cacheInvalidator,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
@@ -1484,6 +1522,7 @@ public class StreamRuneConfig {
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
@@ -1655,6 +1694,11 @@ public class StreamRuneConfig {
    * compensations, and the others stand by and take over when it stops or dies. The lease is taken
    * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
    * SubscriptionLeadership#NOOP}) every backend delivers.
+   *
+   * <p>{@code tracing} is the integration's {@link StreamRuneTracing} bean: the runner starts a
+   * {@code saga/<SagaType>/step} span for each event it handles, linked to the command that
+   * appended the event. The integration does not build saga runners, so it cannot hand them the
+   * bean itself.
    */
   @Bean
   public SagaRunner<?> orderFulfillmentSagaRunner(
@@ -1663,7 +1707,8 @@ public class StreamRuneConfig {
       VirtualThreadCommandBus commandBus,
       PostgresSagaDeadLetterStore sagaDeadLetterStore,
       ObjectProvider<StreamRuneMetrics> metrics,
-      ObjectProvider<SubscriptionLeadership> leadership) {
+      ObjectProvider<SubscriptionLeadership> leadership,
+      StreamRuneTracing tracing) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -1674,6 +1719,7 @@ public class StreamRuneConfig {
         .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
         // One backend delivers this saga type; the others stand by.
         .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .tracing(tracing)
         .build();
   }
 
@@ -1703,6 +1749,7 @@ public class StreamRuneConfig {
       SagaRunner<?> orderFulfillmentSagaRunner,
       StreamRuneProperties properties,
       ObjectProvider<StreamRuneMetrics> metrics,
+      StreamRuneTracing tracing,
       @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
     var runner =
         SagaTimeoutRunner.<OrderFulfillmentState>builder()
@@ -1715,6 +1762,7 @@ public class StreamRuneConfig {
             .pollInterval(pollInterval)
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .tracing(tracing)
             .build();
     runner.start();
     return runner;
@@ -1767,7 +1815,8 @@ public class StreamRuneConfig {
    * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
    * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
    * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
-   * STANDBY}.
+   * STANDBY}. {@code tracing(...)} starts a {@code subscription/<name>/deliver} span for each batch
+   * it delivers, as it does on the subscriptions below.
    *
    * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
    * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
@@ -1782,7 +1831,8 @@ public class StreamRuneConfig {
       EventStore eventStore,
       OffsetStore offsetStore,
       SagaRunner<?> orderFulfillmentSagaRunner,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("order-fulfillment-saga"))
@@ -1791,6 +1841,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .sagaRunner(orderFulfillmentSagaRunner)
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -1826,7 +1877,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       PaymentProcessManager paymentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("payment-process-manager"))
@@ -1836,6 +1888,7 @@ public class StreamRuneConfig {
             .listener(paymentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -1865,7 +1918,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderCancellationProcessManager orderCancellationProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(
@@ -1876,6 +1930,7 @@ public class StreamRuneConfig {
             .listener(orderCancellationProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -1899,7 +1954,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderShipmentProcessManager orderShipmentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of(OrderShipmentProcessManager.SUBSCRIPTION_NAME))
@@ -1909,6 +1965,7 @@ public class StreamRuneConfig {
             .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -2061,7 +2118,7 @@ docker compose --profile two-backends down -v
 
 You have built a production-grade event-sourced application from scratch. Here are directions to take it further.
 
-**Explore Quarkus and Micronaut variants.** The same domain model, deciders, and projections work with StreamRune's Quarkus and Micronaut starters. The `streamrune-integration` module contains `streamrune-quarkus` and `streamrune-micronaut` starters with auto-configuration equivalent to the Spring Boot starter. Swap the starter dependency and the `StreamRuneConfig` equivalent, and the application runs on a different runtime with no domain code changes. A runner you define yourself (the demo's `quarkus-app` and `micronaut-app` each define their own dead-letter retry runner) replaces the framework's, and you start it yourself — the demo does it in `EcommerceSubscriptionLifecycle` (Chapter 14). The same goes for the saga's timeout runner, which the framework never builds: the same `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it on shutdown (Chapter 11). Carry the request-identity setting over too: on Quarkus, `streamrune.security.trust-user-id-header=true` goes in `application.properties` (as in the demo's `quarkus-app`), and on Micronaut `streamrune.security.trust-user-id-header: true` goes in `application.yml` (as in the demo's `micronaut-app`) — without it `X-User-Id` is ignored and, with annotation authorization configured, the application refuses to start (see Chapter 9). Bring a Bean Validation provider as well, or the framework's validation interceptor checks no command: on Quarkus `quarkus-hibernate-validator` and an index of the module that holds your commands (as the demo's `application.properties` does with `quarkus.index-dependency.domain.*`), on Micronaut Hibernate Validator and a `BeanValidationInterceptor` bean built on it (the demo's `StreamRuneFactory#validationInterceptor`, Chapter 3). On Quarkus, set `quarkus.datasource.jdbc.max-size` too: its default of fifty is more than a backend beside others on one database should hold (Two Backends on One Database, above). For a Quarkus native image, register your records with `@RegisterForReflection` (the demo's `EcommerceDomainReflectionConfig`), but list every sealed command and event interface as a `{"type": "…"}` entry in `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reachability-metadata.json`: `@RegisterForReflection` on a sealed interface does not make the image list its permitted subclasses, and the framework then refuses to start with *"Sealed type … reports no permitted subclasses"* rather than letting the dead-letter runner and the startup checks see only the root. The Quarkus starter ships the HikariCP metadata for the framework's own connection pools. `scripts/native-image-smoke-test.sh quarkus` builds the Quarkus binary and runs the same checks as for Spring. For a Micronaut native image, list your records in your own `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reflect-config.json` (the demo's `micronaut-app` has one; include the outbox mapper's DTO records, which Jackson serialises when an event is appended) and the sealed interfaces in a `reachability-metadata.json` beside it, exactly as for Quarkus: a Micronaut `@TypeHint` or `@ReflectiveAccess` on a sealed interface registers the type without its permitted subclasses, and the application refuses to start. Keep a `logback.xml` at INFO (the demo ships one): without it Logback logs at DEBUG, and at DEBUG HikariCP reads its pool settings reflectively, which fails in the image. Build the Micronaut image with `-H:+SharedArenaSupport`. The option is experimental, so wrap it in `-H:+UnlockExperimentalVMOptions` / `-H:-UnlockExperimentalVMOptions`, as `micronaut-app/build.gradle.kts` does in `graalvmNative.binaries.main.buildArgs`. Micronaut's HTTP server runs on Netty 4.2, which on Java 25 frees each direct buffer above 1 MiB, and every pooled chunk when an event loop exits, through `Arena.ofShared().close()`, and a GraalVM 25 image supports that only with this option. Without it a binary answers a request with a 1.5 MiB body with 500, throws `UnsupportedFeatureError: Support for Arena.ofShared is not active` from the event-loop threads at shutdown, and never frees those buffers. `scripts/native-image-smoke-test.sh micronaut` builds the Micronaut binary and runs the same checks on port 8081.
+**Explore Quarkus and Micronaut variants.** The same domain model, deciders, and projections work with StreamRune's Quarkus and Micronaut starters. The `streamrune-integration` module contains `streamrune-quarkus` and `streamrune-micronaut` starters with auto-configuration equivalent to the Spring Boot starter. Swap the starter dependency and the `StreamRuneConfig` equivalent, and the application runs on a different runtime with no domain code changes. A runner you define yourself (the demo's `quarkus-app` and `micronaut-app` each define their own dead-letter retry runner) replaces the framework's, and you start it yourself — the demo does it in `EcommerceSubscriptionLifecycle` (Chapter 14). The same goes for the saga's timeout runner, which the framework never builds: the same `EcommerceSubscriptionLifecycle` starts it after the saga subscription and stops it on shutdown (Chapter 11). Hand those runners and subscriptions the integration's `StreamRuneTracing` bean (`tracing(tracing)`), as the demo's apps do: the integration traces what it builds, and nothing else (Chapter 15). Carry the request-identity setting over too: on Quarkus, `streamrune.security.trust-user-id-header=true` goes in `application.properties` (as in the demo's `quarkus-app`), and on Micronaut `streamrune.security.trust-user-id-header: true` goes in `application.yml` (as in the demo's `micronaut-app`) — without it `X-User-Id` is ignored and, with annotation authorization configured, the application refuses to start (see Chapter 9). Bring a Bean Validation provider as well, or the framework's validation interceptor checks no command: on Quarkus `quarkus-hibernate-validator` and an index of the module that holds your commands (as the demo's `application.properties` does with `quarkus.index-dependency.domain.*`), on Micronaut Hibernate Validator and a `BeanValidationInterceptor` bean built on it (the demo's `StreamRuneFactory#validationInterceptor`, Chapter 3). On Quarkus, set `quarkus.datasource.jdbc.max-size` too: its default of fifty is more than a backend beside others on one database should hold (Two Backends on One Database, above). For a Quarkus native image, register your records with `@RegisterForReflection` (the demo's `EcommerceDomainReflectionConfig`), but list every sealed command and event interface as a `{"type": "…"}` entry in `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reachability-metadata.json`: `@RegisterForReflection` on a sealed interface does not make the image list its permitted subclasses, and the framework then refuses to start with *"Sealed type … reports no permitted subclasses"* rather than letting the dead-letter runner and the startup checks see only the root. The Quarkus starter ships the HikariCP metadata for the framework's own connection pools. `scripts/native-image-smoke-test.sh quarkus` builds the Quarkus binary and runs the same checks as for Spring. For a Micronaut native image, list your records in your own `src/main/resources/META-INF/native-image/<groupId>/<artifactId>/reflect-config.json` (the demo's `micronaut-app` has one; include the outbox mapper's DTO records, which Jackson serialises when an event is appended) and the sealed interfaces in a `reachability-metadata.json` beside it, exactly as for Quarkus: a Micronaut `@TypeHint` or `@ReflectiveAccess` on a sealed interface registers the type without its permitted subclasses, and the application refuses to start. Keep a `logback.xml` at INFO (the demo ships one): without it Logback logs at DEBUG, and at DEBUG HikariCP reads its pool settings reflectively, which fails in the image. Build the Micronaut image with `-H:+SharedArenaSupport`. The option is experimental, so wrap it in `-H:+UnlockExperimentalVMOptions` / `-H:-UnlockExperimentalVMOptions`, as `micronaut-app/build.gradle.kts` does in `graalvmNative.binaries.main.buildArgs`. Micronaut's HTTP server runs on Netty 4.2, which on Java 25 frees each direct buffer above 1 MiB, and every pooled chunk when an event loop exits, through `Arena.ofShared().close()`, and a GraalVM 25 image supports that only with this option. Without it a binary answers a request with a 1.5 MiB body with 500, throws `UnsupportedFeatureError: Support for Arena.ofShared is not active` from the event-loop threads at shutdown, and never frees those buffers. `scripts/native-image-smoke-test.sh micronaut` builds the Micronaut binary and runs the same checks on port 8081.
 
 **Add your own aggregate.** Pick a domain concept not in this demo — a `Review`, a `Voucher`, a `Supplier` — and build it from scratch following the pattern in Chapters 2–5. Define the sealed command and event interfaces, write a `DeciderFixture` test, implement the decider, add a projection, and wire it into the command bus. The process is the same every time.
 
@@ -2069,4 +2126,4 @@ You have built a production-grade event-sourced application from scratch. Here a
 
 **Set up a CI/CD pipeline.** The tutorial test suite runs entirely with `./gradlew test`. Add a GitHub Actions workflow that runs the full test suite on every pull request, builds a Docker image with `./gradlew bootBuildImage`, and pushes it to a container registry on merge to main.
 
-**Deploy to production.** The application runs on any JDK 25 with a PostgreSQL database; on a GraalVM JDK only with `-XX:-UseJVMCICompiler` on the `java` command line, because on JDK 25 the Graal JIT is not supported with StreamRune (Chapter 1, Step 2; StreamRune's production guide, "Supported JVMs"). The Docker images of Chapter 13 run on Temurin and need nothing. The `application.yml` file holds the primary runtime config (datasource, `streamrune.*`, management endpoints); `application.properties` carries the AOT-time datasource defaults. In Docker Compose, connection details are overridden at runtime via the `SPRING_DATASOURCE_URL` / `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` environment variables. For GraalVM native images, the Spring starter registers StreamRune's own types for reflection and the application registers its own: the demo's `EcommerceNativeHints` (wired with `@ImportRuntimeHints` on `StreamRuneConfig`) calls `StreamRuneRuntimeHints.registerDomainPackages` for the four domain modules, which registers every record, enum and value object, and every sealed command and event interface. The sealed interfaces matter: a native image lists a sealed type's permitted subclasses only when the sealed type itself is registered, and the dead-letter runner's `registerCommand(InventoryCommand.class)` (Chapter 14) depends on that list — without it the application refuses to start. Build with `./gradlew :spring-app:nativeCompile` for a self-contained binary with sub-second startup (on a GraalVM without `lib/svm/schemas/reachability-metadata-schema.json`, such as GraalVM CE 25.0.1, native-build-tools refuses its metadata repository: the README's *GraalVM Native Image* section shows how to point `-PgraalvmMetadataRepository` at a copy without the schema); `scripts/native-image-smoke-test.sh spring` runs it against PostgreSQL and RabbitMQ and checks health, a command-to-read-model round trip, the replay of a dead-lettered `InventoryCommand$ReceiveShipment` through its sealed root, and a product with a 1.5 MiB description written and read back. It then stops the binary with SIGTERM, waits for it to exit, and fails if the binary's output (startup, requests and shutdown) holds a GraalVM `UnsupportedFeatureError`.
+**Deploy to production.** The application runs on any JDK 25 with a PostgreSQL database; on a GraalVM JDK only with `-XX:-UseJVMCICompiler` on the `java` command line, because on JDK 25 the Graal JIT is not supported with StreamRune (Chapter 1, Step 2; StreamRune's production guide, "Supported JVMs"). The Docker images of Chapter 13 run on Temurin and need nothing. The `application.yml` file holds the primary runtime config (datasource, `streamrune.*`, management endpoints, tracing: keep a share of the traces in production, `management.tracing.sampling.probability`, rather than the demo's every one, Chapter 15); `application.properties` carries the AOT-time datasource defaults. In Docker Compose, connection details are overridden at runtime via the `SPRING_DATASOURCE_URL` / `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` environment variables. For GraalVM native images, the Spring starter registers StreamRune's own types for reflection and the application registers its own: the demo's `EcommerceNativeHints` (wired with `@ImportRuntimeHints` on `StreamRuneConfig`) calls `StreamRuneRuntimeHints.registerDomainPackages` for the four domain modules, which registers every record, enum and value object, and every sealed command and event interface. The sealed interfaces matter: a native image lists a sealed type's permitted subclasses only when the sealed type itself is registered, and the dead-letter runner's `registerCommand(InventoryCommand.class)` (Chapter 14) depends on that list — without it the application refuses to start. Build with `./gradlew :spring-app:nativeCompile` for a self-contained binary with sub-second startup (on a GraalVM without `lib/svm/schemas/reachability-metadata-schema.json`, such as GraalVM CE 25.0.1, native-build-tools refuses its metadata repository: the README's *GraalVM Native Image* section shows how to point `-PgraalvmMetadataRepository` at a copy without the schema); `scripts/native-image-smoke-test.sh spring` runs it against PostgreSQL and RabbitMQ and checks health, a command-to-read-model round trip, the replay of a dead-lettered `InventoryCommand$ReceiveShipment` through its sealed root, and a product with a 1.5 MiB description written and read back. It then stops the binary with SIGTERM, waits for it to exit, and fails if the binary's output (startup, requests and shutdown) holds a GraalVM `UnsupportedFeatureError`.

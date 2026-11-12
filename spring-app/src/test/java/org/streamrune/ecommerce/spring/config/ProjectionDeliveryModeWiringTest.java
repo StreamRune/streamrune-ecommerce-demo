@@ -25,6 +25,7 @@ import org.streamrune.core.EventMetadata;
 import org.streamrune.core.IdGenerator;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.EventType;
@@ -192,7 +193,8 @@ class ProjectionDeliveryModeWiringTest {
                         new InventoryProjection("inventory".equals(name) ? other : processor),
                         invalidator(),
                         noBean(SubscriptionLeadership.class),
-                        noBean(SubscriptionHealthContributor.class)))
+                        noBean(SubscriptionHealthContributor.class),
+                        StreamRuneTracing.NOOP))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'" + name + "' declares TRANSACTIONAL_LOCAL and writes to")
         .hasMessageContaining(String.valueOf(other.writeTargetIdentity()))

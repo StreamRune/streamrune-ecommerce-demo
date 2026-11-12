@@ -59,6 +59,10 @@ dependencies {
     // a dependency; with the platform import off, it is declared here for its version.
     annotationProcessor(libs.micronaut.micrometer.annotation)
     testAnnotationProcessor(libs.micronaut.micrometer.annotation)
+    // Likewise for micronaut-tracing's processor, which the plugin adds once the tracing module is a
+    // dependency.
+    annotationProcessor(libs.micronaut.tracing.annotation)
+    testAnnotationProcessor(libs.micronaut.tracing.annotation)
     testAnnotationProcessor(libs.micronaut.graal)
     testAnnotationProcessor(libs.micronaut.inject.java)
     testAnnotationProcessor(libs.micronaut.serde.processor)
@@ -95,6 +99,11 @@ dependencies {
     // A MeterRegistry, so the framework's MicrometerStreamRuneMetrics records the StreamRune meters,
     // and the /metrics endpoint that lists them, as Spring's /actuator/metrics does.
     implementation(libs.micronaut.micrometer.core)
+    // Tracing: the OpenTelemetry bean the framework's StreamRuneTracing traces through, the spans of
+    // the HTTP server and the OTLP exporter. The SDK runs and exports nowhere unless
+    // otel.traces.exporter is otlp (OTEL_TRACES_EXPORTER=otlp).
+    implementation(libs.micronaut.tracing.opentelemetry.http)
+    implementation(libs.opentelemetry.exporter.otlp.micronaut)
     implementation(libs.jakarta.annotation.api)
     implementation(libs.snakeyaml)
     implementation(libs.reactor.core)

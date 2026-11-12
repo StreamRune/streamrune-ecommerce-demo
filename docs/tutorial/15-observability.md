@@ -1,6 +1,6 @@
 # Chapter 15: Observability
 
-> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how to opt into `OpenTelemetryCommandInterceptor` so each command dispatch creates a trace span, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, how to watch the pool the aggregate lock takes its connections from, how to serve a live SSE stream of all events using `EventExplorerController`, and how to switch on the framework's own SSE endpoint for the events of one aggregate.
+> **What you'll learn:** How `MicrometerStreamRuneMetrics` exposes command, event, and projection counters through Spring Boot Actuator (auto-registered once a `MeterRegistry` is on the classpath), how StreamRune's spans reach OpenTelemetry and Jaeger, from a command through its lock and its event store to the subscriptions, projections, outbox and saga steps that follow it, how `StreamRuneHealthIndicator` surfaces database and subscription health at `/actuator/health`, how to watch the pool the aggregate lock takes its connections from, how to serve a live SSE stream of all events using `EventExplorerController`, and how to switch on the framework's own SSE endpoint for the events of one aggregate.
 
 ---
 
@@ -14,7 +14,7 @@ In this chapter you will:
 
 - Confirm the Spring Boot Actuator and Micrometer dependencies are present so that the `/actuator` endpoints are available.
 - Verify `MicrometerStreamRuneMetrics` records counters and timers for commands, events, and projections. Because the auto-configuration registers this bean automatically when a `MeterRegistry` is present — and actuator provides a `SimpleMeterRegistry` — the wiring reduces to verifying that the dependency is on the classpath.
-- Opt into `OpenTelemetryCommandInterceptor` as a command interceptor so that every command dispatch creates an OpenTelemetry span with the command type, command ID, and aggregate ID as attributes. The shipped demo does not wire this — it is an addition you make in Step 3.
+- Trace with OpenTelemetry: add Spring Boot's OpenTelemetry SDK, hand the integration's `StreamRuneTracing` bean to the components `StreamRuneConfig` builds itself (the command bus, the aggregate lock, the projection runner, the saga runners, the subscriptions), run Jaeger, and read the trace of a `PlaceOrder` and the traces linked to it.
 - Verify that `StreamRuneHealthIndicator` is registered and returns meaningful detail about the PostgreSQL connection and subscription lag.
 - Give the aggregate lock's connection pool a metrics tracker, so that its meters (`hikaricp.connections.*`, tagged `pool=streamrune-advisory-lock`) show how many commands hold a lock connection and how many wait for one.
 - Create `EventExplorerController`, which exposes three endpoints: a paginated list of all events in the global stream and a per-stream event list, both for an `ADMIN` because they show decrypted payloads, and an open SSE endpoint that announces new events in real time, without their payload.
@@ -26,7 +26,7 @@ In this chapter you will:
 
 ### Step 1: Add Spring Boot Actuator and Micrometer Dependencies
 
-Open `spring-app/build.gradle.kts`. The actuator starter and `opentelemetry-api` are both already present — both from Chapter 1: the actuator starter for the health and metrics endpoints, and `opentelemetry-api` because `StreamRuneAutoConfiguration` references it for AOT (it is also needed by `OpenTelemetryCommandInterceptor` introduced in Step 3). The relevant lines are:
+Open `spring-app/build.gradle.kts`. The actuator starter and `opentelemetry-api` are both already present — both from Chapter 1: the actuator starter for the health and metrics endpoints, and `opentelemetry-api`, the API StreamRune's tracing reaches OpenTelemetry through; Step 3 adds the SDK behind it. The relevant lines are:
 
 ```kotlin
 dependencies {
@@ -86,32 +86,243 @@ MicrometerStreamRuneMetrics.builder().registry(registry).build()
 
 Because the auto-configured `micrometerStreamRuneMetrics` bean method is annotated with `@ConditionalOnMissingBean(StreamRuneMetrics.class)`, your explicit declaration wins. The demo keeps the auto-configured one, so its `StreamRuneConfig` has no such bean.
 
-### Step 3: Wire OpenTelemetryCommandInterceptor
+### Step 3: Trace a Command with OpenTelemetry
 
-`OpenTelemetryCommandInterceptor` implements `CommandInterceptor`. Its `before()` method starts an OpenTelemetry span named `command/<CommandType>` with `streamrune.command.type`, `streamrune.command.id`, `streamrune.aggregate.type`, `streamrune.aggregate.id` and `streamrune.stream.id` as span attributes, so a command that fails before committing carries its stream too. Its `after()` method closes the span with `OK` status; `onError()` records the exception's type and its own message (never the messages of its causes) and closes the span with `ERROR` status. Every attribute key carries the `streamrune.` prefix; `TraceAttributes` in `streamrune-core` (`org.streamrune.core.tracing`) lists them, so filter traces on `streamrune.command.type`, not `command.type`.
+StreamRune traces through one value, a `StreamRuneTracing` (`org.streamrune.core.tracing`). The Spring integration builds it as a bean and hands it to everything it builds itself: the event store, its default locker, its command bus, the outbox poller, its projection runners and each inline projection. The bean traces through the application's `OpenTelemetry` bean, or, without one, through the global OpenTelemetry (`GlobalOpenTelemetry`), the instance the OpenTelemetry Java agent registers before the application starts. When neither exists the bean is `StreamRuneTracing.NOOP`: nothing is traced, the tracing keys below do nothing, and a traced call costs one branch.
 
-`StreamRuneAutoConfiguration` registers this interceptor automatically (with `@Order(ORDER_OPEN_TELEMETRY)`, so it sits outermost) whenever an `io.opentelemetry.api.OpenTelemetry` bean is present. The shipped demo's `StreamRuneConfig` defines **no** `OpenTelemetry` bean and does **not** add the interceptor to its hand-wired `commandBus` — so distributed tracing is an opt-in addition. Because the demo wires its `commandBus` by hand (rather than relying on `StreamRuneAutoConfiguration`), the auto-configured interceptor would not be picked up even if an `OpenTelemetry` bean existed. To trace commands, declare the interceptor bean yourself and inject it into the `commandBus` constructor (next). This step is optional, and the listings of this chapter leave it out, as the demo does. The bean method returns:
+So tracing takes two things: an OpenTelemetry SDK, and the bean handed to the components the application builds itself, which the integration never sees.
 
-```java
-new OpenTelemetryCommandInterceptor(
-    OpenTelemetryTracing.of(io.opentelemetry.api.OpenTelemetry.noop(), TracingSettings.allEnabled()))
+**3a. The OpenTelemetry SDK.** Spring Boot brings one with its tracing modules. Add three lines to `spring-app/build.gradle.kts`:
+
+```kotlin
+// spring-app/build.gradle.kts — inside the dependencies { } block
+implementation("org.springframework.boot:spring-boot-micrometer-tracing-opentelemetry")
+implementation("io.micrometer:micrometer-tracing-bridge-otel")
+implementation("io.opentelemetry:opentelemetry-exporter-otlp")
 ```
 
-`OpenTelemetryTracing.of` (`org.streamrune.runtime`) is the one place that takes an `OpenTelemetry`; the interceptor takes the `StreamRuneTracing` it returns, and `TracingSettings` (also `org.streamrune.runtime`) can switch tracing off as a whole or per area. The no-op `OpenTelemetry` keeps the wiring simple while you learn the mechanics. In production, replace `OpenTelemetry.noop()` with a configured SDK instance that exports spans to your collector. The interceptor itself is SDK-agnostic — it depends only on the `opentelemetry-api` artifact, not on any SDK.
+The first is Spring Boot's OpenTelemetry SDK, an `OpenTelemetry` bean, and its tracing configuration (sampler, span processors, the OTLP exporter's settings). The second is Micrometer's bridge to it: Spring MVC observes every HTTP request, and the bridge turns the observation into a span, so a request is the parent span of the command it dispatches. The third is the OTLP exporter. Spring Boot manages their versions; the `opentelemetry-api` line of Chapter 1 takes the catalog's version, `1.62.0`, the one Spring Boot 4.1 manages, so the API and the SDK match. The demo does not add `spring-boot-starter-opentelemetry`: it also brings Micrometer's OTLP registry, which would take the place of the `SimpleMeterRegistry` of Step 2 and push the meters to an OTLP endpoint.
 
-Once registered, the interceptor must be added to the `VirtualThreadCommandBus` interceptor chain. You already built the `commandBus` bean in the command-bus chapter — it declares the four existing interceptors as constructor parameters and wires them through `.interceptors(...)`, followed by the command inbox (chapter 11), the dead-letter queue (chapter 14), `.snapshotPolicy(...)` and one `.register(...)` call per aggregate. To add the interceptor, do **not** replace that bean — make two surgical edits:
+Then configure the tracing in `spring-app/src/main/resources/application.yml`:
 
-1. Add `OpenTelemetryCommandInterceptor otel` to the parameter list.
-2. Prepend `otel` to the existing `.interceptors(...)` call.
+```yaml
+streamrune:
+  tracing:
+    # The framework's spans (command, lock, event store, subscription, projection, outbox, saga) go
+    # through the OpenTelemetry SDK of Spring Boot (management.* below). Every area is on unless its
+    # key switches it off; without the eventstore/... spans, for example:
+    #   event-store:
+    #     enabled: false
+    enabled: true
 
-Leave every other parameter and builder call exactly as it is. The two lines of the bean that change:
-
-```java
-OpenTelemetryCommandInterceptor otel, // a new parameter of commandBus(...)
-.interceptors(otel, audit, auth, validation, circuitBreaker) // otel first
+management:
+  tracing:
+    sampling:
+      # Every trace, for the demo. A production deployment keeps a share of them (0.1 is Spring
+      # Boot's default).
+      probability: 1.0
+    export:
+      # Off: the spans are made and dropped. MANAGEMENT_TRACING_EXPORT_ENABLED=true sends them over
+      # OTLP to the endpoint below; docker-compose.yml's tracing profile runs Jaeger there and points
+      # the backend at it.
+      enabled: false
+  opentelemetry:
+    resource-attributes:
+      "[service.name]": ecommerce-spring
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
 ```
 
-Place `otel` first in the interceptor list so the span is open for the entire duration of command processing, including auditing, authorization, and validation; `CommandInterceptorOrdering.ORDER_OPEN_TELEMETRY` is the outermost slot of the framework's canonical order.
+`streamrune.tracing.enabled` is the framework's master switch, `true` by default; `false` starts no StreamRune span at all and leaves Spring's own spans alone. Each area has a switch of its own, `streamrune.tracing.<area>.enabled`, also `true` by default: `command` (`command/…`), `subscription` (`subscription/…/deliver`), `projection` (`projection/…/process`), `event-store` (`eventstore/…`, snapshots included), `lock` (`lock/acquire`), `outbox` (`outbox/relay`, `outbox/publish`) and `saga` (`saga/…`). The sampler keeps every trace here, so that every order you place shows up; a production deployment keeps a share, and the default parent-based sampler then follows the decision of the request that started the trace. The export is off: the spans are made and dropped, so a run without a collector logs no export errors. `MANAGEMENT_TRACING_EXPORT_ENABLED=true`, which Spring reads as `management.tracing.export.enabled`, sends them to the OTLP endpoint over HTTP. `service.name` is the name Jaeger lists the application under. In a Spring native image the export switch is fixed when the image is built.
+
+**3b. Hand the bean to what the application builds.** The integration cannot reach the components `StreamRuneConfig` builds itself, so each of them takes the bean. `StreamRuneConfig` imports it:
+
+```java
+import org.streamrune.core.tracing.StreamRuneTracing;
+```
+
+and each of these bean methods gains a parameter, `StreamRuneTracing tracing`, and one call:
+
+```java
+StreamRuneTracing tracing, // a new parameter of each bean method below
+.tracing(tracing) // commandBus, projectionRunner, the saga and timeout runners, the four subscriptions
+.traced(tracing); // aggregateLocker, on the locker withDedicatedPool returns
+```
+
+- **`commandBus`**: `.tracing(tracing)` after `.interceptors(...)`. The builder adds the framework's `OpenTelemetryCommandInterceptor` ahead of every listed interceptor, in the outermost slot of the canonical order (`CommandInterceptorOrdering.ORDER_OPEN_TELEMETRY`), even though the bus is given an explicit list, so the `command/<CommandType>` span covers auditing, authorization and validation too. Do not list the interceptor yourself.
+- **`aggregateLocker`**: `traced(tracing)` returns a locker on the same pool that starts a `lock/acquire` span around each acquisition. The bus does not trace a locker it is given, so the bean is the traced one (Step 4b shows the whole method).
+- **`projectionRunner`**: `.tracing(tracing)` decorates each projection it runs, which then starts a `projection/<name>/process` span per batch.
+- **`orderFulfillmentSagaRunner`** and **`orderFulfillmentTimeoutRunner`**: `.tracing(tracing)`. The runner starts a `saga/<SagaType>/step` span for each event it handles, the timeout runner a `saga/<SagaType>/timeout` span for each saga it times out, and a compensation runs in a `saga/<SagaType>/compensate` span. The saga type is the state class's name, `org.streamrune.ecommerce.commands.saga.OrderFulfillmentState`.
+- **The four `PollingEventSubscription` beans** (`orderFulfillmentSagaSubscription`, `paymentProcessSubscription`, `orderCancellationSubscription`, `orderShipmentSubscription`): `.tracing(tracing)` wraps the listener, which starts a `subscription/<name>/deliver` span for each batch it delivers.
+
+The listing of `StreamRuneConfig` at the end of the chapter has every one of them.
+
+**3c. Run Jaeger and place an order.** Jaeger collects the spans and shows them. It joins `docker-compose.yml` behind a profile of its own, `tracing`, so that `docker compose up` starts it only when asked; the `backend` service gets the two variables that turn its export on and point it at Jaeger. Replace `docker-compose.yml` with the stack of this chapter:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: streamrune_ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      # check_port_connectivity, not ping: ping answers as soon as the Erlang node runs, seconds
+      # before the AMQP listener accepts connections, and the backend and the notifications
+      # service connect the moment this check passes.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/streamrune_ecommerce
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
+      APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
+      # The export of the spans (false unless set): with true, the backend sends them over OTLP to
+      # the jaeger service of the tracing profile.
+      MANAGEMENT_TRACING_EXPORT_ENABLED: ${MANAGEMENT_TRACING_EXPORT_ENABLED:-false}
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    # The backend starts without the broker: its outbox publisher connects on the first publish.
+    # Waiting for the broker lets the first integration events go out at once.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  notifications-service:
+    build:
+      context: .
+      dockerfile: notifications-service/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # Jaeger, started only with the tracing profile, and the backends' spans exported to it:
+  #   MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
+  # Its UI is http://localhost:16686. It takes OTLP over gRPC on 4317 and over HTTP on 4318, where
+  # an app started outside Compose sends its spans too, and keeps the traces in memory.
+  jaeger:
+    profiles: ["tracing"]
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+volumes:
+  pgdata:
+```
+
+`jaegertracing/jaeger` runs Jaeger in one process, with the traces in memory: the UI on port 16686, and OTLP over gRPC on 4317 and over HTTP on 4318. Start it, and the application with its export on (stop the application first if it runs):
+
+```bash
+docker compose --profile tracing up -d jaeger
+MANAGEMENT_TRACING_EXPORT_ENABLED=true ./gradlew :spring-app:bootRun
+```
+
+The application sends its spans to port 4318 of `localhost`, the endpoint of `application.yml`. The whole stack in Compose does the same with `MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build`, after `./gradlew :spring-app:bootJar :notifications-service:bootJar`; there the backend sends to `http://jaeger:4318/v1/traces`. Place an order:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: c-1" -H "X-User-Role: CUSTOMER" \
+  -d '{"orderId": "o-trace-1", "customerId": "c-1", "lines": [{"productId": "p-1", "quantity": 1}]}'
+```
+
+Open `http://localhost:16686`, pick the service `ecommerce-spring` and the operation `command/PlaceOrder`, and open the trace. Jaeger's query API lists the services as well:
+
+```bash
+curl -s http://localhost:16686/api/v3/services
+```
+
+```json
+{"services":["ecommerce-spring","jaeger"]}
+```
+
+**What the trace of `PlaceOrder` holds.** One trace covers the request:
+
+```
+http post /api/orders                          SERVER    Spring MVC, through Micrometer's bridge
+├── eventstore/read                            INTERNAL  OrderPricing reads the product's stream
+└── command/PlaceOrder                         INTERNAL  streamrune.aggregate.id=o-trace-1
+    ├── lock/acquire                           INTERNAL  streamrune.lock.outcome=ACQUIRED
+    ├── eventstore/load                        INTERNAL  streamrune.event.count=0, streamrune.snapshot.used=false
+    │   └── eventstore/load/deserialize        INTERNAL
+    └── eventstore/append                      INTERNAL  streamrune.append.outcome=APPENDED, streamrune.expected.version=0
+        └── eventstore/append/serialize        INTERNAL
+```
+
+`command/PlaceOrder` carries `streamrune.command.type`, `streamrune.command.id`, `streamrune.aggregate.type`, `streamrune.aggregate.id` and `streamrune.stream.id` (`order:o-trace-1`), set when the span starts, so a command that fails before it commits carries its stream too. The lock is the `PgAdvisoryLocker` of Chapter 12, traced through `traced(tracing)`; the load replays the stream (`streamrune.event.count=0` for a new order), and the append writes `OrderPlaced`. A failure marks its span `ERROR` with the exception's type and message; an expected outcome is an attribute and no error: a lock that waited past its timeout (`streamrune.lock.outcome=TIMEOUT`), an append that lost the optimistic-lock check (`streamrune.append.outcome=CONFLICT`), a saga event held back (`streamrune.saga.step.outcome=DEFERRED`).
+
+**What follows, in traces of their own.** Everything the order sets off runs later, on other threads, and starts a trace of its own. The bus stores the span of each command in the metadata of the events it appends, and a span that handles those events carries a *link* to it; Jaeger shows a link under the span's *References*, and opens the linked trace from there:
+
+- `subscription/order-fulfillment-saga/deliver` (kind `CONSUMER`, `streamrune.batch.size`) delivers a batch of events to the saga runner, linked to the command of its first event. Under it, `saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/step` handles `OrderPlaced`, with `streamrune.saga.id=fulfillment-o-trace-1` and `streamrune.saga.step.outcome=ADVANCED`, linked to `command/PlaceOrder`. The command the step dispatches runs on the saga's thread, so `command/InitiatePayment` and its lock, load and append nest under the step.
+- `subscription/payment-process-manager/deliver` holds `command/CapturePayment`, whose append writes the payment's outbox entry (`streamrune.outbox.entry.count=1`).
+- The next steps of the saga follow the same shape: one linked to `CapturePayment` dispatches `command/ReserveStock`, one linked to `ReserveStock` dispatches `command/ConfirmOrder`, and the last, linked to `ConfirmOrder`, ends with `streamrune.saga.step.outcome=COMPLETED`.
+- `outbox/relay` covers one batch the outbox poller claimed, with `streamrune.outbox.published` and `streamrune.outbox.failed`. Under it, one `outbox/publish` (kind `PRODUCER`) per entry hands it to RabbitMQ, with `streamrune.outbox.entry.id` and `streamrune.outbox.payload.type` (`PaymentCaptured`, `OrderConfirmed`), linked to the command whose append wrote the entry.
+- `projection/orders/process` and the spans of the other projections cover each batch a projection processes, with `streamrune.batch.size`; they read the global stream in batches of any orders, and carry no link.
+
+Background work that finds nothing to do starts no span: an idle subscription's poll, an outbox poll that claims nothing and a timeout scan without a saga past its deadline add no trace, so a quiet application exports nothing but its own requests.
+
+**Switching an area off.** `streamrune.tracing.event-store.enabled=false` keeps every span but the `eventstore/…` ones, for example when the JDBC spans of the OpenTelemetry Java agent already show the store's time. Restart the application with it:
+
+```bash
+MANAGEMENT_TRACING_EXPORT_ENABLED=true ./gradlew :spring-app:bootRun \
+  --args='--streamrune.tracing.event-store.enabled=false'
+```
+
+and the next `command/PlaceOrder` holds `lock/acquire` and nothing more. In `application.yml` the same switch is `event-store: enabled: false` under `streamrune.tracing`, the example the comment there shows; an environment variable sets it too, `STREAMRUNE_TRACING_EVENTSTORE_ENABLED=false` (Spring drops the dash from the name).
+
+**Without the SDK: the Java agent.** The integration falls back to the global OpenTelemetry when the application has no `OpenTelemetry` bean. An application started with the OpenTelemetry Java agent (`-javaagent:opentelemetry-javaagent.jar`) needs no SDK dependency and no code: the agent registers the global instance before Spring starts, StreamRune's spans go through it, and the agent's own spans (HTTP, JDBC, the RabbitMQ client) join the same traces, the JDBC ones under `eventstore/load` and `eventstore/append`, the broker's under `outbox/publish`. The integration reads the global instance once, while it starts: an SDK the application registers globally itself is registered before the application context starts, or is an `OpenTelemetry` bean. For the demo's spring-app, remove the three dependencies of 3a to trace through the agent.
+
+**What a span never carries.** The attributes name types (command, event, aggregate, saga, payload), configured names (subscription, projection), counts, versions and outcomes, and the ids the command span carries: aggregate, stream, command, saga and outbox entry. They never carry an event's payload, a metadata value or baggage, an `@Encrypted` field (neither the value nor its ciphertext), a crypto subject id, a user id or role, or SQL. An id passes through `LogSanitizer.sanitizeForTrace`, which removes control, separator and format characters and cuts a longer value after its first 256 characters. The span of a failure records the exception's own message: a message of yours must not quote personal data. No attribute is taken from the user id or the crypto subject. In this demo the customer id is also the `X-User-Id` and the encryption subject, so it appears as `streamrune.aggregate.id`/`stream.id` on the customer's commands.
+
+**What it costs.** Without OpenTelemetry, or with the master switch or an area off, a traced call costs one branch. With OpenTelemetry present a command makes about six spans (the command, the lock, the load and its deserialization, the append and its serialization); a span the sampler drops still exists, as a non-recording span of about 0.2 µs, so its context can link the later spans. A recorded span costs what the SDK does with it: the batch span processor, and the exporter's network call. Switching an area off removes its spans and their cost.
+
+**Stopping Jaeger.** The traces live in Jaeger's memory until it stops. When you are done with the chapter, stop the stack, Jaeger included, with the command below; `-v` also removes the `pgdata` volume, so the database starts empty the next time:
+
+```bash
+docker compose --profile tracing down -v
+```
+
+> **Quarkus and Micronaut.** Both apps trace the same way, each through its framework's SDK. `quarkus-app` depends on `io.quarkus:quarkus-opentelemetry`, whose SDK is off unless `QUARKUS_OTEL_SDK_DISABLED=false` (it then exports over OTLP gRPC to `quarkus.otel.exporter.otlp.traces.endpoint`, `localhost:4317`); `micronaut-app` on `micronaut-tracing-opentelemetry-http` and `opentelemetry-exporter-otlp`, whose exporter is `none` unless `OTEL_TRACES_EXPORTER=otlp` (it then exports over OTLP HTTP to `otel.exporter.otlp.endpoint`, `localhost:4318`). Their integrations build the command bus, so it is traced with the apps' `PgAdvisoryLocker`; the apps hand the bean to the saga runner and timeout runner they produce (`StreamRuneProducer`, `StreamRuneFactory`) and to the subscriptions of `EcommerceSubscriptionLifecycle`. The services are `quarkus-ecommerce` and `micronaut-ecommerce`. The `streamrune.tracing.*` keys are the same, and on Quarkus they are runtime configuration: a deployment switches an area without a rebuild. `PlaceOrderTraceIT` of each app places an order and checks its trace: the command with the lock, the load and the append under it, and the saga's first step linked to the command.
 
 ### Step 4: Verify StreamRuneHealthIndicator
 
@@ -138,11 +349,15 @@ public PgAdvisoryLocker aggregateLocker(
     @Value("${spring.datasource.url}") String url,
     @Value("${spring.datasource.username}") String username,
     @Value("${spring.datasource.password}") String password,
-    MeterRegistry meterRegistry) {
+    MeterRegistry meterRegistry,
+    StreamRuneTracing tracing) {
   return PgAdvisoryLocker.withDedicatedPool(
-      url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+          url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry))
+      .traced(tracing);
 }
 ```
+
+The `tracing` parameter and `traced(tracing)` are those of Step 3: the locker the pool's meters watch is the one that traces `lock/acquire`.
 
 The pool's meters carry Hikari's names and the pool's name as their tag, `pool=streamrune-advisory-lock`:
 
@@ -1374,6 +1589,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.SagaType;
@@ -1667,15 +1883,21 @@ public class StreamRuneConfig {
    * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
    * commands wait for one ({@code
    * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
+   *
+   * <p>{@code traced(tracing)} returns the locker on the same pool that starts a {@code
+   * lock/acquire} span around each acquisition, through the integration's {@link StreamRuneTracing}
+   * bean: the bus below is the app's own, and a bus does not trace a locker it is given.
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
       @Value("${spring.datasource.password}") String password,
-      MeterRegistry meterRegistry) {
+      MeterRegistry meterRegistry,
+      StreamRuneTracing tracing) {
     return PgAdvisoryLocker.withDedicatedPool(
-        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+            url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry))
+        .traced(tracing);
   }
 
   /**
@@ -1703,6 +1925,11 @@ public class StreamRuneConfig {
    * streamrune.lock-timeout} (5 s by default), as the bus the framework builds does: a command
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
+   *
+   * <p>{@code tracing(...)} takes the integration's {@link StreamRuneTracing} bean and adds the
+   * framework's {@code OpenTelemetryCommandInterceptor} ahead of the listed interceptors, so the
+   * {@code command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is
+   * {@code StreamRuneTracing.NOOP} and traces nothing.
    */
   @Bean
   public VirtualThreadCommandBus commandBus(
@@ -1715,7 +1942,8 @@ public class StreamRuneConfig {
       PostgresDeadLetterQueue deadLetterQueue,
       PostgresCryptoEngine cryptoEngine,
       AggregateLocker locker,
-      StreamRuneProperties properties) {
+      StreamRuneProperties properties,
+      StreamRuneTracing tracing) {
     return VirtualThreadCommandBus.builder()
         .eventStore(store)
         .locker(locker)
@@ -1725,6 +1953,7 @@ public class StreamRuneConfig {
         // unless the bus has a commandInbox wired in.
         .commandInbox(commandInbox)
         .interceptors(audit, auth, validation, circuitBreaker)
+        .tracing(tracing)
         .deadLetterQueue(deadLetterQueue)
         .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
         // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
@@ -1887,7 +2116,8 @@ public class StreamRuneConfig {
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
    * lists each projection in the health details as {@code subscription.<name>}, with its {@code
-   * role}.
+   * role}. {@code tracing(...)} starts a {@code projection/<name>/process} span for each batch a
+   * projection processes.
    */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
@@ -1901,7 +2131,8 @@ public class StreamRuneConfig {
       InventoryProjection inventoryProjection,
       CacheInvalidator cacheInvalidator,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
@@ -1909,6 +2140,7 @@ public class StreamRuneConfig {
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
@@ -2080,6 +2312,11 @@ public class StreamRuneConfig {
    * compensations, and the others stand by and take over when it stops or dies. The lease is taken
    * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
    * SubscriptionLeadership#NOOP}) every backend delivers.
+   *
+   * <p>{@code tracing} is the integration's {@link StreamRuneTracing} bean: the runner starts a
+   * {@code saga/<SagaType>/step} span for each event it handles, linked to the command that
+   * appended the event. The integration does not build saga runners, so it cannot hand them the
+   * bean itself.
    */
   @Bean
   public SagaRunner<?> orderFulfillmentSagaRunner(
@@ -2088,7 +2325,8 @@ public class StreamRuneConfig {
       VirtualThreadCommandBus commandBus,
       PostgresSagaDeadLetterStore sagaDeadLetterStore,
       ObjectProvider<StreamRuneMetrics> metrics,
-      ObjectProvider<SubscriptionLeadership> leadership) {
+      ObjectProvider<SubscriptionLeadership> leadership,
+      StreamRuneTracing tracing) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -2099,6 +2337,7 @@ public class StreamRuneConfig {
         .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
         // One backend delivers this saga type; the others stand by.
         .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .tracing(tracing)
         .build();
   }
 
@@ -2128,6 +2367,7 @@ public class StreamRuneConfig {
       SagaRunner<?> orderFulfillmentSagaRunner,
       StreamRuneProperties properties,
       ObjectProvider<StreamRuneMetrics> metrics,
+      StreamRuneTracing tracing,
       @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
     var runner =
         SagaTimeoutRunner.<OrderFulfillmentState>builder()
@@ -2140,6 +2380,7 @@ public class StreamRuneConfig {
             .pollInterval(pollInterval)
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .tracing(tracing)
             .build();
     runner.start();
     return runner;
@@ -2192,7 +2433,8 @@ public class StreamRuneConfig {
    * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
    * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
    * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
-   * STANDBY}.
+   * STANDBY}. {@code tracing(...)} starts a {@code subscription/<name>/deliver} span for each batch
+   * it delivers, as it does on the subscriptions below.
    *
    * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
    * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
@@ -2207,7 +2449,8 @@ public class StreamRuneConfig {
       EventStore eventStore,
       OffsetStore offsetStore,
       SagaRunner<?> orderFulfillmentSagaRunner,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("order-fulfillment-saga"))
@@ -2216,6 +2459,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .sagaRunner(orderFulfillmentSagaRunner)
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -2251,7 +2495,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       PaymentProcessManager paymentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("payment-process-manager"))
@@ -2261,6 +2506,7 @@ public class StreamRuneConfig {
             .listener(paymentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -2290,7 +2536,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderCancellationProcessManager orderCancellationProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(
@@ -2301,6 +2548,7 @@ public class StreamRuneConfig {
             .listener(orderCancellationProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -2324,7 +2572,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderShipmentProcessManager orderShipmentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of(OrderShipmentProcessManager.SUBSCRIPTION_NAME))
@@ -2334,6 +2583,7 @@ public class StreamRuneConfig {
             .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -2630,7 +2880,7 @@ Two details of the wire. Lines that start with a colon are comments, which an SS
 
 **`MicrometerStreamRuneMetrics`** implements `StreamRuneMetrics` using `io.micrometer.core.instrument.MeterRegistry`. It registers counters, timers, and gauges for commands, events, projections, subscriptions, and the other subsystems, under the names `MetricNames` publishes. The framework's `VirtualThreadCommandBus` and `MultiProjectionRunner` increment these counters at each processing stage **when a `StreamRuneMetrics` collector is wired into their builders (`.metrics(...)`)**. The shipped demo wires its command bus and projection runner by hand without a metrics collector, so their meters are registered and discoverable but stay at zero until you pass the bean in (see the optional step in Step 7 above); its saga runner and timeout runner get the bean, so the saga meters, `streamrune.saga.forward_commands_fenced` among them, count. `StreamRuneAutoConfiguration` registers the `MicrometerStreamRuneMetrics` bean automatically when a `MeterRegistry` is present; you can override it by declaring your own `StreamRuneMetrics` bean. The meter names follow the `streamrune.*` namespace and are dimensional, so they export cleanly to any Micrometer registry — including Prometheus, once you add `micrometer-registry-prometheus` (the demo ships only the in-memory `SimpleMeterRegistry`).
 
-**`OpenTelemetryCommandInterceptor`** implements `CommandInterceptor` and uses the `opentelemetry-api` facade — it has no SDK dependency and works with any OpenTelemetry SDK implementation. For each command it creates a span named `command/<CommandType>` of kind `INTERNAL`, sets `streamrune.command.type`, `streamrune.command.id`, `streamrune.aggregate.type`, `streamrune.aggregate.id`, and `streamrune.stream.id` as span attributes when the span starts (a failed command's span carries its stream too), and closes the span with `OK` or `ERROR` status. Each span and the scope that makes it current sit on a per-thread stack, because `before()`, `after()`, and `onError()` are called on the same thread that invoked `CommandBus.execute()`, and a command dispatched from inside another command's callback opens a nested span on that thread. `StreamRuneAutoConfiguration` registers the interceptor automatically when an `OpenTelemetry` bean is present.
+**Tracing** goes through one value, the integration's `StreamRuneTracing` bean, which traces through the application's `OpenTelemetry` bean (here Spring Boot's SDK), or through the global OpenTelemetry the Java agent registers, and is `StreamRuneTracing.NOOP` without either. The integration hands it to what it builds; `StreamRuneConfig` hands it to what it builds itself: `tracing(...)` on the command bus, which adds `OpenTelemetryCommandInterceptor` in the outermost slot of the chain, on the projection runner, the saga and timeout runners and the subscriptions, and `traced(...)` on the `PgAdvisoryLocker`. A command is one trace, `command/<CommandType>` with `lock/acquire`, `eventstore/load` and `eventstore/append` under it, under the HTTP request's span; the saga steps, subscription deliveries and outbox publishing it sets off are traces of their own, linked to the command whose events they handle. `streamrune.tracing.enabled` and one key per area switch the spans off, and the attributes never carry a payload, an `@Encrypted` value or a user id.
 
 **`StreamRuneHealthIndicator`** implements Spring Boot's `HealthIndicator` and checks things in sequence: the JDBC `DataSource` connection validity, the head of the `event_stream` table read directly via SQL on that same connection (reported as `eventStore.lastGlobalOffset`/`eventStore.lastEventTimestamp` — there is no `EventStore` dependency), the lag and error count of each registered subscription via `SubscriptionHealthContributor`, and the liveness of each background relay registered with `BackgroundRelayHealthContributor`. If the database is unreachable, the status is `DOWN` immediately. If any subscription reports `DOWN`, or a started relay's poll thread has died, the overall status is also `DOWN`. All checks are exposed as named details so that operators can distinguish a database failure from a subscription lag spike at a glance.
 

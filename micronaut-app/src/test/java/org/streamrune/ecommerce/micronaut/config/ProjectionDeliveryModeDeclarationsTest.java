@@ -16,6 +16,7 @@ import org.streamrune.core.projection.AtomicBatchProcessor;
 import org.streamrune.core.projection.Projection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.projections.AuditProjection;
 import org.streamrune.micronaut.ProjectionFactory;
@@ -130,7 +131,8 @@ class ProjectionDeliveryModeDeclarationsTest {
             null,
             null,
             StreamRuneMicronautProperties.withDefaults(),
-            emptyEnvironment());
+            emptyEnvironment(),
+            StreamRuneTracing.NOOP);
   }
 
   /** An environment with no streamrune.* overrides: every annotation value stands. */

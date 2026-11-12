@@ -77,12 +77,20 @@ public abstract class AbstractIntegrationTest {
     }
   }
 
-  /** Registers the shared {@link TestRabbitListener} bean into every test context. */
+  /**
+   * Registers the shared {@link TestRabbitListener} bean, and the {@link RecordedSpans} that keep
+   * the spans the application ends, into every test context.
+   */
   @TestConfiguration
   public static class RabbitListenerConfig {
     @Bean
     public TestRabbitListener testRabbitListener() {
       return new TestRabbitListener();
+    }
+
+    @Bean
+    public RecordedSpans recordedSpans() {
+      return new RecordedSpans();
     }
   }
 

@@ -34,6 +34,7 @@ import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
@@ -733,6 +734,11 @@ public class StreamRuneProducer {
    * by the saga subscription {@link EcommerceSubscriptionLifecycle} builds with {@code
    * sagaRunner(...)}; without leadership every backend delivers.
    *
+   * <p>{@code tracing} is the integration's {@link StreamRuneTracing} bean: the runner starts a
+   * {@code saga/<SagaType>/step} span for each event it handles, linked to the command that
+   * appended the event. The integration does not build saga runners, so it cannot hand them the
+   * bean itself.
+   *
    * <p>The framework's saga stores are {@code null} when {@code streamrune.saga.enabled=false}; the
    * demo's orders are confirmed only by this saga, so it refuses to start without them.
    */
@@ -744,7 +750,8 @@ public class StreamRuneProducer {
       SagaDeadLetterStore sagaDeadLetterStore,
       CommandBus commandBus,
       Instance<StreamRuneMetrics> metrics,
-      SubscriptionLeadership leadership) {
+      SubscriptionLeadership leadership,
+      StreamRuneTracing tracing) {
     if (sagaStore == null || sagaDeadLetterStore == null) {
       throw new IllegalStateException(
           "The order-fulfillment saga needs the saga stores: keep streamrune.saga.enabled=true");
@@ -759,6 +766,7 @@ public class StreamRuneProducer {
         .metrics(metrics.isResolvable() ? metrics.get() : StreamRuneMetrics.NOOP)
         // One backend delivers this saga type; the others stand by.
         .leadership(leadership)
+        .tracing(tracing)
         .build();
   }
 
@@ -789,6 +797,7 @@ public class StreamRuneProducer {
       SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
       StreamRuneQuarkusProperties properties,
       Instance<StreamRuneMetrics> metrics,
+      StreamRuneTracing tracing,
       @ConfigProperty(name = "app.saga.timeout-poll-interval", defaultValue = "PT10S")
           Duration pollInterval) {
     return SagaTimeoutRunner.<OrderFulfillmentState>builder()
@@ -801,6 +810,7 @@ public class StreamRuneProducer {
         .pollInterval(pollInterval)
         .metrics(metrics.isResolvable() ? metrics.get() : StreamRuneMetrics.NOOP)
         .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+        .tracing(tracing)
         .build();
   }
 

@@ -62,6 +62,8 @@ Open http://localhost:3000 in your browser.
 
 The profile `two-backends` (`docker compose --profile two-backends up -d --build`) adds `backend-2`, a second backend on the same database on port 8091. Both serve every request; one of them leads the order-fulfillment saga, one the payment process manager, one the order cancellation process manager, one the order shipment process manager and one each projection (the same backend or different ones), and the other stands by and takes over when a leader stops or dies; after a leader dies, the read models it wrote pause until the other backend takes their leases, up to the lease's 15 seconds plus one polling interval. With `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always`, `/actuator/health` shows each backend's role (`LEADING` or `STANDBY`). The aggregate lock holds across the backends: each app takes it in PostgreSQL (`PgAdvisoryLocker`, an advisory lock per stream on a pool of ten connections of its own, whose meters are `hikaricp.connections.*` tagged `pool=streamrune-advisory-lock`), so a command on one backend waits for a command on the same aggregate on the other instead of meeting it in a version conflict; an in-process lock would serialize the commands of one backend only. `scripts/two-backends-invariant.sh` places orders on both backends, cancels some at once or once confirmed (the cancellation releases the stock and voids or refunds the payment), ships others, kills the leader halfway through, waits for the other backend to take over and for every saga to end, and then runs `scripts/money-and-stock-invariants.sql`: no saga's forward command was stored after its compensation, and the money and the stock of every order are consistent with it ([Chapter 17](docs/tutorial/17-full-demo.md#two-backends-on-one-database)).
 
+The profile `tracing` adds Jaeger on port 16686, for the backend's traces with `MANAGEMENT_TRACING_EXPORT_ENABLED=true` ([Tracing](#tracing)).
+
 `scripts/soak/soak.py` runs two Spring backends and the Quarkus backend on one database for hours under a steady mix of commands, queries and live streams, kills the saga's leader, stops RabbitMQ, pauses PostgreSQL and switches the payment gateway off on a schedule, and then checks that every command was applied once, every saga ended, the outbox was published, the read models equal the event store and no resource grows ([docs/soak.md](docs/soak.md)); `--duration 5m` is a smoke run.
 
 The database needs no schema script. The backend creates the framework's tables itself when it starts: `streamrune.event-store.schema.auto-initialize=true` has StreamRune apply the Flyway baselines it ships (event store and crypto), each recorded in its own history table, and the read-model tables are created by the projections on first use. The Micronaut and Quarkus apps do the same.
@@ -92,6 +94,35 @@ docker compose up -d postgres rabbitmq
 ```bash
 ./gradlew :quarkus-app:quarkusDev
 ```
+
+## Tracing
+
+Each app traces through the OpenTelemetry SDK of its framework: Spring Boot's tracing modules (with Micrometer's bridge, so an HTTP request is the parent span of its command), `quarkus-opentelemetry`, and Micronaut's `micronaut-tracing-opentelemetry-http`. StreamRune's integration takes that SDK as its `StreamRuneTracing` bean and traces the command bus, the aggregate lock, the event store, the outbox, the projections, the subscriptions and the sagas; each app hands the bean to the parts it builds itself. Unless you switch the export on, the spans are made and dropped.
+
+The Compose profile `tracing` adds [Jaeger](https://www.jaegertracing.io/) (`jaegertracing/jaeger`, in memory) and points the backend at it:
+
+```bash
+./gradlew :spring-app:bootJar :notifications-service:bootJar
+MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
+```
+
+Place an order (the [Example](#example) below) and open http://localhost:16686: service `ecommerce-spring`, operation `command/PlaceOrder`. The trace holds the HTTP request, the command and, under it, `lock/acquire`, `eventstore/load` and `eventstore/append`; the saga's steps, the subscriptions' deliveries, the projections and the outbox's publishing are traces of their own, linked to the command whose events they handle.
+
+An app started outside Compose sends its spans to the same Jaeger (`docker compose --profile tracing up -d postgres rabbitmq jaeger`, then):
+
+| App | Run with the export on | Service in Jaeger |
+|-----|------------------------|-------------------|
+| Spring Boot | `MANAGEMENT_TRACING_EXPORT_ENABLED=true ./gradlew :spring-app:bootRun` | `ecommerce-spring` |
+| Micronaut | `OTEL_TRACES_EXPORTER=otlp ./gradlew :micronaut-app:run` | `micronaut-ecommerce` |
+| Quarkus | `QUARKUS_OTEL_SDK_DISABLED=false ./gradlew :quarkus-app:quarkusDev` | `quarkus-ecommerce` |
+
+In a Spring native image the export switch is fixed when the image is built. Stop the stack, Jaeger included, with the command below; `-v` also removes the `pgdata` volume, the demo's database:
+
+```bash
+docker compose --profile tracing down -v
+```
+
+`streamrune.tracing.enabled` switches StreamRune's spans off altogether and `streamrune.tracing.<area>.enabled` one area (`command`, `subscription`, `projection`, `event-store`, `lock`, `outbox`, `saga`); all are `true` by default. The attributes name types, configured names, counts, outcomes and the ids of the aggregate, stream, command, saga and outbox entry; they never carry an event's payload, an `@Encrypted` value or a user id. No attribute is taken from the user id or the crypto subject. In this demo the customer id is also the `X-User-Id` and the encryption subject, so it appears as `streamrune.aggregate.id`/`stream.id` on the customer's commands. [Chapter 15](docs/tutorial/15-observability.md#step-3-trace-a-command-with-opentelemetry) walks through a `PlaceOrder` trace.
 
 ## API
 
