@@ -100,6 +100,21 @@ streamrune:
     # connected; with none, a poll reads the head of the stream and no event. SseLiveE2EIT and
     # SseStreamAccessIT exercise it.
     enabled: true
+  tracing:
+    # The framework's spans (command, lock, event store, subscription, projection, outbox, saga) go
+    # through the OpenTelemetry bean of micronaut-tracing (otel below). One key per area switches it
+    # off, for example streamrune.tracing.event-store.enabled: false.
+    enabled: true
+
+otel:
+  traces:
+    # None: the spans are made and dropped. OTEL_TRACES_EXPORTER=otlp sends them over OTLP to the
+    # endpoint below, where docker-compose.yml's tracing profile runs Jaeger.
+    exporter: none
+  exporter:
+    otlp:
+      endpoint: http://localhost:4318
+      protocol: http/protobuf
 
 rabbitmq:
   host: ${RABBITMQ_HOST:localhost}

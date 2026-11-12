@@ -81,6 +81,12 @@ dependencies {
     // Required for AOT: StreamRuneAutoConfiguration references these optional classes.
     implementation(libs.opentelemetry.api)
     implementation("org.springframework.security:spring-security-core")
+    // Tracing: Spring Boot's OpenTelemetry SDK bean, which the framework's StreamRuneTracing traces
+    // through, Micrometer's bridge to it (each HTTP request is the parent span of its command) and
+    // the OTLP exporter, which sends only when management.tracing.export.enabled is true.
+    implementation("org.springframework.boot:spring-boot-micrometer-tracing-opentelemetry")
+    implementation("io.micrometer:micrometer-tracing-bridge-otel")
+    implementation("io.opentelemetry:opentelemetry-exporter-otlp")
 
     testImplementation(libs.spring.boot.starter.test)
     // The tutorial listings compiled by TutorialListingsCompileTest include decider tests.

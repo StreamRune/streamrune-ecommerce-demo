@@ -21,6 +21,7 @@ import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.core.types.SagaType;
@@ -314,15 +315,21 @@ public class StreamRuneConfig {
    * pool=streamrune-advisory-lock}, show how many of its connections the commands hold and how many
    * commands wait for one ({@code
    * /actuator/metrics/hikaricp.connections.active?tag=pool:streamrune-advisory-lock}).
+   *
+   * <p>{@code traced(tracing)} returns the locker on the same pool that starts a {@code
+   * lock/acquire} span around each acquisition, through the integration's {@link StreamRuneTracing}
+   * bean: the bus below is the app's own, and a bus does not trace a locker it is given.
    */
   @Bean(destroyMethod = "close")
   public PgAdvisoryLocker aggregateLocker(
       @Value("${spring.datasource.url}") String url,
       @Value("${spring.datasource.username}") String username,
       @Value("${spring.datasource.password}") String password,
-      MeterRegistry meterRegistry) {
+      MeterRegistry meterRegistry,
+      StreamRuneTracing tracing) {
     return PgAdvisoryLocker.withDedicatedPool(
-        url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry));
+            url, username, password, 10, new MicrometerMetricsTrackerFactory(meterRegistry))
+        .traced(tracing);
   }
 
   /**
@@ -351,6 +358,11 @@ public class StreamRuneConfig {
    * waits that long for its aggregate's lock on each attempt before the bus gives up with a {@link
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
    *
+   * <p>{@code tracing(...)} takes the integration's {@link StreamRuneTracing} bean and adds the
+   * framework's {@code OpenTelemetryCommandInterceptor} ahead of the listed interceptors, so the
+   * {@code command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is
+   * {@code StreamRuneTracing.NOOP} and traces nothing.
+   *
    * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
    * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays
    * every command a saga dispatches, so that a saga's deadline can pass while its forward command
@@ -368,6 +380,7 @@ public class StreamRuneConfig {
       PostgresCryptoEngine cryptoEngine,
       AggregateLocker locker,
       StreamRuneProperties properties,
+      StreamRuneTracing tracing,
       @Value("${app.chaos.saga-command-delay-max:0ms}") Duration sagaCommandDelayMax) {
     var bus =
         VirtualThreadCommandBus.builder()
@@ -379,6 +392,7 @@ public class StreamRuneConfig {
             // unless the bus has a commandInbox wired in.
             .commandInbox(commandInbox)
             .interceptors(audit, auth, validation, circuitBreaker)
+            .tracing(tracing)
             .deadLetterQueue(deadLetterQueue)
             .objectMapper(DeadLetterRetryRunner.createObjectMapper(cryptoEngine))
             // The rules deadLetterRetryRunner replays by: a keyed command that fails again under
@@ -545,7 +559,8 @@ public class StreamRuneConfig {
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
    * lists each projection in the health details as {@code subscription.<name>}, with its {@code
-   * role}.
+   * role}. {@code tracing(...)} starts a {@code projection/<name>/process} span for each batch a
+   * projection processes.
    */
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
@@ -559,7 +574,8 @@ public class StreamRuneConfig {
       InventoryProjection inventoryProjection,
       CacheInvalidator cacheInvalidator,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
@@ -567,6 +583,7 @@ public class StreamRuneConfig {
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction — the inventory counter can never double-reserve.
             .atomicProcessor(projectionRepository)
@@ -738,6 +755,11 @@ public class StreamRuneConfig {
    * compensations, and the others stand by and take over when it stops or dies. The lease is taken
    * by the subscription built with {@code sagaRunner(...)} below; without leadership ({@link
    * SubscriptionLeadership#NOOP}) every backend delivers.
+   *
+   * <p>{@code tracing} is the integration's {@link StreamRuneTracing} bean: the runner starts a
+   * {@code saga/<SagaType>/step} span for each event it handles, linked to the command that
+   * appended the event. The integration does not build saga runners, so it cannot hand them the
+   * bean itself.
    */
   @Bean
   public SagaRunner<?> orderFulfillmentSagaRunner(
@@ -746,7 +768,8 @@ public class StreamRuneConfig {
       VirtualThreadCommandBus commandBus,
       PostgresSagaDeadLetterStore sagaDeadLetterStore,
       ObjectProvider<StreamRuneMetrics> metrics,
-      ObjectProvider<SubscriptionLeadership> leadership) {
+      ObjectProvider<SubscriptionLeadership> leadership,
+      StreamRuneTracing tracing) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -757,6 +780,7 @@ public class StreamRuneConfig {
         .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
         // One backend delivers this saga type; the others stand by.
         .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
+        .tracing(tracing)
         .build();
   }
 
@@ -786,6 +810,7 @@ public class StreamRuneConfig {
       SagaRunner<?> orderFulfillmentSagaRunner,
       StreamRuneProperties properties,
       ObjectProvider<StreamRuneMetrics> metrics,
+      StreamRuneTracing tracing,
       @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
     var runner =
         SagaTimeoutRunner.<OrderFulfillmentState>builder()
@@ -798,6 +823,7 @@ public class StreamRuneConfig {
             .pollInterval(pollInterval)
             .metrics(metrics.getIfAvailable(() -> StreamRuneMetrics.NOOP))
             .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
+            .tracing(tracing)
             .build();
     runner.start();
     return runner;
@@ -850,7 +876,8 @@ public class StreamRuneConfig {
    * reads nothing and asks for the lease again every polling interval. Closing it gives the lease
    * back after the page in flight. {@code healthContributor(...)} lists it in the health details as
    * {@code subscription.order-fulfillment-saga}, with its {@code role}: {@code LEADING} or {@code
-   * STANDBY}.
+   * STANDBY}. {@code tracing(...)} starts a {@code subscription/<name>/deliver} span for each batch
+   * it delivers, as it does on the subscriptions below.
    *
    * <p>Uses a 500 ms polling interval (matching the Quarkus/Micronaut wiring) so that the
    * multi-step saga chain (OrderPlaced → payment → stock → ConfirmOrder) completes well within the
@@ -865,7 +892,8 @@ public class StreamRuneConfig {
       EventStore eventStore,
       OffsetStore offsetStore,
       SagaRunner<?> orderFulfillmentSagaRunner,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("order-fulfillment-saga"))
@@ -874,6 +902,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .sagaRunner(orderFulfillmentSagaRunner)
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -909,7 +938,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       PaymentProcessManager paymentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of("payment-process-manager"))
@@ -919,6 +949,7 @@ public class StreamRuneConfig {
             .listener(paymentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -948,7 +979,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderCancellationProcessManager orderCancellationProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(
@@ -959,6 +991,7 @@ public class StreamRuneConfig {
             .listener(orderCancellationProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;
@@ -982,7 +1015,8 @@ public class StreamRuneConfig {
       OffsetStore offsetStore,
       OrderShipmentProcessManager orderShipmentProcessManager,
       ObjectProvider<SubscriptionLeadership> leadership,
-      ObjectProvider<SubscriptionHealthContributor> health) {
+      ObjectProvider<SubscriptionHealthContributor> health,
+      StreamRuneTracing tracing) {
     var subscription =
         PollingEventSubscription.builder()
             .subscriptionName(SubscriptionName.of(OrderShipmentProcessManager.SUBSCRIPTION_NAME))
@@ -992,6 +1026,7 @@ public class StreamRuneConfig {
             .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
+            .tracing(tracing)
             .build();
     subscription.start();
     return subscription;

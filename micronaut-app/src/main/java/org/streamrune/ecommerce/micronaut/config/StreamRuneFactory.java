@@ -30,6 +30,7 @@ import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
 import org.streamrune.core.subscription.SubscriptionLeadership;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.SagaType;
 import org.streamrune.core.types.StreamId;
@@ -652,6 +653,11 @@ public class StreamRuneFactory {
    * retries its compensations, and the others stand by and take over when it stops or dies. The
    * lease is taken by the saga subscription {@link EcommerceSubscriptionLifecycle} builds with
    * {@code sagaRunner(...)}; without leadership every backend delivers.
+   *
+   * <p>{@code tracing} is the integration's {@link StreamRuneTracing} bean: the runner starts a
+   * {@code saga/<SagaType>/step} span for each event it handles, linked to the command that
+   * appended the event. The integration does not build saga runners, so it cannot hand them the
+   * bean itself.
    */
   @Singleton
   public SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner(
@@ -660,7 +666,8 @@ public class StreamRuneFactory {
       SagaDeadLetterStore sagaDeadLetterStore,
       org.streamrune.core.CommandBus commandBus,
       @Nullable StreamRuneMetrics metrics,
-      @Nullable SubscriptionLeadership leadership) {
+      @Nullable SubscriptionLeadership leadership,
+      StreamRuneTracing tracing) {
     return SagaRunner.<OrderFulfillmentState>builder()
         .orchestrator(orderFulfillmentSaga)
         .sagaStore(sagaStore)
@@ -671,6 +678,7 @@ public class StreamRuneFactory {
         .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         // One backend delivers this saga type; the others stand by.
         .leadership(leadership != null ? leadership : SubscriptionLeadership.NOOP)
+        .tracing(tracing)
         .build();
   }
 
@@ -700,6 +708,7 @@ public class StreamRuneFactory {
       SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner,
       StreamRuneMicronautProperties properties,
       @Nullable StreamRuneMetrics metrics,
+      StreamRuneTracing tracing,
       @Value("${app.saga.timeout-poll-interval:10s}") Duration pollInterval) {
     return SagaTimeoutRunner.<OrderFulfillmentState>builder()
         .decider(orderFulfillmentSaga)
@@ -711,6 +720,7 @@ public class StreamRuneFactory {
         .pollInterval(pollInterval)
         .metrics(metrics != null ? metrics : StreamRuneMetrics.NOOP)
         .inboxRetentionMaxAge(properties.inboxRetentionMaxAge())
+        .tracing(tracing)
         .build();
   }
 

@@ -67,6 +67,13 @@ streamrune:
     # How often the feed reads the global stream: the usual delay between a commit and its frame.
     # The framework default is 1s; the smallest value it accepts is 1ms.
     polling-interval: 100ms
+  tracing:
+    # The framework's spans (command, lock, event store, subscription, projection, outbox, saga) go
+    # through the OpenTelemetry SDK of Spring Boot (management.* below). Every area is on unless its
+    # key switches it off; without the eventstore/... spans, for example:
+    #   event-store:
+    #     enabled: false
+    enabled: true
 
 app:
   saga:
@@ -101,3 +108,20 @@ management:
       # integration events wait in the outbox. The outage shows in streamrune.outbox.pending, in the
       # relay's WARN line and in each waiting entry's last_error.
       enabled: false
+  tracing:
+    sampling:
+      # Every trace, for the demo. A production deployment keeps a share of them (0.1 is Spring
+      # Boot's default).
+      probability: 1.0
+    export:
+      # Off: the spans are made and dropped. MANAGEMENT_TRACING_EXPORT_ENABLED=true sends them over
+      # OTLP to the endpoint below; docker-compose.yml's tracing profile runs Jaeger there and points
+      # the backend at it.
+      enabled: false
+  opentelemetry:
+    resource-attributes:
+      "[service.name]": ecommerce-spring
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
