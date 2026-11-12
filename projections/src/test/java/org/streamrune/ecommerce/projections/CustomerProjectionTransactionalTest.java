@@ -51,7 +51,6 @@ class CustomerProjectionTransactionalTest {
             IdGenerator.generateEventId(),
             IdGenerator.generateCommandId(),
             null,
-            null,
             CorrelationId.of("c-" + version),
             null,
             null,

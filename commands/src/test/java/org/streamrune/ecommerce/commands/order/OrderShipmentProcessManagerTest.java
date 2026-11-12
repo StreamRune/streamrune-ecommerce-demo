@@ -115,7 +115,6 @@ class OrderShipmentProcessManagerTest {
             EventId.of("evt-" + UUID.randomUUID()),
             CommandId.of("cmd-" + UUID.randomUUID()),
             null,
-            null,
             CorrelationId.of("corr-of-a-request"),
             null,
             UserId.of("admin-1"),

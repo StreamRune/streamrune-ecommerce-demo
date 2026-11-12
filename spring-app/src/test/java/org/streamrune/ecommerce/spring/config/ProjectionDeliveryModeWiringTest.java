@@ -218,7 +218,6 @@ class ProjectionDeliveryModeWiringTest {
                     IdGenerator.generateEventId(),
                     IdGenerator.generateCommandId(),
                     null,
-                    null,
                     CorrelationId.of("c"),
                     null,
                     null,

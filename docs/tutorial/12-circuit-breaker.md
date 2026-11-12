@@ -654,7 +654,7 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
@@ -832,7 +832,7 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .sagaRunner(orderFulfillmentSagaRunner)
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -877,7 +877,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(paymentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -917,7 +917,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(orderCancellationProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -950,7 +950,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;

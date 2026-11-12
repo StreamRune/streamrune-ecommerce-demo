@@ -120,7 +120,6 @@ class LegacyProductEventsIT {
                         IdGenerator.generateEventId(),
                         IdGenerator.generateCommandId(),
                         null,
-                        null,
                         IdGenerator.generateCorrelationId(),
                         null,
                         null,

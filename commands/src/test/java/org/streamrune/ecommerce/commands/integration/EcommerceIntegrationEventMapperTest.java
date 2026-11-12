@@ -46,7 +46,6 @@ class EcommerceIntegrationEventMapperTest {
             new EventId(UUID.randomUUID().toString()),
             new CommandId(UUID.randomUUID().toString()),
             null,
-            null,
             new CorrelationId(UUID.randomUUID().toString()),
             null,
             null,

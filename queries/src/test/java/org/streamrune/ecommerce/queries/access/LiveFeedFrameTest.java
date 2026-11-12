@@ -94,7 +94,6 @@ class LiveFeedFrameTest {
             IdGenerator.generateEventId(),
             IdGenerator.generateCommandId(),
             null,
-            null,
             CorrelationId.of("corr-" + offset),
             null,
             UserId.of("c-secret"),

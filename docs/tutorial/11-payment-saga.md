@@ -1742,7 +1742,6 @@ class OrderFulfillmentSagaTest {
             new EventId(UUID.randomUUID().toString()),
             new CommandId(UUID.randomUUID().toString()),
             null,
-            null,
             new CorrelationId(correlationId),
             null,
             null,
@@ -3333,7 +3332,7 @@ public PollingEventSubscription orderFulfillmentSagaSubscription(
           .offsetStore(offsetStore)
           .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
           .sagaRunner(orderFulfillmentSagaRunner)
-          .healthContributor(health.getIfAvailable())
+          .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
           .build();
   subscription.start();
   return subscription;
@@ -3425,7 +3424,7 @@ public PollingEventSubscription paymentProcessSubscription(
           .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
           .listener(paymentProcessManager)
           .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-          .healthContributor(health.getIfAvailable())
+          .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
           .build();
   subscription.start();
   return subscription;
@@ -3464,7 +3463,7 @@ public PollingEventSubscription orderCancellationSubscription(
           .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
           .listener(orderCancellationProcessManager)
           .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-          .healthContributor(health.getIfAvailable())
+          .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
           .build();
   subscription.start();
   return subscription;
@@ -3513,7 +3512,7 @@ public MultiProjectionRunner projectionRunner(
           .offsetStore(offsetStore)
           .subscriptionConfig(projectionPolling(properties))
           .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-          .healthContributor(health.getIfAvailable())
+          .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
           // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
           // checkpoint in ONE transaction.
           .atomicProcessor(projectionRepository)
@@ -4030,7 +4029,7 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
             // checkpoint in ONE transaction.
             .atomicProcessor(projectionRepository)
@@ -4208,7 +4207,7 @@ public class StreamRuneConfig {
             .offsetStore(offsetStore)
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .sagaRunner(orderFulfillmentSagaRunner)
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -4253,7 +4252,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(paymentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -4293,7 +4292,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(orderCancellationProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -4326,7 +4325,7 @@ public class StreamRuneConfig {
             .config(SubscriptionConfig.pollingOnly(Duration.ofMillis(500)))
             .listener(orderShipmentProcessManager)
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
-            .healthContributor(health.getIfAvailable())
+            .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .build();
     subscription.start();
     return subscription;
@@ -5016,7 +5015,7 @@ public SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner(
       .sagaType(SagaType.fromClass(OrderFulfillmentState.class))
       .sagaRunner(orderFulfillmentSagaRunner)
       .pollInterval(pollInterval)
-      .metrics(metrics.isResolvable() ? metrics.get() : null)
+      .metrics(metrics.isResolvable() ? metrics.get() : StreamRuneMetrics.NOOP)
       .inboxRetentionMaxAge(properties.inbox().retentionMaxAge())
       .build();
 }

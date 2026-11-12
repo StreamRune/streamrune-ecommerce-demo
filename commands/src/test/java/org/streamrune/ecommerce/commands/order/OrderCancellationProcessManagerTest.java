@@ -188,7 +188,6 @@ class OrderCancellationProcessManagerTest {
             EventId.of("evt-" + UUID.randomUUID()),
             CommandId.of("cmd-" + UUID.randomUUID()),
             null,
-            null,
             CorrelationId.of("corr-of-a-request"),
             null,
             UserId.of("u-1"),
