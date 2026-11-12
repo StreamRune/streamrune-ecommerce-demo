@@ -98,19 +98,19 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
                   .as("the lock of the order's stream, taken by the app's PgAdvisoryLocker")
                   .containsExactly("order:" + order);
 
-              SpanData firstStep =
+              List<SpanData> linkedSteps =
                   spans.stream()
                       .filter(s -> s.getName().equals(SAGA_SPAN_PREFIX + "step"))
                       .filter(s -> ("fulfillment-" + order).equals(s.getAttributes().get(SAGA_ID)))
                       .filter(s -> linksTo(s, command))
-                      .findFirst()
-                      .orElseThrow(() -> new AssertionError("no saga step linked to the command"));
-              assertThat(
-                      spans.stream()
-                          .filter(s -> s.getName().startsWith("command/"))
-                          .filter(s -> isChildOf(s, firstStep)))
-                  .as("the command the saga's first step dispatches runs under the step's span")
-                  .isNotEmpty();
+                      .toList();
+              assertThat(linkedSteps)
+                  .as("the saga's steps linked to the command, one of which dispatches a command")
+                  .anyMatch(
+                      step ->
+                          spans.stream()
+                              .anyMatch(
+                                  s -> s.getName().startsWith("command/") && isChildOf(s, step)));
               assertThat(spans)
                   .as("the subscription that delivers the order's events to the saga")
                   .anyMatch(

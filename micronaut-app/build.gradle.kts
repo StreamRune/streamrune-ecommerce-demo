@@ -100,9 +100,10 @@ dependencies {
     // and the /metrics endpoint that lists them, as Spring's /actuator/metrics does.
     implementation(libs.micronaut.micrometer.core)
     // Tracing: the OpenTelemetry bean the framework's StreamRuneTracing traces through, the spans of
-    // the HTTP server and the OTLP exporter. The SDK stays off unless otel.sdk.disabled is false.
+    // the HTTP server and the OTLP exporter. The SDK runs and exports nowhere unless
+    // otel.traces.exporter is otlp (OTEL_TRACES_EXPORTER=otlp).
     implementation(libs.micronaut.tracing.opentelemetry.http)
-    implementation(libs.opentelemetry.exporter.otlp)
+    implementation(libs.opentelemetry.exporter.otlp.micronaut)
     implementation(libs.jakarta.annotation.api)
     implementation(libs.snakeyaml)
     implementation(libs.reactor.core)

@@ -14,7 +14,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * {@code SpanProcessor} bean to the tracer provider of its OpenTelemetry SDK, the one the
  * framework's {@code StreamRuneTracing} traces through. The suite shares one application context,
  * so this processor sees the spans of every test class: it keeps the latest {@value #CAPACITY} and
- * drops the oldest.
+ * drops the oldest. It records nothing until a test calls {@link #clear()}, so the spans of the
+ * other tests are not converted.
  */
 public class RecordedSpans implements SpanProcessor {
 
@@ -24,15 +25,19 @@ public class RecordedSpans implements SpanProcessor {
 
   private final AtomicInteger size = new AtomicInteger();
 
+  /** Whether a test has called {@link #clear()}: until then the spans are not kept. */
+  private volatile boolean recording;
+
   /** The spans ended since the last {@link #clear()}, oldest first. */
   public List<SpanData> all() {
     return List.copyOf(spans);
   }
 
-  /** Forgets every span ended so far. */
+  /** Forgets every span ended so far, and keeps the spans ended from now on. */
   public void clear() {
     spans.clear();
     size.set(0);
+    recording = true;
   }
 
   @Override
@@ -45,6 +50,9 @@ public class RecordedSpans implements SpanProcessor {
 
   @Override
   public void onEnd(ReadableSpan span) {
+    if (!recording) {
+      return;
+    }
     spans.addLast(span.toSpanData());
     if (size.incrementAndGet() > CAPACITY && spans.pollFirst() != null) {
       size.decrementAndGet();

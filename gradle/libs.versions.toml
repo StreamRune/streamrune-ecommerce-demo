@@ -84,7 +84,7 @@ rabbitmq-client = { module = "com.rabbitmq:amqp-client", version.ref = "rabbitmq
 
 # Observability
 opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
-opentelemetry-exporter-otlp = { module = "io.opentelemetry:opentelemetry-exporter-otlp", version.ref = "opentelemetry-micronaut" }
+opentelemetry-exporter-otlp-micronaut = { module = "io.opentelemetry:opentelemetry-exporter-otlp", version.ref = "opentelemetry-micronaut" }
 
 # Spring
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "spring-boot" }
