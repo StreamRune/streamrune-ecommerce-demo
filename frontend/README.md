@@ -24,13 +24,15 @@ backend, so you only need the commands above when you work on the frontend itsel
 | Page | What it shows |
 |------|---------------|
 | Dashboard | Stat cards and the live event feed |
-| Products | Product catalogue with role-guarded actions |
+| Products | The storefront: price and availability badges and an Order button, read-only for every role |
 | Orders | The order lifecycle: every order for ADMIN, a customer's own for CUSTOMER |
 | Customers | Registration, data export and the right to be forgotten: every customer for ADMIN, a customer's own record for CUSTOMER |
 | Fulfillment | The order-fulfillment sagas: every saga for ADMIN, the sagas of their own orders for CUSTOMER |
 | Events | The live feed for every role, and the event history (ADMIN only) |
 | Audit | The command audit log (ADMIN only) |
 | Admin | Circuit breaker, dead letters, outbox, payment-failure toggle |
+| Admin → Catalog | Create a product (with an optional opening stock), change its price, discontinue it |
+| Admin → Inventory | Available, reserved and committed units per product; receive a shipment, adjust with a reason (ADMIN only) |
 
 ## Roles
 
@@ -95,10 +97,15 @@ An action is offered to the roles the backend accepts it from (`src/lib/permissi
 request the backend refuses is shown in a toast with the backend's reason: "Not allowed for the
 selected role (403): …" or "The backend refused the request (400): …".
 
-Receive Shipment on the Products page adds to the inventory the fulfillment saga reserves from.
-The inventory is its own aggregate: the Stock column of the catalogue is the product's own figure
-(Adjust Stock changes it) and does not move with a shipment. An order for a product created on
-the page is fulfilled once a shipment for it is received; without one the saga cancels the order.
+The catalogue and the stock are separate. A product holds no stock: Admin → Catalog creates it
+with a name, price and category, and its optional opening stock is sent as a second step, a
+shipment received into the inventory. Admin → Inventory shows each product's available, reserved
+(held for an order not yet shipped) and committed (shipped) units, live, and receives shipments
+and adjusts the units with a reason; it is for the ADMIN role. The Products page shows only an
+availability badge (In stock, Low stock below ten units, Out of stock, Discontinued), never a
+count. An order for a product with too few units available is cancelled by the saga with the
+reason "Insufficient stock for <product>: requested N, available M", which the Orders page shows
+on the order.
 
 ## Checks
 
@@ -120,8 +127,8 @@ The Playwright tests start the dev server themselves, or use the one already run
   answer fails it instead of skipping. Start the stack first (`docker compose up -d --wait` in the
   repository root, or PostgreSQL, RabbitMQ and `./gradlew :spring-app:bootRun`).
   `writes.live.spec.ts` then performs each write through the pages against the backend — register
-  a customer, place and cancel an order, ship and deliver, create a product and change its price
-  and stock, receive a shipment, the payment-failure switch, edit, export and forget — and asserts
+  a customer, place and cancel an order, ship and deliver, create a product with an opening stock
+  and change its price, receive a shipment, adjust the inventory, the payment-failure switch, edit, export and forget — and asserts
   the result through the pages. It brings what it consumes: a customer it registers and a product
   it creates and stocks through the API before the first test, so it changes no seed data and
   passes run after run on the same database. Each run leaves a forgotten customer, two products

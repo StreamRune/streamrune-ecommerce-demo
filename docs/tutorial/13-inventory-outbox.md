@@ -2548,6 +2548,14 @@ curl -s -X POST http://localhost:8080/api/orders \
 # once PaymentCaptured fires, OrderConfirmed follows automatically.
 ```
 
+Read the inventory the order reserved from, as an `ADMIN` (`InventoryQueryController` of Step 1):
+
+```bash
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/inventory/p-1
+```
+
+The answer is the inventory read model's row for `p-1`: `{"productId":"p-1","productName":"...","available":...,"reserved":...,"committed":...}`. The order's unit is `reserved` — held for an order that has not shipped — and it becomes `committed` when an `ADMIN` ships the order. `GET /api/products/p-1` shows the same `available` count with its `availability` badge (Step 1b). The inventory answers `403` to a caller who is not an `ADMIN`; the catalogue is open.
+
 **6b. Check the notifications service.** Within a couple of seconds the poller claims the outbox entry and publishes it to RabbitMQ. The `notifications-service` receives it and stores it in memory:
 
 ```bash

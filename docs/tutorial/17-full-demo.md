@@ -361,7 +361,22 @@ curl -s "http://localhost:8080/api/products" | jq .
 
 The response comes from the `QueryBus` (with caching from Chapter 5). The first call executes the query against the projection. A second call within the cache TTL is served entirely from memory — no SQL executed.
 
-Switch to the Products page in the frontend. Both products are listed next to the three seeded ones. The SSE live feed on the Dashboard already shows two `ProductCreated` events. The page's **Add Product** dialog sends the same request with a generated id (`prod-` and eight hex digits); a product created either way has no inventory until a shipment is received for it (**Receive Shipment** in the row's menu, `POST /api/inventory/{id}/receive`), and the saga cancels an order for it until then.
+Each product in the answer carries `available` and `availability`. The two new products read `"available": 0` and `"availability": "OUT_OF_STOCK"`: the catalogue holds no stock, and a product has none until a shipment is received for it. Receive one for the sprocket, as an `ADMIN`, and read it back:
+
+```bash
+curl -s -X POST http://localhost:8080/api/inventory/prod-sprocket/receive \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: admin-1" \
+  -H "X-User-Role: ADMIN" \
+  -d '{"quantity": 8}'
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/inventory/prod-sprocket | jq .
+```
+
+The inventory answers `{"productId": "prod-sprocket", "productName": "Sprocket", "available": 8, "reserved": 0, "committed": 0}`, the inventory's own read model (`GET /api/inventory` lists every product's). A moment later `GET /api/products/prod-sprocket` reads `"available": 8` and `"availability": "LOW_STOCK"`: the storefront's view follows the inventory, and anything below ten units is low. The same request for a product nobody created, `prod-nope`, answers `400 Product not found: prod-nope` and writes nothing. A correction after a stocktake is `POST /api/inventory/prod-sprocket/adjust` with `{"quantityChange": -3, "reason": "Stocktake"}`; a change that would leave fewer than zero units answers `400 Insufficient stock for prod-sprocket: available=8, change=-20`.
+
+Switch to the frontend. The Products page lists both products next to the three seeded ones as a storefront: a price and an availability badge, no unit counts, and an **Order** button. Admin → Catalog lists them with their status and creates products: its **Add Product** dialog sends the same request with a generated id (`prod-` and eight hex digits) and an optional **Opening stock**, which it sends as a second request, the shipment above. Admin → Inventory shows the three counts of each product, live, and has the **Receive Shipment** and **Adjust** actions. The SSE live feed on the Dashboard already shows the `ProductCreated` events and the `ShipmentReceived`.
 
 ### Step 5: Place an Order — Watch the Saga
 
@@ -451,7 +466,26 @@ curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
 
 The saga of `ord-2` completed before the cancel and stays `COMPLETED`; the undo runs through the cancellation's event, not through the saga. A shipped order is not cancelled: ship `ord-1` as an `ADMIN` (`POST /api/orders/ord-1/ship`), and a cancel of it afterwards answers `400 Cannot cancel SHIPPED orders`. Shipping commits the order's reservation instead (`ReservationConfirmed` in the inventory stream).
 
-The bus snapshots a stream after every 5 of its events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). The count is per stream, so more orders never snapshot an order: an order stream reaches five events only by being cancelled again, as Chapter 8's `order-5` was. A product's stream gets there with stock and price changes, and an inventory stream with its reservations: `SELECT aggregate_type, aggregate_id, version FROM snapshot_store WHERE state_payload IS NOT NULL` lists the streams that have one, and the next load of such a stream starts from the snapshot rather than from its first event.
+#### Order more than the inventory holds
+
+The sprocket has eight units available. Order twenty:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -H "X-User-Role: CUSTOMER" \
+  -H "X-User-Id: cust-walkthrough" \
+  -d '{"orderId": "ord-3", "customerId": "cust-walkthrough", "lines": [{"productId": "prod-sprocket", "quantity": 20}]}'
+
+# a few seconds later
+curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
+  http://localhost:8080/api/orders/ord-3 | jq '{status, paymentStatus, reason}'
+# {"status": "CANCELLED", "paymentStatus": "REFUNDED", "reason": "Insufficient stock for prod-sprocket: requested 20, available 8"}
+```
+
+The order is accepted, not refused: the request answers `200` and the saga finds out at its reservation step. The inventory records `StockReservationRefused` and reserves nothing, the saga cancels the order with the refusal's reason, and the cancellation is undone like any other, so the captured payment is refunded. The saga ends `FAILED` (`GET /api/saga/fulfillments/fulfillment-ord-3` reads `"fulfillmentStatus": "FAILED"`), not `COMPENSATED`, and the reason is the one the Orders page shows under the order's badges. `GET /api/inventory/prod-sprocket` still reads `"available": 8`, `"reserved": 0`. A reservation moves units from available to reserved when the saga makes it, and from reserved to committed when the order ships: after `POST /api/orders/ord-1/ship`, the widget's `committed` count rises by two.
+
+The bus snapshots a stream after every 5 of its events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). The count is per stream, so more orders never snapshot an order: an order stream reaches five events only by being cancelled again, as Chapter 8's `order-5` was. A product's stream gets there with price changes, and an inventory stream with its shipments, adjustments and reservations: `SELECT aggregate_type, aggregate_id, version FROM snapshot_store WHERE state_payload IS NOT NULL` lists the streams that have one, and the next load of such a stream starts from the snapshot rather than from its first event.
 
 ### Step 6: Check the Audit Log — Verify All Commands Were Tracked
 

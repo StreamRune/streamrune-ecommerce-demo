@@ -121,7 +121,7 @@ public sealed interface ProductCommand extends Command {
 }
 ```
 
-> Notice there are no validation annotations here. Commands at this stage are plain data. We will add `@NotBlank`, `@NotNull`, `@PositiveOrZero`, and role-based access control in chapter 3 (validation) and chapter 9 (authorisation).
+> Notice there are no validation annotations here. Commands at this stage are plain data. We will add `@NotBlank`, `@NotNull`, and role-based access control in chapter 3 (validation) and chapter 9 (authorisation).
 
 ### ProductEvent
 
@@ -632,7 +632,7 @@ public class ProductCommandController {
 }
 ```
 
-> `@Valid` on the method parameter triggers Spring MVC's built-in validation before the request body is even mapped to a command. The `@NotBlank`, `@NotNull`, and `@Positive` constraints on the request records match the real demo's controller — a null price or blank product ID is rejected with `400 Bad Request` before it ever reaches the `CommandBus`. These controller-level constraints are an interim measure: in chapter 3 we add field-level `@NotBlank`/`@NotNull`/`@PositiveOrZero` annotations directly on the `ProductCommand` records, enforced by a `BeanValidationInterceptor` so the rules hold no matter how a command is dispatched (not just over HTTP).
+> `@Valid` on the method parameter triggers Spring MVC's built-in validation before the request body is even mapped to a command. The `@NotBlank`, `@NotNull`, and `@Positive` constraints on the request records match the real demo's controller — a null price or blank product ID is rejected with `400 Bad Request` before it ever reaches the `CommandBus`. These controller-level constraints are an interim measure: in chapter 3 we add field-level `@NotBlank`/`@NotNull` annotations directly on the `ProductCommand` records, enforced by a `BeanValidationInterceptor` so the rules hold no matter how a command is dispatched (not just over HTTP).
 
 ### Step 7 — Add the query controller
 
@@ -726,4 +726,4 @@ curl http://localhost:8080/api/products
 
 ## Next Up
 
-Our `Product` aggregate works, but it accepts any input — a blank name, a negative price, an empty product ID. Next, we will add validation so that `@NotBlank`, `@NotNull`, and `@PositiveOrZero` constraints are enforced automatically by a `BeanValidationInterceptor` before the command ever reaches the `Decider`.
+Our `Product` aggregate works, but it accepts any input — a blank name, a negative price, an empty product ID. Next, we will add validation so that `@NotBlank` and `@NotNull` constraints are enforced automatically by a `BeanValidationInterceptor` before the command ever reaches the `Decider`.

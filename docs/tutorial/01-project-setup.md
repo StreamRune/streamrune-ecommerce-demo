@@ -40,13 +40,13 @@ Each side evolves independently. You can add a new read model without touching t
 
 Event Sourcing takes CQRS further on the write side. Instead of storing the current state of an entity (the row as it looks right now), you store the *sequence of events* that caused it to reach that state. Current state is derived on demand by replaying the event stream from the beginning.
 
-Consider a `Product` aggregate. Rather than a row with `stock_level = 42`, you store:
+Consider an inventory of one product. Rather than a row with `stock_level = 42`, you store:
 
 ```
-ProductCreated  { name: "Wireless Keyboard", price: 49.99, stock: 100 }
-StockReserved   { quantity: 50 }
-StockReturned   { quantity: 5 }
-StockReserved   { quantity: 13 }
+ShipmentReceived { quantity: 100 }
+StockReserved    { quantity: 50 }
+StockReleased    { quantity: 5 }
+StockReserved    { quantity: 13 }
 ```
 
 Replaying these four events gives you `stock = 42`. The history is the source of truth.

@@ -1543,8 +1543,8 @@ The framework asks an `SseAuthorizer` one question, `isAuthorized(StreamRuneCont
 | `customer:<id>` | `ADMIN`, or the caller whose id is `<id>` | The events carry the customer's name, e-mail, address and phone. |
 | `order:<id>` | `ADMIN`, or the customer the order read model names for that order | The read model from Chapter 8 already knows each order's `customerId`; one `OrderProjection.get` is the cheapest honest proof of ownership. |
 | `payment:<id>` | `ADMIN` | The amount and the refund or failure reason of one customer's purchase, and no read model links a payment to its customer. |
-| `inventory:<id>` | `ADMIN` | A product's stock events name the orders that reserved it — other customers' orders. |
-| `product:<id>` | `ADMIN` | Nothing personal, but operational detail the public catalogue does not show: stock adjustments with their free-text reason, the price history. |
+| `inventory:<id>` | `ADMIN` | A product's stock events name the orders that reserved it — other customers' orders — and carry the free-text reason of each adjustment. |
+| `product:<id>` | `ADMIN` | Nothing personal, but operational detail the public catalogue does not show: the price history. |
 | any other type | nobody, `ADMIN` included | A new aggregate stays closed until you add a line for it. |
 
 Mind the `order` line: the read model is eventually consistent. `OrderProjection` writes the row a moment after `POST /api/orders` returns, and until it has, the order has no known owner — the customer is refused exactly as for an order that was never placed, and subscribes once `GET /api/orders/{id}` answers.

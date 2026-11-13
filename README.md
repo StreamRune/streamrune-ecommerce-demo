@@ -144,33 +144,42 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 - **A list holds what the caller may see.** An `ADMIN` gets every row; any other authenticated caller gets their own record from `GET /api/customers`, their own orders from `GET /api/orders` and the sagas of their own orders from `GET /api/saga/fulfillments`. The rows are chosen inside `OwnerOrAdminQueries` and the read models, before a controller sees one; the saga list selects its rows by saga type and id in the statement that reads them (`FulfillmentSagaRows`). No query parameter widens that: `?customerId=` may repeat the caller's own id, and naming another customer is a `403`.
 - **A fulfillment saga is read by whoever may read its order.** The saga of an order has the id `fulfillment-<orderId>`, so the order is known from the saga id and its owner is the customer the order's read-model row names. `GET /api/saga/fulfillments/{id}` answers an `ADMIN` and that customer; everyone else gets the `403` an order of somebody else gets, also for an id that names no order and for an order without a row yet. The state a customer reads is the state an `ADMIN` reads: the order, the customer, the payment id derived from the order id, the lines, the products reserved so far, the total and the fulfillment status, all of it the customer's own purchase.
 - **Operations are for an `ADMIN`**: the audit log, the event history, the payment-failure and payment-outage switches and everything under `/api/admin` except `/api/admin/health`, reads and writes alike. The two switches are demo devices of the payment simulator, outside the audit: flipping one writes no audit row, while an operator's decision on a dead-lettered command does (`DLQ_FORCED_REPLAY`, `DLQ_DISCARDED`).
-- **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price or stock, discontinuing it and receiving a shipment into the inventory are for an `ADMIN`.
+- **The catalogue is read by everyone and written by an `ADMIN`**: `GET /api/products` is open; creating a product, changing its price and discontinuing it are for an `ADMIN`. The catalogue holds no stock: the inventory does, and reading it, receiving a shipment into it and adjusting it are for an `ADMIN` too.
 - **A request is read before the caller is decided.** A request without a body, with malformed JSON or without a required field is `400` for every caller, in all three apps, and so is a query parameter that cannot be read: a `limit`, `offset` or `eventOffset` that is not a whole number, or a required `sagaId` or `eventOffset` that is missing. A well-formed request from a caller the rule refuses is `403`.
 - **A command refused for a reason that passes is `503`**, in all three apps: an open circuit breaker on the command bus, a bus that is shutting down or admits no more commands, an aggregate lock that could not be taken within the lock timeout, or a version conflict on every attempt of the bus's retries. The answer carries `Retry-After: 5` and a JSON body naming the reason, e.g. `{"reason": "CIRCUIT_BREAKER_OPEN", "message": "..."}` (`CIRCUIT_BREAKER_OPEN`, `COMMAND_BUS_OVERLOADED`, `COMMAND_BUS_CLOSED`, `AGGREGATE_LOCK_UNAVAILABLE`, `AGGREGATE_VERSION_CONFLICT`); the same request succeeds later. The apps expose `Retry-After` to the frontend's origin, and the page waits that long before it sends a refused command again.
 - **A command the bus recorded in the dead-letter queue is pending, not failed**, whatever it failed on — a store error, a lock it could not take in time, a version conflict on every attempt: a replay of the entry can still apply it. What happens to its entry decides the answer. While the entry is replayed under the request's `Idempotency-Key`, it is answered `503` with `Retry-After: 60` and `{"reason": "QUEUED_FOR_REPLAY", "commandId": "...", "message": "..."}`: wait for the replay, or send it again only with the same key — the command runs once either way, and a new key is a new operation, applied beside the replay. Sent without a key, or sent again under a key whose entry's replays are used up or that is older than the inbox window, it is answered `500` without `Retry-After` and `{"reason": "AWAITING_OPERATOR", "commandId": "..."}`: an operator replays or discards the entry, and an unkeyed request sent again would apply the command a second time. The queue keeps one entry per key: a keyed request that fails again is answered from the entry its first send stored. `commandId` is the entry's id. A genuine failure that left no entry is `500`.
-- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a ship or deliver for an order nobody placed, a price, stock or discontinue for a product nobody created. Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not shipped or delivered. Every cancellation releases the order's stock and voids or refunds its payment.
+- **A command for an id nothing was created under is `400` and writes nothing**: a profile update, an export or a forget for a customer who never registered (`Customer not found`), a ship or deliver for an order nobody placed, a price change or a discontinue for a product nobody created, a shipment or an inventory adjustment for a product nobody created (`Product not found: <id>`). Cancelling is the exception: `CancelOrder` is the fulfillment saga's compensation and is accepted for any order that is not shipped or delivered. Every cancellation releases the order's stock and voids or refunds its payment.
 
 ### Products
 
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
-| `POST` | `/api/products` | Create product | `ADMIN` |
-| `PUT` | `/api/products/{id}/stock` | Adjust stock by `quantity`. With an `Idempotency-Key` header the change is applied once per key (a repeat answers the first request's result), and a failed adjustment is replayed by the dead-letter runner on its schedule: its `503 QUEUED_FOR_REPLAY` means pending, so keep the key and send the request again with it, or wait | `ADMIN` |
+| `POST` | `/api/products` | Create product: `productId`, `name`, `description`, `category`, `price`. The catalogue holds no stock, so the body has no stock field | `ADMIN` |
 | `PUT` | `/api/products/{id}/price` | Update price | `ADMIN` |
 | `POST` | `/api/products/{id}/discontinue` | Discontinue product | `ADMIN` (`@RequireRole`) |
-| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment into the inventory the fulfillment saga reserves from; takes an `Idempotency-Key` like the stock adjustment | `ADMIN` |
-| `GET` | `/api/products/{id}` | Get product | anyone: the public catalogue |
+| `GET` | `/api/products/{id}` | Get product: the catalogue fields, `status` (`AVAILABLE` or `DISCONTINUED`) and the storefront's view of the stock, `available` and `availability` (`IN_STOCK`, `LOW_STOCK` below 10 units, `OUT_OF_STOCK`, `DISCONTINUED`) | anyone: the public catalogue |
 | `GET` | `/api/products` | List products | anyone: the public catalogue |
+
+### Inventory
+
+The inventory is the one source of a product's stock: `available` (units that can be ordered), `reserved` (held for an order that is not shipped yet) and `committed` (shipped). A product starts with none. An id nobody created a product under is refused with `400 Product not found: <id>`.
+
+| Method | Path | Description | Who |
+|--------|------|-------------|-----|
+| `POST` | `/api/inventory/{productId}/receive` | Receive a shipment, `{"quantity": 12}` (above zero). With an `Idempotency-Key` header the shipment is applied once per key (a repeat answers the first request's result), and a failed one is replayed by the dead-letter runner on its schedule: its `503 QUEUED_FOR_REPLAY` means pending, so keep the key and send the request again with it, or wait | `ADMIN` |
+| `POST` | `/api/inventory/{productId}/adjust` | Correct the available units by a signed `quantityChange`, with a `reason`: `{"quantityChange": -3, "reason": "Stocktake"}`. A change of zero, a blank reason and a change that would leave fewer than zero units are `400`. Reserved and committed units are not touched. Takes an `Idempotency-Key` like a shipment | `ADMIN` |
+| `GET` | `/api/inventory` | List the inventory: `productId`, `productName`, `available`, `reserved`, `committed` of every product, those without stock included | `ADMIN` |
+| `GET` | `/api/inventory/{productId}` | One product's inventory; `404` when it has none | `ADMIN` |
 
 ### Orders
 
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
 | `POST` | `/api/orders` | Place order. Each line names a product and a quantity; the price is the product's in the catalogue (its event stream), and a product nobody created or one that is discontinued answers `400`. One line per product. The fulfillment saga confirms the order: there is no endpoint for it, and a `ConfirmOrder` sent by anybody but the saga is refused | `ADMIN`, or the customer the order names in `customerId` |
-| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); every cancellation releases the order's stock and voids its payment, or refunds it in full once captured | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); every cancellation releases the order's stock and voids its payment, or refunds it in full once captured. An order for more units than the inventory has available is cancelled by the fulfillment saga, not refused: its `reason` reads `Insufficient stock for <product>: requested N, available M`, and the saga ends `FAILED` | `ADMIN` or the order's customer |
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
-| `GET` | `/api/orders/{id}` | Get order, with its payment status (`paymentStatus`: `PENDING`, `CAPTURED`, `REFUNDED`, `VOIDED` or `FAILED`; `null` until the payment is initiated) | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
+| `GET` | `/api/orders/{id}` | Get order, with its payment status (`paymentStatus`: `PENDING`, `CAPTURED`, `REFUNDED`, `VOIDED` or `FAILED`; `null` until the payment is initiated) and, once the order is cancelled, its `reason` | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
 | `GET` | `/api/orders` | List orders; `?customerId=` narrows the list | `ADMIN`: every order. Any other authenticated caller: their own orders. `403` without an identity |
 | `GET` | `/api/saga/fulfillments/{id}` | The fulfillment saga of an order, id `fulfillment-<orderId>`: order, customer, payment id, lines, total and fulfillment status | `ADMIN` or the order's customer; `403` otherwise, also for an order without a row |
 | `GET` | `/api/saga/fulfillments?limit=50` | List the fulfillment sagas with the framework's saga status | `ADMIN`: every fulfillment saga. Any other authenticated caller: the sagas of their own orders. `403` without an identity |
@@ -221,7 +230,14 @@ curl -X POST http://localhost:8080/api/products \
   -H "Content-Type: application/json" \
   -H "X-User-Id: admin-1" \
   -H "X-User-Role: ADMIN" \
-  -d '{"productId":"p1","name":"Widget","description":"A widget","category":"General","price":9.99,"initialStock":100}'
+  -d '{"productId":"p1","name":"Widget","description":"A widget","category":"General","price":9.99}'
+
+# Receive a shipment: the product has no stock until the inventory has some
+curl -X POST http://localhost:8080/api/inventory/p1/receive \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: admin-1" \
+  -H "X-User-Role: ADMIN" \
+  -d '{"quantity":100}'
 
 # Place an order as the customer it names
 curl -X POST http://localhost:8080/api/orders \
