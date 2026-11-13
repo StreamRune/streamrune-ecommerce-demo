@@ -14,8 +14,9 @@ import org.streamrune.quarkus.StreamRuneQuarkusProperties;
 
 /**
  * {@link StreamRuneProducer#bind} reads the {@code streamrune.*} keys as Quarkus does: an
- * environment variable sets a key the properties file does not name, a dashed key included, and a
- * key nothing maps is still refused when a file or a system property names it.
+ * environment variable sets a key the properties file does not name, a dashed key included, a
+ * variable that matches no key (Spring's spelling of a dashed key) is ignored, and a key nothing
+ * maps is still refused when a file or a system property names it.
  */
 class StreamRuneQuarkusPropertiesBindingTest {
 
@@ -52,6 +53,30 @@ class StreamRuneQuarkusPropertiesBindingTest {
                 Map.of("streamrune.tracing.event-store.enabled", "true")));
 
     assertThat(properties.tracing().eventStore().enabled()).isFalse();
+  }
+
+  @Test
+  void springsSpellingOfADashedKeyIsIgnored() {
+    StreamRuneQuarkusProperties properties =
+        StreamRuneProducer.bind(
+            live(Map.of("STREAMRUNE_TRACING_EVENTSTORE_ENABLED", "false"), Map.of()));
+
+    assertThat(properties.tracing().eventStore().enabled()).isTrue();
+  }
+
+  @Test
+  void aKeyNothingMapsIsStillRefusedFromASystemProperty() {
+    SmallRyeConfig live =
+        new SmallRyeConfigBuilder()
+            .withSources(
+                new PropertiesConfigSource(
+                    Map.of("streamrune.tracing.event-stor.enabled", "false"),
+                    "SysPropConfigSource",
+                    400))
+            .build();
+
+    assertThatThrownBy(() -> StreamRuneProducer.bind(live))
+        .hasStackTraceContaining("streamrune.tracing.event-stor.enabled");
   }
 
   @Test
