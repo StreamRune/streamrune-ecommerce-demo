@@ -270,7 +270,7 @@ Open `http://localhost:3000` in your browser. The Dashboard page loads with four
 >
 > `SeedDataRunner` (`spring-app/src/main/java/org/streamrune/ecommerce/spring/config/SeedDataRunner.java`) is a Spring `ApplicationRunner` that runs once during startup. It dispatches commands through the `VirtualThreadCommandBus` to create three products (`prod-widget` Widget $19.99, `prod-gadget` Gadget $49.99, `prod-doohickey` Doohickey $9.99), their initial inventory shipments (100 / 50 / 200 units), two customers (`cust-alice` Alice Johnson and `cust-bob` Bob Smith), and one seed order (`order-seed-1`) for Alice containing two widgets and one gadget.
 >
-> On subsequent startups the deciders refuse the creation commands (`DomainException`, e.g. `Product already exists: prod-widget`), the runner finds the inventory streams already stocked, and it logs `Seed data skipped (already exists)` without appending anything. All seed data flows through the full interceptor chain — audit, authorization, validation, and circuit breaker — so it appears in the audit log and produces events visible in the Event Explorer.
+> On subsequent startups the deciders refuse the creation commands (`DomainException`, e.g. `Product already exists: prod-widget`), the runner finds the inventory streams already stocked, and it logs `Seed data skipped (already exists)` without appending anything. With the tracing of Chapter 15 on, each such start shows six refused commands in Jaeger — three `command/CreateProduct`, two `command/RegisterCustomer` and one `command/PlaceOrder` — each with `streamrune.command.rejection.type=org.streamrune.core.DomainException` and no error: a refusal is the domain's answer, not a failed span. With two backends on one database, the one that starts second shows them on its first start. All seed data flows through the full interceptor chain — audit, authorization, validation, and circuit breaker — so it appears in the audit log and produces events visible in the Event Explorer.
 
 If you are running the demo manually (not via Docker Compose), seed data is created on the first `./gradlew :spring-app:bootRun` against a database that does not hold it yet.
 
@@ -596,7 +596,7 @@ Everything so far ran one backend. A production service runs several against one
 | `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
 | `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | `management.endpoint.health.show-details` | `never` | With `always`, `/actuator/health` lists each subscription with its `role`: `LEADING` or `STANDBY` (Chapter 15) |
 
-`backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, where the saga's steps show on whichever backend leads it.
+`backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, both as the service `ecommerce-spring`. StreamRune's attributes name types and ids, never the process; what tells the backends apart is the resource attribute `service.instance.id` of Chapter 15, which Jaeger shows under each span's *Process*: the container's host name, its short id, which `docker ps` lists under `CONTAINER ID`. A saga's steps carry the id of the backend that led it when they ran, so a takeover shows as the next step under the other id; which backend leads now is the `role` in each one's `/actuator/health`.
 
 Replace `docker-compose.yml` with the demo's file, the last version of it:
 
@@ -1298,9 +1298,9 @@ public class StreamRuneConfig {
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
    *
    * <p>{@code tracing(...)} takes the integration's {@link StreamRuneTracing} bean and adds the
-   * framework's {@code OpenTelemetryCommandInterceptor} ahead of the listed interceptors, so the
-   * {@code command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is
-   * {@code StreamRuneTracing.NOOP} and traces nothing.
+   * framework's {@code TracingCommandInterceptor} ahead of the listed interceptors, so the {@code
+   * command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is {@code
+   * StreamRuneTracing.NOOP} and traces nothing.
    *
    * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
    * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays

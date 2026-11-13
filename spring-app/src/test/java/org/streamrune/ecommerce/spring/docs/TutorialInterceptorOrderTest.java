@@ -34,7 +34,7 @@ class TutorialInterceptorOrderTest {
   /** The variable name each interceptor has in the tutorial and the Spring app, and its slot. */
   private static final Map<String, Integer> ORDER_BY_NAME =
       Map.of(
-          "otel", CommandInterceptorOrdering.ORDER_OPEN_TELEMETRY,
+          "otel", CommandInterceptorOrdering.ORDER_TRACING,
           "audit", CommandInterceptorOrdering.ORDER_AUDIT,
           "auth", CommandInterceptorOrdering.ORDER_ANNOTATION_AUTHORIZATION,
           "validation", CommandInterceptorOrdering.ORDER_VALIDATION,

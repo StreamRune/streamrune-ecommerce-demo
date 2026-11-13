@@ -2,6 +2,8 @@ package org.streamrune.ecommerce.quarkus.config;
 
 import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.smallrye.config.ConfigValue;
+import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import jakarta.annotation.Priority;
@@ -126,13 +128,35 @@ public class StreamRuneProducer {
   @Alternative
   @Priority(1)
   public StreamRuneQuarkusProperties streamRuneQuarkusProperties() {
-    SmallRyeConfig quarkusConfig = (SmallRyeConfig) ConfigProvider.getConfig();
+    return bind((SmallRyeConfig) ConfigProvider.getConfig());
+  }
+
+  /**
+   * Binds {@link StreamRuneQuarkusProperties} over a throwaway configuration whose one source
+   * delegates to {@code quarkusConfig} (see {@link #streamRuneQuarkusProperties()}).
+   *
+   * <p>The delegate lists every property name of the live configuration except the names an
+   * environment variable gives. SmallRye checks that every {@code streamrune.*} name maps to a
+   * property of the mapping, and skips a name that comes from the environment: the name of a
+   * variable is lossy ({@code _} stands for {@code .}, {@code -} and more), so {@code
+   * STREAMRUNE_TRACING_EVENT_STORE_ENABLED} is listed as {@code
+   * streamrune.tracing.event.store.enabled}, a name no property has. Listed under the delegate's
+   * name it would fail the check, and the application would not start. The value still reaches the
+   * mapping: each property is looked up by its own name, {@code
+   * streamrune.tracing.event-store.enabled}, which the live configuration matches to the variable.
+   * A misspelled key in {@code application.properties} or a system property is still refused.
+   */
+  static StreamRuneQuarkusProperties bind(SmallRyeConfig quarkusConfig) {
     ConfigSource delegating =
         new ConfigSource() {
           @Override
           public Set<String> getPropertyNames() {
             Set<String> names = new HashSet<>();
-            quarkusConfig.getPropertyNames().forEach(names::add);
+            for (String name : quarkusConfig.getPropertyNames()) {
+              if (!fromEnvironment(quarkusConfig.getConfigValue(name))) {
+                names.add(name);
+              }
+            }
             return names;
           }
 
@@ -170,6 +194,12 @@ public class StreamRuneProducer {
         .withMapping(StreamRuneQuarkusProperties.class)
         .build()
         .getConfigMapping(StreamRuneQuarkusProperties.class);
+  }
+
+  /** Whether the live configuration takes {@code value} from an environment variable. */
+  private static boolean fromEnvironment(ConfigValue value) {
+    String source = value == null ? null : value.getSourceName();
+    return source != null && source.startsWith(EnvConfigSource.NAME);
   }
 
   /**

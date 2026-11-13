@@ -81,12 +81,42 @@ jobs:
           repository: StreamRune/streamrune
           path: streamrune
 
-      - uses: actions/setup-java@v6
+      # GraalVM CE 25.0.1, the GraalVM the README names for native builds, pinned to that release
+      # rather than the latest GraalVM 25.
+      - uses: graalvm/setup-graalvm@f70bc8032f90a104502824a54bcb94b6f01715bc # v1.6.8
         with:
-          java-version: '25'
-          distribution: 'graalvm'
+          java-version: '25.0.1'
+          distribution: 'graalvm-community'
+          check-for-updates: 'false'
 
       - uses: gradle/actions/setup-gradle@v6
+
+      # native-build-tools (the Spring and Micronaut builds) refuses its default
+      # reachability-metadata repository when the GraalVM installation has no
+      # lib/svm/schemas/reachability-metadata-schema.json, and GraalVM CE 25.0.1 has none. As the
+      # README says ("GraalVM Native Image"), the build is pointed at a copy of that repository
+      # without its schema files: version 1.0.20, the default of native-build-tools 1.1.17, checked
+      # against the SHA-256 of that release's archive. The first line stops the job when the
+      # plugin's version changes, so that the two move together.
+      - name: Reachability-metadata repository without its schema (Spring, Micronaut)
+        if: matrix.framework != 'quarkus'
+        working-directory: streamrune-ecommerce-demo
+        env:
+          METADATA_VERSION: '1.0.20'
+          METADATA_SHA256: '7f03bde2feeac1a8e0e40e45c8d70f5236cace2db9d5f8d0f337002329eb1f23'
+        run: |
+          grep -q '^graalvm = "1.1.17"$' gradle/libs.versions.toml || {
+            echo "::error::native-build-tools is not 1.1.17: set METADATA_VERSION and METADATA_SHA256 to its default reachability-metadata release"
+            exit 1
+          }
+          repo="$RUNNER_TEMP/reachability-metadata"
+          curl -fsSL -o "$RUNNER_TEMP/reachability-metadata.zip" \
+            "https://github.com/oracle/graalvm-reachability-metadata/releases/download/${METADATA_VERSION}/graalvm-reachability-metadata-${METADATA_VERSION}.zip"
+          echo "${METADATA_SHA256}  $RUNNER_TEMP/reachability-metadata.zip" | sha256sum -c -
+          mkdir -p "$repo"
+          unzip -q "$RUNNER_TEMP/reachability-metadata.zip" -d "$repo"
+          rm "$repo"/schemas/reachability-metadata-schema-v*.json
+          echo "ORG_GRADLE_PROJECT_graalvmMetadataRepository=$repo" >> "$GITHUB_ENV"
 
       - name: Build native image (Spring)
         if: matrix.framework == 'spring'

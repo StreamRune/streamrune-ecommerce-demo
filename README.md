@@ -97,7 +97,7 @@ docker compose up -d postgres rabbitmq
 
 ## Tracing
 
-Each app traces through the OpenTelemetry SDK of its framework: Spring Boot's tracing modules (with Micrometer's bridge, so an HTTP request is the parent span of its command), `quarkus-opentelemetry`, and Micronaut's `micronaut-tracing-opentelemetry-http`. StreamRune's integration takes that SDK as its `StreamRuneTracing` bean and traces the command bus, the aggregate lock, the event store, the outbox, the projections, the subscriptions and the sagas; each app hands the bean to the parts it builds itself. Unless you switch the export on, the spans are made and dropped.
+Each app traces through the OpenTelemetry SDK of its framework: Spring Boot's tracing modules (with Micrometer's bridge, so an HTTP request is the parent span of its command), `quarkus-opentelemetry`, and Micronaut's `micronaut-tracing-opentelemetry-http`. StreamRune's integration takes that SDK as its `StreamRuneTracing` bean and traces the command bus, the aggregate lock, the event store, the outbox, the projections, the subscriptions and the sagas; each app hands the bean to the parts it builds itself. Unless you switch the export on, the Spring and Micronaut apps make the spans and drop them, and the Quarkus app, whose SDK is off, starts none (StreamRune's tracing is then `NOOP`, and no event carries a span context).
 
 The Compose profile `tracing` adds [Jaeger](https://www.jaegertracing.io/) (`jaegertracing/jaeger`, in memory) and points the backend at it:
 
@@ -106,7 +106,7 @@ The Compose profile `tracing` adds [Jaeger](https://www.jaegertracing.io/) (`jae
 MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
 ```
 
-Place an order (the [Example](#example) below) and open http://localhost:16686: service `ecommerce-spring`, operation `command/PlaceOrder`. The trace holds the HTTP request, the command and, under it, `lock/acquire`, `eventstore/load` and `eventstore/append`; the saga's steps, the subscriptions' deliveries, the projections and the outbox's publishing are traces of their own, linked to the command whose events they handle.
+Place an order (the [Example](#example) below) and open http://localhost:16686: service `ecommerce-spring`, operation `command/PlaceOrder`. The trace holds the HTTP request, the command and, under it, `lock/acquire`, `eventstore/load` and `eventstore/append`; the saga's steps, the subscriptions' deliveries and the outbox's publishing are traces of their own, linked to the command whose events they handle. A projection's batch is a trace of its own too, without a link: it reads the global stream, the events of any number of commands.
 
 An app started outside Compose sends its spans to the same Jaeger (`docker compose --profile tracing up -d postgres rabbitmq jaeger`, then):
 
@@ -122,7 +122,7 @@ In a Spring native image the export switch is fixed when the image is built. Sto
 docker compose --profile tracing down -v
 ```
 
-`streamrune.tracing.enabled` switches StreamRune's spans off altogether and `streamrune.tracing.<area>.enabled` one area (`command`, `subscription`, `projection`, `event-store`, `lock`, `outbox`, `saga`); all are `true` by default. The attributes name types, configured names, counts, outcomes and the ids of the aggregate, stream, command, saga and outbox entry; they never carry an event's payload, an `@Encrypted` value or a user id. No attribute is taken from the user id or the crypto subject. In this demo the customer id is also the `X-User-Id` and the encryption subject, so it appears as `streamrune.aggregate.id`/`stream.id` on the customer's commands. [Chapter 15](docs/tutorial/15-observability.md#step-3-trace-a-command-with-opentelemetry) walks through a `PlaceOrder` trace.
+`streamrune.tracing.enabled` switches StreamRune's spans off altogether and `streamrune.tracing.<area>.enabled` one area (`command`, `subscription`, `projection`, `event-store`, `lock`, `outbox`, `saga`); all are `true` by default. The attributes name types, configured names, counts, outcomes and the ids of the aggregate, stream, command, saga and outbox entry; nothing is taken from an event's payload, an `@Encrypted` value, the request's user id or the crypto subject. The ids are exported as they are: in this demo the customer id is also the `X-User-Id` and the encryption subject, so it appears as `streamrune.aggregate.id`/`stream.id` on the customer's commands, and forgetting the customer does not reach the traces. A command its domain refuses is no failed span: it keeps the unset status and names the refusal by its type alone (`streamrune.command.rejection.type`). [Chapter 15](docs/tutorial/15-observability.md#step-3-trace-a-command-with-opentelemetry) walks through a `PlaceOrder` trace.
 
 ## API
 
@@ -271,7 +271,9 @@ export ORG_GRADLE_PROJECT_graalvmMetadataRepository=/tmp/metadata-repo   # or -P
 ```
 
 The smoke script's builds pick the variable up. The Quarkus build does not use native-build-tools
-and needs none of this.
+and needs none of this. The CI job (`.github/workflows/native-image-smoke-test.yml`) builds the three
+images with GraalVM CE 25.0.1 and gives the Spring and Micronaut builds such a copy: version 1.0.20 of
+the repository, the one native-build-tools 1.1.17 downloads by default.
 
 ```bash
 # Requires running Postgres (AOT processing needs a live DataSource)

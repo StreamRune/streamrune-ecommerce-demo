@@ -80,8 +80,6 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-amqp")
     // The OpenTelemetry API at the version Spring Boot manages, the one of the SDK below.
     implementation(libs.opentelemetry.api)
-    // Required for AOT: StreamRuneAutoConfiguration references this optional class.
-    implementation("org.springframework.security:spring-security-core")
     // Tracing: Spring Boot's OpenTelemetry SDK bean, which the framework's StreamRuneTracing traces
     // through, Micrometer's bridge to it (each HTTP request is the parent span of its command) and
     // the OTLP exporter, which sends only when management.tracing.export.enabled is true.

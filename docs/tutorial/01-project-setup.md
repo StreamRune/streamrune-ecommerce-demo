@@ -513,11 +513,6 @@ dependencies {
     // SDK is present (Chapter 15 adds Spring Boot's). StreamRune's Spring integration also starts
     // without it.
     implementation(libs.opentelemetry.api)
-    // Required at runtime: StreamRune's Spring auto-configuration (StreamRuneAutoConfiguration)
-    // references this optional type when it evaluates its @Conditional beans. It is not on the
-    // classpath transitively, so without it the application context fails to start — even though
-    // your own code never touches it directly.
-    implementation("org.springframework.security:spring-security-core")
 
     // Spring Boot starters
     implementation("org.springframework.boot:spring-boot-starter-web")
@@ -534,7 +529,7 @@ dependencies {
 
 > `spring-boot-starter-webflux` is added now because Chapter 15 (Server-Sent Events) streams `Flux<ServerSentEvent<String>>` from the reactive stack (Spring WebFlux and Reactor). Adding it here prevents a compilation failure when you reach that chapter.
 >
-> `spring-security-core` is a runtime requirement of StreamRune's Spring auto-configuration, not of your code: omitting it compiles fine but fails at startup. Spring Boot's dependency management gives it the version of Spring Security it manages, as it does for the starters. `opentelemetry-api` is optional for the integration: without it StreamRune traces nothing. The `gradle/libs.versions.toml` catalog you copied from the real demo defines its alias, at the version Spring Boot manages, so that the API matches the SDK Chapter 15 adds.
+> The project has no Spring Security, and StreamRune's Spring integration needs none: it starts without `spring-security-core`, in the JVM and in a native image alike. With the jar on the classpath, the integration would take a request's user, and its role, from the Spring Security principal; Chapter 9 decides where the demo's request identity comes from instead. `opentelemetry-api` is optional for the integration: without it StreamRune traces nothing. The `gradle/libs.versions.toml` catalog you copied from the real demo defines its alias, at the version Spring Boot manages, so that the API matches the SDK Chapter 15 adds.
 
 ### Step 5 — Start PostgreSQL
 

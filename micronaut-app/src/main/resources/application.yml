@@ -115,6 +115,10 @@ otel:
     otlp:
       endpoint: http://localhost:4318
       protocol: http/protobuf
+  resource:
+    # Which instance sent a span: an id drawn at each start, so that the spans of two instances
+    # sending to one Jaeger tell them apart.
+    attributes: service.instance.id=${random.uuid}
 
 rabbitmq:
   host: ${RABBITMQ_HOST:localhost}

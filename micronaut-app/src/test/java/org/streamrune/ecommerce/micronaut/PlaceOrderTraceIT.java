@@ -16,6 +16,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
@@ -37,6 +38,9 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
 
   private static final AttributeKey<String> STREAM_ID =
       AttributeKey.stringKey("streamrune.stream.id");
+
+  private static final AttributeKey<String> SERVICE_INSTANCE_ID =
+      AttributeKey.stringKey("service.instance.id");
 
   private static final AttributeKey<String> SAGA_ID = AttributeKey.stringKey("streamrune.saga.id");
 
@@ -93,6 +97,7 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
                       .filter(s -> order.equals(s.getAttributes().get(AGGREGATE_ID)))
                       .findFirst()
                       .orElseThrow(() -> new AssertionError("no command/PlaceOrder span"));
+              assertNamesItsInstance(command);
               assertThat(spans.stream().filter(s -> isChildOf(s, command)).map(SpanData::getName))
                   .as("the spans under command/PlaceOrder")
                   .contains("lock/acquire", "eventstore/load", "eventstore/append");
@@ -135,5 +140,15 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
       }
     }
     return false;
+  }
+
+  /**
+   * The resource of a span names the instance that sent it, {@code service.instance.id}: an id the
+   * application draws at its start. StreamRune's own attributes never name the process.
+   */
+  private static void assertNamesItsInstance(SpanData span) {
+    String instance = span.getResource().getAttribute(SERVICE_INSTANCE_ID);
+    assertThat(instance).as("service.instance.id").isNotBlank();
+    assertThat(UUID.fromString(instance)).isNotNull();
   }
 }
