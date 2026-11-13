@@ -513,10 +513,9 @@ dependencies {
     // SDK is present (Chapter 15 adds Spring Boot's). StreamRune's Spring integration also starts
     // without it.
     implementation(libs.opentelemetry.api)
-    // Required at runtime: StreamRune's Spring auto-configuration (StreamRuneAutoConfiguration)
-    // references this optional type when it evaluates its @Conditional beans. It is not on the
-    // classpath transitively, so without it the application context fails to start — even though
-    // your own code never touches it directly.
+    // Spring Security's core. StreamRune's Spring integration starts without it; with it, the
+    // integration can take a request's user from the Spring Security principal. Chapter 9 decides
+    // where the demo's request identity comes from.
     implementation("org.springframework.security:spring-security-core")
 
     // Spring Boot starters
@@ -534,7 +533,7 @@ dependencies {
 
 > `spring-boot-starter-webflux` is added now because Chapter 15 (Server-Sent Events) streams `Flux<ServerSentEvent<String>>` from the reactive stack (Spring WebFlux and Reactor). Adding it here prevents a compilation failure when you reach that chapter.
 >
-> `spring-security-core` is a runtime requirement of StreamRune's Spring auto-configuration, not of your code: omitting it compiles fine but fails at startup. Spring Boot's dependency management gives it the version of Spring Security it manages, as it does for the starters. `opentelemetry-api` is optional for the integration: without it StreamRune traces nothing. The `gradle/libs.versions.toml` catalog you copied from the real demo defines its alias, at the version Spring Boot manages, so that the API matches the SDK Chapter 15 adds.
+> `spring-security-core` is optional for StreamRune's Spring integration, and the project of every chapter starts without it. With it on the classpath, the integration registers a resolver that takes a request's user from the Spring Security principal, and one that takes the role from it unless the application defines its own `UserRoleResolver`. Chapter 9 explains both, why the demo nevertheless trusts the `X-User-Id` header of its stand-in gateway, and the one case in which an application without Spring Security refuses to start. Spring Boot's dependency management gives it the version of Spring Security it manages, as it does for the starters. `opentelemetry-api` is optional for the integration: without it StreamRune traces nothing. The `gradle/libs.versions.toml` catalog you copied from the real demo defines its alias, at the version Spring Boot manages, so that the API matches the SDK Chapter 15 adds.
 
 ### Step 5 — Start PostgreSQL
 
