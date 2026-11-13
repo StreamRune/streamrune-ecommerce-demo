@@ -32,7 +32,7 @@ test.describe("Admin page", () => {
 
 const ENTRY = {
   commandId: "6f1c2a3e-0000-4000-8000-000000000001",
-  commandType: "org.streamrune.ecommerce.domain.product.ProductCommand$AdjustStock",
+  commandType: "org.streamrune.ecommerce.domain.inventory.InventoryCommand$AdjustInventory",
   errorType: "java.lang.IllegalStateException",
   errorMessage: "transient downstream failure",
   attempts: 3,
@@ -112,7 +112,7 @@ test.describe("Admin page — dead-letter Retry", () => {
     await page.getByRole("button", { name: "Retry" }).click();
 
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustStock?" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustInventory?" })).toBeVisible();
     await expect(dialog.getByText(NOT_DEDUPLICATED)).toBeVisible();
     await expect(dialog.getByText(/If the effect is absent, replay the entry/)).toBeVisible();
     expect(sent, "nothing is forced before the admin confirms").toEqual([RETRY]);

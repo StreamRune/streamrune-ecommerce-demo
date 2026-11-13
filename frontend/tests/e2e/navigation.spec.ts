@@ -9,9 +9,9 @@
  * Uses mocked backend throughout — runs without the Spring Boot backend.
  *
  * The flow runs as GUEST (an empty localStorage). Orders, Customers and
- * Fulfillment require the CUSTOMER or ADMIN role and Audit Log the ADMIN role,
- * so a GUEST sees "Access Restricted" there: the rendered state that proves
- * the page loaded without crashing.
+ * Fulfillment require the CUSTOMER or ADMIN role, Audit Log and Admin →
+ * Inventory the ADMIN role, so a GUEST sees "Access Restricted" there: the
+ * rendered state that proves the page loaded without crashing.
  */
 
 import { test, expect } from "@playwright/test";
@@ -26,6 +26,8 @@ const NAV_ITEMS: Array<{ href: string; heading: string; fallback?: string }> = [
   { href: "/events", heading: "Event Explorer" },
   { href: "/audit", heading: "Audit Log", fallback: "Access Restricted" },
   { href: "/admin", heading: "Admin" },
+  { href: "/admin/catalog", heading: "Catalog" },
+  { href: "/admin/inventory", heading: "Inventory", fallback: "Access Restricted" },
 ];
 
 test.describe("Cross-page navigation flow", () => {

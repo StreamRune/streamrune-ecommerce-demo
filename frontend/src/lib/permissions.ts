@@ -12,8 +12,10 @@ import type { Role } from "./types";
  *   customer or by an ADMIN; the fulfillment saga confirms it. A CUSTOMER's
  *   table holds their own orders only, so the gate needs no check per row.
  * - ORDER_SHIP, ORDER_DELIVER: an ADMIN's, whoever the order belongs to.
- * - PRODUCT_MANAGE: creating a product, its stock and price, discontinuing it
- *   and receiving a shipment are an ADMIN's; everyone reads the catalogue.
+ * - PRODUCT_MANAGE: creating a product, changing its price and discontinuing
+ *   it are an ADMIN's; everyone reads the catalogue and its availability.
+ * - INVENTORY_MANAGE: the inventory's units (GET /api/inventory), receiving a
+ *   shipment and adjusting the units are an ADMIN's.
  * - PROFILE_MANAGE: a CUSTOMER may edit, export and forget their own record.
  * - FULFILLMENT_VIEW: read the fulfillment sagas. A saga belongs to its order,
  *   so the backend serves them as it serves orders: every saga to an ADMIN, the
@@ -27,6 +29,7 @@ const ROLE_PERMISSIONS: Record<Role, string[]> = {
     "ORDER_SHIP",
     "ORDER_DELIVER",
     "PRODUCT_MANAGE",
+    "INVENTORY_MANAGE",
     "CUSTOMER_MANAGE",
     "AUDIT_VIEW",
     "EVENT_HISTORY_VIEW",

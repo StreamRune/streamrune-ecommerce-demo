@@ -10,7 +10,7 @@ import {
   useDeliverOrder,
   useCancelOrder,
 } from "@/lib/mutations";
-import type { OrderView, OrderStatus, PaymentStatus } from "@/lib/types";
+import type { Availability, OrderView, OrderStatus, PaymentStatus } from "@/lib/types";
 import { newId } from "@/lib/ids";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import { AccessRestricted } from "@/components/domain/access-restricted";
@@ -67,10 +67,32 @@ interface OrderLine {
   quantity: number;
 }
 
-function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string }) {
+/** What a product option adds to its name when it is short of stock: a word, never a count. */
+const AVAILABILITY_HINT: Partial<Record<Availability, string>> = {
+  LOW_STOCK: " · low stock",
+  OUT_OF_STOCK: " · out of stock",
+};
+
+interface PlaceOrderDialogProps {
+  initialCustomerId?: string;
+  /** The product the first line starts with, e.g. the storefront row the dialog was opened from. */
+  initialProductId?: string;
+  /** The trigger's label: "Place Order" on the Orders page, "Order" on a storefront row. */
+  triggerLabel?: string;
+  /** A trigger that cannot be used, e.g. for a product that cannot be ordered now. */
+  triggerDisabled?: boolean;
+}
+
+export function PlaceOrderDialog({
+  initialCustomerId,
+  initialProductId,
+  triggerLabel = "Place Order",
+  triggerDisabled = false,
+}: PlaceOrderDialogProps) {
+  const firstLine = { productId: initialProductId ?? "", quantity: 1 };
   const [open, setOpen] = useState(false);
   const [customerId, setCustomerId] = useState(initialCustomerId ?? "");
-  const [lines, setLines] = useState<OrderLine[]>([{ productId: "", quantity: 1 }]);
+  const [lines, setLines] = useState<OrderLine[]>([firstLine]);
   const { mutateAsync, isPending } = usePlaceOrder();
   const { data: products = [] } = useProducts();
   // An ADMIN gets every customer to choose from; a CUSTOMER gets their own record, the only
@@ -111,7 +133,7 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
       await mutateAsync({ orderId, customerId, lines: orderLines });
       toast.success(`Order placed: ${orderId}`);
       setOpen(false);
-      setLines([{ productId: "", quantity: 1 }]);
+      setLines([firstLine]);
       if (!initialCustomerId) setCustomerId("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to place order");
@@ -121,9 +143,17 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <PermissionGate permission="ORDER_PLACE">
-        <DialogTrigger render={<Button />}>
-          <Plus className="size-4" />
-          Place Order
+        <DialogTrigger
+          render={
+            <Button
+              variant={initialProductId ? "outline" : "default"}
+              size={initialProductId ? "xs" : "default"}
+              disabled={triggerDisabled}
+            />
+          }
+        >
+          {!initialProductId && <Plus className="size-4" />}
+          {triggerLabel}
         </DialogTrigger>
       </PermissionGate>
       <DialogContent className="sm:max-w-lg">
@@ -169,6 +199,7 @@ function PlaceOrderDialog({ initialCustomerId }: { initialCustomerId?: string })
                       {products.filter((p) => p.status !== "DISCONTINUED").map((p) => (
                         <SelectItem key={p.productId} value={p.productId}>
                           {p.name} ({formatMoney(p.price.amount, p.price.currency)})
+                          {AVAILABILITY_HINT[p.availability] ?? ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -295,6 +326,14 @@ function OrderRow({ order }: { order: OrderView }) {
               <span className="sr-only">Payment </span>
               {order.paymentStatus}
             </Badge>
+          )}
+          {/* Why the order was cancelled: the customer's reason, or the business reason of the
+              fulfillment, e.g. the stock its reservation was refused for. */}
+          {order.status === "CANCELLED" && order.reason && (
+            <p className="text-xs text-muted-foreground mt-1 max-w-72">
+              <span className="sr-only">Cancellation reason: </span>
+              {order.reason}
+            </p>
           )}
         </TableCell>
         <TableCell>

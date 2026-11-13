@@ -3,18 +3,45 @@ export interface Money {
   currency: string;
 }
 
-export type ProductStatus = "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK" | "DISCONTINUED";
+/** The catalogue's own status: whether the product is sold. The catalogue holds no stock. */
+export type ProductStatus = "AVAILABLE" | "DISCONTINUED";
 
+/**
+ * What the storefront says of a product's stock. The backend derives it from
+ * the inventory's available units (low below its threshold, out at zero) and
+ * from the catalogue's status for a discontinued product.
+ */
+export type Availability = "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK" | "DISCONTINUED";
+
+/**
+ * The storefront's product: the catalogue's fields and the availability the
+ * inventory gives it. `available` is the inventory's count; the storefront shows
+ * the availability badge, not the number.
+ */
 export interface ProductView {
   productId: string;
   name: string;
   description: string;
   category: string;
   price: Money;
-  stock: number;
   status: ProductStatus;
+  available: number;
+  availability: Availability;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * One product's units in the inventory (GET /api/inventory, ADMIN only):
+ * `available` can be reserved by an order, `reserved` is held for orders whose
+ * fulfillment is under way, `committed` belongs to confirmed orders.
+ */
+export interface InventoryView {
+  productId: string;
+  productName: string;
+  available: number;
+  reserved: number;
+  committed: number;
 }
 
 export type OrderStatus = "CREATED" | "CONFIRMED" | "SHIPPED" | "DELIVERED" | "CANCELLED";
@@ -35,6 +62,8 @@ export interface OrderView {
   total: Money;
   status: OrderStatus;
   paymentStatus: PaymentStatus | null;
+  /** Why the order was cancelled, e.g. the stock its reservation was refused for; null otherwise. */
+  reason?: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -2,8 +2,9 @@ import { ApiError, isQueuedForReplay, isRefusal } from "./api";
 import { newIdempotencyKey } from "./ids";
 
 /**
- * The changes of a quantity the page sent and has no final answer for, one per
- * product and kind, each with the `Idempotency-Key` it was sent under.
+ * The changes of an inventory quantity the page sent and has no final answer
+ * for, one per product and kind (a received shipment, an adjustment), each with
+ * the `Idempotency-Key` it was sent under.
  *
  * A key belongs to the change the user intends, not to a dialog: the backend
  * runs a command once per key, and a command that failed on infrastructure is
@@ -24,7 +25,7 @@ import { newIdempotencyKey } from "./ids";
  * storage cannot be read or written (a private window that refuses it), the
  * operations live as long as the page.
  */
-export type OperationKind = "adjust-stock" | "receive-shipment";
+export type OperationKind = "receive-shipment" | "adjust-inventory";
 
 /** An operation the page has no final answer for. */
 export interface PendingOperation {

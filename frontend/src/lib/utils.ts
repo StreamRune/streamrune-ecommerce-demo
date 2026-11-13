@@ -10,7 +10,7 @@ export function formatMoney(amount: number, currency: string) {
 }
 
 export function getAggregateBadgeClass(eventType: string): string {
-  if (["ProductCreated", "PriceUpdated", "StockAdjusted", "ProductDiscontinued"].includes(eventType)) {
+  if (["ProductCreated", "PriceUpdated", "ProductDiscontinued"].includes(eventType)) {
     return "bg-purple-500/10 text-purple-400 border-purple-500/20";
   }
   if (["OrderPlaced", "OrderConfirmed", "OrderShipped", "OrderDelivered", "OrderCancelled"].includes(eventType)) {
@@ -19,7 +19,16 @@ export function getAggregateBadgeClass(eventType: string): string {
   if (["CustomerRegistered", "ProfileUpdated", "DataExportRequested", "CustomerForgotten"].includes(eventType)) {
     return "bg-green-500/10 text-green-400 border-green-500/20";
   }
-  if (["ShipmentReceived", "StockReserved", "StockReleased", "ReservationConfirmed"].includes(eventType)) {
+  if (
+    [
+      "ShipmentReceived",
+      "InventoryAdjusted",
+      "StockReserved",
+      "StockReleased",
+      "ReservationConfirmed",
+      "StockReservationRefused",
+    ].includes(eventType)
+  ) {
     return "bg-orange-500/10 text-orange-400 border-orange-500/20";
   }
   if (
