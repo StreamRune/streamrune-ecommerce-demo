@@ -1298,9 +1298,9 @@ public class StreamRuneConfig {
    * LockException}, which the app answers {@code 503} ({@link GlobalExceptionHandler}).
    *
    * <p>{@code tracing(...)} takes the integration's {@link StreamRuneTracing} bean and adds the
-   * framework's {@code OpenTelemetryCommandInterceptor} ahead of the listed interceptors, so the
-   * {@code command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is
-   * {@code StreamRuneTracing.NOOP} and traces nothing.
+   * framework's {@code TracingCommandInterceptor} ahead of the listed interceptors, so the {@code
+   * command/<CommandType>} span covers the whole command. Without OpenTelemetry the bean is {@code
+   * StreamRuneTracing.NOOP} and traces nothing.
    *
    * <p>{@code app.chaos.saga-command-delay-max} (default {@code 0ms}) adds a {@link
    * SagaCommandDelayInterceptor} innermost when it is above zero: a demo-only knob that delays
