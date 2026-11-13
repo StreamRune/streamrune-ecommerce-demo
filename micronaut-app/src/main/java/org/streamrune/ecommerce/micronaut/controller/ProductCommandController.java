@@ -13,8 +13,8 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * ({@code 403} for everyone else). Creating a product and changing its price ask {@link
  * OwnerOrAdminAccess#requireAdmin} once the request is read; discontinuing is guarded in the
  * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
- * ({@code ProductQueryController}). The catalogue holds no stock: a product's units are received
- * and adjusted on its inventory ({@code InventoryCommandController}).
+ * ({@code ProductQueryController}). The catalogue holds no stock: how many units a product has is
+ * the inventory's concern.
  */
 @Controller("/api/products")
 public class ProductCommandController {
