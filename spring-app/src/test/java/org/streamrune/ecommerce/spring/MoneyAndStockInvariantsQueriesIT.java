@@ -166,6 +166,13 @@ class MoneyAndStockInvariantsQueriesIT {
                     stock("p-3b", "StockReleased", "q-3b", 1)),
                 List.of()),
             new Case(
+                "stock reserved for an order after the inventory refused it",
+                "stock reserved for an order after its refusal",
+                List.of(
+                    stock("p-3c", "StockReservationRefused", "q-3c", 3),
+                    stock("p-3c", "StockReserved", "q-3c", 3)),
+                List.of()),
+            new Case(
                 "a payment captured twice",
                 "payment captured twice, or refunded beyond its capture",
                 List.of(payment("q-4", "PaymentCaptured"), payment("q-4", "PaymentCaptured")),
@@ -277,9 +284,15 @@ class MoneyAndStockInvariantsQueriesIT {
     // A fulfillment saga whose forward commands all came before its compensation.
     insert(new Command("saga:fulfillment-q-ok-3:3:0", 3));
     insert(new Command("saga:fulfillment-q-ok-3:episode:1:comp:0", 9));
+    // An order the inventory refused: nothing reserved, cancelled and refunded.
+    insert(order("q-ok-4", "OrderPlaced", placed("p-ok-4", 3)));
+    insert(payment("q-ok-4", "PaymentCaptured"));
+    insert(stock("p-ok-4", "StockReservationRefused", "q-ok-4", 3));
+    insert(order("q-ok-4", "OrderCancelled", lines("p-ok-4")));
+    insert(payment("q-ok-4", "PaymentRefunded"));
 
     assertThat(MoneyAndStockInvariants.violations(dataSource, "q-")).isEmpty();
-    assertThat(MoneyAndStockInvariants.checks()).hasSize(8);
+    assertThat(MoneyAndStockInvariants.checks()).hasSize(9);
   }
 
   /**
@@ -287,7 +300,9 @@ class MoneyAndStockInvariantsQueriesIT {
    * void is refunded in the same append; a second cancellation of an order finds nothing left to
    * undo; a reservation stored after the first cancellation's undo is released by the second; a
    * payment voided before any stock was reserved; an order shipped and paid for whose saga ended
-   * {@code FAILED} because the compensation's cancellation was refused.
+   * {@code FAILED} because the compensation's cancellation was refused; an order of two products
+   * whose first line was reserved and whose second was refused, the reservation released by the
+   * cancellation.
    */
   @Test
   void historiesThatLookOddAndAreRightReportNothing() throws Exception {
@@ -325,6 +340,19 @@ class MoneyAndStockInvariantsQueriesIT {
     insert(stock("p-n5", "ReservationConfirmed", "q-n5", 3));
     insert(new Command("saga:fulfillment-q-n5:2:0", 3));
     insert(new Command("saga:fulfillment-q-n5:episode:1:comp:0", 20));
+
+    insert(
+        order(
+            "q-n6",
+            "OrderPlaced",
+            "{\"lines\":[{\"productId\":\"p-n6a\",\"quantity\":1},"
+                + "{\"productId\":\"p-n6b\",\"quantity\":2}]}"));
+    insert(payment("q-n6", "PaymentCaptured"));
+    insert(stock("p-n6a", "StockReserved", "q-n6", 1));
+    insert(stock("p-n6b", "StockReservationRefused", "q-n6", 2));
+    insert(order("q-n6", "OrderCancelled", NO_LINES));
+    insert(stock("p-n6a", "StockReleased", "q-n6", 1));
+    insert(payment("q-n6", "PaymentRefunded"));
 
     assertThat(MoneyAndStockInvariants.violations(dataSource, "q-")).isEmpty();
   }

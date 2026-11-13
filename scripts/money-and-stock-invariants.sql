@@ -40,6 +40,19 @@ HAVING count(*) FILTER (WHERE s.event_type = 'StockReserved') > 1
     OR count(*) FILTER (WHERE s.event_type <> 'StockReserved')
      > count(*) FILTER (WHERE s.event_type = 'StockReserved');
 
+-- Stock reserved for an order at a product after the inventory refused that order there. The
+-- refusal is final for the order at that product: the saga cancels the order, and a later or
+-- redelivered reservation request of the order stores nothing.
+SELECT 'stock reserved for an order after its refusal' AS violation,
+       r.payload->>'orderId' AS order_id, 'product ' || r.aggregate_id AS detail
+  FROM event_stream r
+  JOIN event_stream s
+    ON s.aggregate_type = 'inventory' AND s.aggregate_id = r.aggregate_id
+   AND s.event_type = 'StockReserved' AND s.payload->>'orderId' = r.payload->>'orderId'
+   AND s.global_offset > r.global_offset
+ WHERE r.aggregate_type = 'inventory' AND r.event_type = 'StockReservationRefused'
+ GROUP BY r.payload->>'orderId', r.aggregate_id;
+
 -- A payment captured twice, or refunded more often than captured.
 SELECT 'payment captured twice, or refunded beyond its capture' AS violation,
        substr(aggregate_id, 5) AS order_id, aggregate_id AS detail
