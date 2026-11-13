@@ -11,10 +11,12 @@ import { useRole } from "@/providers/role-provider";
 import { AccessRestricted } from "@/components/domain/access-restricted";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import {
+  FieldError,
   PendingNotice,
   reportFailure,
   usePendingOperation,
 } from "@/components/domain/held-operation";
+import { wholeNumber } from "@/lib/utils";
 import {
   Table,
   TableBody,
@@ -47,11 +49,17 @@ function ReceiveShipmentForm({ row, onClose }: { row: InventoryView; onClose: ()
   const [quantity, setQuantity] = useState(() =>
     operation.pending ? String(operation.pending.quantity) : "1"
   );
+  const [quantityError, setQuantityError] = useState<string | null>(null);
   const { mutateAsync, isPending } = useReceiveShipment();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const amount = parseInt(quantity, 10);
+    const amount = wholeNumber(quantity);
+    if (amount === null || amount < 1) {
+      setQuantityError("Enter a whole number of units above zero, e.g. 5.");
+      return;
+    }
+    setQuantityError(null);
     // One key per intended shipment: the page's own retry, and the same amount sent again from
     // this dialog, after it was closed or after a reload, carry it, so the backend applies the
     // shipment once.
@@ -82,14 +90,18 @@ function ReceiveShipmentForm({ row, onClose }: { row: InventoryView; onClose: ()
       )}
       <div className="space-y-1">
         <Label htmlFor="rs-qty">Quantity</Label>
+        {/* step="any": the form reads the number itself (wholeNumber) and says what is wrong,
+            instead of the browser's bubble. */}
         <Input
           id="rs-qty"
           type="number"
-          min="1"
+          step="any"
           value={quantity}
           onChange={(e) => setQuantity(e.target.value)}
-          required
+          aria-invalid={quantityError !== null}
+          aria-describedby={quantityError ? "rs-qty-error" : undefined}
         />
+        <FieldError id="rs-qty-error" message={quantityError} />
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Receive"}</Button>
@@ -105,19 +117,35 @@ function AdjustInventoryForm({ row, onClose }: { row: InventoryView; onClose: ()
   const [change, setChange] = useState(() =>
     operation.pending ? String(operation.pending.quantity) : ""
   );
-  const [reason, setReason] = useState("");
+  // A held adjustment opens with the reason its first request carried.
+  const [reason, setReason] = useState(() => operation.pending?.reason ?? "");
+  const [changeError, setChangeError] = useState<string | null>(null);
   const { mutateAsync, isPending } = useAdjustInventory();
+
+  // The held adjustment this amount sends again, if any. It keeps the reason of its first
+  // request: the backend answers every request under the key with the first one's result, so
+  // an edited reason would not be recorded. The field says so instead of sending it.
+  const typed = wholeNumber(change);
+  const held =
+    operation.pending && operation.pending.quantity === typed ? operation.pending : undefined;
+  const heldReason = held?.reason;
+  const reasonKept = heldReason !== undefined && reason !== heldReason;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const quantityChange = parseInt(change, 10);
+    const quantityChange = wholeNumber(change);
+    if (quantityChange === null) {
+      setChangeError("Enter a whole number of units, negative to remove, e.g. -3.");
+      return;
+    }
+    setChangeError(null);
     // One key per intended adjustment, as for a shipment. The backend decides what it accepts:
     // a change of zero, a blank reason or a count below zero comes back as its 400 and reason.
-    const idempotencyKey = operation.keyFor(quantityChange);
+    const idempotencyKey = operation.keyFor(quantityChange, reason);
     try {
       await mutateAsync({
         productId: row.productId,
-        body: { quantityChange, reason },
+        body: { quantityChange, reason: heldReason ?? reason },
         idempotencyKey,
       });
       operation.refresh();
@@ -147,10 +175,13 @@ function AdjustInventoryForm({ row, onClose }: { row: InventoryView; onClose: ()
         <Input
           id="ai-change"
           type="number"
+          step="any"
           value={change}
           onChange={(e) => setChange(e.target.value)}
-          required
+          aria-invalid={changeError !== null}
+          aria-describedby={changeError ? "ai-change-error" : undefined}
         />
+        <FieldError id="ai-change-error" message={changeError} />
       </div>
       <div className="space-y-1">
         <Label htmlFor="ai-reason">Reason</Label>
@@ -161,6 +192,12 @@ function AdjustInventoryForm({ row, onClose }: { row: InventoryView; onClose: ()
           placeholder="e.g. stocktake: two damaged"
           required
         />
+        {reasonKept && (
+          <p role="note" className="text-xs text-muted-foreground">
+            Sent again, the held adjustment keeps its reason &ldquo;{heldReason}&rdquo;: the
+            backend records the first request&apos;s. The edited reason is not sent.
+          </p>
+        )}
       </div>
       <DialogFooter showCloseButton>
         <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Adjust"}</Button>
@@ -239,8 +276,8 @@ export function InventoryTable() {
       <div>
         <h1 className="text-2xl font-bold">Inventory</h1>
         <p className="text-sm text-muted-foreground">
-          The units of every product: available to order, reserved for orders in fulfillment,
-          committed to confirmed orders
+          The units of every product: available to order, reserved for orders not yet shipped,
+          committed to shipped orders
         </p>
       </div>
 

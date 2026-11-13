@@ -33,8 +33,9 @@ export interface ProductView {
 
 /**
  * One product's units in the inventory (GET /api/inventory, ADMIN only):
- * `available` can be reserved by an order, `reserved` is held for orders whose
- * fulfillment is under way, `committed` belongs to confirmed orders.
+ * `available` can be reserved by an order, `reserved` is held for orders not
+ * yet shipped (a confirmed order keeps its units reserved), `committed`
+ * belongs to shipped orders.
  */
 export interface InventoryView {
   productId: string;

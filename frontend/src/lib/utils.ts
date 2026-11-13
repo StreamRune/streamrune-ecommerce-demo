@@ -5,6 +5,19 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/**
+ * A whole number typed into a number field, read strictly: digits with an
+ * optional minus sign, nothing else. A number field accepts "1e3" and "1.5",
+ * which `parseInt` would read as 1; here they, an empty field and anything
+ * beyond a safe integer are no number (`null`), and the form says so.
+ */
+export function wholeNumber(raw: string): number | null {
+  const text = raw.trim();
+  if (!/^-?\d+$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 export function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(amount);
 }

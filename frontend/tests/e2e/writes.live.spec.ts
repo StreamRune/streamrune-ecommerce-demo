@@ -24,7 +24,7 @@
  * What a run leaves behind: a forgotten customer, three products (the one it
  * ordered from, with the units no order took, a discontinued one and one
  * without stock), five orders with their payments and sagas (one delivered,
- * one confirmed, one cancelled after its confirmation, its payment refunded and
+ * one shipped, one cancelled after its confirmation, its payment refunded and
  * its unit released, one cancelled by a failed payment, one cancelled for want
  * of stock), and the events of all of them. The payment-failure switch is left
  * off.
@@ -401,9 +401,24 @@ test.describe("Writes against a running backend", () => {
     await expect(placed).toContainText("CONFIRMED", SETTLED);
     await customer.context().close();
 
-    // The confirmed order's unit is committed, live on the open inventory page.
+    // A confirmed order holds its unit reserved, live on the open inventory page: the unit is
+    // committed only when the order ships.
     await expect(units.nth(1)).toHaveText("12", SETTLED);
+    await expect(units.nth(2)).toHaveText("1", SETTLED);
+    await expect(units.nth(3)).toHaveText("0");
+
+    // An ADMIN ships the order from the Orders page; the reservation is confirmed and the unit
+    // moves from reserved to committed, again live on the inventory page.
+    const admin = await pageAs(browser, "ADMIN");
+    await admin.goto(`/orders?customerId=${created.customerId}`);
+    const toShip = row(admin, orderId);
+    await expect(toShip).toContainText("CONFIRMED", SETTLED);
+    await toShip.getByRole("button", { name: "Ship" }).click();
+    await expect(admin.getByText("Order shipped")).toBeVisible();
+    await admin.context().close();
+    await expect(units.nth(2)).toHaveText("0", SETTLED);
     await expect(units.nth(3)).toHaveText("1", SETTLED);
+    await expect(units.nth(1)).toHaveText("12");
 
     await page.goto("/admin/catalog");
     await pickRowAction(page, created.productName, "Discontinue");

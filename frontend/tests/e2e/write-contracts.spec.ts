@@ -526,6 +526,35 @@ test.describe("Catalog — the commands the page sends", () => {
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 
+  test("the opening stock is read strictly: an exponent, a fraction or a negative count is refused in the field", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    const received = await answerCommands(page, "/api/inventory/*/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    for (const typed of ["1e3", "1.5", "-1"]) {
+      await dialog.getByLabel(/Opening stock/).fill(typed);
+      await dialog.getByRole("button", { name: "Create" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units, zero or more, or leave it empty."
+      );
+    }
+    expect(sent, "nothing is created while the field is refused").toHaveLength(0);
+
+    await dialog.getByLabel(/Opening stock/).fill("12");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Opening stock received: 12 units of prod-[0-9a-f]{8}/)).toBeVisible();
+    expect(received.map((c) => c.body)).toEqual([{ quantity: 12 }]);
+  });
+
   test("Update Price and Discontinue send the backend's field names", async ({ page }) => {
     await mockBackendRoutes(page);
     await mockList(page, "/api/products", [WIDGET]);
@@ -607,6 +636,46 @@ test.describe("Inventory — the commands the page sends", () => {
     expect(missing, "the browser holds the form back").toBe(true);
     await expect(dialog).toBeVisible();
     expect(adjusted).toHaveLength(0);
+  });
+
+  test("Receive Shipment and Adjust read their numbers strictly: an exponent, a fraction or nothing is refused in the field", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/inventory");
+    const dialog = page.getByRole("dialog");
+    await pickRowAction(page, "Receive Shipment");
+    // A number field takes "1e3" as 1000 and "1.5" as is; neither is a count of units here.
+    for (const typed of ["1e3", "1.5", "", "0"]) {
+      await dialog.getByLabel("Quantity").fill(typed);
+      await dialog.getByRole("button", { name: "Receive" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units above zero, e.g. 5."
+      );
+    }
+    await expect(dialog.getByLabel("Quantity")).toHaveAttribute("aria-invalid", "true");
+    await page.keyboard.press("Escape");
+
+    await pickRowAction(page, "Adjust");
+    await dialog.getByLabel("Reason").fill("recount");
+    for (const typed of ["1e3", "-1.5", ""]) {
+      await dialog.getByLabel(/Quantity change/).fill(typed);
+      await dialog.getByRole("button", { name: "Adjust" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units, negative to remove, e.g. -3."
+      );
+    }
+    await dialog.getByLabel(/Quantity change/).fill("-3");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
+
+    expect(received, "nothing refused in the field is sent").toHaveLength(0);
+    expect(adjusted.map((c) => c.body)).toEqual([{ quantityChange: -3, reason: "recount" }]);
   });
 
   test("Receive Shipment and Adjust send a new Idempotency-Key for each applied change, and the page's retry of a lost answer sends the same one", async ({
@@ -739,9 +808,15 @@ test.describe("Inventory — one Idempotency-Key per intended change", () => {
       "The adjustment of +5 has no answer yet: it may have been applied."
     );
     await expect(dialog.getByLabel(/Quantity change/)).toHaveValue("5");
+    // The held adjustment opens with the reason its first request carried, and keeps it.
+    await expect(dialog.getByLabel("Reason")).toHaveValue("recount");
+    await expect(dialog.getByRole("status")).toContainText("Its reason is “recount”.");
     await dialog.getByLabel(/Quantity change/).fill("6");
     await dialog.getByLabel(/Quantity change/).fill("5");
     await dialog.getByLabel("Reason").fill("recount after the lost answer");
+    await expect(dialog.getByRole("note")).toHaveText(
+      "Sent again, the held adjustment keeps its reason “recount”: the backend records the first request's. The edited reason is not sent."
+    );
     await dialog.getByRole("button", { name: "Adjust" }).click();
     await expect(page.getByText("Inventory adjusted")).toBeVisible();
 
@@ -760,7 +835,8 @@ test.describe("Inventory — one Idempotency-Key per intended change", () => {
       { quantityChange: 5, reason: "recount" },
       { quantityChange: 5, reason: "recount" },
       { quantityChange: 5, reason: "recount" },
-      { quantityChange: 5, reason: "recount after the lost answer" },
+      // Sent again under its key, the held adjustment carries its first reason, not the edit.
+      { quantityChange: 5, reason: "recount" },
       { quantityChange: 5, reason: "another recount" },
     ]);
   });
@@ -845,7 +921,13 @@ test.describe("Inventory — one Idempotency-Key per intended change", () => {
     await dialog.getByLabel("Price (USD)").fill("12.50");
     await dialog.getByLabel(/Opening stock/).fill("4");
     await dialog.getByRole("button", { name: "Create" }).click();
-    await expect(page.getByText(/its opening stock of 4 was not received/)).toBeVisible();
+    // Queued: its outcome is not known yet, and the toast says so instead of "not received".
+    await expect(
+      page.getByText(
+        /^Product prod-[0-9a-f]{8} was created\. Its opening stock of 4 is queued for a replay, so its outcome is not known yet .*In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once\.$/
+      )
+    ).toBeVisible();
+    await expect(page.getByText(/was not received/)).toHaveCount(0);
     const productId = sent[0].body?.productId as string;
 
     // The new product's row in the inventory, as the read model lists it.
@@ -855,6 +937,10 @@ test.describe("Inventory — one Idempotency-Key per intended change", () => {
     await page.goto("/admin/inventory");
     await pickRowAction(page, "Receive Shipment");
     await expect(dialog.getByRole("status")).toContainText("The shipment of +4 is queued for a replay");
+    // Nothing invites a second shipment beside the held one.
+    await expect(dialog.getByRole("status")).toContainText(
+      "Start a new change only for another shipment beside this one: this one may still be applied."
+    );
     await expect(dialog.getByLabel("Quantity")).toHaveValue("4");
     await dialog.getByRole("button", { name: "Receive" }).click();
     await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
@@ -866,6 +952,111 @@ test.describe("Inventory — one Idempotency-Key per intended change", () => {
     expect(received[1].idempotencyKey, "the opening stock keeps its key").toBe(
       received[0].idempotencyKey
     );
+  });
+
+  test("an opening stock without an answer is reported as of unknown outcome, not as not received", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    // The first attempt and the page's two retries get no answer.
+    const received = await answerCommands(page, "/api/inventory/*/receive", (route) =>
+      route.abort("failed")
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByLabel(/Opening stock/).fill("4");
+    await dialog.getByRole("button", { name: "Create" }).click();
+
+    const productId = () => sent[0].body?.productId as string;
+    await expect(
+      page.getByText(
+        /Its opening stock of 4 got no answer, so its outcome is unknown: it may have been received .*In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once\.$/
+      )
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/was not received/)).toHaveCount(0);
+    expect(received.map((c) => c.path)).toEqual(Array(3).fill(`/api/inventory/${productId()}/receive`));
+    expect(new Set(received.map((c) => c.idempotencyKey)).size, "one shipment, one key").toBe(1);
+  });
+
+  test("Create after a lost answer sends the same product id, and the backend's already-exists completes the create", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    let answers = 0;
+    const sent = await answerCommands(page, "/api/products", (route) => {
+      answers += 1;
+      if (answers === 1) return route.abort("failed");
+      const id = (route.request().postDataJSON() as { productId: string }).productId;
+      return route.fulfill({
+        status: 400,
+        contentType: "text/plain",
+        body: `Product already exists: ${id}`,
+      });
+    });
+    const received = await answerCommands(page, "/api/inventory/*/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByLabel(/Opening stock/).fill("3");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Failed to fetch/).first()).toBeVisible();
+    const productId = sent[0].body?.productId as string;
+    await expect(dialog.getByRole("note")).toHaveText(
+      `The last Create of ${productId} got no answer: the product may exist. Create sends it again under the same id, so it cannot make a second product.`
+    );
+
+    // Closed and opened again, the dialog still holds the id.
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Add Product" }).click();
+    await dialog.getByRole("button", { name: "Create" }).click();
+
+    await expect(
+      page.getByText(`Product created: ${productId} (the earlier Create was applied)`)
+    ).toBeVisible();
+    await expect(page.getByText(`Opening stock received: 3 units of ${productId}`)).toBeVisible();
+    expect(sent.map((c) => c.body?.productId)).toEqual([productId, productId]);
+    expect(received.map((c) => [c.path, c.body])).toEqual([
+      [`/api/inventory/${productId}/receive`, { quantity: 3 }],
+    ]);
+  });
+
+  test("a refused Create lets its id go: the next Create picks a new one", async ({ page }) => {
+    await mockBackendRoutes(page);
+    let answers = 0;
+    const sent = await answerCommands(page, "/api/products", (route) =>
+      answers++ === 0
+        ? route.fulfill({ status: 400, contentType: "text/plain", body: "Price must be positive" })
+        : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/refused the request \(400\): Price must be positive/)).toBeVisible();
+    await expect(dialog.getByRole("note")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Product created: prod-[0-9a-f]{8}$/)).toBeVisible();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body?.productId).not.toBe(sent[0].body?.productId);
   });
 
   test("Start a new change makes the same amount a new adjustment with a new key", async ({

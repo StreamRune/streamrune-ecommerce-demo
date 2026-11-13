@@ -12,9 +12,10 @@ import {
 } from "@/lib/mutations";
 import type { ProductView, ProductStatus } from "@/lib/types";
 import { newId } from "@/lib/ids";
-import { isQueuedForReplay } from "@/lib/api";
-import { keyForOperation } from "@/lib/pending-operations";
+import { ApiError } from "@/lib/api";
+import { keyForOperation, outcomeOf, pendingOperation } from "@/lib/pending-operations";
 import { PermissionGate } from "@/components/domain/permission-gate";
+import { FieldError } from "@/components/domain/held-operation";
 import {
   Table,
   TableBody,
@@ -41,7 +42,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn, formatMoney } from "@/lib/utils";
+import { cn, formatMoney, wholeNumber } from "@/lib/utils";
 
 const STATUS_STYLES: Record<ProductStatus, string> = {
   AVAILABLE: "bg-green-500/10 text-green-400 border-green-500/20",
@@ -49,6 +50,45 @@ const STATUS_STYLES: Record<ProductStatus, string> = {
 };
 
 // ─── Create Product Dialog ────────────────────────────────────────────────────
+
+/**
+ * The toast of an opening stock that was not confirmed. The product exists in
+ * every case. What the toast says of the stock follows what the page knows of
+ * the shipment it holds (`pending-operations.ts`): refused for good (`4xx`,
+ * nothing held), refused for now with nothing written, or of unknown outcome —
+ * queued for a replay, or without an answer, so it may have been received. In
+ * the last two cases the way on is the held shipment, which the Receive
+ * Shipment dialog of Admin → Inventory sends again under the same key, so it is
+ * received once; a new shipment beside it could receive the stock twice.
+ */
+function reportOpeningStockFailure(productId: string, units: number, err: unknown) {
+  const answer = err instanceof Error ? err.message : "no answer";
+  const held = pendingOperation("receive-shipment", productId);
+  const resend =
+    "In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once.";
+  if (held === undefined) {
+    toast.error(
+      `Product ${productId} was created, but its opening stock of ${units} was not received (${answer}). Receive it from Admin → Inventory.`
+    );
+    return;
+  }
+  switch (outcomeOf(held)) {
+    case "queued":
+      toast.info(
+        `Product ${productId} was created. Its opening stock of ${units} is queued for a replay, so its outcome is not known yet (${answer}). ${resend}`
+      );
+      return;
+    case "unknown":
+      toast.warning(
+        `Product ${productId} was created. Its opening stock of ${units} got no answer, so its outcome is unknown: it may have been received (${answer}). ${resend}`
+      );
+      return;
+    case "refused":
+      toast.error(
+        `Product ${productId} was created, but its opening stock of ${units} was not received: the backend refused it for now and wrote nothing (${answer}). ${resend}`
+      );
+  }
+}
 
 /** Where the two steps of a create with opening stock stand, as the dialog shows them. */
 type Step = "idle" | "creating" | "receiving";
@@ -61,6 +101,12 @@ type Step = "idle" | "creating" | "receiving";
  * intended change (`pending-operations.ts`), so when it fails the Receive
  * Shipment dialog of Admin → Inventory opens on it and sends it again under
  * the same key.
+ *
+ * The product id is picked once per intended product: when CreateProduct gets
+ * no answer (it may have been applied), the next Create sends the same id
+ * again, so it cannot make a second product; the backend's "Product already
+ * exists" for that id then means the first attempt was applied. A refusal
+ * (`4xx`) or a success lets the id go.
  */
 function CreateProductDialog() {
   const [open, setOpen] = useState(false);
@@ -70,6 +116,9 @@ function CreateProductDialog() {
   const [price, setPrice] = useState("");
   const [openingStock, setOpeningStock] = useState("");
   const [step, setStep] = useState<Step>("idle");
+  const [openingStockError, setOpeningStockError] = useState<string | null>(null);
+  /** The id of a CreateProduct that got no answer: the next Create sends it again. */
+  const [unansweredId, setUnansweredId] = useState<string | null>(null);
   const { mutateAsync: create } = useCreateProduct();
   const { mutateAsync: receive } = useReceiveShipment();
 
@@ -79,20 +128,41 @@ function CreateProductDialog() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const units = openingStock.trim() === "" ? 0 : parseInt(openingStock, 10);
+    const units = openingStock.trim() === "" ? 0 : wholeNumber(openingStock);
+    if (units === null || units < 0) {
+      setOpeningStockError("Enter a whole number of units, zero or more, or leave it empty.");
+      return;
+    }
+    setOpeningStockError(null);
     // Step 1: the backend takes the product id from the request and the price as a plain USD
     // amount.
     let productId: string;
     setStep("creating");
     try {
-      productId = newId("prod");
-      await create({ productId, name, description, category, price: parseFloat(price) });
-      toast.success(`Product created: ${productId}`);
+      productId = unansweredId ?? newId("prod");
     } catch (err) {
       setStep("idle");
       toast.error(err instanceof Error ? err.message : "Failed to create product");
       return;
     }
+    try {
+      await create({ productId, name, description, category, price: parseFloat(price) });
+      toast.success(`Product created: ${productId}`);
+    } catch (err) {
+      const isRefusal = err instanceof ApiError && err.status >= 400 && err.status < 500;
+      if (isRefusal && productId === unansweredId && err.detail.startsWith("Product already exists")) {
+        // The Create that got no answer was applied: the product is there, as first sent.
+        toast.success(`Product created: ${productId} (the earlier Create was applied)`);
+      } else {
+        // A refusal settles a new id; for an id whose first Create got no answer it says nothing
+        // of that first one, so the id is kept.
+        setUnansweredId(isRefusal && productId !== unansweredId ? null : productId);
+        setStep("idle");
+        toast.error(err instanceof Error ? err.message : "Failed to create product");
+        return;
+      }
+    }
+    setUnansweredId(null);
     // Step 2: the opening stock, received into the inventory like any shipment. The product
     // exists whatever this step answers, so the dialog closes either way.
     if (units > 0) {
@@ -107,10 +177,7 @@ function CreateProductDialog() {
           `Opening stock received: ${units} ${units === 1 ? "unit" : "units"} of ${productId}`
         );
       } catch (err) {
-        const answer = err instanceof Error ? err.message : "no answer";
-        const message = `Product ${productId} was created, but its opening stock of ${units} was not received (${answer}). Receive it from Admin → Inventory.`;
-        if (isQueuedForReplay(err)) toast.info(message);
-        else toast.error(message);
+        reportOpeningStockFailure(productId, units, err);
       }
     }
     setStep("idle");
@@ -152,20 +219,31 @@ function CreateProductDialog() {
             </div>
             <div className="space-y-1">
               <Label htmlFor="cp-opening">Opening stock (optional)</Label>
+              {/* step="any": the form reads the number itself (wholeNumber) and says what is
+                  wrong, instead of the browser's bubble. */}
               <Input
                 id="cp-opening"
                 type="number"
-                min="0"
+                step="any"
                 placeholder="0"
                 value={openingStock}
                 onChange={(e) => setOpeningStock(e.target.value)}
+                aria-invalid={openingStockError !== null}
+                aria-describedby={openingStockError ? "cp-opening-error" : undefined}
               />
+              <FieldError id="cp-opening-error" message={openingStockError} />
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
             The catalogue holds no stock. An opening stock is received into the inventory as a
             shipment, a second command sent once the product exists.
           </p>
+          {unansweredId && !busy && (
+            <p role="note" className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
+              The last Create of {unansweredId} got no answer: the product may exist. Create sends
+              it again under the same id, so it cannot make a second product.
+            </p>
+          )}
           {busy && (
             <ol role="status" className="text-sm space-y-1">
               <li>

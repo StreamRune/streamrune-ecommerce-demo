@@ -28,7 +28,8 @@ const OUTCOME_TEXT = {
 /**
  * The notice of a dialog whose change of this product has no final answer: the
  * amount, what the backend answered it so far, what sending it again does, and
- * the way to start a new change instead.
+ * the way to start a new change instead — which, while the held change may
+ * still be applied, is a second change beside it, and the notice says so.
  */
 export function PendingNotice({
   pending,
@@ -40,12 +41,18 @@ export function PendingNotice({
   onStartNew: () => void;
 }) {
   const amount = signed(pending.quantity);
+  const outcome = outcomeOf(pending);
   return (
     <div role="status" className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm space-y-2">
       <p>
-        The {noun} of {amount} {OUTCOME_TEXT[outcomeOf(pending)]} Sending {amount} again sends it
+        The {noun} of {amount} {OUTCOME_TEXT[outcome]} Sending {amount} again sends it
         under the same key, so it is applied once. A different amount is a new {noun}; so is the
         same amount after Start a new change.
+        {pending.reason !== undefined && <> Its reason is &ldquo;{pending.reason}&rdquo;.</>}
+        {outcome !== "refused" && (
+          <> Start a new change only for another {noun} beside this one: this one may still be
+          applied.</>
+        )}
       </p>
       <Button type="button" variant="outline" size="sm" onClick={onStartNew}>
         Start a new change
@@ -75,11 +82,22 @@ export function usePendingOperation(kind: OperationKind, productId: string) {
   const [pending, setPending] = useState(() => pendingOperation(kind, productId));
   return {
     pending,
-    keyFor: (quantity: number) => keyForOperation(kind, productId, quantity),
+    keyFor: (quantity: number, reason?: string) =>
+      keyForOperation(kind, productId, quantity, reason),
     refresh: () => setPending(pendingOperation(kind, productId)),
     startNew: () => {
       startNewOperation(kind, productId);
       setPending(undefined);
     },
   };
+}
+
+/** The message of a field the form refused before sending anything, tied to its input. */
+export function FieldError({ id, message }: { id: string; message: string | null }) {
+  if (!message) return null;
+  return (
+    <p id={id} role="alert" className="text-xs text-destructive">
+      {message}
+    </p>
+  );
 }
