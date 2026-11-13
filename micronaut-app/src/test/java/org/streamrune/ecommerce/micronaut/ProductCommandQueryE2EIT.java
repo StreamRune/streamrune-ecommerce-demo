@@ -171,37 +171,4 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
                             .header("X-User-Id", "test-admin")));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
   }
-
-  /**
-   * The catalogue holds no stock: a request that names an opening stock is refused with {@code
-   * 400}, and no product is created, as in the Spring app.
-   */
-  @Test
-  void aRequestWithAnOpeningStockIsRefused() {
-    String pid = "m-p-opening-stock-" + System.nanoTime();
-    HttpClientResponseException ex =
-        assertThrows(
-            HttpClientResponseException.class,
-            () ->
-                client
-                    .toBlocking()
-                    .exchange(
-                        HttpRequest.POST(
-                                "/api/products",
-                                """
-                                {"productId": "%s", "name": "Widget", "price": 5.00,
-                                 "initialStock": 99}"""
-                                    .formatted(pid))
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "ADMIN")
-                            .header("X-User-Id", "test-admin"),
-                        String.class));
-    assertThat(ex.getStatus().getCode()).isEqualTo(400);
-    assertThat(ex.getResponse().getBody(String.class))
-        .hasValue(
-            "initialStock is not accepted: a product holds no stock; receive its opening stock"
-                + " with POST /api/inventory/{productId}/receive");
-
-    assertThat(getProduct(pid).status()).isEqualTo(404);
-  }
 }

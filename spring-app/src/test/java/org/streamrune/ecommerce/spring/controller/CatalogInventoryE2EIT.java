@@ -106,8 +106,16 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
         .is2xxSuccessful();
 
     awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4, available 1");
+    // The release is the cancellation process manager's, a subscription of its own: wait for it.
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> assertThat(inventoryEvents(stocked, InventoryEvent.StockReleased.class)).isOne());
+    assertThat(inventoryEvents(stocked, InventoryEvent.StockReserved.class))
+        .as("the stocked line was reserved before it was released")
+        .isOne();
     awaitInventory(stocked, new InventoryView(stocked, "Catalogued", 10, 0, 0));
-    assertThat(inventoryEvents(stocked, InventoryEvent.StockReleased.class)).isOne();
   }
 
   @Test

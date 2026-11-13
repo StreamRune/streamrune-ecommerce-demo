@@ -295,6 +295,14 @@ public record InventoryState(
    * ReservationConfirmed}. {@code refusedOrders} holds the orders whose reservation was refused
    * ({@code StockReservationRefused}), so a second request of such an order stores nothing. The
    * state is snapshotted with both.
+   *
+   * <p>Unlike {@code reservations}, {@code refusedOrders} only grows: one order id for each order
+   * the product could not serve. The inventory records no event that says an order is done (the
+   * release that follows a refusal holds nothing and stores nothing), so it has no fact to forget
+   * an id at, and forgetting one would let a late duplicate of the refused request reserve stock
+   * for a cancelled order after the command inbox has pruned its key. The cost is a short string
+   * per refused order in the state and its snapshots, which stays small while refusals are the
+   * exception: an order of more than the shop holds.
    */
   @JsonCreator
   public InventoryState(
@@ -331,7 +339,7 @@ public record InventoryState(
 
 The zero-argument constructor satisfies `AggregateState`; StreamRune calls it when no prior events exist for the stream.
 
-`refusedOrders` holds the orders whose reservation the inventory refused: an order that asks for more than the product holds available is answered with `StockReservationRefused`, an event and not an exception, because the refusal is a fact of the order's fulfillment that the saga acts on. A second `ReserveStock` of a refused order stores nothing, as a second one of a reserved order does.
+`refusedOrders` holds the orders whose reservation the inventory refused: an order that asks for more than the product holds available is answered with `StockReservationRefused`, an event and not an exception, because the refusal is a fact of the order's fulfillment that the saga acts on. A second `ReserveStock` of a refused order stores nothing, as a second one of a reserved order does. The set only grows: the inventory records no event that says an order is done, so it keeps every refused id, a small cost while refusals are the exception, and in return a late duplicate of a refused request never reserves stock for a cancelled order, whatever the command inbox still remembers.
 
 `reservations` holds the open reservation of each order at this product, by order id. `StockReserved` adds an entry; `StockReleased` and `ReservationConfirmed` remove it, so the map holds only the orders in flight for the product. The bus snapshots the state with the map (chapter 8): the canonical constructor is the one Jackson uses (`@JsonCreator`, one `@JsonProperty` per component), and it reads a state written without `reservations` as an empty map. A snapshot that lost the map would make every release and confirmation after it store nothing, with no error, and strand the stock. `reservationOf(orderId)` is the quantity an order holds, or none.
 
@@ -770,8 +778,8 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The order cancelled, with the reason of its {@code OrderCancelled}. An order cancelled twice
-   * (its customer, then the fulfillment saga) shows the first reason: the second cancellation
-   * changes nothing the customer sees.
+   * (its customer, then the fulfillment saga) shows the first cancellation's reason, even when that
+   * one gave none: the second cancellation changes nothing the customer sees.
    */
   private void cancel(String id, String reason, Instant timestamp) {
     findById(id, OrderView.class)
@@ -786,7 +794,7 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         OrderStatus.CANCELLED,
                         existing.paymentStatus(),
-                        existing.reason() != null ? existing.reason() : reason,
+                        existing.status() == OrderStatus.CANCELLED ? existing.reason() : reason,
                         existing.createdAt(),
                         timestamp)));
   }
@@ -1556,7 +1564,7 @@ public record OrderFulfillmentState(
 }
 ```
 
-The `@JsonCreator` / `@JsonProperty` annotations are required because `PostgresSagaStore` serialises saga state to JSON. Java records do not have a no-arg constructor, so Jackson needs explicit constructor mapping. The state carries the order `lines` so that when payment is captured the saga knows which products and quantities to reserve — it does not need to re-load the order aggregate. `reservedProductIds` holds the products whose `StockReserved` the saga has seen, once each and in the order of the lines; the saga moves on to the confirmation when it holds every line's product. The constructor copies both lists defensively and treats `null` as empty so a saga that has not yet seen `OrderPlaced` still has usable (empty) lists. The four package-private helpers — `withStatus`, `withReservedProduct`, `hasLineFor` and `everyLineReserved` — are the saga's only way to build the next state; none of them is a getter, so none ends up in the stored JSON. The `status()` method translates domain-specific `OrderFulfillmentStatus` values to the framework's `SagaStatus` enum on the forward path (a fresh, non-terminal `state.status()` is what gets persisted alongside a successful `handle()`); once a saga reaches a framework-classified outcome — `COMPENSATED`, `FAILED` via compensation, or `FAULTED` via poison-event quarantine — the *stored* status can diverge from what this method would compute, which is exactly why `SagaRunner` and `LoadedSaga` treat the store's persisted status, not this method, as authoritative (see [What We Learned](#what-we-learned)).
+The `@JsonCreator` / `@JsonProperty` annotations are required because `PostgresSagaStore` serialises saga state to JSON. Java records do not have a no-arg constructor, so Jackson needs explicit constructor mapping. The state carries the order `lines` so that when payment is captured the saga knows which products and quantities to reserve — it does not need to re-load the order aggregate. `reservedProductIds` holds the products whose `StockReserved` the saga has seen, once each and in the order of the lines; the saga moves on to the confirmation when it holds every line's product. The constructor copies both lists defensively and treats `null` as empty so a saga that has not yet seen `OrderPlaced` still has usable (empty) lists. `cancellationReason` is the reason the saga cancels its order with when the inventory refuses a line: `cancellingFor` sets it together with the `CANCELLING` status from the `StockReservationRefused` it applies, and it is `null` otherwise. It lives in the state, not in a field of the saga or in the failure `compensate` receives, so a step that is resumed or redelivered sends the very same `CancelOrder`, under the same key. The five package-private helpers — `withStatus`, `withReservedProduct`, `cancellingFor`, `hasLineFor` and `everyLineReserved` — are the saga's only way to build the next state; none of them is a getter, so none ends up in the stored JSON. The `status()` method translates domain-specific `OrderFulfillmentStatus` values to the framework's `SagaStatus` enum on the forward path (a fresh, non-terminal `state.status()` is what gets persisted alongside a successful `handle()`); once a saga reaches a framework-classified outcome — `COMPENSATED`, `FAILED` via compensation, or `FAULTED` via poison-event quarantine — the *stored* status can diverge from what this method would compute, which is exactly why `SagaRunner` and `LoadedSaga` treat the store's persisted status, not this method, as authoritative (see [What We Learned](#what-we-learned)).
 
 ### Step 3 — Implement OrderFulfillmentSaga
 

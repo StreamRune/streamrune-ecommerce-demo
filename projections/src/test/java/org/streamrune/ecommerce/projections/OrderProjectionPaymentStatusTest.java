@@ -122,6 +122,18 @@ class OrderProjectionPaymentStatusTest {
   }
 
   @Test
+  void aFirstCancellationWithoutAReasonIsNotOverwrittenByTheSecond() {
+    process(placed("o-1"), new OrderEvent.OrderCancelled("o-1", null, List.of()));
+
+    process(new OrderEvent.OrderCancelled("o-1", "Order fulfillment did not complete", List.of()));
+
+    assertThat(projection.get("o-1").status()).isEqualTo(OrderStatus.CANCELLED);
+    assertThat(projection.get("o-1").reason())
+        .as("the customer's cancellation came first and gave no reason")
+        .isNull();
+  }
+
+  @Test
   void aPaymentOfAnOrderTheReadModelDoesNotHoldChangesNothing() {
     process(
         new PaymentEvent.PaymentInitiated("pay-o-9", "o-9", TWENTY),

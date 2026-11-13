@@ -193,32 +193,4 @@ class ProductControllerIT extends AbstractIntegrationTest {
         .expectStatus()
         .is4xxClientError();
   }
-
-  /**
-   * The catalogue holds no stock: a request that names an opening stock is refused with {@code
-   * 400}, and no product is created. The Quarkus and Micronaut apps answer the same request alike.
-   */
-  @Test
-  void aRequestWithAnOpeningStockIsRefused() {
-    String pid = "p-opening-stock-" + System.nanoTime();
-    client
-        .post()
-        .uri("/api/products")
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "test-admin")
-        .contentType(MediaType.APPLICATION_JSON)
-        .bodyValue(
-            """
-            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": 99}"""
-                .formatted(pid))
-        .exchange()
-        .expectStatus()
-        .isBadRequest()
-        .expectBody(String.class)
-        .isEqualTo(
-            "initialStock is not accepted: a product holds no stock; receive its opening stock"
-                + " with POST /api/inventory/{productId}/receive");
-
-    client.get().uri("/api/products/" + pid).exchange().expectStatus().isNotFound();
-  }
 }

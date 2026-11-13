@@ -1,6 +1,5 @@
 package org.streamrune.ecommerce.micronaut.controller;
 
-import io.micronaut.core.annotation.Nullable;
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.*;
 import java.math.BigDecimal;
@@ -20,9 +19,6 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 @Controller("/api/products")
 public class ProductCommandController {
 
-  static final String OPENING_STOCK_REFUSED =
-      "initialStock is not accepted: a product holds no stock; receive its opening stock with POST /api/inventory/{productId}/receive";
-
   private final VirtualThreadCommandBus commandBus;
 
   public ProductCommandController(VirtualThreadCommandBus commandBus) {
@@ -34,7 +30,6 @@ public class ProductCommandController {
     RequestChecks.notBlank(req.productId(), "productId");
     RequestChecks.notBlank(req.name(), "name");
     RequestChecks.positive(req.price(), "price");
-    refuseOpeningStock(req.initialStock());
     OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
     commandBus.execute(
         new ProductCommand.CreateProduct(
@@ -62,22 +57,7 @@ public class ProductCommandController {
 
   @io.micronaut.serde.annotation.Serdeable
   public record CreateProductRequest(
-      String productId,
-      String name,
-      String description,
-      String category,
-      BigDecimal price,
-      @Nullable Integer initialStock) {}
-
-  /**
-   * The catalogue holds no stock, so a request that names an opening stock is refused with {@code
-   * 400} instead of creating a product that holds nothing; the stock is received on the inventory.
-   */
-  private static void refuseOpeningStock(Integer initialStock) {
-    if (initialStock != null) {
-      throw new IllegalArgumentException(OPENING_STOCK_REFUSED);
-    }
-  }
+      String productId, String name, String description, String category, BigDecimal price) {}
 
   @io.micronaut.serde.annotation.Serdeable
   public record UpdatePriceRequest(BigDecimal price) {}

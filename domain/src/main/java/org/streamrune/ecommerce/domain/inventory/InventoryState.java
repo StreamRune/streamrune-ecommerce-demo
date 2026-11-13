@@ -28,6 +28,14 @@ public record InventoryState(
    * ReservationConfirmed}. {@code refusedOrders} holds the orders whose reservation was refused
    * ({@code StockReservationRefused}), so a second request of such an order stores nothing. The
    * state is snapshotted with both.
+   *
+   * <p>Unlike {@code reservations}, {@code refusedOrders} only grows: one order id for each order
+   * the product could not serve. The inventory records no event that says an order is done (the
+   * release that follows a refusal holds nothing and stores nothing), so it has no fact to forget
+   * an id at, and forgetting one would let a late duplicate of the refused request reserve stock
+   * for a cancelled order after the command inbox has pruned its key. The cost is a short string
+   * per refused order in the state and its snapshots, which stays small while refusals are the
+   * exception: an order of more than the shop holds.
    */
   @JsonCreator
   public InventoryState(

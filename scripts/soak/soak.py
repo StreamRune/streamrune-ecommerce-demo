@@ -1514,6 +1514,12 @@ def check(run, stop_apps=None):
         SELECT payload->>'orderId' AS order_id, extract(epoch FROM created_at) AS t FROM event_stream
          WHERE aggregate_type = 'payment' AND event_type = 'PaymentFailed' AND aggregate_id LIKE 'pay-soak-{rid}-%'""")}
     decline_wins = windows([c for c in chaos if c["kind"] == "payment-decline"], 2, 15)
+    # The reason of each order's first cancellation, the one the orders view shows.
+    cancelled_for = {r["order_id"]: r["reason"] for r in sql_rows(f"""
+        SELECT DISTINCT ON (aggregate_id) aggregate_id AS order_id, payload->>'reason' AS reason
+          FROM event_stream
+         WHERE aggregate_type = 'order' AND event_type = 'OrderCancelled' AND aggregate_id LIKE 'soak-{rid}-%'
+         ORDER BY aggregate_id, global_offset""")}
     bad, explained = [], collections.Counter()
     for oid, r in orders_ok.items():
         s = sagas.get(oid)
@@ -1528,10 +1534,12 @@ def check(run, stop_apps=None):
                 bad.append(f"{oid}: healthy flow ended {s['status']} ({cause}); placed {iso(r['t'])} "
                            f"in window {in_window(r['t'], chaos_wins + decline_wins)}")
         # An order of more than the product holds is refused by the inventory, and the saga cancels
-        # it with the refusal's reason: FAILED, the end of a fulfillment that cancels its order.
-        if (r["intent"] == "oos" and s["status"] != "FAILED"
-                and not (oid in declined and in_window(declined[oid], decline_wins))):
-            bad.append(f"{oid}: out-of-stock order ended {s['status']}")
+        # it with the refusal's reason: FAILED, and the order's cancellation names the stock. A
+        # payment declined in a decline window ends it FAILED before the stock is asked.
+        if r["intent"] == "oos" and not (oid in declined and in_window(declined[oid], decline_wins)):
+            reason = cancelled_for.get(oid) or ""
+            if s["status"] != "FAILED" or not reason.startswith("Insufficient stock for "):
+                bad.append(f"{oid}: out-of-stock order ended {s['status']}, cancelled for {reason!r}")
     rep.add("no healthy flow compensated", not bad,
             f"{len(orders_ok)} orders; {sum(1 for o, r in orders_ok.items() if r['intent'] == 'happy')} healthy; "
             f"explained {dict(explained)}; {len(bad)} unexplained", bad)

@@ -87,8 +87,8 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The order cancelled, with the reason of its {@code OrderCancelled}. An order cancelled twice
-   * (its customer, then the fulfillment saga) shows the first reason: the second cancellation
-   * changes nothing the customer sees.
+   * (its customer, then the fulfillment saga) shows the first cancellation's reason, even when that
+   * one gave none: the second cancellation changes nothing the customer sees.
    */
   private void cancel(String id, String reason, Instant timestamp) {
     findById(id, OrderView.class)
@@ -103,7 +103,7 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         OrderStatus.CANCELLED,
                         existing.paymentStatus(),
-                        existing.reason() != null ? existing.reason() : reason,
+                        existing.status() == OrderStatus.CANCELLED ? existing.reason() : reason,
                         existing.createdAt(),
                         timestamp)));
   }
