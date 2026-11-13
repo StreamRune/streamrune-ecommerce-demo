@@ -125,6 +125,8 @@ export interface OrderFulfillmentState {
   /** The products whose stock the saga has reserved so far, once each, in the order of the lines. */
   reservedProductIds: string[];
   fulfillmentStatus: OrderFulfillmentStatus;
+  /** The reason the saga cancels the order with when the inventory refuses a line; null otherwise. */
+  cancellationReason: string | null;
 }
 
 /**
