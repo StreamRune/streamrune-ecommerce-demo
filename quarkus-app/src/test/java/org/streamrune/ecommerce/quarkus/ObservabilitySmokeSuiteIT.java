@@ -15,6 +15,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.subscription.LeaseRole;
 import org.streamrune.core.subscription.SubscriptionHealth;
+import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.runtime.SubscriptionHealthContributor;
 
 /**
@@ -33,6 +34,19 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
 class ObservabilitySmokeSuiteIT {
 
   @Inject SubscriptionHealthContributor subscriptionHealth;
+
+  @Inject StreamRuneTracing tracing;
+
+  /**
+   * The application runs with the SDK of quarkus-opentelemetry off ({@code
+   * quarkus.otel.sdk.disabled=true}, as application.properties sets it), and an SDK switched off by
+   * its own setting is no OpenTelemetry to the integration: StreamRune starts no span, and the
+   * comment in application.properties and chapter 15 say so.
+   */
+  @Test
+  void withTheSdkOffStreamRuneTracesNothing() {
+    assertThat(tracing).isSameAs(StreamRuneTracing.NOOP);
+  }
 
   // ── Admin endpoints ────────────────────────────────────────────────────────
 

@@ -97,7 +97,7 @@ docker compose up -d postgres rabbitmq
 
 ## Tracing
 
-Each app traces through the OpenTelemetry SDK of its framework: Spring Boot's tracing modules (with Micrometer's bridge, so an HTTP request is the parent span of its command), `quarkus-opentelemetry`, and Micronaut's `micronaut-tracing-opentelemetry-http`. StreamRune's integration takes that SDK as its `StreamRuneTracing` bean and traces the command bus, the aggregate lock, the event store, the outbox, the projections, the subscriptions and the sagas; each app hands the bean to the parts it builds itself. Unless you switch the export on, the spans are made and dropped.
+Each app traces through the OpenTelemetry SDK of its framework: Spring Boot's tracing modules (with Micrometer's bridge, so an HTTP request is the parent span of its command), `quarkus-opentelemetry`, and Micronaut's `micronaut-tracing-opentelemetry-http`. StreamRune's integration takes that SDK as its `StreamRuneTracing` bean and traces the command bus, the aggregate lock, the event store, the outbox, the projections, the subscriptions and the sagas; each app hands the bean to the parts it builds itself. Unless you switch the export on, the Spring and Micronaut apps make the spans and drop them, and the Quarkus app, whose SDK is off, starts none (StreamRune's tracing is then `NOOP`, and no event carries a span context).
 
 The Compose profile `tracing` adds [Jaeger](https://www.jaegertracing.io/) (`jaegertracing/jaeger`, in memory) and points the backend at it:
 
@@ -106,7 +106,7 @@ The Compose profile `tracing` adds [Jaeger](https://www.jaegertracing.io/) (`jae
 MANAGEMENT_TRACING_EXPORT_ENABLED=true docker compose --profile tracing up -d --build
 ```
 
-Place an order (the [Example](#example) below) and open http://localhost:16686: service `ecommerce-spring`, operation `command/PlaceOrder`. The trace holds the HTTP request, the command and, under it, `lock/acquire`, `eventstore/load` and `eventstore/append`; the saga's steps, the subscriptions' deliveries, the projections and the outbox's publishing are traces of their own, linked to the command whose events they handle.
+Place an order (the [Example](#example) below) and open http://localhost:16686: service `ecommerce-spring`, operation `command/PlaceOrder`. The trace holds the HTTP request, the command and, under it, `lock/acquire`, `eventstore/load` and `eventstore/append`; the saga's steps, the subscriptions' deliveries and the outbox's publishing are traces of their own, linked to the command whose events they handle. A projection's batch is a trace of its own too, without a link: it reads the global stream, the events of any number of commands.
 
 An app started outside Compose sends its spans to the same Jaeger (`docker compose --profile tracing up -d postgres rabbitmq jaeger`, then):
 

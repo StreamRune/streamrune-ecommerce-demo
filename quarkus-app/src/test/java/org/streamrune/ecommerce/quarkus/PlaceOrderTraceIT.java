@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
@@ -38,7 +39,7 @@ class PlaceOrderTraceIT {
   /**
    * The SDK on, exporting nowhere: the spans reach {@link RecordedSpans} and no exporter. The other
    * tests run with the SDK off, as the application does unless {@code QUARKUS_OTEL_SDK_DISABLED} is
-   * {@code false}.
+   * {@code false}, and StreamRune traces nothing in them.
    */
   public static class TracingProfile implements QuarkusTestProfile {
     @Override
@@ -52,6 +53,9 @@ class PlaceOrderTraceIT {
 
   private static final AttributeKey<String> STREAM_ID =
       AttributeKey.stringKey("streamrune.stream.id");
+
+  private static final AttributeKey<String> SERVICE_INSTANCE_ID =
+      AttributeKey.stringKey("service.instance.id");
 
   private static final AttributeKey<String> SAGA_ID = AttributeKey.stringKey("streamrune.saga.id");
 
@@ -103,6 +107,7 @@ class PlaceOrderTraceIT {
                       .filter(s -> order.equals(s.getAttributes().get(AGGREGATE_ID)))
                       .findFirst()
                       .orElseThrow(() -> new AssertionError("no command/PlaceOrder span"));
+              assertNamesItsInstance(command);
               assertThat(spans.stream().filter(s -> isChildOf(s, command)).map(SpanData::getName))
                   .as("the spans under command/PlaceOrder")
                   .contains("lock/acquire", "eventstore/load", "eventstore/append");
@@ -145,5 +150,21 @@ class PlaceOrderTraceIT {
       }
     }
     return false;
+  }
+
+  /**
+   * The resource of a span names the instance that sent it, {@code service.instance.id}: the host
+   * name where {@code HOSTNAME} is set (in Docker the container's, so two backends differ), else an
+   * id the application draws at its start. StreamRune's own attributes never name the process.
+   */
+  private static void assertNamesItsInstance(SpanData span) {
+    String instance = span.getResource().getAttribute(SERVICE_INSTANCE_ID);
+    String hostname = System.getenv("HOSTNAME");
+    if (hostname != null && !hostname.isBlank()) {
+      assertThat(instance).as("service.instance.id").isEqualTo(hostname);
+    } else {
+      assertThat(instance).as("service.instance.id").isNotBlank();
+      assertThat(UUID.fromString(instance)).isNotNull();
+    }
   }
 }

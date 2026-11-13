@@ -596,7 +596,7 @@ Everything so far ran one backend. A production service runs several against one
 | `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
 | `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | `management.endpoint.health.show-details` | `never` | With `always`, `/actuator/health` lists each subscription with its `role`: `LEADING` or `STANDBY` (Chapter 15) |
 
-`backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, where the saga's steps show on whichever backend leads it.
+`backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, both as the service `ecommerce-spring`. StreamRune's attributes name types and ids, never the process; what tells the backends apart is the resource attribute `service.instance.id` of Chapter 15, which Jaeger shows under each span's *Process*: the container's host name, its short id, which `docker ps` lists under `CONTAINER ID`. A saga's steps carry the id of the backend that led it when they ran, so a takeover shows as the next step under the other id; which backend leads now is the `role` in each one's `/actuator/health`.
 
 Replace `docker-compose.yml` with the demo's file, the last version of it:
 

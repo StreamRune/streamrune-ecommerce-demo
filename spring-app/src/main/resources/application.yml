@@ -121,6 +121,9 @@ management:
   opentelemetry:
     resource-attributes:
       "[service.name]": ecommerce-spring
+      # Which instance sent a span: the host name (in Docker, the container's, so the two backends
+      # of the two-backends profile differ), else an id drawn at each start.
+      "[service.instance.id]": ${HOSTNAME:${random.uuid}}
     tracing:
       export:
         otlp:

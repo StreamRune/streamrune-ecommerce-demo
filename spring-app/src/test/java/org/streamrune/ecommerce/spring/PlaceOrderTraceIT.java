@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -36,6 +37,9 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
 
   private static final AttributeKey<String> STREAM_ID =
       AttributeKey.stringKey("streamrune.stream.id");
+
+  private static final AttributeKey<String> SERVICE_INSTANCE_ID =
+      AttributeKey.stringKey("service.instance.id");
 
   private static final AttributeKey<String> SAGA_ID = AttributeKey.stringKey("streamrune.saga.id");
 
@@ -91,6 +95,7 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
             () -> {
               List<SpanData> spans = recorded.all();
               SpanData command = placeOrder(spans, order).orElseThrow();
+              assertNamesItsInstance(command);
               assertThat(command.getKind()).isEqualTo(SpanKind.INTERNAL);
               assertThat(command.getParentSpanContext().isValid())
                   .as("the command span has the HTTP request's span as its parent")
@@ -208,5 +213,21 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
       }
     }
     return false;
+  }
+
+  /**
+   * The resource of a span names the instance that sent it, {@code service.instance.id}: the host
+   * name where {@code HOSTNAME} is set (in Docker the container's, so two backends differ), else an
+   * id the application draws at its start. StreamRune's own attributes never name the process.
+   */
+  private static void assertNamesItsInstance(SpanData span) {
+    String instance = span.getResource().getAttribute(SERVICE_INSTANCE_ID);
+    String hostname = System.getenv("HOSTNAME");
+    if (hostname != null && !hostname.isBlank()) {
+      assertThat(instance).as("service.instance.id").isEqualTo(hostname);
+    } else {
+      assertThat(instance).as("service.instance.id").isNotBlank();
+      assertThat(UUID.fromString(instance)).isNotNull();
+    }
   }
 }

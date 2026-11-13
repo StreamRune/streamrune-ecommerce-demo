@@ -47,7 +47,8 @@ dependencies {
     implementation("io.quarkus:quarkus-micrometer-registry-prometheus")
     // Tracing: the OpenTelemetry bean the framework's StreamRuneTracing traces through, the spans of
     // the REST endpoints and the OTLP exporter. Its SDK stays off unless quarkus.otel.sdk.disabled is
-    // false.
+    // false, and StreamRune traces nothing while it is off. Its observability Dev Service is switched
+    // off in application.properties.
     implementation("io.quarkus:quarkus-opentelemetry")
 
     // In-memory stores (InMemoryProjectionRepository, InMemoryEventStore) for Docker-free tests.
