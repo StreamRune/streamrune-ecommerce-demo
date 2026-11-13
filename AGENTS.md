@@ -56,7 +56,7 @@ runs its tests, with `--enable-preview`.
 | `docker compose up -d postgres rabbitmq`, then `./gradlew :spring-app:bootRun` | One application against local PostgreSQL and RabbitMQ (`:micronaut-app:run`, `:quarkus-app:quarkusDev`) | |
 | `./gradlew :spring-app:bootJar :notifications-service:bootJar`, then `docker compose up` | The full stack of the README's Quick Start | |
 | the same, then `docker compose --profile two-backends up -d --build` | Adds `backend-2`, a second Spring backend on the same database (port 8091), for the two-backend runs of the README and Chapter 17 | |
-| `scripts/native-image-smoke-test.sh spring` (or `quarkus`, `micronaut`, `all`) | Builds an application as a native image and probes it on an empty database: health, the schema, a command and its read model, a dead-letter replay, a saga, shutdown. Needs Docker and a GraalVM JDK 25 on `PATH`. | |
+| `scripts/native-image-smoke-test.sh spring` (or `quarkus`, `micronaut`, `all`) | Builds an application as a native image and probes it on an empty database: health, the schema, a command and its read model, a dead-letter replay, a saga, an order the inventory cannot fill, shutdown. Needs Docker and a GraalVM JDK 25 on `PATH`. | |
 
 In `frontend/`, after `npm ci`:
 
