@@ -56,7 +56,8 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
    * the seed's own.
    */
   private static final Set<String> SEED_AGGREGATES =
-      Set.of("prod-widget", "prod-gadget", "prod-doohickey", "cust-alice", "cust-bob", "order-seed-1");
+      Set.of(
+          "prod-widget", "prod-gadget", "prod-doohickey", "cust-alice", "cust-bob", "order-seed-1");
 
   private static final String SAGA_SPAN_PREFIX =
       "saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/";
