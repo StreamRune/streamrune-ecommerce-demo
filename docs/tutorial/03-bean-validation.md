@@ -11,9 +11,9 @@
 
 ## What We're Building and Why
 
-In chapter 2 we built the `Product` aggregate and verified that a `POST /api/products` call stores a `ProductCreated` event in PostgreSQL. The controller's `CreateProductRequest` DTO already carries some `@Valid` constraints — `@NotBlank` on the product ID and name, `@NotNull @Positive` on the price — so Spring rejects those at the web layer before a command is even constructed. But that DTO is only one entry point, and it does not cover every field: `initialStock`, for example, is left unconstrained on the DTO, so a negative stock value sails straight through to the command. Any command issued programmatically (a test, a batch importer, a future message consumer) bypasses the DTO layer entirely and reaches the `CommandBus` with no structural checks at all.
+In chapter 2 we built the `Product` aggregate and verified that a `POST /api/products` call stores a `ProductCreated` event in PostgreSQL. The controller's `CreateProductRequest` DTO already carries some `@Valid` constraints — `@NotBlank` on the product ID and name, `@NotNull @Positive` on the price — so Spring rejects those at the web layer before a command is even constructed. But that DTO is only one entry point. Any command issued programmatically (a test, a batch importer, a future message consumer) bypasses the DTO layer entirely and reaches the `CommandBus` with no structural checks at all.
 
-We want a single guarantee: a command that reaches the `Decider` is structurally well-formed, no matter how it entered the system. That separation is intentional; business invariants belong in `decide()`, but structural constraints ("name must not be blank", "stock must not be negative") belong earlier and should hold regardless of entry point.
+We want a single guarantee: a command that reaches the `Decider` is structurally well-formed, no matter how it entered the system. That separation is intentional; business invariants belong in `decide()`, but structural constraints ("name must not be blank", "price must be present") belong earlier and should hold regardless of entry point.
 
 StreamRune solves this with **command interceptors** — middleware that wraps the `CommandBus` execution pipeline. Before the bus calls `decide(command, state)`, it calls `before(ctx)` on every registered interceptor in order. If any interceptor throws, the command never reaches the `Decider`.
 
@@ -64,7 +64,7 @@ public sealed interface ProductCommand extends Command {
 A few decisions worth noting:
 
 - `description` and `category` are deliberately left unconstrained. They are optional fields and the domain accepts a product with no description.
-- `@PositiveOrZero` on `initialStock` means zero is allowed — a product can be created with no initial inventory (it would start as `OUT_OF_STOCK`). A strictly positive constraint would prevent that.
+- `@NotBlank` on `productId` and `name` repeats what the controller's DTO already checks. That is the point: the DTO guards the HTTP entry point, the command's own constraints guard every other one.
 - `@NotNull` on `price` prevents a null `Money` object. On the HTTP path the controller always builds `new Money(req.price(), "USD")` from a DTO-validated `BigDecimal`, so the command's price is never null there; this constraint is a defense-in-depth net for callers that construct the command directly. The `Money` record's own fields (`amount`, `currency`) could be validated further with `@Valid`, but for now a non-null price is sufficient.
 
 The `domain` module already has `jakarta.validation-api` on its classpath as an `implementation` dependency (added in Chapter 1, Step 3). Using `implementation` rather than `compileOnly` ensures the annotation types are available at runtime so `BeanValidationInterceptor` can read them reflectively. The validator implementation (`hibernate-validator`) lives in `spring-app` via `spring-boot-starter-validation`; the Quarkus and Micronaut apps bring their own (Step 5).
@@ -210,32 +210,81 @@ Expected: `200 OK` with empty body. The interceptor validated the command, found
 
 ### Step 5 — Verify: the interceptor rejects an invalid command
 
-The clearest way to see `BeanValidationInterceptor` fire is to send a violation that the controller's DTO does *not* also catch. Recall that `CreateProductRequest` leaves `initialStock` unconstrained — but the command's `@PositiveOrZero int initialStock` does not. So a negative stock value passes the DTO `@Valid` check, gets mapped into a `CreateProduct` command, and is then rejected by the interceptor on the command bus.
+Over HTTP the controller's DTO checks the same fields as the command, so a request cannot show the interceptor firing: the DTO refuses first (Step 5a). The interceptor is for the commands that never meet a DTO, so the test builds one in code and hands it to the interceptor the way the bus does. Add `spring-app/src/test/java/org/streamrune/ecommerce/spring/ProductCommandValidationTest.java` (the demo ships the same file):
 
-Send a request with a negative initial stock (and an otherwise-valid body so it clears the DTO layer):
+```java
+package org.streamrune.ecommerce.spring;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import jakarta.validation.Validation;
+import java.math.BigDecimal;
+import java.time.Instant;
+import org.junit.jupiter.api.Test;
+import org.streamrune.core.CommandInterceptor.CommandContext;
+import org.streamrune.core.ValidationException;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.runtime.BeanValidationInterceptor;
+
+class ProductCommandValidationTest {
+
+  private final BeanValidationInterceptor interceptor =
+      new BeanValidationInterceptor(Validation.buildDefaultValidatorFactory().getValidator());
+
+  private static CommandContext contextOf(ProductCommand command, String productId) {
+    return new CommandContext(
+        command,
+        command.getClass().getSimpleName(),
+        null,
+        ProductState.TYPE,
+        AggregateId.of(productId),
+        null,
+        Instant.now());
+  }
+
+  @Test
+  void aCommandWithoutAViolationPasses() {
+    var command =
+        new ProductCommand.CreateProduct(
+            "p-valid", "Sprocket", null, null, new Money(new BigDecimal("4.99"), "USD"));
+
+    assertTrue(interceptor.before(contextOf(command, "p-valid")));
+  }
+
+  /** The controller's DTO would refuse this name; a command built in code never meets the DTO. */
+  @Test
+  void aBlankNameIsRefusedBeforeTheDecider() {
+    var command =
+        new ProductCommand.CreateProduct(
+            "p-blank", " ", null, null, new Money(new BigDecimal("5.00"), "USD"));
+
+    var refused =
+        assertThrows(
+            ValidationException.class, () -> interceptor.before(contextOf(command, "p-blank")));
+
+    assertEquals("Command validation failed for CreateProduct", refused.getMessage());
+    assertEquals("name", refused.errors().getFirst().field());
+    assertEquals("NotBlank", refused.errors().getFirst().code());
+  }
+}
+```
 
 ```bash
-curl -i -X POST http://localhost:8080/api/products \
-  -H 'Content-Type: application/json' \
-  -d '{"productId":"p-2","name":"Widget","price":5.00}'
+./gradlew :spring-app:test --tests '*ProductCommandValidationTest'
 ```
 
-Expected response:
+Both tests pass. The blank name never reaches a `Decider`: `before()` throws a `ValidationException` whose message is `Command validation failed for CreateProduct` and whose error list names the field (`name`) and the violated constraint (`NotBlank`). On the HTTP path the `GlobalExceptionHandler`'s `handleDomainException` handler answers such an exception with `400 Bad Request` and that message as plain text, and no event reaches the store.
 
-```
-HTTP/1.1 400 Bad Request
-Content-Type: text/plain;charset=UTF-8
-
-Command validation failed for CreateProduct
-```
-
-The `BeanValidationInterceptor` caught the `@PositiveOrZero` violation on `initialStock`, threw a `ValidationException`, and the `GlobalExceptionHandler`'s `handleDomainException` handler mapped it to a 400. The `Decider` was never called — no event reached the store.
-
-The Quarkus and Micronaut apps refuse the same request with the same `400` and message, from the same `BeanValidationInterceptor`, and on both the validator is Hibernate Validator too. On Quarkus it comes from `quarkus-hibernate-validator` in `quarkus-app/build.gradle.kts`, the interceptor the framework puts on the command bus uses it, and it knows the constraints of the classes in Quarkus' index only: the commands are compiled in the `domain` module, which ships no index, so `quarkus-app`'s `application.properties` has Quarkus index it (`quarkus.index-dependency.domain.group-id` and `quarkus.index-dependency.domain.artifact-id`). Without that index the request is answered `200`. On Micronaut, `micronaut-app` depends on `org.hibernate.validator:hibernate-validator`, and `StreamRuneFactory#validationInterceptor` builds the `BeanValidationInterceptor` on it, which replaces the framework's. Micronaut's own validator sees the constraints of a type only through the introspection its annotation processor writes while compiling that type, and the commands are compiled in `domain`, so it would check none of them. Without a validator the framework logs at startup that command validation is disabled. `ProductControllerIT` (Spring) and `ProductCommandQueryE2EIT` (Quarkus and Micronaut) send this request.
+The Quarkus and Micronaut apps put the same `BeanValidationInterceptor` on their command bus, and on both the validator is Hibernate Validator too. On Quarkus it comes from `quarkus-hibernate-validator` in `quarkus-app/build.gradle.kts`, the interceptor the framework puts on the command bus uses it, and it knows the constraints of the classes in Quarkus' index only: the commands are compiled in the `domain` module, which ships no index, so `quarkus-app`'s `application.properties` has Quarkus index it (`quarkus.index-dependency.domain.group-id` and `quarkus.index-dependency.domain.artifact-id`). Without that index the interceptor finds no constraint and every command passes. On Micronaut, `micronaut-app` depends on `org.hibernate.validator:hibernate-validator`, and `StreamRuneFactory#validationInterceptor` builds the `BeanValidationInterceptor` on it, which replaces the framework's. Micronaut's own validator sees the constraints of a type only through the introspection its annotation processor writes while compiling that type, and the commands are compiled in `domain`, so it would check none of them. Without a validator the framework logs at startup that command validation is disabled.
 
 ### Step 5a — Two layers of validation
 
-The two negative cases below are *also* rejected with a 400, but by a different layer — Spring's `@Valid` check on the controller DTO, which runs *before* a command is ever constructed. Send a command with a blank name:
+The two negative requests below are rejected with a 400 too, but by the other layer — Spring's `@Valid` check on the controller DTO, which runs *before* a command is ever constructed. Send a command with a blank name:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/products \
@@ -263,7 +312,7 @@ The Quarkus and Micronaut apps answer the same two requests with `400` too: they
 This is defense in depth, not redundancy:
 
 - The **DTO `@Valid` layer** guards the HTTP entry point: a malformed body is refused before any command exists.
-- The **command-bus interceptor** is the safety net that validates the command itself — it fires for fields the DTO leaves open (like `initialStock`) and for any command constructed in code that bypasses the controller entirely (tests, importers, message consumers). It guarantees that whatever reaches the `Decider` is structurally well-formed.
+- The **command-bus interceptor** is the safety net that validates the command itself — it fires for any command constructed in code that bypasses the controller entirely (tests, importers, message consumers), and for any field a DTO leaves open. It guarantees that whatever reaches the `Decider` is structurally well-formed.
 
 ---
 
@@ -272,7 +321,7 @@ This is defense in depth, not redundancy:
 - **Command interceptors** implement `CommandInterceptor` and are called by the `CommandBus` before and after `decide()`. They are the right place for cross-cutting concerns that should not pollute domain logic.
 - **`BeanValidationInterceptor`** reads JSR-380 annotations on command fields, runs the Jakarta Validator, and throws a **`ValidationException`** — which extends `DomainException` (a `RuntimeException`) — carrying a list of `ValidationError` records (`field`, `message`, `code`) before the command reaches the `Decider`.
 - **Interceptor chain ordering**: `before()` fires left-to-right, `after()` and `onError()` fire right-to-left (like servlet filters). Validation is not first: from Chapter 9 on it sits behind authorization, so a caller without the required role is refused before validation runs, and from Chapter 10 on behind audit, so that refusal is recorded.
-- **Two validation layers**: the controller's DTO `@Valid` check rejects malformed HTTP bodies at the web layer (a Spring `MethodArgumentNotValidException` → 400 with Spring Boot's default error body), while the command-bus interceptor is the defense-in-depth net that validates the command regardless of entry point and catches fields the DTO leaves open (like `initialStock`).
+- **Two validation layers**: the controller's DTO `@Valid` check rejects malformed HTTP bodies at the web layer (a Spring `MethodArgumentNotValidException` → 400 with Spring Boot's default error body), while the command-bus interceptor is the defense-in-depth net that validates the command regardless of entry point, so a command built in code is checked as a request is.
 - **`GlobalExceptionHandler`** maps `DomainException` (and therefore `ValidationException`) to `400 Bad Request` via its `handleDomainException` handler. No changes to the web layer were needed.
 - **Every failure has its status.** Over the tutorial the handler grows into this table, the same in the Spring, Quarkus and Micronaut apps:
 

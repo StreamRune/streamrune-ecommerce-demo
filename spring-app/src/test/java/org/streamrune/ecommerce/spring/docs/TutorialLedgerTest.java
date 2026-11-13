@@ -96,6 +96,8 @@ class TutorialLedgerTest {
           controller("POST /api/admin/payment-outage/toggle", 12),
           controller("POST /api/inventory/{id}/receive", 11),
           controller("POST /api/inventory/{id}/adjust", 11),
+          controller("GET /api/inventory/{id}", 13),
+          controller("GET /api/inventory", 13),
           controller("GET /received", 13),
           controller("GET /health", 13),
           controller("GET /api/admin/outbox", 14),
@@ -121,7 +123,7 @@ class TutorialLedgerTest {
           // Products
           created("p-1", 2),
           created("p-valid", 3),
-          named("p-2", 3, "refused by validation here; chapter 5 creates it"),
+          created("p-2", 5),
           named("p-3", 3, "refused by validation"),
           named("p-4", 3, "refused by validation"),
           named("p-legacy", 4, "written as a raw version-1 event with psql"),
@@ -163,6 +165,7 @@ class TutorialLedgerTest {
           created("ord-1", 17),
           named("fulfillment-ord-1", 17, "the fulfillment saga of order ord-1"),
           created("ord-2", 17),
+          created("ord-3", 17),
           named("pay-ord-2", 17, "the payment of order ord-2"),
           named("fulfillment-walk-cb-1", 17, "the fulfillment saga of the first breaker order"));
 
