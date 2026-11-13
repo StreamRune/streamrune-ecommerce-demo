@@ -9,10 +9,10 @@ import org.streamrune.core.types.UserId;
 /**
  * Dispatches a request's command under the {@code Idempotency-Key} the client sent, or without a
  * key when it sent none. The three apps call it from the endpoints whose command changes a quantity
- * by an amount ({@code PUT /api/products/{id}/stock}, {@code POST
- * /api/inventory/{productId}/receive}): applied twice, such a command is a different stock. A
- * client that sends such a request again — after a timeout, from a retry button — sends the same
- * key, and the command bus runs the command once and answers the repeat with the recorded result.
+ * by an amount ({@code POST /api/inventory/{productId}/receive}, {@code POST
+ * /api/inventory/{productId}/adjust}): applied twice, such a command is a different stock. A client
+ * that sends such a request again — after a timeout, from a retry button — sends the same key, and
+ * the command bus runs the command once and answers the repeat with the recorded result.
  *
  * <p>The key is also what makes the command safe to replay from the dead-letter queue: an entry
  * keeps the key, and the replay runs under it, so a replay after the caller's own successful retry

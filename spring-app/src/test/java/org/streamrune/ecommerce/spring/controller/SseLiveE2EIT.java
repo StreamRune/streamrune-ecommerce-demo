@@ -53,8 +53,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(
             """
-            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50,
-             "initialStock": 0}"""
+            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50}"""
                 .formatted(productId))
         .exchange()
         .expectStatus()

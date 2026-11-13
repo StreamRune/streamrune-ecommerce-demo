@@ -114,7 +114,7 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
   private void createProduct(String productId, String price) {
     commandBus.execute(
         new ProductCommand.CreateProduct(
-            productId, "Product", null, "General", new Money(new BigDecimal(price), "USD"), 0));
+            productId, "Product", null, "General", new Money(new BigDecimal(price), "USD")));
   }
 
   /** Creates the product in the catalogue at 9.99. */

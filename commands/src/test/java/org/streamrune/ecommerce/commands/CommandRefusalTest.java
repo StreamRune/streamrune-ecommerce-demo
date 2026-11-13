@@ -16,7 +16,7 @@ import org.streamrune.core.types.CommandId;
 import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.ecommerce.commands.CommandRefusal.Reason;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.runtime.CommandDeadLetteredException;
 import org.streamrune.runtime.LockAcquisitionException;
 
@@ -26,8 +26,8 @@ import org.streamrune.runtime.LockAcquisitionException;
  */
 class CommandRefusalTest {
 
-  private static final StreamId PRODUCT =
-      StreamId.of(AggregateType.of("product"), AggregateId.of("p-1"));
+  private static final StreamId INVENTORY =
+      StreamId.of(AggregateType.of("inventory"), AggregateId.of("p-1"));
 
   @Test
   void eachRefusalNamesItsReasonAndTheWait() {
@@ -122,9 +122,9 @@ class CommandRefusalTest {
     CommandRefusal answer =
         CommandRefusal.of(
                 new CommandDeadLetteredException(
-                    new ProductCommand.AdjustStock("p-1", 5, "restock"),
+                    new InventoryCommand.AdjustInventory("p-1", 5, "restock"),
                     CommandId.of("cmd-dl-1"),
-                    PRODUCT,
+                    INVENTORY,
                     IdempotencyKey.scopedTo("admin-1", "k-1"),
                     CommandDeadLetteredException.PendingOutcome.AWAITING_OPERATOR,
                     new EventStoreException("store down")))
@@ -152,15 +152,15 @@ class CommandRefusalTest {
   }
 
   /**
-   * What the bus throws once the entry of a stock adjustment that failed on {@code cause} is
+   * What the bus throws once the entry of an inventory adjustment that failed on {@code cause} is
    * stored.
    */
   private static CommandDeadLetteredException deadLettered(
       IdempotencyKey key, RuntimeException cause) {
     return new CommandDeadLetteredException(
-        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        new InventoryCommand.AdjustInventory("p-1", 5, "restock"),
         CommandId.of("cmd-dl-1"),
-        PRODUCT,
+        INVENTORY,
         key,
         cause);
   }

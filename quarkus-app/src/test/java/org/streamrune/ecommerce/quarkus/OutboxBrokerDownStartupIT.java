@@ -120,7 +120,7 @@ class OutboxBrokerDownStartupIT {
         .body(
             """
             {"productId": "%s", "name": "Lamp", "description": "while the broker is down",
-             "category": "Home", "price": 20.00, "initialStock": 3}"""
+             "category": "Home", "price": 20.00}"""
                 .formatted(productId))
         .when()
         .post("/api/products")

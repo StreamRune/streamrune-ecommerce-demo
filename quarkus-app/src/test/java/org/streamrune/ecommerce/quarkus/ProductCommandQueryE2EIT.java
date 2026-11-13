@@ -3,7 +3,6 @@ package org.streamrune.ecommerce.quarkus;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.hamcrest.Matchers.equalTo;
 
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -19,14 +18,15 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * GET query) over real HTTP against a running Quarkus app backed by a real PostgreSQL
  * (Testcontainers).
  *
- * <p>The suite covers create, adjust-stock and update-price. Discontinuing a product, and who may
- * call each of the four writes, is {@code OwnerOrAdminRestAccessIT}'s.
+ * <p>The suite covers create and update-price. Discontinuing a product, and who may call each of
+ * the writes, is {@code OwnerOrAdminRestAccessIT}'s; the stock a product shows is {@code
+ * CatalogInventoryE2EIT}'s.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
 class ProductCommandQueryE2EIT {
 
-  private void createProduct(String id, String name, double price, int stock) {
+  private void createProduct(String id, String name, double price) {
     String body =
         """
         {
@@ -34,10 +34,9 @@ class ProductCommandQueryE2EIT {
           "name": "%s",
           "description": "test product",
           "category": "Test",
-          "price": %s,
-          "initialStock": %d
+          "price": %s
         }"""
-            .formatted(id, name, price, stock);
+            .formatted(id, name, price);
     given()
         .header("X-User-Role", "ADMIN")
         .header("X-User-Id", "test-admin")
@@ -62,7 +61,7 @@ class ProductCommandQueryE2EIT {
   @Test
   void createProductReturns2xxAndProjectionEventuallyExposesIt() {
     String pid = "q-p-create-" + System.nanoTime();
-    createProduct(pid, "Widget", 19.99, 100);
+    createProduct(pid, "Widget", 19.99);
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -74,6 +73,8 @@ class ProductCommandQueryE2EIT {
               assertThat(v.productId()).isEqualTo(pid);
               assertThat(v.name()).isEqualTo("Widget");
               assertThat(v.status().name()).isEqualTo("AVAILABLE");
+              assertThat(v.available()).as("the catalogue holds no stock").isZero();
+              assertThat(v.availability().name()).isEqualTo("OUT_OF_STOCK");
             });
   }
 
@@ -81,8 +82,8 @@ class ProductCommandQueryE2EIT {
   void listProductsReturnsAllCreated() {
     String pid1 = "q-p-list-1-" + System.nanoTime();
     String pid2 = "q-p-list-2-" + System.nanoTime();
-    createProduct(pid1, "ListA", 9.99, 50);
-    createProduct(pid2, "ListB", 14.99, 30);
+    createProduct(pid1, "ListA", 9.99);
+    createProduct(pid2, "ListB", 14.99);
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -110,7 +111,7 @@ class ProductCommandQueryE2EIT {
   @Test
   void updatePriceReflectsInProjection() {
     String pid = "q-p-price-" + System.nanoTime();
-    createProduct(pid, "PriceWidget", 10.00, 10);
+    createProduct(pid, "PriceWidget", 10.00);
     await()
         .atMost(Duration.ofSeconds(10))
         .pollInterval(Duration.ofMillis(200))
@@ -139,38 +140,6 @@ class ProductCommandQueryE2EIT {
   }
 
   @Test
-  void adjustStockBelowThresholdMarksLowStock() {
-    String pid = "q-p-stock-" + System.nanoTime();
-    createProduct(pid, "StockWidget", 5.00, 100);
-    await()
-        .atMost(Duration.ofSeconds(10))
-        .pollInterval(Duration.ofMillis(200))
-        .untilAsserted(() -> assertThat(fetchProduct(pid)).isNotNull());
-
-    given()
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "test-admin")
-        .contentType(ContentType.JSON)
-        .body(
-            """
-            {"quantity": -95, "reason": "test adjustment"}""")
-        .when()
-        .put("/api/products/" + pid + "/stock")
-        .then()
-        .statusCode(200);
-
-    await()
-        .atMost(Duration.ofSeconds(10))
-        .pollInterval(Duration.ofMillis(200))
-        .untilAsserted(
-            () -> {
-              ProductView v = fetchProduct(pid);
-              assertThat(v.stock()).isEqualTo(5);
-              assertThat(v.status().name()).isEqualTo("LOW_STOCK");
-            });
-  }
-
-  @Test
   void invalidPayloadReturns400() {
     // Blank productId: the command bus rejects the blank aggregate id with an
     // IllegalArgumentException, mapped to 400 by IllegalArgumentExceptionMapper.
@@ -185,32 +154,5 @@ class ProductCommandQueryE2EIT {
         .post("/api/products")
         .then()
         .statusCode(400);
-  }
-
-  /**
-   * A negative initial stock passes the handler's checks, which leave {@code initialStock} open,
-   * and the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
-   * CreateProduct}) with {@code 400} and the interceptor's message, as in the Spring app. The
-   * validator is Hibernate Validator, which {@code quarkus-hibernate-validator} brings. The product
-   * is never created.
-   */
-  @Test
-  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
-    String pid = "p-negative-stock-" + System.nanoTime();
-    given()
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "test-admin")
-        .contentType(ContentType.JSON)
-        .body(
-            """
-            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": -1}"""
-                .formatted(pid))
-        .when()
-        .post("/api/products")
-        .then()
-        .statusCode(400)
-        .body(equalTo("Command validation failed for CreateProduct"));
-
-    given().when().get("/api/products/" + pid).then().statusCode(404);
   }
 }

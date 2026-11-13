@@ -153,7 +153,7 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
                         "/api/products",
                         """
                         {"productId": "%s", "name": "Lamp", "description": "while the broker is down",
-                         "category": "Home", "price": 20.00, "initialStock": 3}"""
+                         "category": "Home", "price": 20.00}"""
                             .formatted(productId))
                     .contentType(MediaType.APPLICATION_JSON_TYPE)
                     .header("X-User-Id", "admin-1")

@@ -130,7 +130,7 @@ class DeadLetterReplayAuthorizationIT {
         .body(
             """
             {"productId": "%s", "name": "Replayed", "description": "dead-letter replay",
-             "category": "Test", "price": 5.00, "initialStock": 3}"""
+             "category": "Test", "price": 5.00}"""
                 .formatted(pid))
         .when()
         .post("/api/products")

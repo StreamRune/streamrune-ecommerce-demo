@@ -107,7 +107,7 @@ class OutboxBrokerDownStartupIT {
             "/api/products",
             """
             {"productId": "%s", "name": "Lamp", "description": "while the broker is down",
-             "category": "Home", "price": 20.00, "initialStock": 3}"""
+             "category": "Home", "price": 20.00}"""
                 .formatted(productId));
     assertThat(created.statusCode()).as("create: %s", created.body()).isEqualTo(200);
 

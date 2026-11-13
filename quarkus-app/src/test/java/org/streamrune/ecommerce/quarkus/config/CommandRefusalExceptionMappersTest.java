@@ -16,7 +16,7 @@ import org.streamrune.core.types.AggregateType;
 import org.streamrune.core.types.CommandId;
 import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.StreamId;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.runtime.CommandDeadLetteredException;
 
 /**
@@ -93,9 +93,9 @@ class CommandRefusalExceptionMappersTest {
   private static CommandDeadLetteredException deadLettered(
       IdempotencyKey key, RuntimeException cause) {
     return new CommandDeadLetteredException(
-        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        new InventoryCommand.AdjustInventory("p-1", 5, "restock"),
         CommandId.of("cmd-dl-1"),
-        StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
+        StreamId.of(AggregateType.of("inventory"), AggregateId.of("p-1")),
         key,
         cause);
   }
@@ -106,9 +106,9 @@ class CommandRefusalExceptionMappersTest {
       CommandDeadLetteredException.PendingOutcome outcome,
       RuntimeException cause) {
     return new CommandDeadLetteredException(
-        new ProductCommand.AdjustStock("p-1", 5, "restock"),
+        new InventoryCommand.AdjustInventory("p-1", 5, "restock"),
         CommandId.of("cmd-dl-1"),
-        StreamId.of(AggregateType.of("product"), AggregateId.of("p-1")),
+        StreamId.of(AggregateType.of("inventory"), AggregateId.of("p-1")),
         key,
         outcome,
         cause);

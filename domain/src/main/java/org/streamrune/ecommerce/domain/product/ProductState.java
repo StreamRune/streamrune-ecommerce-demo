@@ -4,13 +4,16 @@ import org.streamrune.core.AggregateState;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.ecommerce.domain.common.Money;
 
+/**
+ * What the catalogue knows of a product: what it is and what it costs. How many units the shop
+ * holds is the inventory's ({@code InventoryState}).
+ */
 public record ProductState(
     String productId,
     String name,
     String description,
     String category,
     Money price,
-    int stock,
     ProductStatus status)
     implements AggregateState {
   /**
@@ -18,19 +21,7 @@ public record ProductState(
    */
   public static final AggregateType TYPE = AggregateType.of("product");
 
-  private static final int LOW_STOCK_THRESHOLD = 10;
-
   public ProductState() {
-    this(null, null, null, null, null, 0, ProductStatus.AVAILABLE);
-  }
-
-  public static ProductStatus statusForStock(int stock) {
-    if (stock <= 0) {
-      return ProductStatus.OUT_OF_STOCK;
-    }
-    if (stock < LOW_STOCK_THRESHOLD) {
-      return ProductStatus.LOW_STOCK;
-    }
-    return ProductStatus.AVAILABLE;
+    this(null, null, null, null, null, ProductStatus.AVAILABLE);
   }
 }

@@ -261,7 +261,7 @@ class PaymentCaptureRetryIT {
   private void createProduct(String productId) {
     commandBus.execute(
         new ProductCommand.CreateProduct(
-            productId, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD"), 0));
+            productId, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD")));
   }
 
   private void placeOrder(String orderId, String customerId, String productId) {

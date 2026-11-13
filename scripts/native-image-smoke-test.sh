@@ -3,7 +3,8 @@
 # Builds a native binary for the chosen framework, starts it against an empty Postgres database and
 # RabbitMQ, and probes it: health, the schema the binary created at startup, a command-to-read-model
 # round trip, a dead-lettered command replayed through its sealed root, a read model larger than
-# 1 MiB written and read back, and an order fulfilled by its saga from OrderPlaced to COMPLETED.
+# 1 MiB written and read back, an order fulfilled by its saga from OrderPlaced to COMPLETED, and the
+# inventory and storefront views that follow its reservation.
 # It then stops the binary with SIGTERM, waits for it to exit, prints its output, and fails the run
 # when that output (startup, requests and shutdown) holds a GraalVM UnsupportedFeatureError.
 #
@@ -179,7 +180,7 @@ functional_smoke() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
-    -d "{\"productId\":\"$pid\",\"name\":\"SmokeWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99,\"initialStock\":10}")
+    -d "{\"productId\":\"$pid\",\"name\":\"SmokeWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99}")
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/products returned $code"
     return 1
@@ -286,7 +287,7 @@ large_read_model_smoke() {
   {
     printf '{"productId":"%s","name":"BigWidget","description":"' "$pid"
     head -c "$min_bytes" /dev/zero | tr '\0' 'x'
-    printf '","category":"Smoke","price":1.00,"initialStock":1}'
+    printf '","category":"Smoke","price":1.00}'
   } > "$body"
 
   local code
@@ -333,7 +334,7 @@ saga_origin_smoke() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
-    -d "{\"productId\":\"$pid\",\"name\":\"SagaWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99,\"initialStock\":0}")
+    -d "{\"productId\":\"$pid\",\"name\":\"SagaWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99}")
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/products returned $code"
     return 1
@@ -389,6 +390,29 @@ saga_origin_smoke() {
     return 1
   fi
   echo "  ✓ Saga fulfillment-$oid completed (${i}s); PaymentCaptured carries its origin; a reserved correlation id is refused."
+
+  # The inventory read model and the storefront follow the order's reservation: 5 received, 1
+  # reserved. Both views are records the binary serializes by reflection.
+  local inventory="" product=""
+  for i in $(seq 1 20); do
+    inventory=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/inventory/$pid")
+    product=$(curl -s "$base/api/products/$pid")
+    if printf '%s' "$inventory" | grep -q '"productName":"SagaWidget"' \
+        && printf '%s' "$inventory" | grep -q '"available":4' \
+        && printf '%s' "$inventory" | grep -q '"reserved":1' \
+        && printf '%s' "$product" | grep -q '"availability":"LOW_STOCK"'; then
+      break
+    fi
+    inventory=""
+    sleep 1
+  done
+  if [ -z "$inventory" ]; then
+    echo "  ✗ The inventory or the storefront of $pid did not follow the reservation within 20s."
+    echo "    inventory: $(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/inventory/$pid")"
+    echo "    product:   $product"
+    return 1
+  fi
+  echo "  ✓ The inventory of $pid shows the reservation and the storefront shows it low in stock."
 
   # The cancellation of the completed order is undone by the order cancellation process manager:
   # its stock is released and its payment refunded. In a native image the process manager's

@@ -164,7 +164,7 @@ fi
 for p in 1 2; do
   product="two-backends-$RUN-$p"
   post "$FIRST/api/products" \
-    "{\"productId\":\"$product\",\"name\":\"Two backends $p\",\"description\":\"Two-backend run\",\"category\":\"General\",\"price\":10.00,\"initialStock\":0}" \
+    "{\"productId\":\"$product\",\"name\":\"Two backends $p\",\"description\":\"Two-backend run\",\"category\":\"General\",\"price\":10.00}" \
     "${ADMIN[@]}"
   post "$FIRST/api/inventory/$product/receive" "{\"quantity\":$((3 * ORDERS))}" "${ADMIN[@]}"
 done

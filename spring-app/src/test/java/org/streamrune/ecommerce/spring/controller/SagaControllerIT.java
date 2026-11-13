@@ -12,7 +12,8 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 
 class SagaControllerIT extends AbstractIntegrationTest {
 
-  private void createProduct(String pid, int stock) {
+  /** Creates the product in the catalogue and receives its opening stock into the inventory. */
+  private void stockProduct(String pid, int quantity) {
     String body =
         """
         {
@@ -20,10 +21,9 @@ class SagaControllerIT extends AbstractIntegrationTest {
           "name": "Saga Widget",
           "description": "saga test product",
           "category": "Test",
-          "price": 15.00,
-          "initialStock": %d
+          "price": 15.00
         }"""
-            .formatted(pid, stock);
+            .formatted(pid);
     client
         .post()
         .uri("/api/products")
@@ -31,6 +31,16 @@ class SagaControllerIT extends AbstractIntegrationTest {
         .header("X-User-Id", "test-admin")
         .contentType(MediaType.APPLICATION_JSON)
         .bodyValue(body)
+        .exchange()
+        .expectStatus()
+        .is2xxSuccessful();
+    client
+        .post()
+        .uri("/api/inventory/" + pid + "/receive")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue("{\"quantity\": %d}".formatted(quantity))
         .exchange()
         .expectStatus()
         .is2xxSuccessful();
@@ -125,14 +135,18 @@ class SagaControllerIT extends AbstractIntegrationTest {
         .isNotFound();
   }
 
+  /**
+   * An order of a product with stock in its inventory runs the whole fulfillment: the saga ends
+   * {@code COMPLETED} and the order {@code CONFIRMED}, not merely a saga that exists.
+   */
   @Test
-  void placingOrderEventuallyCreatesASagaEntry() {
+  void placingAnOrderOfAStockedProductCompletesItsSagaAndConfirmsTheOrder() {
     String cid = "saga-cust-" + System.nanoTime();
     String pid = "saga-prod-" + System.nanoTime();
     String oid = "saga-order-" + System.nanoTime();
 
     registerCustomer(cid);
-    createProduct(pid, 50);
+    stockProduct(pid, 50);
 
     // Wait for projections to catch up before placing the order
     await()
@@ -186,6 +200,43 @@ class SagaControllerIT extends AbstractIntegrationTest {
               assertThat(hasSagaForOrder)
                   .as("Expected a fulfillment saga entry for order %s", oid)
                   .isTrue();
+            });
+
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              @SuppressWarnings("unchecked")
+              Map<String, Object> saga =
+                  client
+                      .get()
+                      .uri("/api/saga/fulfillments/fulfillment-" + oid)
+                      .header("X-User-Id", "admin-1")
+                      .header("X-User-Role", "ADMIN")
+                      .exchange()
+                      .expectStatus()
+                      .isOk()
+                      .expectBody(Map.class)
+                      .returnResult()
+                      .getResponseBody();
+              assertThat(saga).isNotNull();
+              assertThat(saga.get("fulfillmentStatus")).isEqualTo("COMPLETED");
+              @SuppressWarnings("unchecked")
+              Map<String, Object> order =
+                  client
+                      .get()
+                      .uri("/api/orders/" + oid)
+                      .header("X-User-Id", "admin-1")
+                      .header("X-User-Role", "ADMIN")
+                      .exchange()
+                      .expectStatus()
+                      .isOk()
+                      .expectBody(Map.class)
+                      .returnResult()
+                      .getResponseBody();
+              assertThat(order).isNotNull();
+              assertThat(order.get("status")).isEqualTo("CONFIRMED");
             });
   }
 

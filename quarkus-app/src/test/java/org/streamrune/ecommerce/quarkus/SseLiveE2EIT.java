@@ -56,8 +56,7 @@ class SseLiveE2EIT {
         .contentType(ContentType.JSON)
         .body(
             """
-            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50,
-             "initialStock": 0}"""
+            {"productId": "%s", "name": "SSE product", "category": "General", "price": 12.50}"""
                 .formatted(productId))
         .when()
         .post("/api/products")

@@ -92,8 +92,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.name(),
                       e.category(),
                       e.price().amount(),
-                      e.price().currency(),
-                      e.stock()),
+                      e.price().currency()),
                   "ProductCreated",
                   stream));
       case ProductEvent.PriceUpdated e ->
@@ -107,13 +106,6 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.newPrice().amount(),
                       e.newPrice().currency()),
                   "PriceUpdated",
-                  stream));
-      case ProductEvent.StockAdjusted e ->
-          List.of(
-              entry(
-                  eventId,
-                  new StockAdjustedDto(e.productId(), e.previousStock(), e.newStock(), e.reason()),
-                  "StockAdjusted",
                   stream));
       case ProductEvent.ProductDiscontinued e ->
           List.of(
@@ -159,12 +151,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
   record PaymentFailedDto(String paymentId, String reason) {}
 
   record ProductCreatedDto(
-      String productId,
-      String name,
-      String category,
-      BigDecimal price,
-      String currency,
-      int stock) {}
+      String productId, String name, String category, BigDecimal price, String currency) {}
 
   record PriceUpdatedDto(
       String productId,
@@ -172,8 +159,6 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
       String previousCurrency,
       BigDecimal newPrice,
       String newCurrency) {}
-
-  record StockAdjustedDto(String productId, int previousStock, int newStock, String reason) {}
 
   record ProductDiscontinuedDto(String productId) {}
 }

@@ -14,4 +14,7 @@ public sealed interface InventoryEvent extends DomainEvent {
 
   record ShipmentReceived(String productId, int quantity, int availableAfter)
       implements InventoryEvent {}
+
+  record InventoryAdjusted(String productId, int quantityChange, String reason, int availableAfter)
+      implements InventoryEvent {}
 }

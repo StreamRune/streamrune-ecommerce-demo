@@ -223,8 +223,7 @@ class LiveFeedAccessIT extends AbstractIntegrationTest {
     String product = uniqueId("p");
     String body =
         """
-        {"productId": "%s", "name": "Feed product", "category": "General", "price": 12.50,
-         "initialStock": 0}"""
+        {"productId": "%s", "name": "Feed product", "category": "General", "price": 12.50}"""
             .formatted(product);
     assertThat(send("POST", "/api/products", OPERATOR, "ADMIN", body).statusCode())
         .isBetween(200, 299);

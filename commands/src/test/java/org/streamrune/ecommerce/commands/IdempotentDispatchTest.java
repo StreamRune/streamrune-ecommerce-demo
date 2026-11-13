@@ -10,11 +10,11 @@ import org.streamrune.core.Command;
 import org.streamrune.core.CommandBus;
 import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.UserId;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 
 class IdempotentDispatchTest {
 
-  private static final Command ADJUST = new ProductCommand.AdjustStock("p-1", 5, "restock");
+  private static final Command ADJUST = new InventoryCommand.AdjustInventory("p-1", 5, "restock");
 
   @Test
   void noHeaderIsNoKey() {

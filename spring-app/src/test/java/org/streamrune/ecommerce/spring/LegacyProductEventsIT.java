@@ -104,8 +104,7 @@ class LegacyProductEventsIT {
             "Gadget",
             "Created in chapter 2",
             "Gadgets",
-            new Money(new BigDecimal("19.99"), "USD"),
-            5);
+            new Money(new BigDecimal("19.99"), "USD"));
     storeWithoutUpcaster()
         .append(
             streamId,

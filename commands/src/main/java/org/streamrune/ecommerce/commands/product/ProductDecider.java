@@ -17,33 +17,18 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
     return switch (cmd) {
       case ProductCommand.CreateProduct c -> {
         // A product id is created once. Without this check a second CreateProduct would append
-        // another ProductCreated, and evolve would replace the product's name, price and stock.
+        // another ProductCreated, and evolve would replace the product's name and price.
         if (state.productId() != null) {
           throw new DomainException("Product already exists: " + c.productId());
         }
         yield List.of(
             new ProductEvent.ProductCreated(
-                c.productId(),
-                c.name(),
-                c.description(),
-                c.category(),
-                c.price(),
-                c.initialStock()));
+                c.productId(), c.name(), c.description(), c.category(), c.price()));
       }
 
       case ProductCommand.UpdatePrice c -> {
         requireCreated(state, c.productId());
         yield List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
-      }
-
-      case ProductCommand.AdjustStock c -> {
-        requireCreated(state, c.productId());
-        int newStock = state.stock() + c.quantityChange();
-        if (newStock < 0) {
-          throw new DomainException("Insufficient stock for product: " + c.productId());
-        }
-        yield List.of(
-            new ProductEvent.StockAdjusted(c.productId(), state.stock(), newStock, c.reason()));
       }
 
       case ProductCommand.DiscontinueProduct c -> {
@@ -58,7 +43,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
 
   /**
    * A product that was never created takes no command but {@code CreateProduct}: without this check
-   * a price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+   * a price change or a discontinuation would open a stream for an id nobody created.
    */
   private static void requireCreated(ProductState state, String productId) {
     if (state.productId() == null) {
@@ -76,8 +61,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               e.description(),
               e.category(),
               e.price(),
-              e.stock(),
-              ProductState.statusForStock(e.stock()));
+              ProductStatus.AVAILABLE);
       case ProductEvent.PriceUpdated e ->
           new ProductState(
               state.productId(),
@@ -85,17 +69,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               state.description(),
               state.category(),
               e.newPrice(),
-              state.stock(),
               state.status());
-      case ProductEvent.StockAdjusted e ->
-          new ProductState(
-              state.productId(),
-              state.name(),
-              state.description(),
-              state.category(),
-              state.price(),
-              e.newStock(),
-              ProductState.statusForStock(e.newStock()));
       case ProductEvent.ProductDiscontinued e ->
           new ProductState(
               state.productId(),
@@ -103,7 +77,6 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               state.description(),
               state.category(),
               state.price(),
-              state.stock(),
               ProductStatus.DISCONTINUED);
     };
   }

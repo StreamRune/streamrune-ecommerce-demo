@@ -34,7 +34,7 @@ class ProjectionDeliveryModeE2EIT {
 
   @Inject DataSource dataSource;
 
-  private void createProduct(String id, String name, double price, int stock) {
+  private void createProduct(String id, String name, double price) {
     String body =
         """
         {
@@ -42,10 +42,9 @@ class ProjectionDeliveryModeE2EIT {
           "name": "%s",
           "description": "test product",
           "category": "Test",
-          "price": %s,
-          "initialStock": %d
+          "price": %s
         }"""
-            .formatted(id, name, price, stock);
+            .formatted(id, name, price);
     given()
         .header("X-User-Role", "ADMIN")
         .header("X-User-Id", "test-admin")
@@ -84,7 +83,7 @@ class ProjectionDeliveryModeE2EIT {
   void anAtLeastOnceProjectionOverMemory_runsBesideTheTransactionalFour() throws Exception {
     int before = AuditMemProjection.MEMORY.rowCount(AUDIT_MEM);
     String pid = "q-p-mode-" + System.nanoTime();
-    createProduct(pid, "ModeWidget", 12.50, 10);
+    createProduct(pid, "ModeWidget", 12.50);
 
     await()
         .atMost(Duration.ofSeconds(15))

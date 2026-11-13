@@ -50,8 +50,7 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
             "ADMIN",
             "test-admin",
             """
-            {"productId": "%s", "name": "Product", "category": "General", "price": 9.99,
-             "initialStock": 0}"""
+            {"productId": "%s", "name": "Product", "category": "General", "price": 9.99}"""
                 .formatted(productId)));
   }
 
@@ -81,17 +80,12 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
     String product =
         """
         {"productId": "%s", "name": "%s", "description": "d", "category": "Test",
-         "price": %s, "initialStock": %d}""";
+         "price": %s}""";
 
     accepted(
-        post(
-            "/api/products",
-            "ADMIN",
-            "test-admin",
-            product.formatted(pid, "Original", "19.99", 100)));
+        post("/api/products", "ADMIN", "test-admin", product.formatted(pid, "Original", "19.99")));
     refused(
-        post(
-            "/api/products", "ADMIN", "test-admin", product.formatted(pid, "Overwrite", "1.00", 5)),
+        post("/api/products", "ADMIN", "test-admin", product.formatted(pid, "Overwrite", "1.00")),
         "Product already exists: " + pid);
 
     List<EventEnvelope> stream = events(ProductState.TYPE, pid);
@@ -99,7 +93,6 @@ class DuplicateCreationIT extends AbstractIntegrationTest {
     var created = (ProductEvent.ProductCreated) stream.getFirst().event();
     assertThat(created.name()).isEqualTo("Original");
     assertThat(created.price().amount()).isEqualByComparingTo(new BigDecimal("19.99"));
-    assertThat(created.stock()).isEqualTo(100);
   }
 
   @Test

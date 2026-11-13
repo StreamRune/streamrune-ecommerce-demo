@@ -49,19 +49,19 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  * after the bus's three attempts, in about three seconds. The tests run in order:
  *
  * <ol>
- *   <li><b>A held aggregate lock.</b> A price change of a product stops in its audit write, which
- *       the command bus makes while it still holds the product's lock: a trigger on {@code
- *       audit_log} waits for an advisory lock the test holds. A stock adjustment of the same
- *       product waits for the product's lock until the lock timeout, on every attempt of the bus's
- *       retry policy, and is dead-lettered: sent with a key it is {@code QUEUED_FOR_REPLAY}, sent
- *       without one {@code AWAITING_OPERATOR}. Released, the price change completes with {@code
- *       200}.
+ *   <li><b>A held aggregate lock.</b> A shipment received into a product's inventory stops in its
+ *       audit write, which the command bus makes while it still holds the inventory's lock: a
+ *       trigger on {@code audit_log} waits for an advisory lock the test holds. An inventory
+ *       adjustment of the same product waits for the inventory's lock until the lock timeout, on
+ *       every attempt of the bus's retry policy, and is dead-lettered: sent with a key it is {@code
+ *       QUEUED_FOR_REPLAY}, sent without one {@code AWAITING_OPERATOR}. Released, the shipment
+ *       completes with {@code 200}.
  *   <li><b>A version conflict on every attempt.</b> A trigger on {@code event_stream} raises {@code
- *       unique_violation} for a stock adjustment of a product, which the event store reports as an
- *       {@code OptimisticLockException}, as it does when a second writer stored the version first.
- *       The bus tries the command on every attempt of its retry policy and dead-letters it, keyed
- *       or not, with the two answers above; nothing is written.
- *   <li><b>A keyed entry left to an operator.</b> With the same version conflict, a keyed stock
+ *       unique_violation} for an inventory adjustment of a product, which the event store reports
+ *       as an {@code OptimisticLockException}, as it does when a second writer stored the version
+ *       first. The bus tries the command on every attempt of its retry policy and dead-letters it,
+ *       keyed or not, with the two answers above; nothing is written.
+ *   <li><b>A keyed entry left to an operator.</b> With the same version conflict, a keyed inventory
  *       adjustment is queued for replay; once its entry's replays are marked used up, the same
  *       request sent again stores no second entry and is answered {@code AWAITING_OPERATOR} with
  *       the first entry's {@code commandId}.
@@ -74,7 +74,7 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
  *       CIRCUIT_BREAKER_OPEN}.
  *   <li><b>A closed command bus.</b> Once the bus is closed, as on shutdown, a command is refused
  *       with {@code COMMAND_BUS_CLOSED}.
- *   <li><b>A preflight.</b> The question a browser asks before the page sends a keyed stock
+ *   <li><b>A preflight.</b> The question a browser asks before the page sends a keyed inventory
  *       adjustment is answered for the frontend's origin, without credentials.
  * </ol>
  */
@@ -141,39 +141,39 @@ class CommandRefusalStatusIT {
       throws Exception {
     String productId = "refusal-lock-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
-    String stock = "/api/products/" + productId + "/stock";
-    String recount = "{\"quantity\": 1, \"reason\": \"recount\"}";
+    String adjust = "/api/inventory/" + productId + "/adjust";
+    String recount = "{\"quantityChange\": 1, \"reason\": \"recount\"}";
 
     DataSource dataSource = app.getBean(DataSource.class);
     var postgres = AbstractIntegrationTest.POSTGRES;
     // A connection of its own, not one of the pool's: closing it ends the session and with it the
     // advisory lock, also when an assertion fails before the release.
-    try (var auditHold = new AuditWriteHold(dataSource, productId, "UpdatePrice");
+    try (var auditHold = new AuditWriteHold(dataSource, productId, "ReceiveShipment");
         var holder =
             DriverManager.getConnection(
                 databaseUrl(), postgres.getUsername(), postgres.getPassword())) {
       holdAdvisoryLock(holder);
-      CompletableFuture<HttpResponse<String>> priceChange =
+      CompletableFuture<HttpResponse<String>> shipment =
           CompletableFuture.supplyAsync(
-              () -> send("PUT", "/api/products/" + productId + "/price", "{\"price\": 25.00}"));
-      // Committed, then stopped in its audit write: the product's lock is held from here.
+              () -> send("POST", "/api/inventory/" + productId + "/receive", "{\"quantity\": 10}"));
+      // Committed, then stopped in its audit write: the inventory's lock is held from here.
       await()
           .atMost(Duration.ofSeconds(30))
-          .until(() -> eventCount(dataSource, productId, "PriceUpdated") == 1);
+          .until(() -> eventCount(dataSource, productId, "ShipmentReceived") == 1);
 
       long waitStart = System.nanoTime();
-      HttpResponse<String> keyed = send("PUT", stock, recount, "lock-key-1");
+      HttpResponse<String> keyed = send("POST", adjust, recount, "lock-key-1");
       assertThat(Duration.ofNanos(System.nanoTime() - waitStart))
           .as("the configured lock timeout, one second, on each of the bus's three attempts")
           .isLessThan(Duration.ofSeconds(10));
       assertQueuedForReplay(keyed, dataSource, "lock-key-1");
 
-      assertAwaitingOperator(send("PUT", stock, recount, null), dataSource);
+      assertAwaitingOperator(send("POST", adjust, recount, null), dataSource);
 
       releaseAdvisoryLock(holder);
-      assertThat(priceChange.get().statusCode()).isEqualTo(200);
+      assertThat(shipment.get().statusCode()).isEqualTo(200);
     }
-    assertThat(eventCount(dataSource, productId, "StockAdjusted"))
+    assertThat(eventCount(dataSource, productId, "InventoryAdjusted"))
         .as("no adjustment ran while the lock was held")
         .isZero();
   }
@@ -184,16 +184,16 @@ class CommandRefusalStatusIT {
       throws Exception {
     String productId = "refusal-version-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
-    String stock = "/api/products/" + productId + "/stock";
-    String recount = "{\"quantity\": 2, \"reason\": \"recount\"}";
+    String adjust = "/api/inventory/" + productId + "/adjust";
+    String recount = "{\"quantityChange\": 2, \"reason\": \"recount\"}";
     DataSource dataSource = app.getBean(DataSource.class);
 
-    try (var conflict = new VersionConflictInjection(dataSource, productId, "StockAdjusted")) {
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "InventoryAdjusted")) {
       assertQueuedForReplay(
-          send("PUT", stock, recount, "version-key-1"), dataSource, "version-key-1");
-      assertAwaitingOperator(send("PUT", stock, recount, null), dataSource);
+          send("POST", adjust, recount, "version-key-1"), dataSource, "version-key-1");
+      assertAwaitingOperator(send("POST", adjust, recount, null), dataSource);
 
-      assertThat(eventCount(dataSource, productId, "StockAdjusted"))
+      assertThat(eventCount(dataSource, productId, "InventoryAdjusted"))
           .as("nothing was written")
           .isZero();
     }
@@ -210,17 +210,17 @@ class CommandRefusalStatusIT {
   void aKeyedSendAgainstAnEntryLeftToAnOperatorAwaitsTheOperator() throws Exception {
     String productId = "refusal-exhausted-" + System.nanoTime();
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
-    String stock = "/api/products/" + productId + "/stock";
-    String recount = "{\"quantity\": 4, \"reason\": \"recount\"}";
+    String adjust = "/api/inventory/" + productId + "/adjust";
+    String recount = "{\"quantityChange\": 4, \"reason\": \"recount\"}";
     DataSource dataSource = app.getBean(DataSource.class);
 
-    try (var conflict = new VersionConflictInjection(dataSource, productId, "StockAdjusted")) {
-      HttpResponse<String> first = send("PUT", stock, recount, "exhausted-key-1");
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "InventoryAdjusted")) {
+      HttpResponse<String> first = send("POST", adjust, recount, "exhausted-key-1");
       assertQueuedForReplay(first, dataSource, "exhausted-key-1");
       String entry = jsonBody(first).path("commandId").asText();
       useUpReplays(dataSource, entry, DeadLetterRetryPolicy.DEFAULT.maxRetries());
 
-      HttpResponse<String> again = send("PUT", stock, recount, "exhausted-key-1");
+      HttpResponse<String> again = send("POST", adjust, recount, "exhausted-key-1");
       assertThat(again.statusCode()).as("status of %s", again.body()).isEqualTo(500);
       assertThat(again.headers().firstValue("Retry-After")).isEmpty();
       JsonNode body = jsonBody(again);
@@ -231,7 +231,7 @@ class CommandRefusalStatusIT {
       assertThat(entriesUnderKey(dataSource, "exhausted-key-1"))
           .as("one entry for the key")
           .isOne();
-      assertThat(eventCount(dataSource, productId, "StockAdjusted"))
+      assertThat(eventCount(dataSource, productId, "InventoryAdjusted"))
           .as("nothing was written")
           .isZero();
     }
@@ -244,18 +244,18 @@ class CommandRefusalStatusIT {
     assertThat(createProduct(productId).statusCode()).isEqualTo(200);
     DataSource dataSource = app.getBean(DataSource.class);
 
-    try (var conflict = new VersionConflictInjection(dataSource, productId, "StockAdjusted");
+    try (var conflict = new VersionConflictInjection(dataSource, productId, "InventoryAdjusted");
         var refused = new DeadLetterWriteFailure(dataSource, productId)) {
       HttpResponse<String> adjusted =
           send(
-              "PUT",
-              "/api/products/" + productId + "/stock",
-              "{\"quantity\": 3, \"reason\": \"recount\"}",
+              "POST",
+              "/api/inventory/" + productId + "/adjust",
+              "{\"quantityChange\": 3, \"reason\": \"recount\"}",
               "unstored-key-1");
 
       // Nothing is pending: the version conflict itself reaches the caller, a refusal.
       assertRefused(adjusted, "AGGREGATE_VERSION_CONFLICT");
-      assertThat(eventCount(dataSource, productId, "StockAdjusted"))
+      assertThat(eventCount(dataSource, productId, "InventoryAdjusted"))
           .as("nothing was written")
           .isZero();
     }
@@ -297,13 +297,13 @@ class CommandRefusalStatusIT {
 
   /**
    * Before the page sends a command, the browser asks whether it may: a preflight with the method
-   * and the headers of the request, here a keyed stock adjustment's. The answer admits the
+   * and the headers of the request, here a keyed inventory adjustment's. The answer admits the
    * frontend's origin and allows no credentials.
    */
   @Test
   @Order(7)
   void aPreflightAdmitsTheFrontendsOrigin_andAllowsNoCredentials() throws Exception {
-    HttpResponse<String> answer = preflight("/api/products/refusal-preflight/stock", "PUT");
+    HttpResponse<String> answer = preflight("/api/inventory/refusal-preflight/adjust", "POST");
 
     assertThat(answer.statusCode()).as("status of the preflight").isEqualTo(200);
     assertThat(answer.headers().firstValue("Access-Control-Allow-Origin"))
@@ -413,7 +413,7 @@ class CommandRefusalStatusIT {
         "/api/products",
         """
         {"productId": "%s", "name": "Lamp", "description": "refusals", "category": "Home",
-         "price": 20.00, "initialStock": 3}"""
+         "price": 20.00}"""
             .formatted(productId));
   }
 
@@ -490,13 +490,16 @@ class CommandRefusalStatusIT {
     }
   }
 
+  /**
+   * The events of one type the product's streams hold: its catalogue stream and its inventory share
+   * the id, and each event type belongs to one of them.
+   */
   private static long eventCount(DataSource dataSource, String productId, String eventType)
       throws Exception {
     try (var conn = dataSource.getConnection();
         PreparedStatement ps =
             conn.prepareStatement(
-                "SELECT count(*) FROM event_stream WHERE aggregate_type = 'product'"
-                    + " AND aggregate_id = ? AND event_type = ?")) {
+                "SELECT count(*) FROM event_stream WHERE aggregate_id = ? AND event_type = ?")) {
       ps.setString(1, productId);
       ps.setString(2, eventType);
       try (ResultSet rs = ps.executeQuery()) {

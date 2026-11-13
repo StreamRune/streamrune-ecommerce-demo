@@ -44,6 +44,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -137,7 +138,6 @@ public class StreamRuneFactory {
         // Product events
         .registerEvent("ProductCreated", ProductEvent.ProductCreated.class)
         .registerEvent("PriceUpdated", ProductEvent.PriceUpdated.class)
-        .registerEvent("StockAdjusted", ProductEvent.StockAdjusted.class)
         .registerEvent("ProductDiscontinued", ProductEvent.ProductDiscontinued.class)
         // Order events
         .registerEvent("OrderPlaced", OrderEvent.OrderPlaced.class)
@@ -162,6 +162,7 @@ public class StreamRuneFactory {
         .registerEvent("StockReleased", InventoryEvent.StockReleased.class)
         .registerEvent("ReservationConfirmed", InventoryEvent.ReservationConfirmed.class)
         .registerEvent("ShipmentReceived", InventoryEvent.ShipmentReceived.class)
+        .registerEvent("InventoryAdjusted", InventoryEvent.InventoryAdjusted.class)
         // Aggregate state types — required so the command bus's snapshot policy can persist and
         // rehydrate snapshots. Without these, every snapshot save fails best-effort with
         // "state type 'XxxState' does not resolve in the EventTypeRegistry" and floods the log.
@@ -397,7 +398,6 @@ public class StreamRuneFactory {
             AggregateId.of(
                 switch (cmd) {
                   case ProductCommand.CreateProduct c -> c.productId();
-                  case ProductCommand.AdjustStock c -> c.productId();
                   case ProductCommand.UpdatePrice c -> c.productId();
                   case ProductCommand.DiscontinueProduct c -> c.productId();
                 }),
@@ -468,6 +468,7 @@ public class StreamRuneFactory {
                   case InventoryCommand.ReleaseStock c -> c.productId();
                   case InventoryCommand.ConfirmReservation c -> c.productId();
                   case InventoryCommand.ReceiveShipment c -> c.productId();
+                  case InventoryCommand.AdjustInventory c -> c.productId();
                 }),
         new InventoryDecider());
   }
@@ -762,6 +763,12 @@ public class StreamRuneFactory {
   @Singleton
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Singleton
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /**

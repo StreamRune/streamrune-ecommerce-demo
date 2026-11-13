@@ -228,7 +228,7 @@ class EcommerceIntegrationEventMapperTest {
   @Test
   void productCreated_producesOneEntry() {
     var event =
-        new ProductEvent.ProductCreated("prod-1", "Widget", "Nice widget", "GADGETS", TEN_USD, 100);
+        new ProductEvent.ProductCreated("prod-1", "Widget", "Nice widget", "GADGETS", TEN_USD);
     List<OutboxEntry> entries =
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-1")));
     assertThat(entries).hasSize(1);
@@ -245,15 +245,6 @@ class EcommerceIntegrationEventMapperTest {
         mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-2")));
     assertThat(entries).hasSize(1);
     assertThat(entries.getFirst().streamId()).isEqualTo(stream(ProductState.TYPE, "prod-2"));
-    assertPiiAbsent(entries.getFirst().payload());
-  }
-
-  @Test
-  void stockAdjusted_producesOneEntry() {
-    var event = new ProductEvent.StockAdjusted("prod-3", 10, 15, "Restock");
-    List<OutboxEntry> entries =
-        mapper.toOutbox(envelope(event, stream(ProductState.TYPE, "prod-3")));
-    assertThat(entries).hasSize(1);
     assertPiiAbsent(entries.getFirst().payload());
   }
 

@@ -21,8 +21,7 @@ class EventExplorerControllerIT extends AbstractIntegrationTest {
           "name": "Event Explorer Widget",
           "description": "event test",
           "category": "Test",
-          "price": 5.00,
-          "initialStock": 10
+          "price": 5.00
         }"""
             .formatted(id);
     client

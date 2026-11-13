@@ -39,8 +39,7 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *   <li>{@code inventory}: {@code ADMIN} only. A product's stock events name the orders that
  *       reserved it, which are other customers' orders.
  *   <li>{@code product}: {@code ADMIN} only. Nothing in the events is personal, but they carry
- *       operational detail the public catalogue does not show: every stock adjustment with its
- *       free-text reason, and the price history.
+ *       operational detail the public catalogue does not show: the price history.
  *   <li>any other type: refused, for {@code ADMIN} too. A new aggregate is closed until a line is
  *       added here.
  * </ul>

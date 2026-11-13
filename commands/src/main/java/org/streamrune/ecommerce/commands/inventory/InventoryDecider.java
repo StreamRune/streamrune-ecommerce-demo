@@ -66,6 +66,29 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
           List.of(
               new InventoryEvent.ShipmentReceived(
                   c.productId(), c.quantity(), state.available() + c.quantity()));
+
+      // A correction of the units on hand, never of what orders hold: reserved and committed stay.
+      case InventoryCommand.AdjustInventory c -> {
+        if (c.quantityChange() == 0) {
+          throw new DomainException("An inventory adjustment must change the quantity");
+        }
+        if (c.reason() == null || c.reason().isBlank()) {
+          throw new DomainException("An inventory adjustment needs a reason");
+        }
+        int availableAfter = state.available() + c.quantityChange();
+        if (availableAfter < 0) {
+          throw new DomainException(
+              "Insufficient stock for "
+                  + c.productId()
+                  + ": available="
+                  + state.available()
+                  + ", change="
+                  + c.quantityChange());
+        }
+        yield List.of(
+            new InventoryEvent.InventoryAdjusted(
+                c.productId(), c.quantityChange(), c.reason(), availableAfter));
+      }
     };
   }
 
@@ -94,6 +117,13 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
               state.committed() + e.quantity(),
               without(state.reservations(), e.orderId()));
       case InventoryEvent.ShipmentReceived e ->
+          new InventoryState(
+              e.productId(),
+              e.availableAfter(),
+              state.reserved(),
+              state.committed(),
+              state.reservations());
+      case InventoryEvent.InventoryAdjusted e ->
           new InventoryState(
               e.productId(),
               e.availableAfter(),

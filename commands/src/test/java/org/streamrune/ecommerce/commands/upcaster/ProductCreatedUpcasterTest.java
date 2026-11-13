@@ -28,7 +28,6 @@ class ProductCreatedUpcasterTest {
     v1.put("name", "Widget");
     v1.put("description", "A widget");
     v1.put("price", Map.of("amount", 10, "currency", "USD"));
-    v1.put("stock", 50);
 
     Map<String, Object> v2 = upcaster.upcast(v1, 1);
 

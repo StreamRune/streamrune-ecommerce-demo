@@ -37,6 +37,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -99,9 +100,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -157,6 +155,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -408,7 +409,6 @@ public class StreamRuneConfig {
                         switch (cmd) {
                           case ProductCommand.CreateProduct c -> c.productId();
                           case ProductCommand.UpdatePrice c -> c.productId();
-                          case ProductCommand.AdjustStock c -> c.productId();
                           case ProductCommand.DiscontinueProduct c -> c.productId();
                         }),
                 new ProductDecider())
@@ -459,6 +459,7 @@ public class StreamRuneConfig {
                           case InventoryCommand.ReleaseStock c -> c.productId();
                           case InventoryCommand.ConfirmReservation c -> c.productId();
                           case InventoryCommand.ReceiveShipment c -> c.productId();
+                          case InventoryCommand.AdjustInventory c -> c.productId();
                         }),
                 new InventoryDecider());
     if (sagaCommandDelayMax.isPositive()) {
@@ -959,6 +960,12 @@ public class StreamRuneConfig {
   @Bean
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */

@@ -182,4 +182,71 @@ class InventoryDeciderTest {
               assertThat(s.reservationOf("o-2")).isEqualTo(OptionalInt.empty());
             });
   }
+
+  @Test
+  void adjustInventory_changesTheAvailableUnitsAlone() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17))
+        .when(new InventoryCommand.AdjustInventory("p-1", -5, "Stocktake"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 12))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(12);
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+            });
+  }
+
+  @Test
+  void adjustInventory_upwards_addsUnits() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", 4, "Found in the back room"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", 4, "Found in the back room", 14));
+  }
+
+  @Test
+  void adjustInventory_belowZero_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -11, "Stocktake"))
+        .expectFailedWith(
+            DomainException.class, "Insufficient stock for p-1: available=10, change=-11");
+  }
+
+  @Test
+  void adjustInventory_toExactlyZero_isAccepted() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -10, "Damaged"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -10, "Damaged", 0));
+  }
+
+  @Test
+  void adjustInventory_withoutAChange_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", 0, "Stocktake"))
+        .expectFailedWith(
+            DomainException.class, "An inventory adjustment must change the quantity");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   "})
+  void adjustInventory_withABlankReason_isRefused(String reason) {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -1, reason))
+        .expectFailedWith(DomainException.class, "An inventory adjustment needs a reason");
+  }
+
+  @Test
+  void adjustInventory_withoutAReason_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -1, null))
+        .expectFailedWith(DomainException.class, "An inventory adjustment needs a reason");
+  }
 }

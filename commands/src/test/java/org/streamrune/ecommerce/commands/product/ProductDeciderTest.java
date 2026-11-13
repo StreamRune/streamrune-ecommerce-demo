@@ -23,21 +23,15 @@ class ProductDeciderTest {
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
         .expectEvents(
             new ProductEvent.ProductCreated(
                 "p-1",
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
-        .expectState(
-            s -> {
-              assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
-              assertThat(s.stock()).isEqualTo(100);
-            });
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
+        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE));
   }
 
   @Test
@@ -45,62 +39,11 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")))
         .when(
             new ProductCommand.CreateProduct(
-                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD"), 5))
+                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD")))
         .expectFailedWith(DomainException.class, "Product already exists: p-1");
-  }
-
-  @Test
-  void createProduct_lowStock() {
-    fixture
-        .given()
-        .when(
-            new ProductCommand.CreateProduct(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
-  }
-
-  @Test
-  void createProduct_outOfStock() {
-    fixture
-        .given()
-        .when(
-            new ProductCommand.CreateProduct(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 0))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.OUT_OF_STOCK));
-  }
-
-  @Test
-  void adjustStock_reducesStock() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
-        .when(new ProductCommand.AdjustStock("p-1", -30, "Sold"))
-        .expectEvents(new ProductEvent.StockAdjusted("p-1", 100, 70, "Sold"))
-        .expectState(s -> assertThat(s.stock()).isEqualTo(70));
-  }
-
-  @Test
-  void adjustStock_insufficientStock_throws() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
-        .when(new ProductCommand.AdjustStock("p-1", -10, "Oversold"))
-        .expectException(DomainException.class);
-  }
-
-  @Test
-  void adjustStock_triggersLowStockStatus() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 15))
-        .when(new ProductCommand.AdjustStock("p-1", -10, "Sale"))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
   }
 
   @Test
@@ -108,7 +51,7 @@ class ProductDeciderTest {
     var oldPrice = new Money(java.math.BigDecimal.TEN, "USD");
     var newPrice = new Money(java.math.BigDecimal.valueOf(25), "USD");
     fixture
-        .given(new ProductEvent.ProductCreated("p-1", "Widget", null, null, oldPrice, 50))
+        .given(new ProductEvent.ProductCreated("p-1", "Widget", null, null, oldPrice))
         .when(new ProductCommand.UpdatePrice("p-1", newPrice))
         .expectEvents(new ProductEvent.PriceUpdated("p-1", oldPrice, newPrice));
   }
@@ -118,7 +61,7 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50))
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")))
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectEvents(new ProductEvent.ProductDiscontinued("p-1"))
         .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.DISCONTINUED));
@@ -129,14 +72,14 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50),
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")),
             new ProductEvent.ProductDiscontinued("p-1"))
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectException(DomainException.class);
   }
 
   // A product that was never created takes no command but CreateProduct: without the check a
-  // price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+  // price change or a discontinuation would open a stream for an id nobody created.
 
   @Test
   void updatePrice_neverCreated_throws() {
@@ -145,14 +88,6 @@ class ProductDeciderTest {
         .when(
             new ProductCommand.UpdatePrice(
                 "p-none", new Money(java.math.BigDecimal.valueOf(25), "USD")))
-        .expectFailedWith(DomainException.class, "Product not found: p-none");
-  }
-
-  @Test
-  void adjustStock_neverCreated_throws() {
-    fixture
-        .given()
-        .when(new ProductCommand.AdjustStock("p-none", 5, "Restock"))
         .expectFailedWith(DomainException.class, "Product not found: p-none");
   }
 

@@ -60,12 +60,7 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
     String order = "m-trace-o-" + System.nanoTime();
     commandBus.execute(
         new ProductCommand.CreateProduct(
-            product,
-            "Traced product",
-            null,
-            "General",
-            new Money(new BigDecimal("4.50"), "USD"),
-            0));
+            product, "Traced product", null, "General", new Money(new BigDecimal("4.50"), "USD")));
     commandBus.execute(new InventoryCommand.ReceiveShipment(product, 5));
     recorded.clear();
 

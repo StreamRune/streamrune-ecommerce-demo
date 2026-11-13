@@ -66,7 +66,7 @@ class SseLiveE2EIT extends AbstractIntegrationTest {
                         "/api/products",
                         """
                         {"productId": "%s", "name": "SSE product", "category": "General",
-                         "price": 12.50, "initialStock": 0}"""
+                         "price": 12.50}"""
                             .formatted(productId))
                     .contentType(MediaType.APPLICATION_JSON)
                     .header("X-User-Role", "ADMIN")

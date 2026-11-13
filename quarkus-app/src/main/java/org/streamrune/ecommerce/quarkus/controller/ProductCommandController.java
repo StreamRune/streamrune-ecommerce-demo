@@ -5,8 +5,6 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
-import org.streamrune.core.types.IdempotencyKey;
-import org.streamrune.ecommerce.commands.IdempotentDispatch;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
@@ -16,10 +14,11 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
  * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
- * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
- * ask {@link OwnerOrAdminAccess#requireAdmin} once the request is read; discontinuing is guarded in
- * the command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
- * ({@code ProductQueryController}).
+ * ({@code 403} for everyone else). Creating a product and changing its price ask {@link
+ * OwnerOrAdminAccess#requireAdmin} once the request is read; discontinuing is guarded in the
+ * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
+ * ({@code ProductQueryController}). The catalogue holds no stock: a product's units are received
+ * and adjusted on its inventory ({@code InventoryCommandController}).
  */
 @Path("/api/products")
 @Produces(MediaType.APPLICATION_JSON)
@@ -38,14 +37,9 @@ public class ProductCommandController {
    * {@code GUEST}.
    */
   private void executeInContext(ProductCommand command) {
-    executeInContext(command, null);
-  }
-
-  /** As {@link #executeInContext(ProductCommand)}, under {@code key} unless it is {@code null}. */
-  private void executeInContext(ProductCommand command, IdempotencyKey key) {
     StreamRuneRequestFilter.withContext(
         requestContext != null ? requestContext.context() : null,
-        () -> IdempotentDispatch.execute(commandBus, command, key));
+        () -> commandBus.execute(command));
   }
 
   @POST
@@ -61,29 +55,7 @@ public class ProductCommandController {
             req.name(),
             req.description(),
             req.category(),
-            new Money(req.price(), "USD"),
-            req.initialStock()));
-    return Response.ok().build();
-  }
-
-  /**
-   * A change of the stock by {@code quantity}: sent twice, it is applied twice, unless the client
-   * sends an {@code Idempotency-Key}. With the header the bus runs the command once per key and
-   * answers a repeat with the recorded result, and a dead-lettered adjustment is replayed under the
-   * same key, so the retry runner replays it on its schedule.
-   */
-  @PUT
-  @Path("/{id}/stock")
-  public Response adjustStock(
-      @PathParam("id") String id,
-      @HeaderParam(IdempotentDispatch.HEADER) String idempotencyKey,
-      AdjustStockRequest req) {
-    RequestChecks.present(req);
-    var caller = RequestCaller.of(requestContext);
-    OwnerOrAdminAccess.requireAdmin(caller);
-    executeInContext(
-        new ProductCommand.AdjustStock(id, req.quantity(), req.reason()),
-        IdempotentDispatch.keyFor(idempotencyKey, caller.userId()));
+            new Money(req.price(), "USD")));
     return Response.ok().build();
   }
 
@@ -105,14 +77,7 @@ public class ProductCommandController {
   }
 
   public record CreateProductRequest(
-      String productId,
-      String name,
-      String description,
-      String category,
-      BigDecimal price,
-      int initialStock) {}
-
-  public record AdjustStockRequest(int quantity, String reason) {}
+      String productId, String name, String description, String category, BigDecimal price) {}
 
   public record UpdatePriceRequest(BigDecimal price) {}
 }

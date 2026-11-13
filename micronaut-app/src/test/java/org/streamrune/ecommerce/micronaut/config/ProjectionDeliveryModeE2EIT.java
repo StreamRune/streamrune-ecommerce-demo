@@ -62,8 +62,7 @@ class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
           "name": "Mode probe",
           "description": "test product",
           "category": "Test",
-          "price": 9.99,
-          "initialStock": 1
+          "price": 9.99
         }"""
             .formatted(pid);
     var response =
