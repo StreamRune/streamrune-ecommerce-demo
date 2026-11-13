@@ -962,14 +962,25 @@ public final class ProductCatalog {
   }
 
   /**
-   * Refuses a product id nobody created ({@code DomainException}, {@code 400} in the three apps).
-   * The inventory endpoints ask this before they send a command, so no inventory stream is opened
-   * for a product the catalogue does not hold.
+   * The product as its stream holds it, refused when nobody created it ({@code DomainException}
+   * "Product not found: &lt;id&gt;", {@code 400} in the three apps). Order pricing reads the price
+   * and the status of each line's product here.
    */
-  public void requireExists(String productId) {
-    if (current(productId).productId() == null) {
+  public ProductState require(String productId) {
+    ProductState product = current(productId);
+    if (product.productId() == null) {
       throw new DomainException("Product not found: " + productId);
     }
+    return product;
+  }
+
+  /**
+   * Refuses a product id nobody created, as {@link #require} does. The inventory endpoints ask this
+   * before they send a command, so no inventory stream is opened for a product the catalogue does
+   * not hold.
+   */
+  public void requireExists(String productId) {
+    require(productId);
   }
 }
 ```
@@ -996,9 +1007,9 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * event stream holds it when the order is placed; the client names products and quantities only.
  * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
  * product created a moment ago is orderable and a price change applies at once. A product nobody
- * created, or one that is discontinued, is refused ({@code DomainException}, {@code 400}). An order
- * id too long for its saga id, a malformed product id and two lines of one product are refused
- * before the store is read.
+ * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
+ * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
+ * two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
@@ -1031,10 +1042,7 @@ public final class OrderPricing {
     }
     List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
     for (RequestedLine line : lines) {
-      ProductState product = catalog.current(line.productId());
-      if (product.productId() == null) {
-        throw new DomainException("Product not found");
-      }
+      ProductState product = catalog.require(line.productId());
       if (product.status() == ProductStatus.DISCONTINUED) {
         throw new DomainException("Product is discontinued");
       }
@@ -1045,7 +1053,7 @@ public final class OrderPricing {
 }
 ```
 
-`OrderPricing` reads the product's stream from the event store through `ProductCatalog` (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It does so for every line of every order, so the cost of an order grows with the history of the products it names; a product's stream is small in the demo (its creation, a few price changes, perhaps its discontinuation), which is why the read is cheap here although it starts from the first event and does not use the snapshots the command bus takes. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
+`OrderPricing` reads the product's stream from the event store through `ProductCatalog` (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It does so for every line of every order, so the cost of an order grows with the history of the products it names; a product's stream is small in the demo (its creation, a few price changes, perhaps its discontinuation), which is why the read is cheap here although it starts from the first event and does not use the snapshots the command bus takes. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found: <id>`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
 
 Register it in `StreamRuneConfig`:
 
@@ -1610,7 +1618,7 @@ curl -X POST http://localhost:8080/api/orders \
 
 `GET /api/orders/order-1` shows the line at `12.50`, the product's price, and a total of `25.00`. The order stays `CREATED` in this chapter: the fulfillment saga of Chapter 11 confirms an order once its payment is captured and its stock reserved, and there is no endpoint that confirms one. `POST /api/orders/order-1/confirm` answers `404 Not Found`.
 
-**Verify that the catalogue is the price list:** an order of a product nobody created answers `400 Bad Request` with the body `Product not found`, and writes nothing:
+**Verify that the catalogue is the price list:** an order of a product nobody created answers `400 Bad Request` with the body `Product not found: p-nobody`, and writes nothing:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/orders \

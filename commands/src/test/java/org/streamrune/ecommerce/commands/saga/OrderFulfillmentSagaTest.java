@@ -198,7 +198,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",
@@ -278,6 +279,7 @@ class OrderFulfillmentSagaTest {
     others.put(new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10), stock);
     others.put(new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2), stock);
     others.put(new InventoryEvent.ShipmentReceived("prod-1", 5, 5), stock);
+    others.put(new InventoryEvent.StockReservationRefused("prod-1", "o-1", 2, 1), stock);
 
     others.forEach(
         (event, stream) ->
@@ -363,6 +365,15 @@ class OrderFulfillmentSagaTest {
             "prod-1");
     assertThat(saga.evolve(awaitingInventory, foreignReservation)).isEqualTo(awaitingInventory);
 
+    var foreignRefusal =
+        causedBySagaOf(
+            "o-2",
+            new InventoryEvent.StockReservationRefused("prod-1", "o-1", 2, 1),
+            InventoryState.TYPE,
+            "prod-1");
+    assertThat(saga.evolve(awaitingInventory, foreignRefusal)).isEqualTo(awaitingInventory);
+    assertThat(saga.handle(awaitingInventory, foreignRefusal)).isEmpty();
+
     var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
     var foreignCancel =
         envelope(
@@ -414,7 +425,8 @@ class OrderFulfillmentSagaTest {
         new Money(BigDecimal.TEN, "USD"),
         List.of(line),
         List.of(),
-        status);
+        status,
+        null);
   }
 
   // ---- AWAITING_INVENTORY must gate on PaymentCaptured, like its sibling branches ----
@@ -431,7 +443,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     // A redelivered/unrelated event arrives while the saga sits in AWAITING_INVENTORY — must not
     // re-issue ReserveStock for anything other than the PaymentCaptured that drives this step.
     var unrelated =
@@ -570,7 +583,8 @@ class OrderFulfillmentSagaTest {
         new Money(BigDecimal.TEN, "USD"),
         List.of(lines),
         reserved,
-        status);
+        status,
+        null);
   }
 
   // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
@@ -590,7 +604,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     var failed =
         causedBySagaOf(
             "o-1",
@@ -620,7 +635,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(),
             List.of(),
-            OrderFulfillmentStatus.CANCELLING);
+            OrderFulfillmentStatus.CANCELLING,
+            null);
     var cancelled =
         causedBySagaOf(
             "o-1",
@@ -631,6 +647,100 @@ class OrderFulfillmentSagaTest {
     state = saga.evolve(state, cancelled);
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.FAILED);
+  }
+
+  // ---- A line the inventory refuses cancels the order with the refusal's reason, through the
+  // same non-terminal CANCELLING step as a failed payment. The reason is in the state, so the
+  // command is the same on every delivery; only the refusal that decided asks for it. ----
+
+  @Test
+  void stockReservationRefused_evolvesToCancelling_andHandleCancelsWithTheReason() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            List.of("prod-1"),
+            line("prod-1", 2),
+            line("prod-2", 3));
+    var refused = refusedBySagaOf("prod-2", 3, 1);
+
+    state = saga.evolve(state, refused);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
+    assertThat(state.status()).isEqualTo(SagaStatus.RUNNING);
+    assertThat(state.cancellationReason())
+        .isEqualTo("Insufficient stock for prod-2: requested 3, available 1");
+    assertThat(saga.handle(state, refused))
+        .containsExactly(
+            new SagaCommand(
+                new OrderCommand.CancelOrder(
+                    "o-1", "Insufficient stock for prod-2: requested 3, available 1"),
+                new AggregateId("o-1")));
+  }
+
+  @Test
+  void stockReservationRefused_ofASecondLine_asksForNothingMore() {
+    var state =
+        saga.evolve(
+            stateOfOrderOne(
+                OrderFulfillmentStatus.AWAITING_INVENTORY,
+                List.of(),
+                line("prod-1", 2),
+                line("prod-2", 3)),
+            refusedBySagaOf("prod-1", 2, 0));
+    var second = refusedBySagaOf("prod-2", 3, 1);
+
+    var after = saga.evolve(state, second);
+
+    assertThat(after).isEqualTo(state);
+    assertThat(after.cancellationReason())
+        .isEqualTo("Insufficient stock for prod-1: requested 2, available 0");
+    assertThat(saga.handle(after, second)).isEmpty();
+  }
+
+  @Test
+  void stockReservationRefused_ofAProductTheOrderDoesNotHold_changesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
+    var refused = refusedBySagaOf("prod-9", 2, 0);
+
+    assertThat(saga.evolve(state, refused)).isEqualTo(state);
+    assertThat(saga.handle(state, refused)).isEmpty();
+  }
+
+  @Test
+  void stockReservationRefused_outsideTheWaitForTheStock_changesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_PAYMENT, List.of(), line("prod-1", 2));
+
+    assertThat(saga.evolve(state, refusedBySagaOf("prod-1", 2, 0))).isEqualTo(state);
+  }
+
+  @Test
+  void orderCancelled_afterARefusal_terminatesFailed() {
+    var state =
+        saga.evolve(
+            stateOfOrderOne(
+                OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2)),
+            refusedBySagaOf("prod-1", 2, 0));
+    var cancelled =
+        causedBySagaOf(
+            "o-1",
+            new OrderEvent.OrderCancelled(
+                "o-1", "Insufficient stock for prod-1: requested 2, available 0", List.of()),
+            OrderState.TYPE,
+            "o-1");
+
+    state = saga.evolve(state, cancelled);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.FAILED);
+  }
+
+  private EventEnvelope refusedBySagaOf(String productId, int requested, int available) {
+    return causedBySagaOf(
+        "o-1",
+        new InventoryEvent.StockReservationRefused(productId, "o-1", requested, available),
+        InventoryState.TYPE,
+        productId);
   }
 
   // ---- A cancellation the saga did not ask for ends the fulfillment: the saga moves to
@@ -750,7 +860,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",
@@ -778,7 +889,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",

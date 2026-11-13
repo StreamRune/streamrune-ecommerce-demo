@@ -88,7 +88,7 @@ the connection (it is down) passes the command to the next one, as a load balanc
 | 45 % | `POST /api/orders` as the customer | one or two lines; see the order intents below |
 | 12 % | `POST /api/customers` as the new customer | |
 | 10 % | `POST /api/inventory/{id}/receive` as an `ADMIN` | keyed: the bus runs it once per `Idempotency-Key` |
-| 6 % | `PUT /api/products/{id}/stock` as an `ADMIN` | keyed |
+| 6 % | `POST /api/inventory/{id}/adjust` as an `ADMIN` | a signed change of -5 to 5; keyed, and a count up is sent again under its key; a count down below what is available answers `400` |
 | 4 % | `PUT /api/customers/{id}` | |
 | 3 % | `PUT /api/products/{id}/price` | |
 | 2 % | `POST /api/products`, then a keyed receipt of its first stock | the receipt is sent again under its key until it is applied; orders use the product only then |
@@ -101,8 +101,8 @@ repeat with the recorded result, and a creation answers `400` because the id exi
 Each order gets an intent: 70 % run to the end untouched (*healthy*), 8 % are cancelled by their
 customer one to three seconds after they are placed, 8 % are cancelled once they are confirmed
 (the cancellation refunds the payment and releases the stock), 12 % are shipped and then
-delivered by an `ADMIN` once confirmed, and 2 % ask for more than any product holds, so their saga
-compensates. Beside the commands, two readers query orders, products and customers (`--query-rate`),
+delivered by an `ADMIN` once confirmed, and 2 % ask for more than any product holds, so the
+inventory refuses the line and the saga cancels the order with the refusal's reason. Beside the commands, two readers query orders, products and customers (`--query-rate`),
 and `--sse-readers` threads each hold a live stream of a recent order for a minute at a time.
 
 Every command is recorded in `requests.jsonl`: time, operation, method, path, the backend that
@@ -135,7 +135,7 @@ every subscription is at the head of the event store, the outbox holds nothing p
    exactly one creation event; none has two, whatever the answers were.
 2. **Keyed commands applied once per key.** Every key answered with `2xx` is in `command_inbox`,
    a key sent twice is answered the same way, and the number of `ShipmentReceived` and
-   `StockAdjusted` events of every product equals the number of its inbox entries.
+   `InventoryAdjusted` events of every product equals the number of its inbox entries.
 3. **Every `503 QUEUED_FOR_REPLAY` applied or awaiting an operator.** Its key, scoped to the
    caller's `X-User-Id` as the apps store it, is in the inbox, or its entry is still in
    `dead_letter_queue`.
@@ -144,7 +144,8 @@ every subscription is at the head of the event store, the outbox holds nothing p
 5. **Every saga terminal.** Every order-fulfillment saga of the run is `COMPLETED`, `COMPENSATED` or
    `FAILED`.
 6. **No healthy flow compensated.** Every healthy order is `COMPLETED`, unless its payment failed
-   inside a decline window; every order beyond the stock is compensated.
+   inside a decline window; every order beyond the stock ends `FAILED`, cancelled with the
+   inventory's refusal.
 7. **Money and stock consistent**, by `scripts/money-and-stock-invariants.sql`, for the orders of
    the run.
 8. **Outbox drained, every entry published once.** No outbox entry is pending, in progress or
@@ -152,7 +153,7 @@ every subscription is at the head of the event store, the outbox holds nothing p
    within five minutes of a failure (the relay publishes at least once: a backend killed between
    the broker's confirmation and the entry's update publishes it again).
 9. **Projections equal to a rebuild.** Every order's status and payment status, every product's
-   stock and price, every inventory's available, reserved and committed counts and every customer
+   available units and price, every inventory's available, reserved and committed counts and every customer
    in the read model equal what the event store says, and every subscription is at its head.
 10. **Every dead letter explained.** Every entry of `dead_letter_queue`, `saga_dead_letters` and
     `projection_dead_letters` was written during a failure or within a minute after it.

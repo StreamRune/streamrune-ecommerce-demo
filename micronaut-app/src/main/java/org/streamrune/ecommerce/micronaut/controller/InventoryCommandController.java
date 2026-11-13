@@ -56,6 +56,9 @@ public class InventoryCommandController {
       @PathVariable String productId,
       @Header(IdempotentDispatch.HEADER) @Nullable String idempotencyKey,
       @Body AdjustInventoryRequest req) {
+    if (req.quantityChange() == null) {
+      throw new IllegalArgumentException("quantityChange is required");
+    }
     var caller = RequestCaller.current();
     OwnerOrAdminAccess.requireAdmin(caller);
     var key = IdempotentDispatch.keyFor(idempotencyKey, caller.userId());
@@ -71,5 +74,5 @@ public class InventoryCommandController {
   public record ReceiveShipmentRequest(int quantity) {}
 
   @io.micronaut.serde.annotation.Serdeable
-  public record AdjustInventoryRequest(int quantityChange, @Nullable String reason) {}
+  public record AdjustInventoryRequest(@Nullable Integer quantityChange, @Nullable String reason) {}
 }

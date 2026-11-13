@@ -379,6 +379,9 @@ public class InventoryCommandController {
       @PathVariable String productId,
       @RequestHeader(name = IdempotentDispatch.HEADER, required = false) String idempotencyKey,
       @Valid @RequestBody AdjustInventoryRequest req) {
+    if (req.quantityChange() == null) {
+      throw new IllegalArgumentException("quantityChange is required");
+    }
     var caller = RequestCaller.current();
     OwnerOrAdminAccess.requireAdmin(caller);
     var key = IdempotentDispatch.keyFor(idempotencyKey, caller.userId());
@@ -392,7 +395,7 @@ public class InventoryCommandController {
 
   public record ReceiveShipmentRequest(@Positive int quantity) {}
 
-  public record AdjustInventoryRequest(int quantityChange, String reason) {}
+  public record AdjustInventoryRequest(Integer quantityChange, String reason) {}
 }
 ```
 
@@ -1443,6 +1446,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
         .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)

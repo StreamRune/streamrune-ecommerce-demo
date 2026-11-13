@@ -572,7 +572,9 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
     String oid = "m-o-noproduct-" + System.nanoTime();
     String cid = "m-o-noproduct-cust-" + System.nanoTime();
 
-    assertOrderRefused(oid, cid, "m-prod-nobody-" + System.nanoTime(), "Product not found");
+    String pid = "m-prod-nobody-" + System.nanoTime();
+
+    assertOrderRefused(oid, cid, pid, "Product not found: " + pid);
   }
 
   @Test

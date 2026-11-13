@@ -7,8 +7,15 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import org.streamrune.core.EventStore;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
 import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 
@@ -17,6 +24,8 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * inventory read model, all for an {@code ADMIN}.
  */
 class InventoryControllerIT extends AbstractIntegrationTest {
+
+  @Autowired private EventStore eventStore;
 
   @Test
   void receiveShipmentReturns2xxAndEventIsRecordedInInventoryStream() {
@@ -128,13 +137,11 @@ class InventoryControllerIT extends AbstractIntegrationTest {
   }
 
   /**
-   * A blank reason passes the request record, which leaves {@code reason} open, and the command
-   * bus's Bean Validation refuses the command ({@code @NotBlank} on {@code AdjustInventory}) with
-   * {@code 400} and the interceptor's message. Nothing is stored. The Quarkus and Micronaut apps
-   * answer the same request alike.
+   * A blank reason is refused by the inventory decider with its own message, {@code 400}, and
+   * nothing is stored. The Quarkus and Micronaut apps answer the same request alike.
    */
   @Test
-  void anAdjustmentWithoutAReasonIsRefusedByTheCommandsConstraint() {
+  void anAdjustmentWithoutAReasonIsRefused() {
     String pid = createProduct("inv-reason-");
     receive(pid, 5).expectStatus().isOk();
 
@@ -142,8 +149,23 @@ class InventoryControllerIT extends AbstractIntegrationTest {
         .expectStatus()
         .isBadRequest()
         .expectBody(String.class)
-        .isEqualTo("Command validation failed for AdjustInventory");
-    awaitInventory(pid, new InventoryView(pid, "Stocked", 5, 0, 0));
+        .isEqualTo("An inventory adjustment needs a reason");
+    assertThat(inventoryEvents(pid, InventoryEvent.InventoryAdjusted.class)).isZero();
+  }
+
+  /** A body without {@code quantityChange} is refused with the same answer in the three apps. */
+  @Test
+  void anAdjustmentWithoutAQuantityChangeIsRefused() {
+    String pid = createProduct("inv-missing-");
+
+    asAdmin(client.post().uri("/api/inventory/" + pid + "/adjust"))
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue("{\"reason\": \"Stocktake\"}")
+        .exchange()
+        .expectStatus()
+        .isBadRequest()
+        .expectBody(String.class)
+        .isEqualTo("quantityChange is required");
   }
 
   @Test
@@ -155,6 +177,17 @@ class InventoryControllerIT extends AbstractIntegrationTest {
         .isBadRequest()
         .expectBody(String.class)
         .isEqualTo("An inventory adjustment must change the quantity");
+  }
+
+  private long inventoryEvents(String pid, Class<?> type) {
+    return eventStore
+        .readStream(
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
+            Version.initial(),
+            Integer.MAX_VALUE)
+        .stream()
+        .filter(e -> type.isInstance(e.event()))
+        .count();
   }
 
   private String createProduct(String prefix) {

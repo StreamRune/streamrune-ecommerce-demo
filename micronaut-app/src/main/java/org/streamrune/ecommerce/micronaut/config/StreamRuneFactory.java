@@ -159,6 +159,7 @@ public class StreamRuneFactory {
         .registerEvent("PaymentVoided", PaymentEvent.PaymentVoided.class)
         // Inventory events
         .registerEvent("StockReserved", InventoryEvent.StockReserved.class)
+        .registerEvent("StockReservationRefused", InventoryEvent.StockReservationRefused.class)
         .registerEvent("StockReleased", InventoryEvent.StockReleased.class)
         .registerEvent("ReservationConfirmed", InventoryEvent.ReservationConfirmed.class)
         .registerEvent("ShipmentReceived", InventoryEvent.ShipmentReceived.class)

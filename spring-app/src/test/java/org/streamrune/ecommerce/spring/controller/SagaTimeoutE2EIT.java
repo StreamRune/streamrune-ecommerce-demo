@@ -145,7 +145,8 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
             new Money(new BigDecimal("42.00"), "USD"),
             List.of(),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     // RUNNING: the saga is mid-fulfilment (awaiting inventory), not yet in a terminal status.
     sagaStore.create(
         sagaId, SagaType.fromClass(OrderFulfillmentState.class), state, SagaStatus.RUNNING);

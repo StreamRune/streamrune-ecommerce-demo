@@ -1,6 +1,5 @@
 package org.streamrune.ecommerce.domain.inventory;
 
-import jakarta.validation.constraints.NotBlank;
 import org.streamrune.core.Command;
 
 public sealed interface InventoryCommand extends Command {
@@ -15,8 +14,8 @@ public sealed interface InventoryCommand extends Command {
   /**
    * A correction of the units on hand by a signed amount, a stocktake for example: a negative
    * change lowers the available units, a positive one raises them. Reserved and committed units are
-   * not touched. The reason is required: the command bus's Bean Validation refuses a blank one.
+   * not touched. The reason is required: the decider refuses a blank one.
    */
-  record AdjustInventory(String productId, int quantityChange, @NotBlank String reason)
+  record AdjustInventory(String productId, int quantityChange, String reason)
       implements InventoryCommand {}
 }

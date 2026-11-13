@@ -53,6 +53,7 @@ class DomainEventSerializationTest {
           new PaymentEvent.PaymentFailed("pay-1", "o-1", "card declined"),
           new PaymentEvent.PaymentVoided("pay-1", "o-1", "order cancelled"),
           new InventoryEvent.StockReserved("p-1", "o-1", 2, 5),
+          new InventoryEvent.StockReservationRefused("p-1", "o-1", 9, 5),
           new InventoryEvent.StockReleased("p-1", "o-1", 2, 7),
           new InventoryEvent.ReservationConfirmed("p-1", "o-1", 2),
           new InventoryEvent.ShipmentReceived("p-1", 10, 17),

@@ -23,7 +23,7 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * availableAfter}), so the view takes that count as it is. A product is {@link
  * Availability#LOW_STOCK} below {@link #LOW_STOCK_THRESHOLD} units, {@link
  * Availability#OUT_OF_STOCK} at none, and {@link Availability#DISCONTINUED} once the catalogue
- * discontinues it, whatever it holds.
+ * discontinues it, whatever it holds. A refused reservation changes nothing.
  */
 @org.streamrune.core.ProjectionConfig(
     name = "products",
@@ -127,9 +127,9 @@ public class ProductProjection extends BaseProjection {
   }
 
   /**
-   * Rewrites the view of a product the projection has seen created. The inventory endpoints refuse
-   * a product the catalogue does not hold, so its {@code ProductCreated} comes first in the global
-   * stream.
+   * Rewrites the view of a product the projection has seen created, as {@code InventoryProjection}
+   * does. The inventory endpoints refuse a product the catalogue does not hold, so its {@code
+   * ProductCreated} comes first in the global stream.
    */
   private void update(String productId, UnaryOperator<ProductView> change) {
     findById(productId, ProductView.class).ifPresent(p -> save(productId, change.apply(p)));

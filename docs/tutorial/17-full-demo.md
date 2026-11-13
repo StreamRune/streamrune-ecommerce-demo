@@ -445,8 +445,8 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
 # ["StockReserved", "StockReleased"]
 
 curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
-  http://localhost:8080/api/orders/ord-2 | jq '{status, paymentStatus}'
-# {"status": "CANCELLED", "paymentStatus": "REFUNDED"}
+  http://localhost:8080/api/orders/ord-2 | jq '{status, paymentStatus, reason}'
+# {"status": "CANCELLED", "paymentStatus": "REFUNDED", "reason": "changed my mind"}
 ```
 
 The saga of `ord-2` completed before the cancel and stays `COMPLETED`; the undo runs through the cancellation's event, not through the saga. A shipped order is not cancelled: ship `ord-1` as an `ADMIN` (`POST /api/orders/ord-1/ship`), and a cancel of it afterwards answers `400 Cannot cancel SHIPPED orders`. Shipping commits the order's reservation instead (`ReservationConfirmed` in the inventory stream).
@@ -1080,6 +1080,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
         .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)

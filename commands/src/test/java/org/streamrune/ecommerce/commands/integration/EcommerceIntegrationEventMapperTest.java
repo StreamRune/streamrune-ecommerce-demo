@@ -23,6 +23,8 @@ import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.customer.CustomerEvent;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.order.OrderState;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
@@ -256,6 +258,47 @@ class EcommerceIntegrationEventMapperTest {
     assertThat(entries).hasSize(1);
     assertThat(entries.getFirst().streamId()).isEqualTo(stream(ProductState.TYPE, "prod-4"));
     assertPiiAbsent(entries.getFirst().payload());
+  }
+
+  @Test
+  void shipmentReceived_isPublishedOnTheInventoryStream() {
+    var stream = stream(InventoryState.TYPE, "prod-5");
+    List<OutboxEntry> entries =
+        mapper.toOutbox(envelope(new InventoryEvent.ShipmentReceived("prod-5", 20, 25), stream));
+    assertThat(entries).hasSize(1);
+    assertThat(entries.getFirst().streamId()).isEqualTo(stream);
+    assertThat(entries.getFirst().payloadType()).isEqualTo("ShipmentReceived");
+    assertThat(entries.getFirst().payload())
+        .isEqualTo("{\"productId\":\"prod-5\",\"quantity\":20,\"availableAfter\":25}");
+  }
+
+  @Test
+  void inventoryAdjusted_isPublishedOnTheInventoryStream() {
+    var stream = stream(InventoryState.TYPE, "prod-5");
+    List<OutboxEntry> entries =
+        mapper.toOutbox(
+            envelope(new InventoryEvent.InventoryAdjusted("prod-5", -2, "Stocktake", 23), stream));
+    assertThat(entries).hasSize(1);
+    assertThat(entries.getFirst().payloadType()).isEqualTo("InventoryAdjusted");
+    assertThat(entries.getFirst().payload())
+        .isEqualTo(
+            "{\"productId\":\"prod-5\",\"quantityChange\":-2,\"reason\":\"Stocktake\","
+                + "\"availableAfter\":23}");
+  }
+
+  @Test
+  void theReservationEventsNameOrders_andAreNotPublished() {
+    var stream = stream(InventoryState.TYPE, "prod-5");
+    for (var event :
+        List.<DomainEvent>of(
+            new InventoryEvent.StockReserved("prod-5", "o-1", 2, 23),
+            new InventoryEvent.StockReleased("prod-5", "o-1", 2, 25),
+            new InventoryEvent.ReservationConfirmed("prod-5", "o-1", 2),
+            new InventoryEvent.StockReservationRefused("prod-5", "o-1", 99, 25))) {
+      assertThat(mapper.toOutbox(envelope(event, stream)))
+          .as(event.getClass().getSimpleName())
+          .isEmpty();
+    }
   }
 
   // ---------------------------------------------------------------------------

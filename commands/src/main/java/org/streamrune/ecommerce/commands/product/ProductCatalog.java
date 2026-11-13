@@ -55,13 +55,24 @@ public final class ProductCatalog {
   }
 
   /**
-   * Refuses a product id nobody created ({@code DomainException}, {@code 400} in the three apps).
-   * The inventory endpoints ask this before they send a command, so no inventory stream is opened
-   * for a product the catalogue does not hold.
+   * The product as its stream holds it, refused when nobody created it ({@code DomainException}
+   * "Product not found: &lt;id&gt;", {@code 400} in the three apps). Order pricing reads the price
+   * and the status of each line's product here.
    */
-  public void requireExists(String productId) {
-    if (current(productId).productId() == null) {
+  public ProductState require(String productId) {
+    ProductState product = current(productId);
+    if (product.productId() == null) {
       throw new DomainException("Product not found: " + productId);
     }
+    return product;
+  }
+
+  /**
+   * Refuses a product id nobody created, as {@link #require} does. The inventory endpoints ask this
+   * before they send a command, so no inventory stream is opened for a product the catalogue does
+   * not hold.
+   */
+  public void requireExists(String productId) {
+    require(productId);
   }
 }

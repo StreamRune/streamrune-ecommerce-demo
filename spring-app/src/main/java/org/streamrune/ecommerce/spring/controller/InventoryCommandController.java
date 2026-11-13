@@ -56,6 +56,9 @@ public class InventoryCommandController {
       @PathVariable String productId,
       @RequestHeader(name = IdempotentDispatch.HEADER, required = false) String idempotencyKey,
       @Valid @RequestBody AdjustInventoryRequest req) {
+    if (req.quantityChange() == null) {
+      throw new IllegalArgumentException("quantityChange is required");
+    }
     var caller = RequestCaller.current();
     OwnerOrAdminAccess.requireAdmin(caller);
     var key = IdempotentDispatch.keyFor(idempotencyKey, caller.userId());
@@ -69,5 +72,5 @@ public class InventoryCommandController {
 
   public record ReceiveShipmentRequest(@Positive int quantity) {}
 
-  public record AdjustInventoryRequest(int quantityChange, String reason) {}
+  public record AdjustInventoryRequest(Integer quantityChange, String reason) {}
 }

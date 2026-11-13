@@ -18,6 +18,7 @@ import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.Availability;
@@ -64,8 +65,11 @@ class CatalogInventoryE2EIT {
     String oid = "q-cat-short-order-" + System.nanoTime();
     placeOrder(oid, "q-cat-cust-" + System.nanoTime(), pid, 3);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
-    awaitInventory(pid, new InventoryView(pid, "Catalogued", 2, 0, 0));
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 3, available 2");
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReserved.class))
+        .as("nothing is reserved")
+        .isZero();
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReservationRefused.class)).isOne();
     awaitProduct(pid, 2, Availability.LOW_STOCK);
   }
 
@@ -77,7 +81,7 @@ class CatalogInventoryE2EIT {
     String oid = "q-cat-empty-order-" + System.nanoTime();
     placeOrder(oid, "q-cat-cust-" + System.nanoTime(), pid, 1);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 1, available 0");
   }
 
   @Test
@@ -157,21 +161,62 @@ class CatalogInventoryE2EIT {
         .statusCode(403);
   }
 
-  /**
-   * A blank reason passes the handler's checks, which leave {@code reason} open, and the command
-   * bus's Bean Validation refuses the command ({@code @NotBlank} on {@code AdjustInventory}) with
-   * {@code 400} and the interceptor's message, as in the Spring app. The validator is Hibernate
-   * Validator, which {@code quarkus-hibernate-validator} brings. Nothing is stored.
-   */
+  /** A blank reason is refused by the inventory decider with its own message; nothing is stored. */
   @Test
-  void anAdjustmentWithoutAReasonIsRefusedByTheCommandsConstraint() {
+  void anAdjustmentWithoutAReasonIsRefused() {
     String pid = createProduct("q-cat-reason-");
     receive(pid, 5).statusCode(200);
 
-    adjust(pid, -1, " ")
+    adjust(pid, -1, " ").statusCode(400).body(equalTo("An inventory adjustment needs a reason"));
+    assertThat(inventoryEvents(pid, InventoryEvent.InventoryAdjusted.class)).isZero();
+  }
+
+  /** A body without {@code quantityChange} is refused with the same answer in the three apps. */
+  @Test
+  void anAdjustmentWithoutAQuantityChangeIsRefused() {
+    String pid = createProduct("q-cat-missing-");
+
+    asAdmin()
+        .contentType(ContentType.JSON)
+        .body("{\"reason\": \"Stocktake\"}")
+        .when()
+        .post("/api/inventory/" + pid + "/adjust")
+        .then()
         .statusCode(400)
-        .body(equalTo("Command validation failed for AdjustInventory"));
-    awaitInventory(pid, new InventoryView(pid, "Catalogued", 5, 0, 0));
+        .body(equalTo("quantityChange is required"));
+  }
+
+  /**
+   * An order of two products, one of them short: the line that fits is reserved, the other is
+   * refused, and the cancellation with the refusal's reason releases the reservation already made.
+   */
+  @Test
+  void aShortLineCancelsTheOrderAndReleasesTheOtherLinesReservation() {
+    String stocked = createProduct("q-cat-two-ok-");
+    String scarce = createProduct("q-cat-two-scarce-");
+    receive(stocked, 10).statusCode(200);
+    receive(scarce, 1).statusCode(200);
+    awaitInventory(scarce, new InventoryView(scarce, "Catalogued", 1, 0, 0));
+    String cid = "q-cat-cust-" + System.nanoTime();
+    String oid = "q-cat-two-order-" + System.nanoTime();
+
+    given()
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", cid)
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"orderId": "%s", "customerId": "%s", "lines": [
+              {"productId": "%s", "quantity": 2}, {"productId": "%s", "quantity": 4}]}"""
+                .formatted(oid, cid, stocked, scarce))
+        .when()
+        .post("/api/orders")
+        .then()
+        .statusCode(200);
+
+    awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4, available 1");
+    awaitInventory(stocked, new InventoryView(stocked, "Catalogued", 10, 0, 0));
+    assertThat(inventoryEvents(stocked, InventoryEvent.StockReleased.class)).isOne();
   }
 
   @Test
@@ -284,6 +329,36 @@ class CatalogInventoryE2EIT {
                             .as(OrderView.class)
                             .status())
                     .isEqualTo(status));
+  }
+
+  private static void awaitCancelled(String oid, String reason) {
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              OrderView order =
+                  asAdmin()
+                      .when()
+                      .get("/api/orders/" + oid)
+                      .then()
+                      .statusCode(200)
+                      .extract()
+                      .as(OrderView.class);
+              assertThat(order.status()).isEqualTo(OrderStatus.CANCELLED);
+              assertThat(order.reason()).isEqualTo(reason);
+            });
+  }
+
+  private long inventoryEvents(String pid, Class<?> type) {
+    return eventStore
+        .readStream(
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
+            Version.initial(),
+            Integer.MAX_VALUE)
+        .stream()
+        .filter(e -> type.isInstance(e.event()))
+        .count();
   }
 
   private static RequestSpecification asAdmin() {

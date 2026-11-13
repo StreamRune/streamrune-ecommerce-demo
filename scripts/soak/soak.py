@@ -561,10 +561,15 @@ class Driver:
         if not pid:
             return
         key = str(uuid.uuid4())
-        body = {"quantityChange": random.randint(1, 5), "reason": "soak count"}
+        # A signed change: a count down may find fewer units available than it removes, and the
+        # backend answers 400 "Insufficient stock ..." for it, an expected outcome. Only a count up
+        # is sent again under its key: a count down refused once could pass on a resend after a
+        # shipment, and one key would then have answered both 400 and 2xx.
+        change = random.choice([c for c in range(-5, 6) if c != 0])
+        body = {"quantityChange": change, "reason": "soak count"}
         path = f"/api/inventory/{pid}/adjust"
         self.send("adjust_inventory", "POST", path, admin_headers(), body, key, pid)
-        if random.random() < 0.15:
+        if change > 0 and random.random() < 0.15:
             self.schedule(random.uniform(0.05, 5), lambda: self.send(
                 "adjust_inventory", "POST", path, admin_headers(), body, key, pid, resend=True))
 
@@ -1522,7 +1527,9 @@ def check(run, stop_apps=None):
                 cause = "deadline" if s["by_deadline"] else ("payment failed outside a decline window" if oid in declined else "unknown")
                 bad.append(f"{oid}: healthy flow ended {s['status']} ({cause}); placed {iso(r['t'])} "
                            f"in window {in_window(r['t'], chaos_wins + decline_wins)}")
-        if (r["intent"] == "oos" and s["status"] != "COMPENSATED"
+        # An order of more than the product holds is refused by the inventory, and the saga cancels
+        # it with the refusal's reason: FAILED, the end of a fulfillment that cancels its order.
+        if (r["intent"] == "oos" and s["status"] != "FAILED"
                 and not (oid in declined and in_window(declined[oid], decline_wins))):
             bad.append(f"{oid}: out-of-stock order ended {s['status']}")
     rep.add("no healthy flow compensated", not bad,
@@ -1583,7 +1590,7 @@ def check(run, stop_apps=None):
              coalesce(v.data->>'available', 'missing') || '/' || coalesce(v.data->>'reserved', '-') || '/' || coalesce(v.data->>'committed', '-')
         FROM (SELECT aggregate_id AS id,
                      (array_agg((payload->>'availableAfter')::int ORDER BY global_offset DESC)
-                        FILTER (WHERE event_type <> 'ReservationConfirmed'))[1] AS available,
+                        FILTER (WHERE event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')))[1] AS available,
                      coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type = 'StockReserved'), 0)
                        - coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type IN ('StockReleased','ReservationConfirmed')), 0) AS reserved,
                      coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type = 'ReservationConfirmed'), 0) AS committed
@@ -1598,7 +1605,7 @@ def check(run, stop_apps=None):
                         FILTER (WHERE p.event_type IN ('ProductCreated','PriceUpdated')))[1] AS price,
                      coalesce((SELECT (i.payload->>'availableAfter')::int FROM event_stream i
                                 WHERE i.aggregate_type = 'inventory' AND i.aggregate_id = p.aggregate_id
-                                  AND i.event_type <> 'ReservationConfirmed'
+                                  AND i.event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')
                                 ORDER BY i.global_offset DESC LIMIT 1), 0) AS available
                 FROM event_stream p WHERE p.aggregate_type = 'product' GROUP BY p.aggregate_id) e
         LEFT JOIN products_view v ON v.id = e.id

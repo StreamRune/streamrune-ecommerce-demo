@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 import java.util.OptionalInt;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -18,7 +19,8 @@ class InventoryStateJsonTest {
 
   @Test
   void aRoundTripKeepsEveryOpenReservation() throws Exception {
-    InventoryState state = new InventoryState("p-1", 90, 7, 3, Map.of("o-1", 3, "o-2", 4));
+    InventoryState state =
+        new InventoryState("p-1", 90, 7, 3, Map.of("o-1", 3, "o-2", 4), Set.of("o-9"));
 
     InventoryState read = mapper.readValue(mapper.writeValueAsString(state), InventoryState.class);
 
@@ -26,6 +28,7 @@ class InventoryStateJsonTest {
     assertEquals(OptionalInt.of(3), read.reservationOf("o-1"));
     assertEquals(OptionalInt.of(4), read.reservationOf("o-2"));
     assertEquals(OptionalInt.empty(), read.reservationOf("o-3"));
+    assertTrue(read.refused("o-9"));
   }
 
   @Test
@@ -36,6 +39,7 @@ class InventoryStateJsonTest {
             InventoryState.class);
 
     assertTrue(read.reservations().isEmpty());
+    assertTrue(read.refusedOrders().isEmpty());
     assertEquals(5, read.available());
   }
 }

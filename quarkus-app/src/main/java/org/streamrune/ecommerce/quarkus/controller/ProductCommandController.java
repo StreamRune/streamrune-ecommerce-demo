@@ -25,6 +25,9 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 @Consumes(MediaType.APPLICATION_JSON)
 public class ProductCommandController {
 
+  static final String OPENING_STOCK_REFUSED =
+      "initialStock is not accepted: a product holds no stock; receive its opening stock with POST /api/inventory/{productId}/receive";
+
   @Inject VirtualThreadCommandBus commandBus;
   @Inject StreamRuneRequestContextHolder requestContext;
 
@@ -48,6 +51,7 @@ public class ProductCommandController {
     RequestChecks.notBlank(req.productId(), "productId");
     RequestChecks.notBlank(req.name(), "name");
     RequestChecks.positive(req.price(), "price");
+    refuseOpeningStock(req.initialStock());
     OwnerOrAdminAccess.requireAdmin(RequestCaller.of(requestContext));
     executeInContext(
         new ProductCommand.CreateProduct(
@@ -77,7 +81,22 @@ public class ProductCommandController {
   }
 
   public record CreateProductRequest(
-      String productId, String name, String description, String category, BigDecimal price) {}
+      String productId,
+      String name,
+      String description,
+      String category,
+      BigDecimal price,
+      Integer initialStock) {}
+
+  /**
+   * The catalogue holds no stock, so a request that names an opening stock is refused with {@code
+   * 400} instead of creating a product that holds nothing; the stock is received on the inventory.
+   */
+  private static void refuseOpeningStock(Integer initialStock) {
+    if (initialStock != null) {
+      throw new IllegalArgumentException(OPENING_STOCK_REFUSED);
+    }
+  }
 
   public record UpdatePriceRequest(BigDecimal price) {}
 }

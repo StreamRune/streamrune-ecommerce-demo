@@ -254,7 +254,8 @@ class FulfillmentSagaRoutingIT {
             PRICE,
             List.of(new OrderEvent.OrderLine(product, 1, PRICE)),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     sagaStore.create(sagaId, FULFILLMENT, state, SagaStatus.STARTED);
     return sagaId;
   }

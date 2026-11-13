@@ -533,7 +533,9 @@ class OrderCommandQueryE2EIT {
     String oid = "q-o-noproduct-" + System.nanoTime();
     String cid = "q-o-noproduct-cust-" + System.nanoTime();
 
-    assertOrderRefused(oid, cid, "q-prod-nobody-" + System.nanoTime(), "Product not found");
+    String pid = "q-prod-nobody-" + System.nanoTime();
+
+    assertOrderRefused(oid, cid, pid, "Product not found: " + pid);
   }
 
   @Test

@@ -12,6 +12,7 @@ import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.Availability;
@@ -56,8 +57,11 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
     String oid = "cat-short-order-" + System.nanoTime();
     placeOrder(oid, registerCustomer(), pid, 3);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
-    awaitInventory(pid, new InventoryView(pid, "Catalogued", 2, 0, 0));
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 3, available 2");
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReserved.class))
+        .as("nothing is reserved")
+        .isZero();
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReservationRefused.class)).isOne();
     awaitProduct(pid, 2, Availability.LOW_STOCK);
   }
 
@@ -69,7 +73,41 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
     String oid = "cat-empty-order-" + System.nanoTime();
     placeOrder(oid, registerCustomer(), pid, 1);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 1, available 0");
+  }
+
+  /**
+   * An order of two products, one of them short: the line that fits is reserved, the other is
+   * refused, and the cancellation with the refusal's reason releases the reservation already made.
+   */
+  @Test
+  void aShortLineCancelsTheOrderAndReleasesTheOtherLinesReservation() {
+    String stocked = createProduct("cat-two-ok-");
+    String scarce = createProduct("cat-two-scarce-");
+    receive(stocked, 10).expectStatus().isOk();
+    receive(scarce, 1).expectStatus().isOk();
+    awaitInventory(scarce, new InventoryView(scarce, "Catalogued", 1, 0, 0));
+    String cid = registerCustomer();
+    String oid = "cat-two-order-" + System.nanoTime();
+
+    client
+        .post()
+        .uri("/api/orders")
+        .header("X-User-Role", "CUSTOMER")
+        .header("X-User-Id", cid)
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(
+            """
+            {"orderId": "%s", "customerId": "%s", "lines": [
+              {"productId": "%s", "quantity": 2}, {"productId": "%s", "quantity": 4}]}"""
+                .formatted(oid, cid, stocked, scarce))
+        .exchange()
+        .expectStatus()
+        .is2xxSuccessful();
+
+    awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4, available 1");
+    awaitInventory(stocked, new InventoryView(stocked, "Catalogued", 10, 0, 0));
+    assertThat(inventoryEvents(stocked, InventoryEvent.StockReleased.class)).isOne();
   }
 
   @Test
@@ -215,6 +253,37 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
                             .returnResult()
                             .getResponseBody())
                     .isEqualTo(expected));
+  }
+
+  private void awaitCancelled(String oid, String reason) {
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        .untilAsserted(
+            () -> {
+              OrderView order =
+                  asAdmin(client.get().uri("/api/orders/" + oid))
+                      .exchange()
+                      .expectStatus()
+                      .isOk()
+                      .expectBody(OrderView.class)
+                      .returnResult()
+                      .getResponseBody();
+              assertThat(order).isNotNull();
+              assertThat(order.status()).isEqualTo(OrderStatus.CANCELLED);
+              assertThat(order.reason()).isEqualTo(reason);
+            });
+  }
+
+  private long inventoryEvents(String pid, Class<?> type) {
+    return eventStore
+        .readStream(
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
+            Version.initial(),
+            Integer.MAX_VALUE)
+        .stream()
+        .filter(e -> type.isInstance(e.event()))
+        .count();
   }
 
   private void awaitOrder(String oid, OrderStatus status) {

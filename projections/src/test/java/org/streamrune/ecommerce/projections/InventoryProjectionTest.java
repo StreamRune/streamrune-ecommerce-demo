@@ -57,4 +57,22 @@ class InventoryProjectionTest {
   private void process(DomainEvent... list) {
     projection.process(events.of(list));
   }
+
+  @Test
+  void aRefusedReservationChangesNoCount() {
+    process(
+        created("p-1", "Widget"),
+        new InventoryEvent.ShipmentReceived("p-1", 2, 2),
+        new InventoryEvent.StockReservationRefused("p-1", "o-1", 3, 2));
+
+    assertThat(projection.get("p-1")).isEqualTo(new InventoryView("p-1", "Widget", 2, 0, 0));
+  }
+
+  @Test
+  void anInventoryEventOfAProductNeverCreatedChangesNothing() {
+    process(new InventoryEvent.ShipmentReceived("p-none", 5, 5));
+
+    assertThat(projection.get("p-none")).isNull();
+    assertThat(projection.listAll()).isEmpty();
+  }
 }

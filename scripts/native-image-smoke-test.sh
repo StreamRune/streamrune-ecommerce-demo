@@ -398,8 +398,8 @@ saga_origin_smoke() {
     inventory=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/inventory/$pid")
     product=$(curl -s "$base/api/products/$pid")
     if printf '%s' "$inventory" | grep -q '"productName":"SagaWidget"' \
-        && printf '%s' "$inventory" | grep -q '"available":4' \
-        && printf '%s' "$inventory" | grep -q '"reserved":1' \
+        && printf '%s' "$inventory" | grep -Eq '"available":4[,}]' \
+        && printf '%s' "$inventory" | grep -Eq '"reserved":1[,}]' \
         && printf '%s' "$product" | grep -q '"availability":"LOW_STOCK"'; then
       break
     fi

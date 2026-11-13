@@ -64,11 +64,62 @@ class InventoryDeciderTest {
   }
 
   @Test
-  void reserveStock_insufficient_throws() {
+  void reserveStock_moreThanAvailable_isRefusedWithAnEvent() {
     fixture
         .given(received())
         .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
-        .expectException(DomainException.class);
+        .expectEvents(new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 10))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(10);
+              assertThat(s.reserved()).isZero();
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.empty());
+              assertThat(s.refused("o-1")).isTrue();
+            });
+  }
+
+  @Test
+  void reserveStock_withNothingReceived_isRefusedWithAnEvent() {
+    fixture
+        .given()
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 1))
+        .expectEvents(new InventoryEvent.StockReservationRefused("p-1", "o-1", 1, 0));
+  }
+
+  @Test
+  void reserveStock_ofAnOrderAlreadyRefused_storesNothing() {
+    fixture
+        .given(
+            new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 0),
+            new InventoryEvent.ShipmentReceived("p-1", 500, 500))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
+        .expectNoEvents();
+  }
+
+  @Test
+  void reserveStock_aRefusalOfOneOrder_leavesAnotherOrderFree() {
+    fixture
+        .given(received(), new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 10))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-2", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-2", 3, 7));
+  }
+
+  @Test
+  void receiveShipment_beyondTheLargestCount_isRefused() {
+    fixture
+        .given(new InventoryEvent.ShipmentReceived("p-1", Integer.MAX_VALUE, Integer.MAX_VALUE))
+        .when(new InventoryCommand.ReceiveShipment("p-1", 1))
+        .expectFailedWith(
+            DomainException.class, "Stock for p-1 cannot exceed " + Integer.MAX_VALUE + " units");
+  }
+
+  @Test
+  void adjustInventory_beyondTheLargestCount_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", Integer.MAX_VALUE, "Found a warehouse"))
+        .expectFailedWith(
+            DomainException.class, "Stock for p-1 cannot exceed " + Integer.MAX_VALUE + " units");
   }
 
   @Test
@@ -188,13 +239,16 @@ class InventoryDeciderTest {
     fixture
         .given(
             new InventoryEvent.ShipmentReceived("p-1", 20, 20),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17))
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 2, 15),
+            new InventoryEvent.ReservationConfirmed("p-1", "o-2", 2))
         .when(new InventoryCommand.AdjustInventory("p-1", -5, "Stocktake"))
-        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 12))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 10))
         .expectState(
             s -> {
-              assertThat(s.available()).isEqualTo(12);
+              assertThat(s.available()).isEqualTo(10);
               assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.committed()).isEqualTo(2);
               assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
             });
   }

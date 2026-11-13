@@ -121,6 +121,7 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
 
       // ── inventory ────────────────────────────────────────────────────────────
       InventoryEvent.StockReserved.class,
+      InventoryEvent.StockReservationRefused.class,
       InventoryEvent.StockReleased.class,
       InventoryEvent.ReservationConfirmed.class,
       InventoryEvent.ShipmentReceived.class,

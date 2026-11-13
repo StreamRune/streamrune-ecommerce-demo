@@ -23,15 +23,16 @@ The order fulfillment flow the saga drives — what its `evolve()`/`handle()`/`c
 
 1. `OrderPlaced` arrives — the saga starts, issues `InitiatePayment`
 2. `PaymentCaptured` arrives — saga advances and issues one `ReserveStock` per order line against the inventory aggregate (Step 1b)
-3. One `StockReserved` per line arrives — the one that completes the order's lines makes the saga issue `ConfirmOrder`
+3. One `StockReserved` per line arrives — the one that completes the order's lines makes the saga issue `ConfirmOrder`. A line that asks for more than its product holds available is answered with `StockReservationRefused` instead, and the saga cancels the order with the refusal's reason (step 5)
 4. `OrderConfirmed` arrives — saga completes (`COMPLETED`)
-5. Any failure — on `PaymentFailed` the saga moves to a non-terminal `CANCELLING` step, dispatches `CancelOrder`, and `OrderCancelled` then closes it out to `FAILED` (a terminal `evolve()` would end the saga before `handle()` ever ran, so the cancel needs that intermediate step — see [Step 3](#step-3--implement-orderfulfillmentsaga)); if a later step's command fails, or the fulfillment's deadline passes, `compensate()` cancels the order. A cancellation of the order by its customer or an `ADMIN` while the saga runs ends the fulfillment too: the saga moves to `COMPENSATING`, and its compensation cancels the order once more
+5. Any failure — on `PaymentFailed` or `StockReservationRefused` the saga moves to a non-terminal `CANCELLING` step, dispatches `CancelOrder` (with the reason `Payment failed`, or the refusal's, such as `Insufficient stock for p-1: requested 3, available 2`), and `OrderCancelled` then closes it out to `FAILED` (a terminal `evolve()` would end the saga before `handle()` ever ran, so the cancel needs that intermediate step — see [Step 3](#step-3--implement-orderfulfillmentsaga)); if a later step's command fails, or the fulfillment's deadline passes, `compensate()` cancels the order. A cancellation of the order by its customer or an `ADMIN` while the saga runs ends the fulfillment too: the saga moves to `COMPENSATING`, and its compensation cancels the order once more
 
 ```mermaid
 stateDiagram-v2
     [*] --> AWAITING_PAYMENT: OrderPlaced
     AWAITING_PAYMENT --> AWAITING_INVENTORY: PaymentCaptured
     AWAITING_PAYMENT --> CANCELLING: PaymentFailed
+    AWAITING_INVENTORY --> CANCELLING: StockReservationRefused
     CANCELLING --> FAILED: OrderCancelled
     AWAITING_INVENTORY --> AWAITING_INVENTORY: StockReserved (not the last line)
     AWAITING_INVENTORY --> AWAITING_CONFIRMATION: StockReserved (the last line)
@@ -202,7 +203,6 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/Inventory
 ```java
 package org.streamrune.ecommerce.domain.inventory;
 
-import jakarta.validation.constraints.NotBlank;
 import org.streamrune.core.Command;
 
 public sealed interface InventoryCommand extends Command {
@@ -217,9 +217,9 @@ public sealed interface InventoryCommand extends Command {
   /**
    * A correction of the units on hand by a signed amount, a stocktake for example: a negative
    * change lowers the available units, a positive one raises them. Reserved and committed units are
-   * not touched. The reason is required: the command bus's Bean Validation refuses a blank one.
+   * not touched. The reason is required: the decider refuses a blank one.
    */
-  record AdjustInventory(String productId, int quantityChange, @NotBlank String reason)
+  record AdjustInventory(String productId, int quantityChange, String reason)
       implements InventoryCommand {}
 }
 ```
@@ -235,6 +235,13 @@ import org.streamrune.core.DomainEvent;
 
 public sealed interface InventoryEvent extends DomainEvent {
   record StockReserved(String productId, String orderId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+
+  /**
+   * The order asked for more units than the product holds available. Nothing is reserved; the
+   * fulfillment saga cancels the order with the reason this event gives.
+   */
+  record StockReservationRefused(String productId, String orderId, int requested, int available)
       implements InventoryEvent {}
 
   record StockReleased(String productId, String orderId, int quantity, int availableAfter)
@@ -264,11 +271,17 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.Map;
 import java.util.OptionalInt;
+import java.util.Set;
 import org.streamrune.core.AggregateState;
 import org.streamrune.core.types.AggregateType;
 
 public record InventoryState(
-    String productId, int available, int reserved, int committed, Map<String, Integer> reservations)
+    String productId,
+    int available,
+    int reserved,
+    int committed,
+    Map<String, Integer> reservations,
+    Set<String> refusedOrders)
     implements AggregateState {
   /**
    * The aggregate type the inventory decider is registered under: streams are
@@ -279,7 +292,9 @@ public record InventoryState(
   /**
    * {@code reservations} holds the open reservation of each order at this product, by order id: an
    * entry is added by {@code StockReserved} and removed by {@code StockReleased} or {@code
-   * ReservationConfirmed}. The state is snapshotted with the map.
+   * ReservationConfirmed}. {@code refusedOrders} holds the orders whose reservation was refused
+   * ({@code StockReservationRefused}), so a second request of such an order stores nothing. The
+   * state is snapshotted with both.
    */
   @JsonCreator
   public InventoryState(
@@ -287,16 +302,23 @@ public record InventoryState(
       @JsonProperty("available") int available,
       @JsonProperty("reserved") int reserved,
       @JsonProperty("committed") int committed,
-      @JsonProperty("reservations") Map<String, Integer> reservations) {
+      @JsonProperty("reservations") Map<String, Integer> reservations,
+      @JsonProperty("refusedOrders") Set<String> refusedOrders) {
     this.productId = productId;
     this.available = available;
     this.reserved = reserved;
     this.committed = committed;
     this.reservations = reservations == null ? Map.of() : Map.copyOf(reservations);
+    this.refusedOrders = refusedOrders == null ? Set.of() : Set.copyOf(refusedOrders);
   }
 
   public InventoryState() {
-    this(null, 0, 0, 0, Map.of());
+    this(null, 0, 0, 0, Map.of(), Set.of());
+  }
+
+  /** Whether a reservation of the order at this product was refused. */
+  public boolean refused(String orderId) {
+    return refusedOrders.contains(orderId);
   }
 
   /** The quantity the order holds reserved at this product, or none. */
@@ -308,6 +330,8 @@ public record InventoryState(
 ```
 
 The zero-argument constructor satisfies `AggregateState`; StreamRune calls it when no prior events exist for the stream.
+
+`refusedOrders` holds the orders whose reservation the inventory refused: an order that asks for more than the product holds available is answered with `StockReservationRefused`, an event and not an exception, because the refusal is a fact of the order's fulfillment that the saga acts on. A second `ReserveStock` of a refused order stores nothing, as a second one of a reserved order does.
 
 `reservations` holds the open reservation of each order at this product, by order id. `StockReserved` adds an entry; `StockReleased` and `ReservationConfirmed` remove it, so the map holds only the orders in flight for the product. The bus snapshots the state with the map (chapter 8): the canonical constructor is the one Jackson uses (`@JsonCreator`, one `@JsonProperty` per component), and it reads a state written without `reservations` as an empty map. A snapshot that lost the map would make every release and confirmation after it store nothing, with no error, and strand the stock. `reservationOf(orderId)` is the quantity an order holds, or none.
 
@@ -623,7 +647,7 @@ Run the tests again: they should all pass.
 
 ### Step 1a — Show the payment on the order
 
-The order's row in the read model shows the status of its payment, so the Orders page (Chapter 16) can show it beside the order's own status. Give `OrderView` from Chapter 8 a `paymentStatus` component. Replace `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
+The order's row in the read model shows the status of its payment, so the Orders page (Chapter 16) can show it beside the order's own status. Give `OrderView` from Chapter 8 a `paymentStatus` component, and a `reason` that says why a cancelled order was cancelled: its customer's reason, or the saga's, such as the stock a line asked for and its product did not hold. Replace `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
 
 ```java
 package org.streamrune.ecommerce.queries.dto;
@@ -636,7 +660,9 @@ import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 
 /**
  * An order as the read model holds it. {@code paymentStatus} is the status of the order's payment,
- * {@code null} until the payment is initiated.
+ * {@code null} until the payment is initiated. {@code reason} is why the order was cancelled: the
+ * customer's or an operator's reason, or the fulfillment's, such as the stock a line asked for and
+ * its product did not hold; {@code null} for an order that is not cancelled.
  */
 public record OrderView(
     String orderId,
@@ -645,6 +671,7 @@ public record OrderView(
     Money total,
     OrderStatus status,
     PaymentStatus paymentStatus,
+    String reason,
     Instant createdAt,
     Instant updatedAt) {
   public record OrderLineView(String productId, int quantity, Money unitPrice) {}
@@ -712,16 +739,17 @@ public class OrderProjection extends BaseProjection {
                   e.total(),
                   OrderStatus.CREATED,
                   null,
+                  null,
                   at,
                   at));
       case OrderEvent.OrderConfirmed e -> updateStatus(e.orderId(), OrderStatus.CONFIRMED, at);
       case OrderEvent.OrderShipped e -> updateStatus(e.orderId(), OrderStatus.SHIPPED, at);
       case OrderEvent.OrderDelivered e -> updateStatus(e.orderId(), OrderStatus.DELIVERED, at);
-      case OrderEvent.OrderCancelled e -> updateStatus(e.orderId(), OrderStatus.CANCELLED, at);
+      case OrderEvent.OrderCancelled e -> cancel(e.orderId(), e.reason(), at);
     }
   }
 
-  /** The status of the order's row; its payment status stays as it is. */
+  /** The status of the order's row; its payment status and reason stay as they are. */
   private void updateStatus(String id, OrderStatus status, Instant timestamp) {
     findById(id, OrderView.class)
         .ifPresent(
@@ -735,6 +763,30 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         status,
                         existing.paymentStatus(),
+                        existing.reason(),
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  /**
+   * The order cancelled, with the reason of its {@code OrderCancelled}. An order cancelled twice
+   * (its customer, then the fulfillment saga) shows the first reason: the second cancellation
+   * changes nothing the customer sees.
+   */
+  private void cancel(String id, String reason, Instant timestamp) {
+    findById(id, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    id,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        OrderStatus.CANCELLED,
+                        existing.paymentStatus(),
+                        existing.reason() != null ? existing.reason() : reason,
                         existing.createdAt(),
                         timestamp)));
   }
@@ -756,6 +808,7 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         existing.status(),
                         paymentStatus,
+                        existing.reason(),
                         existing.createdAt(),
                         timestamp)));
   }
@@ -851,11 +904,62 @@ class InventoryDeciderTest {
   }
 
   @Test
-  void reserveStock_insufficient_throws() {
+  void reserveStock_moreThanAvailable_isRefusedWithAnEvent() {
     fixture
         .given(received())
         .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
-        .expectException(DomainException.class);
+        .expectEvents(new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 10))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(10);
+              assertThat(s.reserved()).isZero();
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.empty());
+              assertThat(s.refused("o-1")).isTrue();
+            });
+  }
+
+  @Test
+  void reserveStock_withNothingReceived_isRefusedWithAnEvent() {
+    fixture
+        .given()
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 1))
+        .expectEvents(new InventoryEvent.StockReservationRefused("p-1", "o-1", 1, 0));
+  }
+
+  @Test
+  void reserveStock_ofAnOrderAlreadyRefused_storesNothing() {
+    fixture
+        .given(
+            new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 0),
+            new InventoryEvent.ShipmentReceived("p-1", 500, 500))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-1", 200))
+        .expectNoEvents();
+  }
+
+  @Test
+  void reserveStock_aRefusalOfOneOrder_leavesAnotherOrderFree() {
+    fixture
+        .given(received(), new InventoryEvent.StockReservationRefused("p-1", "o-1", 200, 10))
+        .when(new InventoryCommand.ReserveStock("p-1", "o-2", 3))
+        .expectEvents(new InventoryEvent.StockReserved("p-1", "o-2", 3, 7));
+  }
+
+  @Test
+  void receiveShipment_beyondTheLargestCount_isRefused() {
+    fixture
+        .given(new InventoryEvent.ShipmentReceived("p-1", Integer.MAX_VALUE, Integer.MAX_VALUE))
+        .when(new InventoryCommand.ReceiveShipment("p-1", 1))
+        .expectFailedWith(
+            DomainException.class, "Stock for p-1 cannot exceed " + Integer.MAX_VALUE + " units");
+  }
+
+  @Test
+  void adjustInventory_beyondTheLargestCount_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", Integer.MAX_VALUE, "Found a warehouse"))
+        .expectFailedWith(
+            DomainException.class, "Stock for p-1 cannot exceed " + Integer.MAX_VALUE + " units");
   }
 
   @Test
@@ -975,13 +1079,16 @@ class InventoryDeciderTest {
     fixture
         .given(
             new InventoryEvent.ShipmentReceived("p-1", 20, 20),
-            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17))
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17),
+            new InventoryEvent.StockReserved("p-1", "o-2", 2, 15),
+            new InventoryEvent.ReservationConfirmed("p-1", "o-2", 2))
         .when(new InventoryCommand.AdjustInventory("p-1", -5, "Stocktake"))
-        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 12))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 10))
         .expectState(
             s -> {
-              assertThat(s.available()).isEqualTo(12);
+              assertThat(s.available()).isEqualTo(10);
               assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.committed()).isEqualTo(2);
               assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
             });
   }
@@ -1049,9 +1156,11 @@ Create `commands/src/main/java/org/streamrune/ecommerce/commands/inventory/Inven
 package org.streamrune.ecommerce.commands.inventory;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
+import java.util.Set;
 import org.streamrune.core.Decider;
 import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.inventory.*;
@@ -1066,6 +1175,10 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
   /**
    * Stock is held per order: a second reservation of one order at one product stores nothing, and a
    * release or a confirmation acts on this order's reservation alone — nothing when it holds none.
+   * An order that asks for more than the product holds available is refused with an event, {@code
+   * StockReservationRefused}, not an exception: the refusal is a fact of the order's fulfillment,
+   * and the saga cancels the order with its reason. A second request of a refused order stores
+   * nothing.
    */
   @Override
   public List<InventoryEvent> decide(InventoryCommand cmd, InventoryState state) {
@@ -1074,17 +1187,13 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
         if (c.quantity() <= 0) {
           throw new DomainException("Reservation quantity must be positive, got " + c.quantity());
         }
-        if (state.reservationOf(c.orderId()).isPresent()) {
+        if (state.reservationOf(c.orderId()).isPresent() || state.refused(c.orderId())) {
           yield List.of();
         }
         if (state.available() < c.quantity()) {
-          throw new DomainException(
-              "Insufficient stock for "
-                  + c.productId()
-                  + ": available="
-                  + state.available()
-                  + ", requested="
-                  + c.quantity());
+          yield List.of(
+              new InventoryEvent.StockReservationRefused(
+                  c.productId(), c.orderId(), c.quantity(), state.available()));
         }
         yield List.of(
             new InventoryEvent.StockReserved(
@@ -1113,7 +1222,7 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
       case InventoryCommand.ReceiveShipment c ->
           List.of(
               new InventoryEvent.ShipmentReceived(
-                  c.productId(), c.quantity(), state.available() + c.quantity()));
+                  c.productId(), c.quantity(), availableAfter(state, c.productId(), c.quantity())));
 
       // A correction of the units on hand, never of what orders hold: reserved and committed stay.
       case InventoryCommand.AdjustInventory c -> {
@@ -1123,7 +1232,7 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
         if (c.reason() == null || c.reason().isBlank()) {
           throw new DomainException("An inventory adjustment needs a reason");
         }
-        int availableAfter = state.available() + c.quantityChange();
+        int availableAfter = availableAfter(state, c.productId(), c.quantityChange());
         if (availableAfter < 0) {
           throw new DomainException(
               "Insufficient stock for "
@@ -1140,6 +1249,16 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
     };
   }
 
+  /** The available units after a change, refused when they would not fit in an {@code int}. */
+  private static int availableAfter(InventoryState state, String productId, int change) {
+    try {
+      return Math.addExact(state.available(), change);
+    } catch (ArithmeticException e) {
+      throw new DomainException(
+          "Stock for " + productId + " cannot exceed " + Integer.MAX_VALUE + " units");
+    }
+  }
+
   @Override
   public InventoryState evolve(InventoryState state, InventoryEvent evt) {
     return switch (evt) {
@@ -1149,35 +1268,48 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
               e.availableAfter(),
               state.reserved() + e.quantity(),
               state.committed(),
-              with(state.reservations(), e.orderId(), e.quantity()));
+              with(state.reservations(), e.orderId(), e.quantity()),
+              state.refusedOrders());
+      case InventoryEvent.StockReservationRefused e ->
+          new InventoryState(
+              e.productId(),
+              state.available(),
+              state.reserved(),
+              state.committed(),
+              state.reservations(),
+              plus(state.refusedOrders(), e.orderId()));
       case InventoryEvent.StockReleased e ->
           new InventoryState(
               e.productId(),
               e.availableAfter(),
               state.reserved() - e.quantity(),
               state.committed(),
-              without(state.reservations(), e.orderId()));
+              without(state.reservations(), e.orderId()),
+              state.refusedOrders());
       case InventoryEvent.ReservationConfirmed e ->
           new InventoryState(
               state.productId(),
               state.available(),
               state.reserved() - e.quantity(),
               state.committed() + e.quantity(),
-              without(state.reservations(), e.orderId()));
+              without(state.reservations(), e.orderId()),
+              state.refusedOrders());
       case InventoryEvent.ShipmentReceived e ->
           new InventoryState(
               e.productId(),
               e.availableAfter(),
               state.reserved(),
               state.committed(),
-              state.reservations());
+              state.reservations(),
+              state.refusedOrders());
       case InventoryEvent.InventoryAdjusted e ->
           new InventoryState(
               e.productId(),
               e.availableAfter(),
               state.reserved(),
               state.committed(),
-              state.reservations());
+              state.reservations(),
+              state.refusedOrders());
     };
   }
 
@@ -1191,6 +1323,12 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
   private static Map<String, Integer> without(Map<String, Integer> reservations, String orderId) {
     var next = new HashMap<>(reservations);
     next.remove(orderId);
+    return next;
+  }
+
+  private static Set<String> plus(Set<String> orders, String orderId) {
+    var next = new HashSet<>(orders);
+    next.add(orderId);
     return next;
   }
 }
@@ -1306,8 +1444,9 @@ import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 
 /**
- * What the fulfillment saga keeps of its order: the ids, the total, the lines, and the products
- * whose stock is reserved so far, once each, in the order of the lines.
+ * What the fulfillment saga keeps of its order: the ids, the total, the lines, the products whose
+ * stock is reserved so far, once each, in the order of the lines, and the reason it cancels the
+ * order with when a product's stock is refused ({@code null} otherwise).
  */
 public record OrderFulfillmentState(
     SagaId sagaId,
@@ -1317,7 +1456,8 @@ public record OrderFulfillmentState(
     Money orderTotal,
     List<OrderEvent.OrderLine> lines,
     List<String> reservedProductIds,
-    OrderFulfillmentStatus fulfillmentStatus)
+    OrderFulfillmentStatus fulfillmentStatus,
+    String cancellationReason)
     implements SagaState {
 
   @JsonCreator
@@ -1329,7 +1469,8 @@ public record OrderFulfillmentState(
       @JsonProperty("orderTotal") Money orderTotal,
       @JsonProperty("lines") List<OrderEvent.OrderLine> lines,
       @JsonProperty("reservedProductIds") List<String> reservedProductIds,
-      @JsonProperty("fulfillmentStatus") OrderFulfillmentStatus fulfillmentStatus) {
+      @JsonProperty("fulfillmentStatus") OrderFulfillmentStatus fulfillmentStatus,
+      @JsonProperty("cancellationReason") String cancellationReason) {
     this.sagaId = sagaId;
     this.orderId = orderId;
     this.customerId = customerId;
@@ -1339,6 +1480,7 @@ public record OrderFulfillmentState(
     this.reservedProductIds =
         reservedProductIds == null ? List.of() : List.copyOf(reservedProductIds);
     this.fulfillmentStatus = fulfillmentStatus;
+    this.cancellationReason = cancellationReason;
   }
 
   @Override
@@ -1357,7 +1499,29 @@ public record OrderFulfillmentState(
 
   OrderFulfillmentState withStatus(OrderFulfillmentStatus status) {
     return new OrderFulfillmentState(
-        sagaId, orderId, customerId, paymentId, orderTotal, lines, reservedProductIds, status);
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reservedProductIds,
+        status,
+        cancellationReason);
+  }
+
+  /** The saga cancelling its order for {@code reason}. */
+  OrderFulfillmentState cancellingFor(String reason) {
+    return new OrderFulfillmentState(
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reservedProductIds,
+        OrderFulfillmentStatus.CANCELLING,
+        reason);
   }
 
   /** The products reserved so far plus {@code productId}, once each, in the order of the lines. */
@@ -1369,7 +1533,15 @@ public record OrderFulfillmentState(
             .distinct()
             .toList();
     return new OrderFulfillmentState(
-        sagaId, orderId, customerId, paymentId, orderTotal, lines, reserved, fulfillmentStatus);
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reserved,
+        fulfillmentStatus,
+        cancellationReason);
   }
 
   boolean hasLineFor(String productId) {
@@ -1425,6 +1597,16 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * #handle} once {@code evolve} reaches a terminal {@code SagaStatus}, so a final command can only
  * be dispatched from a state that is still running.
  *
+ * <p><b>Stock the inventory does not hold.</b> A line that asks for more than its product holds
+ * available is refused by the inventory with an event, {@code StockReservationRefused}, not with an
+ * exception. The saga takes the same path as for a failed payment: StockReservationRefused →
+ * CANCELLING → CancelOrder with the refusal's reason ({@link #refusalReason}, for example
+ * "Insufficient stock for p-1: requested 3, available 2") → OrderCancelled → FAILED. The order's
+ * {@code OrderCancelled} undoes the money and the stock as every cancellation does: the
+ * reservations already made for the order's other lines are released and the payment is refunded.
+ * The reason lives in the saga's state, so a resumed step sends the same command; the first refusal
+ * decides it, and the refusal of a second line asks for nothing more.
+ *
  * <p><b>A cancellation the saga did not ask for.</b> The order's customer or an {@code ADMIN} can
  * cancel the order while the saga runs. Its {@code OrderCancelled} moves the saga to {@code
  * COMPENSATING}: the step's row write opens the compensation episode, and the forward fence refuses
@@ -1447,12 +1629,13 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  *   <li><b>An event this saga caused.</b> The command bus stores, with every event of a command a
  *       saga dispatched, the saga's origin: the saga type, the saga id and a hop count ({@code
  *       EventMetadata.sagaOrigin()}). {@code SagaRunner} hands such an event to the saga its origin
- *       names and asks this class nothing. {@code PaymentInitiated}, {@code StockReserved} and the
- *       saga's own {@code OrderConfirmed} and {@code OrderCancelled} arrive this way; so do {@code
- *       PaymentCaptured} and {@code PaymentFailed}, which the payment process manager causes by
- *       continuing {@code PaymentInitiated}, and the {@code StockReleased}, {@code PaymentVoided}
- *       and {@code PaymentRefunded} the cancellation process manager causes by continuing the
- *       saga's own {@code OrderCancelled} (each one hop further from the saga, the same origin).
+ *       names and asks this class nothing. {@code PaymentInitiated}, {@code StockReserved}, {@code
+ *       StockReservationRefused} and the saga's own {@code OrderConfirmed} and {@code
+ *       OrderCancelled} arrive this way; so do {@code PaymentCaptured} and {@code PaymentFailed},
+ *       which the payment process manager causes by continuing {@code PaymentInitiated}, and the
+ *       {@code StockReleased}, {@code PaymentVoided} and {@code PaymentRefunded} the cancellation
+ *       process manager causes by continuing the saga's own {@code OrderCancelled} (each one hop
+ *       further from the saga, the same origin).
  *   <li><b>An event somebody else caused.</b> A request of the order's customer or an {@code ADMIN}
  *       cancels an order too. Its event carries no origin, so the runner asks {@link
  *       #correlateByEventData}, which answers from the order id in the event.
@@ -1521,7 +1704,11 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 public class OrderFulfillmentSaga
     implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {
 
-  /** The reason of the cancellation every compensation of this saga dispatches. */
+  /**
+   * The reason of the cancellation every compensation of this saga dispatches: a step that failed
+   * on something other than a business rule, a lock or a store that refused the write, say, or the
+   * deadline. A refused reservation carries its own reason ({@link #refusalReason}).
+   */
   public static final String COMPENSATION_REASON = "Order fulfillment did not complete";
 
   /** The deadline of a fulfillment when the application names none: fifteen minutes. */
@@ -1570,7 +1757,18 @@ public class OrderFulfillmentSaga
         null,
         List.of(),
         List.of(),
-        OrderFulfillmentStatus.AWAITING_PAYMENT);
+        OrderFulfillmentStatus.AWAITING_PAYMENT,
+        null);
+  }
+
+  /** The reason the saga cancels an order with when the inventory refuses one of its lines. */
+  public static String refusalReason(InventoryEvent.StockReservationRefused refused) {
+    return "Insufficient stock for "
+        + refused.productId()
+        + ": requested "
+        + refused.requested()
+        + ", available "
+        + refused.available();
   }
 
   @Override
@@ -1632,6 +1830,7 @@ public class OrderFulfillmentSaga
       case PaymentEvent.PaymentRefunded e -> isTheSagasOwn(state.paymentId(), e.paymentId());
       case InventoryEvent.StockReserved e -> isTheSagasOwn(state.orderId(), e.orderId());
       case InventoryEvent.StockReleased e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case InventoryEvent.StockReservationRefused e -> isTheSagasOwn(state.orderId(), e.orderId());
       default -> false;
     };
   }
@@ -1660,7 +1859,8 @@ public class OrderFulfillmentSaga
               e.total(),
               e.lines(),
               List.of(),
-              OrderFulfillmentStatus.AWAITING_PAYMENT);
+              OrderFulfillmentStatus.AWAITING_PAYMENT,
+              null);
 
       // The payment decides once, while the saga waits for it. A capture recorded after the
       // payment failed (the gateway took the money after all) is refunded by the payment itself
@@ -1702,6 +1902,15 @@ public class OrderFulfillmentSaga
             ? reserved.withStatus(OrderFulfillmentStatus.AWAITING_CONFIRMATION)
             : reserved;
       }
+
+      // A line the inventory refused ends the fulfillment: CANCELLING, with the refusal's reason,
+      // as
+      // a failed payment does. Only the first refusal decides; a later one finds the saga
+      // cancelling.
+      case InventoryEvent.StockReservationRefused e ->
+          status == OrderFulfillmentStatus.AWAITING_INVENTORY && state.hasLineFor(e.productId())
+              ? state.cancellingFor(refusalReason(e))
+              : state;
 
       case OrderEvent.OrderConfirmed e ->
           status == OrderFulfillmentStatus.AWAITING_CONFIRMATION
@@ -1751,16 +1960,26 @@ public class OrderFulfillmentSaga
                       new AggregateId(state.orderId())))
               : List.of();
 
+      // The event that moved the saga to CANCELLING asks for the cancellation: the failed payment,
+      // or the refusal whose reason the state holds. Another refusal asks for nothing.
       case CANCELLING ->
-          event.event() instanceof PaymentEvent.PaymentFailed
-              ? List.of(
-                  new SagaCommand(
-                      new OrderCommand.CancelOrder(state.orderId(), "Payment failed"),
-                      new AggregateId(state.orderId())))
-              : List.of();
+          switch (event.event()) {
+            case PaymentEvent.PaymentFailed e -> cancel(state, "Payment failed");
+            case InventoryEvent.StockReservationRefused e
+                when refusalReason(e).equals(state.cancellationReason()) ->
+                cancel(state, state.cancellationReason());
+            default -> List.of();
+          };
 
       default -> List.of();
     };
+  }
+
+  private static List<SagaCommand> cancel(OrderFulfillmentState state, String reason) {
+    return List.of(
+        new SagaCommand(
+            new OrderCommand.CancelOrder(state.orderId(), reason),
+            new AggregateId(state.orderId())));
   }
 
   /**
@@ -2012,7 +2231,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",
@@ -2092,6 +2312,7 @@ class OrderFulfillmentSagaTest {
     others.put(new InventoryEvent.StockReleased("prod-1", "o-1", 2, 10), stock);
     others.put(new InventoryEvent.ReservationConfirmed("prod-1", "o-1", 2), stock);
     others.put(new InventoryEvent.ShipmentReceived("prod-1", 5, 5), stock);
+    others.put(new InventoryEvent.StockReservationRefused("prod-1", "o-1", 2, 1), stock);
 
     others.forEach(
         (event, stream) ->
@@ -2177,6 +2398,15 @@ class OrderFulfillmentSagaTest {
             "prod-1");
     assertThat(saga.evolve(awaitingInventory, foreignReservation)).isEqualTo(awaitingInventory);
 
+    var foreignRefusal =
+        causedBySagaOf(
+            "o-2",
+            new InventoryEvent.StockReservationRefused("prod-1", "o-1", 2, 1),
+            InventoryState.TYPE,
+            "prod-1");
+    assertThat(saga.evolve(awaitingInventory, foreignRefusal)).isEqualTo(awaitingInventory);
+    assertThat(saga.handle(awaitingInventory, foreignRefusal)).isEmpty();
+
     var cancelling = stateOfOrderTwo(OrderFulfillmentStatus.CANCELLING);
     var foreignCancel =
         envelope(
@@ -2228,7 +2458,8 @@ class OrderFulfillmentSagaTest {
         new Money(BigDecimal.TEN, "USD"),
         List.of(line),
         List.of(),
-        status);
+        status,
+        null);
   }
 
   // ---- AWAITING_INVENTORY must gate on PaymentCaptured, like its sibling branches ----
@@ -2245,7 +2476,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     // A redelivered/unrelated event arrives while the saga sits in AWAITING_INVENTORY — must not
     // re-issue ReserveStock for anything other than the PaymentCaptured that drives this step.
     var unrelated =
@@ -2384,7 +2616,8 @@ class OrderFulfillmentSagaTest {
         new Money(BigDecimal.TEN, "USD"),
         List.of(lines),
         reserved,
-        status);
+        status,
+        null);
   }
 
   // ---- PaymentFailed must actually cancel the order. An evolve straight to FAILED would make
@@ -2404,7 +2637,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     var failed =
         causedBySagaOf(
             "o-1",
@@ -2434,7 +2668,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(),
             List.of(),
-            OrderFulfillmentStatus.CANCELLING);
+            OrderFulfillmentStatus.CANCELLING,
+            null);
     var cancelled =
         causedBySagaOf(
             "o-1",
@@ -2445,6 +2680,100 @@ class OrderFulfillmentSagaTest {
     state = saga.evolve(state, cancelled);
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.FAILED);
+  }
+
+  // ---- A line the inventory refuses cancels the order with the refusal's reason, through the
+  // same non-terminal CANCELLING step as a failed payment. The reason is in the state, so the
+  // command is the same on every delivery; only the refusal that decided asks for it. ----
+
+  @Test
+  void stockReservationRefused_evolvesToCancelling_andHandleCancelsWithTheReason() {
+    var state =
+        stateOfOrderOne(
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            List.of("prod-1"),
+            line("prod-1", 2),
+            line("prod-2", 3));
+    var refused = refusedBySagaOf("prod-2", 3, 1);
+
+    state = saga.evolve(state, refused);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
+    assertThat(state.status()).isEqualTo(SagaStatus.RUNNING);
+    assertThat(state.cancellationReason())
+        .isEqualTo("Insufficient stock for prod-2: requested 3, available 1");
+    assertThat(saga.handle(state, refused))
+        .containsExactly(
+            new SagaCommand(
+                new OrderCommand.CancelOrder(
+                    "o-1", "Insufficient stock for prod-2: requested 3, available 1"),
+                new AggregateId("o-1")));
+  }
+
+  @Test
+  void stockReservationRefused_ofASecondLine_asksForNothingMore() {
+    var state =
+        saga.evolve(
+            stateOfOrderOne(
+                OrderFulfillmentStatus.AWAITING_INVENTORY,
+                List.of(),
+                line("prod-1", 2),
+                line("prod-2", 3)),
+            refusedBySagaOf("prod-1", 2, 0));
+    var second = refusedBySagaOf("prod-2", 3, 1);
+
+    var after = saga.evolve(state, second);
+
+    assertThat(after).isEqualTo(state);
+    assertThat(after.cancellationReason())
+        .isEqualTo("Insufficient stock for prod-1: requested 2, available 0");
+    assertThat(saga.handle(after, second)).isEmpty();
+  }
+
+  @Test
+  void stockReservationRefused_ofAProductTheOrderDoesNotHold_changesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2));
+    var refused = refusedBySagaOf("prod-9", 2, 0);
+
+    assertThat(saga.evolve(state, refused)).isEqualTo(state);
+    assertThat(saga.handle(state, refused)).isEmpty();
+  }
+
+  @Test
+  void stockReservationRefused_outsideTheWaitForTheStock_changesNothing() {
+    var state =
+        stateOfOrderOne(OrderFulfillmentStatus.AWAITING_PAYMENT, List.of(), line("prod-1", 2));
+
+    assertThat(saga.evolve(state, refusedBySagaOf("prod-1", 2, 0))).isEqualTo(state);
+  }
+
+  @Test
+  void orderCancelled_afterARefusal_terminatesFailed() {
+    var state =
+        saga.evolve(
+            stateOfOrderOne(
+                OrderFulfillmentStatus.AWAITING_INVENTORY, List.of(), line("prod-1", 2)),
+            refusedBySagaOf("prod-1", 2, 0));
+    var cancelled =
+        causedBySagaOf(
+            "o-1",
+            new OrderEvent.OrderCancelled(
+                "o-1", "Insufficient stock for prod-1: requested 2, available 0", List.of()),
+            OrderState.TYPE,
+            "o-1");
+
+    state = saga.evolve(state, cancelled);
+
+    assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.FAILED);
+  }
+
+  private EventEnvelope refusedBySagaOf(String productId, int requested, int available) {
+    return causedBySagaOf(
+        "o-1",
+        new InventoryEvent.StockReservationRefused(productId, "o-1", requested, available),
+        InventoryState.TYPE,
+        productId);
   }
 
   // ---- A cancellation the saga did not ask for ends the fulfillment: the saga moves to
@@ -2564,7 +2893,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",
@@ -2592,7 +2922,8 @@ class OrderFulfillmentSagaTest {
             new Money(BigDecimal.TEN, "USD"),
             List.of(line),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_INVENTORY);
+            OrderFulfillmentStatus.AWAITING_INVENTORY,
+            null);
     var captured =
         causedBySagaOf(
             "o-1",
@@ -2614,6 +2945,8 @@ Two test scenarios are worth highlighting, plus the regression tests for the can
 **Happy path:** `OrderPlaced` is consumed, `evolve()` populates the state with order data (including a derived `paymentId` of `"pay-" + orderId` and the order `lines`), and `handle()` returns a single `InitiatePayment` command. After `PaymentCaptured`, the saga transitions to `AWAITING_INVENTORY` and `handle()` returns one `ReserveStock` command per order line, in the order of the lines (`awaitingInventory_paymentCaptured_reservesEveryLineInTheOrderOfTheLines`). Each `StockReserved` records its product; the one that completes the set moves the saga to `AWAITING_CONFIRMATION` and `handle()` returns `ConfirmOrder` (`stockReserved_ofTheLastLine_movesToAwaitingConfirmationAndAsksForTheConfirmation`), one that leaves a line open dispatches nothing (`stockReserved_ofSomeLines_staysAwaitingInventoryAndDispatchesNothing`), and a second `StockReserved` of one product or one of a product the order does not hold changes nothing (`stockReserved_twiceForOneProduct_countsOnce`, `stockReserved_ofAProductTheOrderDoesNotHold_changesNothing`) — also once the saga awaits its confirmation, where it asks for no second `ConfirmOrder` (`awaitingConfirmation_aStockReservedOfAProductTheOrderDoesNotHold_asksForNoConfirmation`). `OrderConfirmed` then drives it to `COMPLETED`.
 
 **Compensation path:** When `PaymentFailed` arrives, `evolve()` moves status to the non-terminal `CANCELLING` (not directly to `FAILED`) and `handle()` emits `CancelOrder`; `OrderCancelled` then drives `evolve()` to the terminal `FAILED`. The two-step detour matters: `SagaRunner` skips `handle()` entirely once `evolve()` reaches a terminal `SagaStatus`, so a direct `PaymentFailed` → `FAILED` evolve would make the `CancelOrder` dispatch unreachable — `CANCELLING` keeps the saga running long enough to actually dispatch the cancel. When a saga command fails for good mid-flight, or the deadline passes, `compensate()` returns the order's cancellation, whatever the state.
+
+**A refused line cancels the order with its reason:** `stockReservationRefused_evolvesToCancelling_andHandleCancelsWithTheReason` takes the refusal of one line of a two-line order to `CANCELLING`, keeps the reason in the state (`cancellationReason`), and has `handle()` dispatch `CancelOrder` with it. The order's `OrderCancelled` releases the line already reserved, as every cancellation does. `stockReservationRefused_ofASecondLine_asksForNothingMore` shows that only the first refusal decides, and `orderCancelled_afterARefusal_terminatesFailed` closes the saga `FAILED`. `compensate()` still ignores its `failure` argument: the reason comes from an event the saga applied, so a resumed step sends the same command.
 
 **`PaymentFailed` must actually cancel the order:** `paymentFailed_evolvesToCancelling_andHandleEmitsCancelOrder` proves the full two-step flow — `evolve()` lands on `CANCELLING`, then `handle()` on that same state dispatches exactly one `CancelOrder`. `orderCancelled_whileCancelling_terminatesFailed` proves the closing transition: `OrderCancelled` while `CANCELLING` evolves to `FAILED`. An `evolve(PaymentFailed)` that set the status directly to `FAILED` (terminal) would make `SagaRunner.persistStatusFor` return before ever calling `handle()` — the `handle()` branch for a payment failure would be dead code, and a failed payment would never cancel the order.
 
@@ -3671,6 +4004,9 @@ public MultiProjectionRunner projectionRunner(
     "StockReserved",
     org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
 .registerEvent(
+    "StockReservationRefused",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
+.registerEvent(
     "StockReleased",
     org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
 .registerEvent(
@@ -3870,6 +4206,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
+        .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
         .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
@@ -4484,7 +4823,7 @@ Start the application:
 ./gradlew :spring-app:bootRun
 ```
 
-The saga subscription reads the event store from its first event, so the orders of Chapters 8 to 10 get a fulfillment saga as well when the application starts. No stock has arrived for any product yet, so their reservations are refused and their sagas compensate: those orders end `CANCELLED`, and the order cancellation process manager voids their payments. The saga reserves the stock of every line, so receive a shipment of `p-1` before the next order, as an `ADMIN` (Step 1c):
+The saga subscription reads the event store from its first event, so the orders of Chapters 8 to 10 get a fulfillment saga as well when the application starts. No stock has arrived for any product yet, so their reservations are refused and their sagas cancel them: those orders end `CANCELLED` with the reason `Insufficient stock for <product>: requested <n>, available 0`, and the order cancellation process manager refunds their payments. The saga reserves the stock of every line, so receive a shipment of `p-1` before the next order, as an `ADMIN` (Step 1c):
 
 ```bash
 curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \

@@ -286,7 +286,8 @@ class SagaRecoveryAdminIT {
         new Money(new BigDecimal("19.99"), "USD"),
         List.of(),
         List.of(),
-        status);
+        status,
+        null);
   }
 
   /** A saga awaiting inventory that a poison event faulted. */

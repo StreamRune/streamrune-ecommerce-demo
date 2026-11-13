@@ -32,6 +32,16 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * #handle} once {@code evolve} reaches a terminal {@code SagaStatus}, so a final command can only
  * be dispatched from a state that is still running.
  *
+ * <p><b>Stock the inventory does not hold.</b> A line that asks for more than its product holds
+ * available is refused by the inventory with an event, {@code StockReservationRefused}, not with an
+ * exception. The saga takes the same path as for a failed payment: StockReservationRefused →
+ * CANCELLING → CancelOrder with the refusal's reason ({@link #refusalReason}, for example
+ * "Insufficient stock for p-1: requested 3, available 2") → OrderCancelled → FAILED. The order's
+ * {@code OrderCancelled} undoes the money and the stock as every cancellation does: the
+ * reservations already made for the order's other lines are released and the payment is refunded.
+ * The reason lives in the saga's state, so a resumed step sends the same command; the first refusal
+ * decides it, and the refusal of a second line asks for nothing more.
+ *
  * <p><b>A cancellation the saga did not ask for.</b> The order's customer or an {@code ADMIN} can
  * cancel the order while the saga runs. Its {@code OrderCancelled} moves the saga to {@code
  * COMPENSATING}: the step's row write opens the compensation episode, and the forward fence refuses
@@ -54,12 +64,13 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  *   <li><b>An event this saga caused.</b> The command bus stores, with every event of a command a
  *       saga dispatched, the saga's origin: the saga type, the saga id and a hop count ({@code
  *       EventMetadata.sagaOrigin()}). {@code SagaRunner} hands such an event to the saga its origin
- *       names and asks this class nothing. {@code PaymentInitiated}, {@code StockReserved} and the
- *       saga's own {@code OrderConfirmed} and {@code OrderCancelled} arrive this way; so do {@code
- *       PaymentCaptured} and {@code PaymentFailed}, which the payment process manager causes by
- *       continuing {@code PaymentInitiated}, and the {@code StockReleased}, {@code PaymentVoided}
- *       and {@code PaymentRefunded} the cancellation process manager causes by continuing the
- *       saga's own {@code OrderCancelled} (each one hop further from the saga, the same origin).
+ *       names and asks this class nothing. {@code PaymentInitiated}, {@code StockReserved}, {@code
+ *       StockReservationRefused} and the saga's own {@code OrderConfirmed} and {@code
+ *       OrderCancelled} arrive this way; so do {@code PaymentCaptured} and {@code PaymentFailed},
+ *       which the payment process manager causes by continuing {@code PaymentInitiated}, and the
+ *       {@code StockReleased}, {@code PaymentVoided} and {@code PaymentRefunded} the cancellation
+ *       process manager causes by continuing the saga's own {@code OrderCancelled} (each one hop
+ *       further from the saga, the same origin).
  *   <li><b>An event somebody else caused.</b> A request of the order's customer or an {@code ADMIN}
  *       cancels an order too. Its event carries no origin, so the runner asks {@link
  *       #correlateByEventData}, which answers from the order id in the event.
@@ -128,7 +139,11 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 public class OrderFulfillmentSaga
     implements SagaOrchestrator<OrderFulfillmentState>, SagaDecider<OrderFulfillmentState> {
 
-  /** The reason of the cancellation every compensation of this saga dispatches. */
+  /**
+   * The reason of the cancellation every compensation of this saga dispatches: a step that failed
+   * on something other than a business rule, a lock or a store that refused the write, say, or the
+   * deadline. A refused reservation carries its own reason ({@link #refusalReason}).
+   */
   public static final String COMPENSATION_REASON = "Order fulfillment did not complete";
 
   /** The deadline of a fulfillment when the application names none: fifteen minutes. */
@@ -177,7 +192,18 @@ public class OrderFulfillmentSaga
         null,
         List.of(),
         List.of(),
-        OrderFulfillmentStatus.AWAITING_PAYMENT);
+        OrderFulfillmentStatus.AWAITING_PAYMENT,
+        null);
+  }
+
+  /** The reason the saga cancels an order with when the inventory refuses one of its lines. */
+  public static String refusalReason(InventoryEvent.StockReservationRefused refused) {
+    return "Insufficient stock for "
+        + refused.productId()
+        + ": requested "
+        + refused.requested()
+        + ", available "
+        + refused.available();
   }
 
   @Override
@@ -239,6 +265,7 @@ public class OrderFulfillmentSaga
       case PaymentEvent.PaymentRefunded e -> isTheSagasOwn(state.paymentId(), e.paymentId());
       case InventoryEvent.StockReserved e -> isTheSagasOwn(state.orderId(), e.orderId());
       case InventoryEvent.StockReleased e -> isTheSagasOwn(state.orderId(), e.orderId());
+      case InventoryEvent.StockReservationRefused e -> isTheSagasOwn(state.orderId(), e.orderId());
       default -> false;
     };
   }
@@ -267,7 +294,8 @@ public class OrderFulfillmentSaga
               e.total(),
               e.lines(),
               List.of(),
-              OrderFulfillmentStatus.AWAITING_PAYMENT);
+              OrderFulfillmentStatus.AWAITING_PAYMENT,
+              null);
 
       // The payment decides once, while the saga waits for it. A capture recorded after the
       // payment failed (the gateway took the money after all) is refunded by the payment itself
@@ -309,6 +337,15 @@ public class OrderFulfillmentSaga
             ? reserved.withStatus(OrderFulfillmentStatus.AWAITING_CONFIRMATION)
             : reserved;
       }
+
+      // A line the inventory refused ends the fulfillment: CANCELLING, with the refusal's reason,
+      // as
+      // a failed payment does. Only the first refusal decides; a later one finds the saga
+      // cancelling.
+      case InventoryEvent.StockReservationRefused e ->
+          status == OrderFulfillmentStatus.AWAITING_INVENTORY && state.hasLineFor(e.productId())
+              ? state.cancellingFor(refusalReason(e))
+              : state;
 
       case OrderEvent.OrderConfirmed e ->
           status == OrderFulfillmentStatus.AWAITING_CONFIRMATION
@@ -358,16 +395,26 @@ public class OrderFulfillmentSaga
                       new AggregateId(state.orderId())))
               : List.of();
 
+      // The event that moved the saga to CANCELLING asks for the cancellation: the failed payment,
+      // or the refusal whose reason the state holds. Another refusal asks for nothing.
       case CANCELLING ->
-          event.event() instanceof PaymentEvent.PaymentFailed
-              ? List.of(
-                  new SagaCommand(
-                      new OrderCommand.CancelOrder(state.orderId(), "Payment failed"),
-                      new AggregateId(state.orderId())))
-              : List.of();
+          switch (event.event()) {
+            case PaymentEvent.PaymentFailed e -> cancel(state, "Payment failed");
+            case InventoryEvent.StockReservationRefused e
+                when refusalReason(e).equals(state.cancellationReason()) ->
+                cancel(state, state.cancellationReason());
+            default -> List.of();
+          };
 
       default -> List.of();
     };
+  }
+
+  private static List<SagaCommand> cancel(OrderFulfillmentState state, String reason) {
+    return List.of(
+        new SagaCommand(
+            new OrderCommand.CancelOrder(state.orderId(), reason),
+            new AggregateId(state.orderId())));
   }
 
   /**

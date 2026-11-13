@@ -72,7 +72,7 @@ class OrderPricingTest {
   void anUnknownProductIsRefused() {
     assertThatThrownBy(() -> priceOf("p-nobody"))
         .isExactlyInstanceOf(DomainException.class)
-        .hasMessage("Product not found");
+        .hasMessage("Product not found: p-nobody");
   }
 
   @Test

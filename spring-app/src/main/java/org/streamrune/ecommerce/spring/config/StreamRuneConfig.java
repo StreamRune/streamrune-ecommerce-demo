@@ -147,6 +147,9 @@ public class StreamRuneConfig {
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
         .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
+        .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
         .registerEvent(

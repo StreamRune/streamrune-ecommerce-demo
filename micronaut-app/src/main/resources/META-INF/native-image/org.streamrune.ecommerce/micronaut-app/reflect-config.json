@@ -49,6 +49,7 @@
   {"name": "org.streamrune.ecommerce.domain.payment.PaymentCommand$CancelPayment", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
 
   {"name": "org.streamrune.ecommerce.domain.inventory.InventoryEvent$StockReserved", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.streamrune.ecommerce.domain.inventory.InventoryEvent$StockReservationRefused", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.inventory.InventoryEvent$StockReleased", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.inventory.InventoryEvent$ReservationConfirmed", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.domain.inventory.InventoryEvent$ShipmentReceived", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
@@ -85,5 +86,7 @@
   {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$PaymentVoidedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$ProductCreatedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$PriceUpdatedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
-  {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$ProductDiscontinuedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true}
+  {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$ProductDiscontinuedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$ShipmentReceivedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.streamrune.ecommerce.commands.integration.EcommerceIntegrationEventMapper$InventoryAdjustedDto", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true}
 ]

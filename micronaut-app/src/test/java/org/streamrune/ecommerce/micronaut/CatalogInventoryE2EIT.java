@@ -19,6 +19,7 @@ import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.Availability;
@@ -72,8 +73,11 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
     String oid = "m-cat-short-order-" + System.nanoTime();
     placeOrder(oid, "m-cat-cust-" + System.nanoTime(), pid, 3);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
-    awaitInventory(pid, new InventoryView(pid, "Catalogued", 2, 0, 0));
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 3, available 2");
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReserved.class))
+        .as("nothing is reserved")
+        .isZero();
+    assertThat(inventoryEvents(pid, InventoryEvent.StockReservationRefused.class)).isOne();
     awaitProduct(pid, 2, Availability.LOW_STOCK, Duration.ofSeconds(10));
   }
 
@@ -85,7 +89,7 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
     String oid = "m-cat-empty-order-" + System.nanoTime();
     placeOrder(oid, "m-cat-cust-" + System.nanoTime(), pid, 1);
 
-    awaitOrder(oid, OrderStatus.CANCELLED);
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 1, available 0");
   }
 
   @Test
@@ -161,19 +165,61 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
         .isEqualTo(403);
   }
 
-  /**
-   * A blank reason passes the handler's checks, which leave {@code reason} open, and the command
-   * bus's Bean Validation refuses the command ({@code @NotBlank} on {@code AdjustInventory}) with
-   * {@code 400} and the interceptor's message, as in the Spring app. Nothing is stored.
-   */
+  /** A blank reason is refused by the inventory decider with its own message; nothing is stored. */
   @Test
-  void anAdjustmentWithoutAReasonIsRefusedByTheCommandsConstraint() {
+  void anAdjustmentWithoutAReasonIsRefused() {
     String pid = createProduct("m-cat-reason-");
     assertThat(receive(pid, 5).status()).isEqualTo(200);
 
     assertThat(adjust(pid, -1, " "))
-        .isEqualTo(new Answer(400, "Command validation failed for AdjustInventory"));
-    awaitInventory(pid, new InventoryView(pid, "Catalogued", 5, 0, 0));
+        .isEqualTo(new Answer(400, "An inventory adjustment needs a reason"));
+    assertThat(inventoryEvents(pid, InventoryEvent.InventoryAdjusted.class)).isZero();
+  }
+
+  /** A body without {@code quantityChange} is refused with the same answer in the three apps. */
+  @Test
+  void anAdjustmentWithoutAQuantityChangeIsRefused() {
+    String pid = createProduct("m-cat-missing-");
+
+    assertThat(
+            send(
+                asAdmin(
+                    HttpRequest.POST(
+                            "/api/inventory/" + pid + "/adjust", "{\"reason\": \"Stocktake\"}")
+                        .contentType(MediaType.APPLICATION_JSON))))
+        .isEqualTo(new Answer(400, "quantityChange is required"));
+  }
+
+  /**
+   * An order of two products, one of them short: the line that fits is reserved, the other is
+   * refused, and the cancellation with the refusal's reason releases the reservation already made.
+   */
+  @Test
+  void aShortLineCancelsTheOrderAndReleasesTheOtherLinesReservation() {
+    String stocked = createProduct("m-cat-two-ok-");
+    String scarce = createProduct("m-cat-two-scarce-");
+    assertThat(receive(stocked, 10).status()).isEqualTo(200);
+    assertThat(receive(scarce, 1).status()).isEqualTo(200);
+    awaitInventory(scarce, new InventoryView(scarce, "Catalogued", 1, 0, 0));
+    String cid = "m-cat-cust-" + System.nanoTime();
+    String oid = "m-cat-two-order-" + System.nanoTime();
+
+    Answer placed =
+        send(
+            HttpRequest.POST(
+                    "/api/orders",
+                    """
+                    {"orderId": "%s", "customerId": "%s", "lines": [
+                      {"productId": "%s", "quantity": 2}, {"productId": "%s", "quantity": 4}]}"""
+                        .formatted(oid, cid, stocked, scarce))
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Role", "CUSTOMER")
+                .header("X-User-Id", cid));
+    assertThat(placed.status()).as(placed.body()).isBetween(200, 299);
+
+    awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4, available 1");
+    awaitInventory(stocked, new InventoryView(stocked, "Catalogued", 10, 0, 0));
+    assertThat(inventoryEvents(stocked, InventoryEvent.StockReleased.class)).isOne();
   }
 
   @Test
@@ -281,6 +327,34 @@ class CatalogInventoryE2EIT extends AbstractIntegrationTest {
                                 asAdmin(HttpRequest.GET("/api/orders/" + oid)), OrderView.class)
                             .status())
                     .isEqualTo(status));
+  }
+
+  private void awaitCancelled(String oid, String reason) {
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .pollInterval(Duration.ofMillis(200))
+        // A 404 until the projection has the row: retried like a failed assertion.
+        .ignoreExceptionsInstanceOf(HttpClientResponseException.class)
+        .untilAsserted(
+            () -> {
+              OrderView order =
+                  client
+                      .toBlocking()
+                      .retrieve(asAdmin(HttpRequest.GET("/api/orders/" + oid)), OrderView.class);
+              assertThat(order.status()).isEqualTo(OrderStatus.CANCELLED);
+              assertThat(order.reason()).isEqualTo(reason);
+            });
+  }
+
+  private long inventoryEvents(String pid, Class<?> type) {
+    return eventStore
+        .readStream(
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
+            Version.initial(),
+            Integer.MAX_VALUE)
+        .stream()
+        .filter(e -> type.isInstance(e.event()))
+        .count();
   }
 
   private static <T> MutableHttpRequest<T> asAdmin(MutableHttpRequest<T> request) {

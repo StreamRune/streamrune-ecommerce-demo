@@ -17,9 +17,9 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * event stream holds it when the order is placed; the client names products and quantities only.
  * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
  * product created a moment ago is orderable and a price change applies at once. A product nobody
- * created, or one that is discontinued, is refused ({@code DomainException}, {@code 400}). An order
- * id too long for its saga id, a malformed product id and two lines of one product are refused
- * before the store is read.
+ * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
+ * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
+ * two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
@@ -52,10 +52,7 @@ public final class OrderPricing {
     }
     List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
     for (RequestedLine line : lines) {
-      ProductState product = catalog.current(line.productId());
-      if (product.productId() == null) {
-        throw new DomainException("Product not found");
-      }
+      ProductState product = catalog.require(line.productId());
       if (product.status() == ProductStatus.DISCONTINUED) {
         throw new DomainException("Product is discontinued");
       }

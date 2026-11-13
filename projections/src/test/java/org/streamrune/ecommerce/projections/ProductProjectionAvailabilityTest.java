@@ -111,6 +111,24 @@ class ProductProjectionAvailabilityTest {
     assertThat(projection.get("p-2").available()).isEqualTo(3);
   }
 
+  @Test
+  void aRefusedReservationChangesNothing() {
+    process(
+        created("p-1"),
+        new InventoryEvent.ShipmentReceived("p-1", 2, 2),
+        new InventoryEvent.StockReservationRefused("p-1", "o-1", 3, 2));
+
+    assertThat(projection.get("p-1").available()).isEqualTo(2);
+    assertThat(projection.get("p-1").availability()).isEqualTo(Availability.LOW_STOCK);
+  }
+
+  @Test
+  void anInventoryEventOfAProductNeverCreatedChangesNothing() {
+    process(new InventoryEvent.ShipmentReceived("p-none", 5, 5));
+
+    assertThat(projection.get("p-none")).isNull();
+  }
+
   private static ProductEvent.ProductCreated created(String productId) {
     return new ProductEvent.ProductCreated(productId, "Widget", "A widget", "Gadgets", PRICE);
   }

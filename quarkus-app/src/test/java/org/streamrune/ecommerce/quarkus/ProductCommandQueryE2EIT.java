@@ -3,6 +3,7 @@ package org.streamrune.ecommerce.quarkus;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.equalTo;
 
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -154,5 +155,32 @@ class ProductCommandQueryE2EIT {
         .post("/api/products")
         .then()
         .statusCode(400);
+  }
+
+  /**
+   * The catalogue holds no stock: a request that names an opening stock is refused with {@code
+   * 400}, and no product is created, as in the Spring app.
+   */
+  @Test
+  void aRequestWithAnOpeningStockIsRefused() {
+    String pid = "q-p-opening-stock-" + System.nanoTime();
+    given()
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": 99}"""
+                .formatted(pid))
+        .when()
+        .post("/api/products")
+        .then()
+        .statusCode(400)
+        .body(
+            equalTo(
+                "initialStock is not accepted: a product holds no stock; receive its opening stock"
+                    + " with POST /api/inventory/{productId}/receive"));
+
+    given().when().get("/api/products/" + pid).then().statusCode(404);
   }
 }
