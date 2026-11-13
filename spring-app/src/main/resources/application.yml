@@ -42,15 +42,14 @@ streamrune:
     skipped-retention-max-age: 30d
   security:
     # Request identity, decided for this app: TRUSTED-GATEWAY MODE, not an authenticated resolver.
-    # The demo has no login (spring-security-core is on the classpath only for the framework's
-    # optional AuthenticatedUserResolver AOT wiring), so it stands in for a gateway that would
+    # The demo has no login and no Spring Security, so it stands in for a gateway that would
     # authenticate every caller, overwrite X-User-Id with the authenticated id and strip any
     # X-User-Id or X-User-Role a client sent. Nothing does that here: the frontend, the tutorial's
     # curl examples and the integration tests send X-User-Id themselves, which is acceptable only
     # for a local showcase. Never enable the flag in production unless such a gateway is in front.
-    # Without it the header is never the identity: spring-security-core's resolver would make every
-    # login-less request anonymous, and without Spring Security the app would refuse to start,
-    # because annotation authorization is configured. The flag covers X-User-Role too: the
+    # Without it the header is never the identity, and the app would refuse to start: annotation
+    # authorization is configured, and with no Spring Security a request would have no identity
+    # source. The flag covers X-User-Role too: the
     # framework reads it into baggage `role` only in this mode, and HeaderUserRoleResolver
     # authorizes on it, a demo shortcut a real deployment must not copy. Startup logs
     # "Request identity: TRUSTED_GATEWAY ...".
