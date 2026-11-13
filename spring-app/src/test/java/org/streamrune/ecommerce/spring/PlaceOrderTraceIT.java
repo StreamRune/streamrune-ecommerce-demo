@@ -5,6 +5,7 @@ import static org.awaitility.Awaitility.await;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.sdk.trace.data.LinkData;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import java.math.BigDecimal;
@@ -14,9 +15,11 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
+import org.streamrune.core.DomainException;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.spring.config.SeedDataRunner;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
@@ -39,12 +42,17 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
   private static final AttributeKey<String> PROJECTION_NAME =
       AttributeKey.stringKey("streamrune.projection.name");
 
+  private static final AttributeKey<String> REJECTION_TYPE =
+      AttributeKey.stringKey("streamrune.command.rejection.type");
+
   private static final String SAGA_SPAN_PREFIX =
       "saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/";
 
   @Autowired private RecordedSpans recorded;
 
   @Autowired private VirtualThreadCommandBus commandBus;
+
+  @Autowired private SeedDataRunner seedDataRunner;
 
   @Test
   void aPlacedOrderIsTracedFromItsCommandToItsSaga() {
@@ -127,6 +135,53 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
                       s ->
                           s.getName().equals("projection/orders/process")
                               && "orders".equals(s.getAttributes().get(PROJECTION_NAME)));
+            });
+  }
+
+  /**
+   * A start on a seeded database sends the six creation commands again, and their deciders refuse
+   * them: that is how the seed finds its data there. Each refusal is the domain's answer, not a
+   * failure, so its span keeps the unset status, records no exception and names the rejection by
+   * its type alone (chapter 17, "Starting again on a seeded database").
+   */
+  @Test
+  void theSeedsRefusalsOnASeededDatabaseAreRejectedCommandsNotFailedSpans() {
+    seedDataRunner.seed(); // the database is seeded from here on, whichever test ran first
+    recorded.clear();
+
+    assertThat(seedDataRunner.seed()).as("a seeded database takes no seed command").isZero();
+
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .untilAsserted(
+            () -> {
+              List<SpanData> rejected =
+                  recorded.all().stream()
+                      .filter(s -> s.getName().startsWith("command/"))
+                      .filter(s -> s.getAttributes().get(REJECTION_TYPE) != null)
+                      .toList();
+              assertThat(rejected)
+                  .extracting(SpanData::getName)
+                  .containsExactlyInAnyOrder(
+                      "command/CreateProduct",
+                      "command/CreateProduct",
+                      "command/CreateProduct",
+                      "command/RegisterCustomer",
+                      "command/RegisterCustomer",
+                      "command/PlaceOrder");
+              assertThat(rejected)
+                  .allSatisfy(
+                      span -> {
+                        assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.UNSET);
+                        assertThat(span.getEvents()).as("no exception event").isEmpty();
+                        assertThat(span.getAttributes().get(REJECTION_TYPE))
+                            .isEqualTo(DomainException.class.getName());
+                        assertThat(
+                                recorded.all().stream()
+                                    .filter(s -> s.getTraceId().equals(span.getTraceId())))
+                            .as("no span of the refused command's trace is a failed one")
+                            .noneMatch(s -> s.getStatus().getStatusCode() == StatusCode.ERROR);
+                      });
             });
   }
 
