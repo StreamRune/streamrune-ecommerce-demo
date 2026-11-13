@@ -7,12 +7,14 @@ import static org.hamcrest.Matchers.equalTo;
 
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.common.mapper.TypeRef;
 import io.restassured.http.ContentType;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.types.AggregateId;
@@ -24,7 +26,6 @@ import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.Availability;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
 import org.streamrune.ecommerce.queries.dto.OrderView;
-import org.streamrune.ecommerce.queries.dto.ProductView;
 
 /**
  * The catalogue and the inventory over HTTP, as in the Spring app's {@code CatalogInventoryE2EIT}
@@ -43,17 +44,17 @@ class CatalogInventoryE2EIT {
   @Test
   void anOrderReservesFromTheInventoryAndTheStorefrontFollows() {
     String pid = createProduct("q-cat-inv-");
-    awaitProduct(pid, 0, Availability.OUT_OF_STOCK);
+    awaitProduct(pid, Availability.OUT_OF_STOCK);
 
     receive(pid, 12).statusCode(200);
-    awaitProduct(pid, 12, Availability.IN_STOCK);
+    awaitProduct(pid, Availability.IN_STOCK);
 
     String oid = "q-cat-inv-order-" + System.nanoTime();
     placeOrder(oid, "q-cat-cust-" + System.nanoTime(), pid, 3);
 
     awaitOrder(oid, OrderStatus.CONFIRMED);
     awaitInventory(pid, new InventoryView(pid, "Catalogued", 9, 3, 0));
-    awaitProduct(pid, 9, Availability.LOW_STOCK);
+    awaitProduct(pid, Availability.LOW_STOCK);
   }
 
   @Test
@@ -65,23 +66,23 @@ class CatalogInventoryE2EIT {
     String oid = "q-cat-short-order-" + System.nanoTime();
     placeOrder(oid, "q-cat-cust-" + System.nanoTime(), pid, 3);
 
-    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 3, available 2");
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 3");
     assertThat(inventoryEvents(pid, InventoryEvent.StockReserved.class))
         .as("nothing is reserved")
         .isZero();
     assertThat(inventoryEvents(pid, InventoryEvent.StockReservationRefused.class)).isOne();
-    awaitProduct(pid, 2, Availability.LOW_STOCK);
+    awaitProduct(pid, Availability.LOW_STOCK);
   }
 
   @Test
   void aProductCreatedWithoutStockIsCancelledWhenOrdered() {
     String pid = createProduct("q-cat-empty-");
-    awaitProduct(pid, 0, Availability.OUT_OF_STOCK);
+    awaitProduct(pid, Availability.OUT_OF_STOCK);
 
     String oid = "q-cat-empty-order-" + System.nanoTime();
     placeOrder(oid, "q-cat-cust-" + System.nanoTime(), pid, 1);
 
-    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 1, available 0");
+    awaitCancelled(oid, "Insufficient stock for " + pid + ": requested 1");
   }
 
   @Test
@@ -110,10 +111,10 @@ class CatalogInventoryE2EIT {
 
     adjust(pid, -2, "Stocktake").statusCode(200);
     awaitInventory(pid, new InventoryView(pid, "Catalogued", 7, 0, 0));
-    awaitProduct(pid, 7, Availability.LOW_STOCK);
+    awaitProduct(pid, Availability.LOW_STOCK);
 
     adjust(pid, -7, "Water damage").statusCode(200);
-    awaitProduct(pid, 0, Availability.OUT_OF_STOCK);
+    awaitProduct(pid, Availability.OUT_OF_STOCK);
   }
 
   @Test
@@ -214,7 +215,7 @@ class CatalogInventoryE2EIT {
         .then()
         .statusCode(200);
 
-    awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4, available 1");
+    awaitCancelled(oid, "Insufficient stock for " + scarce + ": requested 4");
     // The release is the cancellation process manager's, a subscription of its own: wait for it.
     await()
         .atMost(Duration.ofSeconds(20))
@@ -285,22 +286,28 @@ class CatalogInventoryE2EIT {
         .then();
   }
 
-  private static void awaitProduct(String pid, int available, Availability availability) {
+  /**
+   * Waits for the storefront to show the product with this availability, and checks that the public
+   * view carries no unit count: the counts are the inventory view's, for an {@code ADMIN}.
+   */
+  private static void awaitProduct(String pid, Availability availability) {
     await()
         .atMost(Duration.ofSeconds(10))
         .pollInterval(Duration.ofMillis(200))
         .untilAsserted(
             () -> {
-              ProductView product =
+              Map<String, Object> product =
                   given()
                       .when()
                       .get("/api/products/" + pid)
                       .then()
                       .statusCode(200)
                       .extract()
-                      .as(ProductView.class);
-              assertThat(product.available()).isEqualTo(available);
-              assertThat(product.availability()).isEqualTo(availability);
+                      .as(new TypeRef<Map<String, Object>>() {});
+              assertThat(product)
+                  .containsEntry("availability", availability.name())
+                  .as("the storefront shows no unit count")
+                  .doesNotContainKey("available");
             });
   }
 

@@ -15,8 +15,8 @@ import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
  * The storefront's product view: {@link ProductProjection} takes the catalogue's fields from the
- * product events and the available units from the inventory events of the same product id, and
- * derives the availability from both.
+ * product events, and derives the availability from the catalogue's status and the available units
+ * the inventory events of the same product id carry. The view keeps no unit count.
  */
 class ProductProjectionAvailabilityTest {
 
@@ -33,24 +33,21 @@ class ProductProjectionAvailabilityTest {
 
     ProductView view = projection.get("p-1");
     assertThat(view.status()).isEqualTo(ProductStatus.AVAILABLE);
-    assertThat(view.available()).isZero();
     assertThat(view.availability()).isEqualTo(Availability.OUT_OF_STOCK);
   }
 
   @Test
-  void theAvailableUnitsFollowTheInventory() {
+  void theAvailabilityFollowsTheInventory() {
     process(created("p-1"), new InventoryEvent.ShipmentReceived("p-1", LOW + 5, LOW + 5));
-    assertThat(projection.get("p-1").available()).isEqualTo(LOW + 5);
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.IN_STOCK);
 
     process(new InventoryEvent.StockReserved("p-1", "o-1", 6, LOW - 1));
-    assertThat(projection.get("p-1").available()).isEqualTo(LOW - 1);
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.LOW_STOCK);
 
     process(new InventoryEvent.ReservationConfirmed("p-1", "o-1", 6));
-    assertThat(projection.get("p-1").available())
+    assertThat(projection.get("p-1").availability())
         .as("a confirmation moves reserved units to committed, the available units stay")
-        .isEqualTo(LOW - 1);
+        .isEqualTo(Availability.LOW_STOCK);
 
     process(new InventoryEvent.InventoryAdjusted("p-1", -(LOW - 1), "Stocktake", 0));
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.OUT_OF_STOCK);
@@ -59,7 +56,6 @@ class ProductProjectionAvailabilityTest {
         new InventoryEvent.ShipmentReceived("p-1", 3, 3),
         new InventoryEvent.StockReserved("p-1", "o-2", 3, 0),
         new InventoryEvent.StockReleased("p-1", "o-2", 3, 3));
-    assertThat(projection.get("p-1").available()).isEqualTo(3);
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.LOW_STOCK);
   }
 
@@ -83,11 +79,13 @@ class ProductProjectionAvailabilityTest {
 
     process(new InventoryEvent.InventoryAdjusted("p-1", -50, "Written off", 0));
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.DISCONTINUED);
-    assertThat(projection.get("p-1").available()).isZero();
+
+    process(new InventoryEvent.ShipmentReceived("p-1", 30, 30));
+    assertThat(projection.get("p-1").availability()).isEqualTo(Availability.DISCONTINUED);
   }
 
   @Test
-  void aPriceChangeKeepsTheAvailableUnits() {
+  void aPriceChangeKeepsTheAvailability() {
     Money newPrice = new Money(new BigDecimal("12.00"), "USD");
     process(
         created("p-1"),
@@ -95,7 +93,6 @@ class ProductProjectionAvailabilityTest {
         new ProductEvent.PriceUpdated("p-1", PRICE, newPrice));
 
     assertThat(projection.get("p-1").price()).isEqualTo(newPrice);
-    assertThat(projection.get("p-1").available()).isEqualTo(20);
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.IN_STOCK);
   }
 
@@ -107,8 +104,8 @@ class ProductProjectionAvailabilityTest {
         new InventoryEvent.ShipmentReceived("p-1", 20, 20),
         new InventoryEvent.ShipmentReceived("p-2", 3, 3));
 
-    assertThat(projection.get("p-1").available()).isEqualTo(20);
-    assertThat(projection.get("p-2").available()).isEqualTo(3);
+    assertThat(projection.get("p-1").availability()).isEqualTo(Availability.IN_STOCK);
+    assertThat(projection.get("p-2").availability()).isEqualTo(Availability.LOW_STOCK);
   }
 
   @Test
@@ -118,7 +115,6 @@ class ProductProjectionAvailabilityTest {
         new InventoryEvent.ShipmentReceived("p-1", 2, 2),
         new InventoryEvent.StockReservationRefused("p-1", "o-1", 3, 2));
 
-    assertThat(projection.get("p-1").available()).isEqualTo(2);
     assertThat(projection.get("p-1").availability()).isEqualTo(Availability.LOW_STOCK);
   }
 

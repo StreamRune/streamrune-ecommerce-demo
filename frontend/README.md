@@ -103,9 +103,10 @@ shipment received into the inventory. Admin → Inventory shows each product's a
 (held for an order not yet shipped) and committed (shipped) units, live, and receives shipments
 and adjusts the units with a reason; it is for the ADMIN role. The Products page shows only an
 availability badge (In stock, Low stock below ten units, Out of stock, Discontinued), never a
-count. An order for a product with too few units available is cancelled by the saga with the
-reason "Insufficient stock for <product>: requested N, available M", which the Orders page shows
-on the order.
+count: the public product view (`GET /api/products`) carries the availability alone. An order for
+a product with too few units available is cancelled by the saga with the reason "Insufficient
+stock for <product>: requested N", which the Orders page shows on the order and which names no
+available count either.
 
 ## Checks
 

@@ -201,7 +201,6 @@ test.describe("Admin → Catalog", () => {
             category: "Electronics",
             price: { amount: 19.99, currency: "USD" },
             status: "DISCONTINUED",
-            available: 731,
             availability: "DISCONTINUED",
             createdAt: "2026-10-04T00:00:00Z",
             updatedAt: "2026-10-04T00:00:00Z",
@@ -217,8 +216,6 @@ test.describe("Admin → Catalog", () => {
     await expect(widget).toContainText("Electronics");
     await expect(widget).toContainText("$19.99");
     await expect(widget).toContainText("DISCONTINUED");
-    // The catalogue holds no stock: no units on this page either.
-    await expect(page.getByRole("table")).not.toContainText("731");
     await expect(page.getByRole("link", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
 
     // A CUSTOMER is told that Add Product is an ADMIN's.

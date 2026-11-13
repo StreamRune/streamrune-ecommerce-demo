@@ -157,7 +157,7 @@ One rule guards a customer's data, in all three apps: **an authenticated caller 
 | `POST` | `/api/products` | Create product: `productId`, `name`, `description`, `category`, `price`. The catalogue holds no stock, so the body has no stock field | `ADMIN` |
 | `PUT` | `/api/products/{id}/price` | Update price | `ADMIN` |
 | `POST` | `/api/products/{id}/discontinue` | Discontinue product | `ADMIN` (`@RequireRole`) |
-| `GET` | `/api/products/{id}` | Get product: the catalogue fields, `status` (`AVAILABLE` or `DISCONTINUED`) and the storefront's view of the stock, `available` and `availability` (`IN_STOCK`, `LOW_STOCK` below 10 units, `OUT_OF_STOCK`, `DISCONTINUED`) | anyone: the public catalogue |
+| `GET` | `/api/products/{id}` | Get product: the catalogue fields, `status` (`AVAILABLE` or `DISCONTINUED`) and the storefront's view of the stock, `availability` (`IN_STOCK`, `LOW_STOCK` below 10 units, `OUT_OF_STOCK`, `DISCONTINUED`). The public view carries no unit count: the counts are the inventory's, for an `ADMIN` | anyone: the public catalogue |
 | `GET` | `/api/products` | List products | anyone: the public catalogue |
 
 ### Inventory
@@ -176,7 +176,7 @@ The inventory is the one source of a product's stock: `available` (units that ca
 | Method | Path | Description | Who |
 |--------|------|-------------|-----|
 | `POST` | `/api/orders` | Place order. Each line names a product and a quantity; the price is the product's in the catalogue (its event stream), and a product nobody created or one that is discontinued answers `400`. One line per product. The fulfillment saga confirms the order: there is no endpoint for it, and a `ConfirmOrder` sent by anybody but the saga is refused | `ADMIN`, or the customer the order names in `customerId` |
-| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); every cancellation releases the order's stock and voids its payment, or refunds it in full once captured. An order for more units than the inventory has available is cancelled by the fulfillment saga, not refused: its `reason` reads `Insufficient stock for <product>: requested N, available M`, and the saga ends `FAILED` | `ADMIN` or the order's customer |
+| `POST` | `/api/orders/{id}/cancel` | Cancel order. Accepted for any order that is not shipped or delivered (a shipped order answers `400`); every cancellation releases the order's stock and voids its payment, or refunds it in full once captured. An order for more units than the inventory has available is cancelled by the fulfillment saga, not refused: its `reason` reads `Insufficient stock for <product>: requested N`, which names no available count, and the saga ends `FAILED` | `ADMIN` or the order's customer |
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
 | `GET` | `/api/orders/{id}` | Get order, with its payment status (`paymentStatus`: `PENDING`, `CAPTURED`, `REFUNDED`, `VOIDED` or `FAILED`; `null` until the payment is initiated) and, once the order is cancelled, its `reason` | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |

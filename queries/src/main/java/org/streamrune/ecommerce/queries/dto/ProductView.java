@@ -5,8 +5,9 @@ import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductStatus;
 
 /**
- * The storefront's product: the catalogue's fields, the units the inventory holds available, and
- * the {@link Availability} derived from both.
+ * The storefront's product: the catalogue's fields and the {@link Availability} the projection
+ * derives from the catalogue's status and the inventory's units. The view carries no unit count:
+ * the counts are the inventory's, served to an {@code ADMIN} by the inventory view.
  */
 public record ProductView(
     String productId,
@@ -15,7 +16,6 @@ public record ProductView(
     String category,
     Money price,
     ProductStatus status,
-    int available,
     Availability availability,
     Instant createdAt,
     Instant updatedAt) {}

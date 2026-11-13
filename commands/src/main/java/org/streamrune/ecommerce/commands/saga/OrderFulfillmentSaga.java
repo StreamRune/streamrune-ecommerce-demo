@@ -36,11 +36,11 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * available is refused by the inventory with an event, {@code StockReservationRefused}, not with an
  * exception. The saga takes the same path as for a failed payment: StockReservationRefused →
  * CANCELLING → CancelOrder with the refusal's reason ({@link #refusalReason}, for example
- * "Insufficient stock for p-1: requested 3, available 2") → OrderCancelled → FAILED. The order's
- * {@code OrderCancelled} undoes the money and the stock as every cancellation does: the
- * reservations already made for the order's other lines are released and the payment is refunded.
- * The reason lives in the saga's state, so a resumed step sends the same command; the first refusal
- * decides it, and the refusal of a second line asks for nothing more.
+ * "Insufficient stock for p-1: requested 3") → OrderCancelled → FAILED. The order's {@code
+ * OrderCancelled} undoes the money and the stock as every cancellation does: the reservations
+ * already made for the order's other lines are released and the payment is refunded. The reason
+ * lives in the saga's state, so a resumed step sends the same command; the first refusal decides
+ * it, and the refusal of a second line asks for nothing more.
  *
  * <p><b>A cancellation the saga did not ask for.</b> The order's customer or an {@code ADMIN} can
  * cancel the order while the saga runs. Its {@code OrderCancelled} moves the saga to {@code
@@ -196,14 +196,13 @@ public class OrderFulfillmentSaga
         null);
   }
 
-  /** The reason the saga cancels an order with when the inventory refuses one of its lines. */
+  /**
+   * The reason the saga cancels an order with when the inventory refuses one of its lines. The
+   * order's customer reads it, so it names the units asked for and not the units the inventory
+   * holds: the counts are an {@code ADMIN}'s.
+   */
   public static String refusalReason(InventoryEvent.StockReservationRefused refused) {
-    return "Insufficient stock for "
-        + refused.productId()
-        + ": requested "
-        + refused.requested()
-        + ", available "
-        + refused.available();
+    return "Insufficient stock for " + refused.productId() + ": requested " + refused.requested();
   }
 
   @Override

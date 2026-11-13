@@ -25,7 +25,7 @@ The order fulfillment flow the saga drives — what its `evolve()`/`handle()`/`c
 2. `PaymentCaptured` arrives — saga advances and issues one `ReserveStock` per order line against the inventory aggregate (Step 1b)
 3. One `StockReserved` per line arrives — the one that completes the order's lines makes the saga issue `ConfirmOrder`. A line that asks for more than its product holds available is answered with `StockReservationRefused` instead, and the saga cancels the order with the refusal's reason (step 5)
 4. `OrderConfirmed` arrives — saga completes (`COMPLETED`)
-5. Any failure — on `PaymentFailed` or `StockReservationRefused` the saga moves to a non-terminal `CANCELLING` step, dispatches `CancelOrder` (with the reason `Payment failed`, or the refusal's, such as `Insufficient stock for p-1: requested 3, available 2`), and `OrderCancelled` then closes it out to `FAILED` (a terminal `evolve()` would end the saga before `handle()` ever ran, so the cancel needs that intermediate step — see [Step 3](#step-3--implement-orderfulfillmentsaga)); if a later step's command fails, or the fulfillment's deadline passes, `compensate()` cancels the order. A cancellation of the order by its customer or an `ADMIN` while the saga runs ends the fulfillment too: the saga moves to `COMPENSATING`, and its compensation cancels the order once more
+5. Any failure — on `PaymentFailed` or `StockReservationRefused` the saga moves to a non-terminal `CANCELLING` step, dispatches `CancelOrder` (with the reason `Payment failed`, or the refusal's, such as `Insufficient stock for p-1: requested 3`), and `OrderCancelled` then closes it out to `FAILED` (a terminal `evolve()` would end the saga before `handle()` ever ran, so the cancel needs that intermediate step — see [Step 3](#step-3--implement-orderfulfillmentsaga)); if a later step's command fails, or the fulfillment's deadline passes, `compensate()` cancels the order. A cancellation of the order by its customer or an `ADMIN` while the saga runs ends the fulfillment too: the saga moves to `COMPENSATING`, and its compensation cancels the order once more
 
 ```mermaid
 stateDiagram-v2
@@ -1609,11 +1609,11 @@ import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
  * available is refused by the inventory with an event, {@code StockReservationRefused}, not with an
  * exception. The saga takes the same path as for a failed payment: StockReservationRefused →
  * CANCELLING → CancelOrder with the refusal's reason ({@link #refusalReason}, for example
- * "Insufficient stock for p-1: requested 3, available 2") → OrderCancelled → FAILED. The order's
- * {@code OrderCancelled} undoes the money and the stock as every cancellation does: the
- * reservations already made for the order's other lines are released and the payment is refunded.
- * The reason lives in the saga's state, so a resumed step sends the same command; the first refusal
- * decides it, and the refusal of a second line asks for nothing more.
+ * "Insufficient stock for p-1: requested 3") → OrderCancelled → FAILED. The order's {@code
+ * OrderCancelled} undoes the money and the stock as every cancellation does: the reservations
+ * already made for the order's other lines are released and the payment is refunded. The reason
+ * lives in the saga's state, so a resumed step sends the same command; the first refusal decides
+ * it, and the refusal of a second line asks for nothing more.
  *
  * <p><b>A cancellation the saga did not ask for.</b> The order's customer or an {@code ADMIN} can
  * cancel the order while the saga runs. Its {@code OrderCancelled} moves the saga to {@code
@@ -1769,14 +1769,13 @@ public class OrderFulfillmentSaga
         null);
   }
 
-  /** The reason the saga cancels an order with when the inventory refuses one of its lines. */
+  /**
+   * The reason the saga cancels an order with when the inventory refuses one of its lines. The
+   * order's customer reads it, so it names the units asked for and not the units the inventory
+   * holds: the counts are an {@code ADMIN}'s.
+   */
   public static String refusalReason(InventoryEvent.StockReservationRefused refused) {
-    return "Insufficient stock for "
-        + refused.productId()
-        + ": requested "
-        + refused.requested()
-        + ", available "
-        + refused.available();
+    return "Insufficient stock for " + refused.productId() + ": requested " + refused.requested();
   }
 
   @Override
@@ -2708,13 +2707,11 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
     assertThat(state.status()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(state.cancellationReason())
-        .isEqualTo("Insufficient stock for prod-2: requested 3, available 1");
+    assertThat(state.cancellationReason()).isEqualTo("Insufficient stock for prod-2: requested 3");
     assertThat(saga.handle(state, refused))
         .containsExactly(
             new SagaCommand(
-                new OrderCommand.CancelOrder(
-                    "o-1", "Insufficient stock for prod-2: requested 3, available 1"),
+                new OrderCommand.CancelOrder("o-1", "Insufficient stock for prod-2: requested 3"),
                 new AggregateId("o-1")));
   }
 
@@ -2733,8 +2730,7 @@ class OrderFulfillmentSagaTest {
     var after = saga.evolve(state, second);
 
     assertThat(after).isEqualTo(state);
-    assertThat(after.cancellationReason())
-        .isEqualTo("Insufficient stock for prod-1: requested 2, available 0");
+    assertThat(after.cancellationReason()).isEqualTo("Insufficient stock for prod-1: requested 2");
     assertThat(saga.handle(after, second)).isEmpty();
   }
 
@@ -2767,7 +2763,7 @@ class OrderFulfillmentSagaTest {
         causedBySagaOf(
             "o-1",
             new OrderEvent.OrderCancelled(
-                "o-1", "Insufficient stock for prod-1: requested 2, available 0", List.of()),
+                "o-1", "Insufficient stock for prod-1: requested 2", List.of()),
             OrderState.TYPE,
             "o-1");
 
@@ -4831,7 +4827,7 @@ Start the application:
 ./gradlew :spring-app:bootRun
 ```
 
-The saga subscription reads the event store from its first event, so the orders of Chapters 8 to 10 get a fulfillment saga as well when the application starts. No stock has arrived for any product yet, so their reservations are refused and their sagas cancel them: those orders end `CANCELLED` with the reason `Insufficient stock for <product>: requested <n>, available 0`, and the order cancellation process manager refunds their payments. The saga reserves the stock of every line, so receive a shipment of `p-1` before the next order, as an `ADMIN` (Step 1c):
+The saga subscription reads the event store from its first event, so the orders of Chapters 8 to 10 get a fulfillment saga as well when the application starts. No stock has arrived for any product yet, so their reservations are refused and their sagas cancel them: those orders end `CANCELLED` with the reason `Insufficient stock for <product>: requested <n>`, and the order cancellation process manager refunds their payments. The saga reserves the stock of every line, so receive a shipment of `p-1` before the next order, as an `ADMIN` (Step 1c):
 
 ```bash
 curl -i -X POST http://localhost:8080/api/inventory/p-1/receive \

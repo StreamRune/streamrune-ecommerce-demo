@@ -3,8 +3,8 @@
  *
  * Surface tests: mocked backend — always run. The storefront shows each
  * product's name, category, price and availability badge, and an Order action;
- * never the number of units the API also returns, and none of the catalogue's
- * or the inventory's actions, for any role.
+ * no number of units (the public product view carries none), and none of the
+ * catalogue's or the inventory's actions, for any role.
  * Backend-dependent block: skipped when Spring Boot at localhost:8080 is not
  * reachable; when backend IS running it asserts seed products (Widget, Gadget,
  * Doohickey) are visible in the table.
@@ -20,13 +20,7 @@ import {
   BACKEND_URL,
 } from "./helpers";
 
-function product(
-  productId: string,
-  name: string,
-  available: number,
-  availability: string,
-  status = "AVAILABLE"
-) {
+function product(productId: string, name: string, availability: string, status = "AVAILABLE") {
   return {
     productId,
     name,
@@ -34,19 +28,18 @@ function product(
     category: "Electronics",
     price: { amount: 19.99, currency: "USD" },
     status,
-    available,
     availability,
     createdAt: "2026-10-04T00:00:00Z",
     updatedAt: "2026-10-04T00:00:00Z",
   };
 }
 
-/** Four products, one per availability, with unit counts that appear nowhere else on the page. */
+/** Four products, one per availability. */
 const STOREFRONT = [
-  product("prod-widget", "Widget", 731, "IN_STOCK"),
-  product("prod-gadget", "Gadget", 7, "LOW_STOCK"),
-  product("prod-doohickey", "Doohickey", 0, "OUT_OF_STOCK"),
-  product("prod-gizmo", "Gizmo", 453, "DISCONTINUED", "DISCONTINUED"),
+  product("prod-widget", "Widget", "IN_STOCK"),
+  product("prod-gadget", "Gadget", "LOW_STOCK"),
+  product("prod-doohickey", "Doohickey", "OUT_OF_STOCK"),
+  product("prod-gizmo", "Gizmo", "DISCONTINUED", "DISCONTINUED"),
 ];
 
 const ALICE = {
@@ -110,11 +103,7 @@ test.describe("Products page — the storefront", () => {
     await expect(row(page, "Gadget")).toContainText("Low stock");
     await expect(row(page, "Doohickey")).toContainText("Out of stock");
     await expect(row(page, "Gizmo")).toContainText("Discontinued");
-    // The API sends the counts; the page shows none of them, not even to an ADMIN.
-    const table = page.getByRole("table");
-    for (const units of ["731", "453"]) {
-      await expect(table).not.toContainText(units);
-    }
+    // The badge is the stock column, for every role: no column of units, not even for an ADMIN.
     await expect(row(page, "Gadget").getByRole("cell").nth(3)).toHaveText("Low stock");
     await expect(page.getByRole("columnheader", { name: /Stock/ })).toHaveCount(0);
   });

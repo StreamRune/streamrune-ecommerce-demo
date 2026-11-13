@@ -153,7 +153,7 @@ every subscription is at the head of the event store, the outbox holds nothing p
    within five minutes of a failure (the relay publishes at least once: a backend killed between
    the broker's confirmation and the entry's update publishes it again).
 9. **Projections equal to a rebuild.** Every order's status and payment status, every product's
-   available units and price, every inventory's available, reserved and committed counts and every customer
+   availability and price, every inventory's available, reserved and committed counts and every customer
    in the read model equal what the event store says, and every subscription is at its head.
 10. **Every dead letter explained.** Every entry of `dead_letter_queue`, `saga_dead_letters` and
     `projection_dead_letters` was written during a failure or within a minute after it.

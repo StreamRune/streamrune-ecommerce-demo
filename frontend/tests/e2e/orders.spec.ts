@@ -40,7 +40,7 @@ function order(orderId: string, customerId: string, paymentStatus: string | null
 test.describe("Orders page — surface (no backend required)", () => {
   test("a cancelled order shows why it was cancelled", async ({ page }) => {
     await mockBackendRoutes(page);
-    const reason = "Insufficient stock for prod-widget: requested 3, available 1";
+    const reason = "Insufficient stock for prod-widget: requested 3";
     await page.route(`${BACKEND_URL}/api/orders`, (route) =>
       route.fulfill({
         status: 200,

@@ -24,7 +24,6 @@ const WIDGET = {
   category: "Electronics",
   price: { amount: 19.99, currency: "USD" },
   status: "AVAILABLE",
-  available: 100,
   availability: "IN_STOCK",
   createdAt: "2026-10-04T00:00:00Z",
   updatedAt: "2026-10-04T00:00:00Z",

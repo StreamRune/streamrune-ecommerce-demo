@@ -437,7 +437,7 @@ test.describe("Writes against a running backend", () => {
     const placed = row(page, orderId);
     await expect(placed).toContainText("CANCELLED", SETTLED);
     await expect(placed).toContainText(
-      `Insufficient stock for ${created.unstockedProductId}: requested 1, available 0`,
+      `Insufficient stock for ${created.unstockedProductId}: requested 1`,
       SETTLED
     );
   });

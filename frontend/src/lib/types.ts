@@ -15,8 +15,8 @@ export type Availability = "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK" | "DISCONTI
 
 /**
  * The storefront's product: the catalogue's fields and the availability the
- * inventory gives it. `available` is the inventory's count; the storefront shows
- * the availability badge, not the number.
+ * inventory gives it. The public view carries no unit count: the counts are the
+ * inventory's (InventoryView), for an ADMIN.
  */
 export interface ProductView {
   productId: string;
@@ -25,7 +25,6 @@ export interface ProductView {
   category: string;
   price: Money;
   status: ProductStatus;
-  available: number;
   availability: Availability;
   createdAt: string;
   updatedAt: string;

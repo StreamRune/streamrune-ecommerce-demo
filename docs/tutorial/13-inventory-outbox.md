@@ -263,7 +263,7 @@ public class InventoryQueryController {
 
 ### Step 1b: The storefront follows the inventory
 
-The product view of Chapter 5 shows the catalogue alone. A customer also wants to know whether a product is in stock, and the inventory knows. A read model may combine as many streams as its question needs, so `ProductProjection` now reads the inventory events of the same product id as well, while the two aggregates stay apart. The view carries the available units and an availability derived from them. Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/Availability.java`:
+The product view of Chapter 5 shows the catalogue alone. A customer also wants to know whether a product is in stock, and the inventory knows. A read model may combine as many streams as its question needs, so `ProductProjection` now reads the inventory events of the same product id as well, while the two aggregates stay apart. The view carries an availability derived from the available units, not the count itself: the storefront is public, and the counts stay in the inventory view an `ADMIN` reads. Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/Availability.java`:
 
 ```java
 package org.streamrune.ecommerce.queries.dto;
@@ -290,8 +290,9 @@ import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductStatus;
 
 /**
- * The storefront's product: the catalogue's fields, the units the inventory holds available, and
- * the {@link Availability} derived from both.
+ * The storefront's product: the catalogue's fields and the {@link Availability} the projection
+ * derives from the catalogue's status and the inventory's units. The view carries no unit count:
+ * the counts are the inventory's, served to an {@code ADMIN} by the inventory view.
  */
 public record ProductView(
     String productId,
@@ -300,7 +301,6 @@ public record ProductView(
     String category,
     Money price,
     ProductStatus status,
-    int available,
     Availability availability,
     Instant createdAt,
     Instant updatedAt) {}
@@ -361,7 +361,8 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * aggregates stay apart.
  *
  * <p>Every inventory event that changes the available units carries the count after it ({@code
- * availableAfter}), so the view takes that count as it is. A product is {@link
+ * availableAfter}), so the view derives the availability from that count as it is and keeps the
+ * availability alone: the storefront shows no unit count. A product is {@link
  * Availability#LOW_STOCK} below {@link #LOW_STOCK_THRESHOLD} units, {@link
  * Availability#OUT_OF_STOCK} at none, and {@link Availability#DISCONTINUED} once the catalogue
  * discontinues it, whatever it holds. A refused reservation changes nothing.
@@ -393,7 +394,6 @@ public class ProductProjection extends BaseProjection {
                     e.category(),
                     e.price(),
                     ProductStatus.AVAILABLE,
-                    0,
                     availability(ProductStatus.AVAILABLE, 0),
                     at,
                     at));
@@ -408,7 +408,6 @@ public class ProductProjection extends BaseProjection {
                         p.category(),
                         e.newPrice(),
                         p.status(),
-                        p.available(),
                         p.availability(),
                         p.createdAt(),
                         at));
@@ -423,8 +422,7 @@ public class ProductProjection extends BaseProjection {
                         p.category(),
                         p.price(),
                         ProductStatus.DISCONTINUED,
-                        p.available(),
-                        availability(ProductStatus.DISCONTINUED, p.available()),
+                        Availability.DISCONTINUED,
                         p.createdAt(),
                         at));
         case InventoryEvent.ShipmentReceived e -> available(e.productId(), e.availableAfter(), at);
@@ -461,7 +459,6 @@ public class ProductProjection extends BaseProjection {
                 p.category(),
                 p.price(),
                 p.status(),
-                available,
                 availability(p.status(), available),
                 p.createdAt(),
                 at));
@@ -486,7 +483,7 @@ public class ProductProjection extends BaseProjection {
 }
 ```
 
-Every inventory event that changes the available units carries the count after it (`availableAfter`), so the view takes that count as it is, whichever order arrives first. `LOW_STOCK_THRESHOLD` is the one place that says what "low" means.
+Every inventory event that changes the available units carries the count after it (`availableAfter`), so the view derives the availability from that count as it is, whichever order arrives first. A discontinued product stays `DISCONTINUED` whatever it holds, so the view needs no count of its own. `LOW_STOCK_THRESHOLD` is the one place that says what "low" means.
 
 ### Step 2: Wire the Outbox Beans
 
@@ -2554,7 +2551,7 @@ Read the inventory the order reserved from, as an `ADMIN` (`InventoryQueryContro
 curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" http://localhost:8080/api/inventory/p-1
 ```
 
-The answer is the inventory read model's row for `p-1`: `{"productId":"p-1","productName":"...","available":...,"reserved":...,"committed":...}`. The order's unit is `reserved` — held for an order that has not shipped — and it becomes `committed` when an `ADMIN` ships the order. `GET /api/products/p-1` shows the same `available` count with its `availability` badge (Step 1b). The inventory answers `403` to a caller who is not an `ADMIN`; the catalogue is open.
+The answer is the inventory read model's row for `p-1`: `{"productId":"p-1","productName":"...","available":...,"reserved":...,"committed":...}`. The order's unit is `reserved` — held for an order that has not shipped — and it becomes `committed` when an `ADMIN` ships the order. `GET /api/products/p-1` shows the `availability` that count gives, without the count (Step 1b). The inventory answers `403` to a caller who is not an `ADMIN`; the catalogue is open.
 
 **6b. Check the notifications service.** Within a couple of seconds the poller claims the outbox entry and publishes it to RabbitMQ. The `notifications-service` receives it and stores it in memory:
 

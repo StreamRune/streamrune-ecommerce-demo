@@ -29,7 +29,6 @@ test.describe("Dashboard page", () => {
       category: "Tests",
       price: { amount: 1, currency: "USD" },
       status: availability === "DISCONTINUED" ? "DISCONTINUED" : "AVAILABLE",
-      available: availability === "OUT_OF_STOCK" ? 0 : 5,
       availability,
       createdAt: "2026-10-04T00:00:00Z",
       updatedAt: "2026-10-04T00:00:00Z",

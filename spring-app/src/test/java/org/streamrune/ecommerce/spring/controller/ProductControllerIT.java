@@ -65,7 +65,6 @@ class ProductControllerIT extends AbstractIntegrationTest {
               assertThat(v.productId()).isEqualTo(pid);
               assertThat(v.name()).isEqualTo("Widget");
               assertThat(v.status().name()).isEqualTo("AVAILABLE");
-              assertThat(v.available()).as("the catalogue holds no stock").isZero();
               assertThat(v.availability().name()).isEqualTo("OUT_OF_STOCK");
             });
   }

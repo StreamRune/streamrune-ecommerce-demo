@@ -47,6 +47,8 @@ AUDIT_QUEUE = "soak.audit"
 EXCHANGE = "streamrune.events"
 INTEGRATION_QUEUE = "streamrune.integration"
 TERMINAL_SAGA = ("COMPLETED", "COMPENSATED", "FAILED")
+# Below this many available units the storefront shows a product LOW_STOCK (ProductProjection).
+LOW_STOCK_THRESHOLD = 10
 
 
 def now():
@@ -1607,22 +1609,28 @@ def check(run, stop_apps=None):
        WHERE v.id IS NULL OR (v.data->>'available')::int <> e.available OR (v.data->>'reserved')::int <> e.reserved
           OR (v.data->>'committed')::int <> e.committed
       UNION ALL
-      SELECT 'products', e.id, e.available || '/' || e.price, coalesce(v.data->>'available', 'missing') || '/' || coalesce(v.data->'price'->>'amount', '-')
-        FROM (SELECT p.aggregate_id AS id,
-                     (array_agg(coalesce(p.payload->'newPrice'->>'amount', p.payload->'price'->>'amount')::numeric ORDER BY p.global_offset DESC)
-                        FILTER (WHERE p.event_type IN ('ProductCreated','PriceUpdated')))[1] AS price,
-                     coalesce((SELECT (i.payload->>'availableAfter')::int FROM event_stream i
-                                WHERE i.aggregate_type = 'inventory' AND i.aggregate_id = p.aggregate_id
-                                  AND i.event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')
-                                ORDER BY i.global_offset DESC LIMIT 1), 0) AS available
-                FROM event_stream p WHERE p.aggregate_type = 'product' GROUP BY p.aggregate_id) e
+      SELECT 'products', e.id, e.availability || '/' || e.price,
+             coalesce(v.data->>'availability', 'missing') || '/' || coalesce(v.data->'price'->>'amount', '-')
+        FROM (SELECT id, price,
+                     CASE WHEN discontinued THEN 'DISCONTINUED' WHEN available <= 0 THEN 'OUT_OF_STOCK'
+                       WHEN available < %(low)s THEN 'LOW_STOCK' ELSE 'IN_STOCK' END AS availability
+                FROM (SELECT p.aggregate_id AS id,
+                             (array_agg(coalesce(p.payload->'newPrice'->>'amount', p.payload->'price'->>'amount')::numeric ORDER BY p.global_offset DESC)
+                                FILTER (WHERE p.event_type IN ('ProductCreated','PriceUpdated')))[1] AS price,
+                             bool_or(p.event_type = 'ProductDiscontinued') AS discontinued,
+                             coalesce((SELECT (i.payload->>'availableAfter')::int FROM event_stream i
+                                        WHERE i.aggregate_type = 'inventory' AND i.aggregate_id = p.aggregate_id
+                                          AND i.event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')
+                                        ORDER BY i.global_offset DESC LIMIT 1), 0) AS available
+                        FROM event_stream p WHERE p.aggregate_type = 'product' GROUP BY p.aggregate_id) x) e
         LEFT JOIN products_view v ON v.id = e.id
-       WHERE v.id IS NULL OR (v.data->>'available')::int <> e.available OR (v.data->'price'->>'amount')::numeric <> e.price
+       WHERE v.id IS NULL OR v.data->>'availability' IS DISTINCT FROM e.availability
+          OR (v.data->'price'->>'amount')::numeric <> e.price
       UNION ALL
       SELECT 'customers', c.aggregate_id, 'present', 'missing'
         FROM (SELECT aggregate_id FROM event_stream WHERE aggregate_type = 'customer' GROUP BY aggregate_id
                HAVING NOT bool_or(event_type = 'CustomerForgotten')) c
-        LEFT JOIN customers_view v ON v.id = c.aggregate_id WHERE v.id IS NULL""")
+        LEFT JOIN customers_view v ON v.id = c.aggregate_id WHERE v.id IS NULL""" % {"low": LOW_STOCK_THRESHOLD})
     counts = sql_one("SELECT (SELECT count(*) FROM orders_view) AS orders, (SELECT count(*) FROM inventory_view) AS inventory,"
                      " (SELECT count(*) FROM products_view) AS products, (SELECT count(*) FROM customers_view) AS customers")
     bad = [f"subscription {b['projection_name']} at {b['last_offset']}, behind the head" for b in behind]

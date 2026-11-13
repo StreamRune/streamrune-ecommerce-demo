@@ -20,7 +20,8 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * aggregates stay apart.
  *
  * <p>Every inventory event that changes the available units carries the count after it ({@code
- * availableAfter}), so the view takes that count as it is. A product is {@link
+ * availableAfter}), so the view derives the availability from that count as it is and keeps the
+ * availability alone: the storefront shows no unit count. A product is {@link
  * Availability#LOW_STOCK} below {@link #LOW_STOCK_THRESHOLD} units, {@link
  * Availability#OUT_OF_STOCK} at none, and {@link Availability#DISCONTINUED} once the catalogue
  * discontinues it, whatever it holds. A refused reservation changes nothing.
@@ -52,7 +53,6 @@ public class ProductProjection extends BaseProjection {
                     e.category(),
                     e.price(),
                     ProductStatus.AVAILABLE,
-                    0,
                     availability(ProductStatus.AVAILABLE, 0),
                     at,
                     at));
@@ -67,7 +67,6 @@ public class ProductProjection extends BaseProjection {
                         p.category(),
                         e.newPrice(),
                         p.status(),
-                        p.available(),
                         p.availability(),
                         p.createdAt(),
                         at));
@@ -82,8 +81,7 @@ public class ProductProjection extends BaseProjection {
                         p.category(),
                         p.price(),
                         ProductStatus.DISCONTINUED,
-                        p.available(),
-                        availability(ProductStatus.DISCONTINUED, p.available()),
+                        Availability.DISCONTINUED,
                         p.createdAt(),
                         at));
         case InventoryEvent.ShipmentReceived e -> available(e.productId(), e.availableAfter(), at);
@@ -120,7 +118,6 @@ public class ProductProjection extends BaseProjection {
                 p.category(),
                 p.price(),
                 p.status(),
-                available,
                 availability(p.status(), available),
                 p.createdAt(),
                 at));

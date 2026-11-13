@@ -86,7 +86,6 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
               assertThat(r.body().productId()).isEqualTo(pid);
               assertThat(r.body().name()).isEqualTo("Widget");
               assertThat(r.body().status().name()).isEqualTo("AVAILABLE");
-              assertThat(r.body().available()).as("the catalogue holds no stock").isZero();
               assertThat(r.body().availability().name()).isEqualTo("OUT_OF_STOCK");
             });
   }

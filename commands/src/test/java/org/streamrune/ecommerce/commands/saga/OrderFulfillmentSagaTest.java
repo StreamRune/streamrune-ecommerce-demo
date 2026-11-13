@@ -667,13 +667,11 @@ class OrderFulfillmentSagaTest {
 
     assertThat(state.fulfillmentStatus()).isEqualTo(OrderFulfillmentStatus.CANCELLING);
     assertThat(state.status()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(state.cancellationReason())
-        .isEqualTo("Insufficient stock for prod-2: requested 3, available 1");
+    assertThat(state.cancellationReason()).isEqualTo("Insufficient stock for prod-2: requested 3");
     assertThat(saga.handle(state, refused))
         .containsExactly(
             new SagaCommand(
-                new OrderCommand.CancelOrder(
-                    "o-1", "Insufficient stock for prod-2: requested 3, available 1"),
+                new OrderCommand.CancelOrder("o-1", "Insufficient stock for prod-2: requested 3"),
                 new AggregateId("o-1")));
   }
 
@@ -692,8 +690,7 @@ class OrderFulfillmentSagaTest {
     var after = saga.evolve(state, second);
 
     assertThat(after).isEqualTo(state);
-    assertThat(after.cancellationReason())
-        .isEqualTo("Insufficient stock for prod-1: requested 2, available 0");
+    assertThat(after.cancellationReason()).isEqualTo("Insufficient stock for prod-1: requested 2");
     assertThat(saga.handle(after, second)).isEmpty();
   }
 
@@ -726,7 +723,7 @@ class OrderFulfillmentSagaTest {
         causedBySagaOf(
             "o-1",
             new OrderEvent.OrderCancelled(
-                "o-1", "Insufficient stock for prod-1: requested 2, available 0", List.of()),
+                "o-1", "Insufficient stock for prod-1: requested 2", List.of()),
             OrderState.TYPE,
             "o-1");
 

@@ -105,20 +105,18 @@ class OrderProjectionPaymentStatusTest {
     assertThat(projection.get("o-1").reason()).as("an order that is not cancelled").isNull();
 
     process(
-        new OrderEvent.OrderCancelled(
-            "o-1", "Insufficient stock for p-1: requested 2, available 1", List.of()));
-    assertThat(projection.get("o-1").reason())
-        .isEqualTo("Insufficient stock for p-1: requested 2, available 1");
+        new OrderEvent.OrderCancelled("o-1", "Insufficient stock for p-1: requested 2", List.of()));
+    assertThat(projection.get("o-1").reason()).isEqualTo("Insufficient stock for p-1: requested 2");
 
     process(new OrderEvent.OrderCancelled("o-1", "Order fulfillment did not complete", List.of()));
     assertThat(projection.get("o-1").reason())
         .as("a second cancellation keeps the first reason")
-        .isEqualTo("Insufficient stock for p-1: requested 2, available 1");
+        .isEqualTo("Insufficient stock for p-1: requested 2");
 
     process(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", TWENTY));
     assertThat(projection.get("o-1").reason())
         .as("a payment event keeps the reason")
-        .isEqualTo("Insufficient stock for p-1: requested 2, available 1");
+        .isEqualTo("Insufficient stock for p-1: requested 2");
   }
 
   @Test
