@@ -81,7 +81,8 @@ A write action sends the request the backend's controller reads, field for field
   action shows it.
 - **An order line names a product and a quantity.** The backend prices each line from the product
   catalogue, and takes one line per product: the Place Order dialog merges the lines of one
-  product, their quantities summed, before it sends the order.
+  product, their quantities summed, before it sends the order. A quantity is a whole number above
+  zero; anything else is refused in its field and nothing is sent.
 - **Nobody confirms an order by hand**: the fulfillment saga confirms it once its payment is
   captured and its stock reserved. Each order row shows its payment status beside the order's.
 - **Cancel is offered for a confirmed order too**, and says what it does: the order becomes

@@ -12,6 +12,7 @@ import {
 } from "@/lib/mutations";
 import type { Availability, OrderView, OrderStatus, PaymentStatus } from "@/lib/types";
 import { newId } from "@/lib/ids";
+import { FieldError } from "@/components/domain/held-operation";
 import { PermissionGate } from "@/components/domain/permission-gate";
 import { AccessRestricted } from "@/components/domain/access-restricted";
 import { useRole } from "@/providers/role-provider";
@@ -42,7 +43,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn, formatMoney } from "@/lib/utils";
+import { cn, formatMoney, wholeNumber } from "@/lib/utils";
 
 const STATUS_STYLES: Record<OrderStatus, string> = {
   CREATED: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -64,8 +65,11 @@ const PAYMENT_STYLES: Record<PaymentStatus, string> = {
 
 interface OrderLine {
   productId: string;
-  quantity: number;
+  /** The quantity as typed; read strictly (wholeNumber) when the order is placed. */
+  quantity: string;
 }
+
+const QUANTITY_ERROR = "Enter a whole number of units above zero, e.g. 2.";
 
 /** What a product option adds to its name when it is short of stock: a word, never a count. */
 const AVAILABILITY_HINT: Partial<Record<Availability, string>> = {
@@ -89,10 +93,12 @@ export function PlaceOrderDialog({
   triggerLabel = "Place Order",
   triggerDisabled = false,
 }: PlaceOrderDialogProps) {
-  const firstLine = { productId: initialProductId ?? "", quantity: 1 };
+  const firstLine = { productId: initialProductId ?? "", quantity: "1" };
   const [open, setOpen] = useState(false);
   const [customerId, setCustomerId] = useState(initialCustomerId ?? "");
   const [lines, setLines] = useState<OrderLine[]>([firstLine]);
+  // The lines whose quantity was refused when the order was last placed, by index.
+  const [quantityErrors, setQuantityErrors] = useState<ReadonlySet<number>>(new Set());
   const { mutateAsync, isPending } = usePlaceOrder();
   const { data: products = [] } = useProducts();
   // An ADMIN gets every customer to choose from; a CUSTOMER gets their own record, the only
@@ -101,14 +107,15 @@ export function PlaceOrderDialog({
   const { data: customers = [] } = useCustomers(hasPermission("OWN_DATA_VIEW"));
 
   function addLine() {
-    setLines((l) => [...l, { productId: "", quantity: 1 }]);
+    setLines((l) => [...l, { productId: "", quantity: "1" }]);
   }
 
   function removeLine(i: number) {
     setLines((l) => l.filter((_, idx) => idx !== i));
+    setQuantityErrors(new Set());
   }
 
-  function updateLine(i: number, field: keyof OrderLine, value: string | number) {
+  function updateLine(i: number, field: keyof OrderLine, value: string) {
     setLines((l) => l.map((line, idx) => idx === i ? { ...line, [field]: value } : line));
   }
 
@@ -116,13 +123,22 @@ export function PlaceOrderDialog({
     e.preventDefault();
     // The order id is picked here; the backend prices each line from the product catalogue, so a
     // line names a product and a quantity only. The backend takes one line per product, so lines
-    // of one product are merged and their quantities summed.
+    // of one product are merged and their quantities summed. A quantity is a whole number above
+    // zero: a number field also takes "1e3" and "1.5", which are no count of units, and a line
+    // with one of them, or with nothing, is refused in its field and nothing is sent.
+    const refused = new Set<number>();
     const quantities = new Map<string, number>();
-    for (const l of lines) {
-      if (l.productId && l.quantity > 0) {
-        quantities.set(l.productId, (quantities.get(l.productId) ?? 0) + l.quantity);
+    lines.forEach((l, i) => {
+      if (!l.productId) return;
+      const quantity = wholeNumber(l.quantity);
+      if (quantity === null || quantity < 1) {
+        refused.add(i);
+        return;
       }
-    }
+      quantities.set(l.productId, (quantities.get(l.productId) ?? 0) + quantity);
+    });
+    setQuantityErrors(refused);
+    if (refused.size > 0) return;
     const orderLines = [...quantities].map(([productId, quantity]) => ({ productId, quantity }));
     if (orderLines.length === 0) {
       toast.error("Add at least one product line");
@@ -134,6 +150,7 @@ export function PlaceOrderDialog({
       toast.success(`Order placed: ${orderId}`);
       setOpen(false);
       setLines([firstLine]);
+      setQuantityErrors(new Set());
       if (!initialCustomerId) setCustomerId("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to place order");
@@ -189,35 +206,46 @@ export function PlaceOrderDialog({
           <div className="space-y-2">
             <Label>Order Lines</Label>
             {lines.map((line, i) => (
-              <div key={i} className="flex gap-2 items-end">
-                <div className="flex-1 space-y-1">
-                  <Select value={line.productId} onValueChange={(v) => { if (v) updateLine(i, "productId", v as string); }}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="Select product…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {products.filter((p) => p.status !== "DISCONTINUED").map((p) => (
-                        <SelectItem key={p.productId} value={p.productId}>
-                          {p.name} ({formatMoney(p.price.amount, p.price.currency)})
-                          {AVAILABILITY_HINT[p.availability] ?? ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+              <div key={i} className="space-y-1">
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 space-y-1">
+                    <Select value={line.productId} onValueChange={(v) => { if (v) updateLine(i, "productId", v as string); }}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Select product…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {products.filter((p) => p.status !== "DISCONTINUED").map((p) => (
+                          <SelectItem key={p.productId} value={p.productId}>
+                            {p.name} ({formatMoney(p.price.amount, p.price.currency)})
+                            {AVAILABILITY_HINT[p.availability] ?? ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="w-20">
+                    {/* step="any": the form reads the number itself (wholeNumber) and says what is
+                        wrong, instead of the browser's bubble. */}
+                    <Input
+                      type="number"
+                      step="any"
+                      aria-label="Quantity"
+                      value={line.quantity}
+                      onChange={(e) => updateLine(i, "quantity", e.target.value)}
+                      aria-invalid={quantityErrors.has(i)}
+                      aria-describedby={quantityErrors.has(i) ? `po-qty-${i}-error` : undefined}
+                    />
+                  </div>
+                  {lines.length > 1 && (
+                    <Button variant="ghost" size="icon-sm" type="button" onClick={() => removeLine(i)}>
+                      ×
+                    </Button>
+                  )}
                 </div>
-                <div className="w-20">
-                  <Input
-                    type="number"
-                    min="1"
-                    value={line.quantity}
-                    onChange={(e) => updateLine(i, "quantity", parseInt(e.target.value, 10))}
-                  />
-                </div>
-                {lines.length > 1 && (
-                  <Button variant="ghost" size="icon-sm" type="button" onClick={() => removeLine(i)}>
-                    ×
-                  </Button>
-                )}
+                <FieldError
+                  id={`po-qty-${i}-error`}
+                  message={quantityErrors.has(i) ? QUANTITY_ERROR : null}
+                />
               </div>
             ))}
             <Button type="button" variant="outline" size="sm" onClick={addLine}>

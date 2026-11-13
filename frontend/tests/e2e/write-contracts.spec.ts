@@ -120,6 +120,37 @@ test.describe("Orders — the commands the page sends", () => {
     expect(sent[0].body?.lines).toEqual([{ productId: "prod-widget", quantity: 2 }]);
   });
 
+  test("Place Order reads each line's quantity strictly: an exponent, a fraction, nothing or zero is refused in the field", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/customers", [ALICE]);
+    const sent = await answerCommands(page, "/api/orders");
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "Place Order" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("combobox").filter({ hasText: "Select product" }).click();
+    await page.getByRole("option", { name: /Widget/ }).click();
+    // A number field takes "1e3" as 1000 and "1.5" as is; parseInt would read both as 1.
+    for (const typed of ["1e3", "1.5", "", "0"]) {
+      await dialog.getByLabel("Quantity").fill(typed);
+      await dialog.getByRole("button", { name: "Place Order" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units above zero, e.g. 2."
+      );
+    }
+    await expect(dialog.getByLabel("Quantity")).toHaveAttribute("aria-invalid", "true");
+    expect(sent, "nothing refused in the field is sent").toHaveLength(0);
+
+    await dialog.getByLabel("Quantity").fill("3");
+    await dialog.getByRole("button", { name: "Place Order" }).click();
+    await expect(page.getByText(/Order placed: order-[0-9a-f]{8}/)).toBeVisible();
+    expect(sent.map((c) => c.body?.lines)).toEqual([[{ productId: "prod-widget", quantity: 3 }]]);
+  });
+
   test("Place Order sends products and quantities, merged per product", async ({ page }) => {
     await mockBackendRoutes(page);
     await mockList(page, "/api/products", [WIDGET]);
