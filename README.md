@@ -271,7 +271,9 @@ export ORG_GRADLE_PROJECT_graalvmMetadataRepository=/tmp/metadata-repo   # or -P
 ```
 
 The smoke script's builds pick the variable up. The Quarkus build does not use native-build-tools
-and needs none of this.
+and needs none of this. The CI job (`.github/workflows/native-image-smoke-test.yml`) builds the three
+images with GraalVM CE 25.0.1 and gives the Spring and Micronaut builds such a copy: version 1.0.20 of
+the repository, the one native-build-tools 1.1.17 downloads by default.
 
 ```bash
 # Requires running Postgres (AOT processing needs a live DataSource)
