@@ -308,7 +308,7 @@ MANAGEMENT_TRACING_EXPORT_ENABLED=true ./gradlew :spring-app:bootRun \
   --args='--streamrune.tracing.event-store.enabled=false'
 ```
 
-and the next `command/PlaceOrder` holds `lock/acquire` and nothing more. In `application.yml` the same switch is `event-store: enabled: false` under `streamrune.tracing`, the example the comment there shows; an environment variable sets it too, `STREAMRUNE_TRACING_EVENTSTORE_ENABLED=false` (Spring drops the dash from the name).
+and the next `command/PlaceOrder` holds `lock/acquire` and nothing more. In `application.yml` the same switch is `event-store: enabled: false` under `streamrune.tracing`, the example the comment there shows; an environment variable sets it too, `STREAMRUNE_TRACING_EVENTSTORE_ENABLED=false` (Spring drops the dash from the name). The Quarkus app reads the dash as an underscore, `STREAMRUNE_TRACING_EVENT_STORE_ENABLED=false`, and ignores Spring's spelling.
 
 **Without the SDK: the Java agent.** The integration falls back to the global OpenTelemetry when the application has no `OpenTelemetry` bean. An application started with the OpenTelemetry Java agent (`-javaagent:opentelemetry-javaagent.jar`) needs no SDK dependency and no code: the agent registers the global instance before Spring starts, StreamRune's spans go through it, and the agent's own spans (HTTP, JDBC, the RabbitMQ client) join the same traces, the JDBC ones under `eventstore/load` and `eventstore/append`, the broker's under `outbox/publish`. The integration reads the global instance once, while it starts: an SDK the application registers globally itself is registered before the application context starts, or is an `OpenTelemetry` bean. For the demo's spring-app, remove the three dependencies of 3a to trace through the agent.
 
