@@ -4,7 +4,8 @@
  * Each test performs a write through the page, as a person does, and asserts
  * its result through the page: the row a registration adds, the order that
  * appears in its customer's list and is confirmed by the fulfillment saga, the
- * price and the stock a product shows. Nothing is mocked, so a request the
+ * price a product shows, its units in the inventory and its availability on the
+ * storefront. Nothing is mocked, so a request the
  * backend does not accept fails the test with the backend's own answer.
  *
  * Backend-dependent: skipped when the backend is not reachable. Run it with
@@ -16,15 +17,17 @@
  * one registers places the orders of the later ones. The suite brings what it
  * consumes: before the first test it creates a product of its own through the
  * API and receives ten units of it into the inventory, and every order that
- * needs stock takes it from there. It changes no seed data, so it passes run
- * after run on the same database.
+ * needs stock takes it from there. It also creates a product without stock,
+ * whose order the fulfillment cancels with the stock's reason. It changes no
+ * seed data, so it passes run after run on the same database.
  *
- * What a run leaves behind: a forgotten customer, two products (the one it
- * ordered from, with the units no order took, and a discontinued one), four
- * orders with their payments and sagas (one delivered, one confirmed, one
- * cancelled after its confirmation, its payment refunded and its unit
- * released, one cancelled by a failed payment), and the events of all of
- * them. The payment-failure switch is left off.
+ * What a run leaves behind: a forgotten customer, three products (the one it
+ * ordered from, with the units no order took, a discontinued one and one
+ * without stock), five orders with their payments and sagas (one delivered,
+ * one confirmed, one cancelled after its confirmation, its payment refunded and
+ * its unit released, one cancelled by a failed payment, one cancelled for want
+ * of stock), and the events of all of them. The payment-failure switch is left
+ * off.
  */
 
 import { test, expect, request, type Browser, type Page } from "@playwright/test";
@@ -55,6 +58,9 @@ const created = {
   /** The product the suite's orders take their stock from. */
   stockedProductId: "",
   stockedProductName: "",
+  /** A product the inventory holds no units of. */
+  unstockedProductId: "",
+  unstockedProductName: "",
 };
 
 const STOCKED_PRICE = 19.99;
@@ -128,18 +134,25 @@ test.describe("Writes against a running backend", () => {
     const suffix = Date.now().toString(36);
     created.stockedProductId = `prod-live-${suffix}`;
     created.stockedProductName = `Live Gadget ${suffix}`;
+    created.unstockedProductId = `prod-live-empty-${suffix}`;
+    created.unstockedProductName = `Live Empty ${suffix}`;
     const api = await request.newContext({ extraHTTPHeaders: ADMIN_HEADERS });
-    const product = await api.post(`${BACKEND_URL}/api/products`, {
-      data: {
-        productId: created.stockedProductId,
-        name: created.stockedProductName,
-        description: "Ordered by the write tests",
-        category: "Tests",
-        price: STOCKED_PRICE,
-        initialStock: 0,
-      },
-    });
-    expect(product.status(), await product.text()).toBe(200);
+    for (const [productId, name] of [
+      [created.stockedProductId, created.stockedProductName],
+      [created.unstockedProductId, created.unstockedProductName],
+    ]) {
+      const product = await api.post(`${BACKEND_URL}/api/products`, {
+        data: {
+          productId,
+          name,
+          description: "Ordered by the write tests",
+          category: "Tests",
+          price: STOCKED_PRICE,
+        },
+      });
+      expect(product.status(), await product.text()).toBe(200);
+    }
+    // The catalogue holds no stock: the units are received into the inventory.
     const shipment = await api.post(
       `${BACKEND_URL}/api/inventory/${created.stockedProductId}/receive`,
       { data: { quantity: 10 } }
@@ -147,12 +160,11 @@ test.describe("Writes against a running backend", () => {
     expect(shipment.status(), await shipment.text()).toBe(200);
     // No page is open yet to hear the feed announce the product: wait until the catalogue, a
     // read model, lists it, so that the first Place Order dialog offers it.
-    await expect
-      .poll(
-        async () => (await api.get(`${BACKEND_URL}/api/products/${created.stockedProductId}`)).status(),
-        SETTLED
-      )
-      .toBe(200);
+    for (const productId of [created.stockedProductId, created.unstockedProductId]) {
+      await expect
+        .poll(async () => (await api.get(`${BACKEND_URL}/api/products/${productId}`)).status(), SETTLED)
+        .toBe(200);
+    }
     await api.dispose();
   });
 
@@ -287,9 +299,11 @@ test.describe("Writes against a running backend", () => {
     await expect(placed).toContainText("DELIVERED", SETTLED);
   });
 
-  test("an ADMIN creates a product and changes its price and its stock", async ({ page }) => {
+  test("an ADMIN creates a product with an opening stock and changes its price", async ({
+    page,
+  }) => {
     await actAs(page, "ADMIN");
-    await page.goto("/products");
+    await page.goto("/admin/catalog");
     await expect(row(page, "Widget")).toBeVisible();
 
     created.productName = `Sprocket ${Date.now().toString(36)}`;
@@ -299,18 +313,22 @@ test.describe("Writes against a running backend", () => {
     await dialog.getByLabel("Description").fill("Made by the write tests");
     await dialog.getByLabel("Category").fill("Hardware");
     await dialog.getByLabel("Price (USD)").fill("12.50");
-    await dialog.getByLabel("Initial Stock").fill("7");
+    await dialog.getByLabel(/Opening stock/).fill("7");
     const body = await commandSentBy(page, "/api/products", () =>
       dialog.getByRole("button", { name: "Create" }).click()
     );
     created.productId = body.productId as string;
 
+    // Two commands, each with its toast: the product, then its opening stock as a shipment.
     await expect(page.getByText(`Product created: ${created.productId}`)).toBeVisible();
+    await expect(
+      page.getByText(`Opening stock received: 7 units of ${created.productId}`)
+    ).toBeVisible();
     const product = row(page, created.productName);
     await expect(product).toBeVisible(SETTLED);
     await expect(product).toContainText("Hardware");
     await expect(product).toContainText("$12.50");
-    await expect(product.getByRole("cell").nth(3)).toHaveText("7");
+    await expect(product).toContainText("AVAILABLE");
 
     await pickRowAction(page, created.productName, "Update Price");
     await page.getByRole("dialog").getByLabel("New Price (USD)").fill("24.50");
@@ -318,23 +336,47 @@ test.describe("Writes against a running backend", () => {
     await expect(page.getByText("Price updated")).toBeVisible();
     await expect(product).toContainText("$24.50", SETTLED);
 
-    await pickRowAction(page, created.productName, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("5");
-    await page.getByRole("dialog").getByLabel("Reason (optional)").fill("found in the back");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
-    await expect(product.getByRole("cell").nth(3)).toHaveText("12", SETTLED);
+    // The opening stock is the inventory's; the storefront shows a badge for seven units.
+    await page.goto("/admin/inventory");
+    await expect(row(page, created.productName).getByRole("cell").nth(1)).toHaveText("7", SETTLED);
+    await page.goto("/products");
+    await expect(row(page, created.productName)).toContainText("Low stock", SETTLED);
+    await expect(row(page, created.productName)).toContainText("$24.50");
+  });
 
-    await pickRowAction(page, created.productName, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("-2");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-    await expect(product.getByRole("cell").nth(3)).toHaveText("10", SETTLED);
+  test("an ADMIN adjusts the inventory with a reason, and the backend refuses a count below zero", async ({
+    page,
+  }) => {
+    await actAs(page, "ADMIN");
+    await page.goto("/admin/inventory");
+    const units = row(page, created.productName).getByRole("cell");
+    await expect(units.nth(1)).toHaveText("7", SETTLED);
 
-    // More than there is: the backend refuses, and the page says why.
-    await pickRowAction(page, created.productName, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("-500");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText(/refused the request \(400\): Insufficient stock/)).toBeVisible();
+    const adjust = async (change: string, reason: string) => {
+      await pickRowAction(page, created.productName, "Adjust");
+      const dialog = page.getByRole("dialog");
+      await dialog.getByLabel(/Quantity change/).fill(change);
+      await dialog.getByLabel("Reason").fill(reason);
+      await dialog.getByRole("button", { name: "Adjust" }).click();
+    };
+
+    await adjust("5", "found in the back");
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
+    await expect(units.nth(1)).toHaveText("12", SETTLED);
+
+    await adjust("-2", "stocktake: two damaged");
+    await expect(units.nth(1)).toHaveText("10", SETTLED);
+
+    // More than there is: the backend refuses, and the page shows its words.
+    await adjust("-500", "stocktake");
+    await expect(
+      page.getByText(/refused the request \(400\): Insufficient stock for .*: available=10, change=-500/)
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    // The storefront follows the inventory: ten units are in stock again.
+    await page.goto("/products");
+    await expect(row(page, created.productName).getByRole("cell").nth(3)).toHaveText("In stock", SETTLED);
   });
 
   test("a shipment received into the inventory lets an order for the new product be fulfilled", async ({
@@ -342,11 +384,14 @@ test.describe("Writes against a running backend", () => {
     browser,
   }) => {
     await actAs(page, "ADMIN");
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
+    const units = row(page, created.productName).getByRole("cell");
+    await expect(units.nth(1)).toHaveText("10", SETTLED);
     await pickRowAction(page, created.productName, "Receive Shipment");
     await page.getByRole("dialog").getByLabel("Quantity").fill("3");
     await page.getByRole("dialog").getByRole("button", { name: "Receive" }).click();
     await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
+    await expect(units.nth(1)).toHaveText("13", SETTLED);
 
     // The saga reserves from that inventory: the order is confirmed at the catalogue's price.
     const customer = await pageAs(browser, "CUSTOMER", created.customerId);
@@ -356,9 +401,30 @@ test.describe("Writes against a running backend", () => {
     await expect(placed).toContainText("CONFIRMED", SETTLED);
     await customer.context().close();
 
+    // The confirmed order's unit is committed, live on the open inventory page.
+    await expect(units.nth(1)).toHaveText("12", SETTLED);
+    await expect(units.nth(3)).toHaveText("1", SETTLED);
+
+    await page.goto("/admin/catalog");
     await pickRowAction(page, created.productName, "Discontinue");
     await expect(page.getByText("Product discontinued")).toBeVisible();
     await expect(row(page, created.productName)).toContainText("DISCONTINUED", SETTLED);
+    await page.goto("/products");
+    await expect(row(page, created.productName)).toContainText("Discontinued", SETTLED);
+  });
+
+  test("an order for a product without stock is cancelled, and the Orders page says why", async ({
+    page,
+  }) => {
+    await actAs(page, "CUSTOMER", created.customerId);
+    // The Place Order dialog still offers the product, marked out of stock.
+    const orderId = await placeOrder(page, created.unstockedProductName);
+    const placed = row(page, orderId);
+    await expect(placed).toContainText("CANCELLED", SETTLED);
+    await expect(placed).toContainText(
+      `Insufficient stock for ${created.unstockedProductId}: requested 1, available 0`,
+      SETTLED
+    );
   });
 
   test("the payment-failure switch fails the next order's payment and is switched off again", async ({
