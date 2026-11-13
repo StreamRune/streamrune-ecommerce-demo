@@ -44,7 +44,12 @@ The read model is one row per product with the three counters. Create `queries/s
 ```java
 package org.streamrune.ecommerce.queries.dto;
 
-public record InventoryView(String productId, int available, int reserved, int committed) {}
+/**
+ * A product's inventory: the units available to order, reserved by orders in fulfillment, and
+ * committed to shipped orders, with the product's name from the catalogue.
+ */
+public record InventoryView(
+    String productId, String productName, int available, int reserved, int committed) {}
 ```
 
 and `projections/src/main/java/org/streamrune/ecommerce/projections/InventoryProjection.java`, which follows the pattern of `ProductProjection` and `OrderProjection`:
@@ -56,9 +61,15 @@ import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionRepository;
-import org.streamrune.ecommerce.domain.inventory.*;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
 
+/**
+ * The operators' inventory view: one row per product of the catalogue, with the units available,
+ * reserved and committed. The row is opened, with nothing held, when the product is created, so a
+ * product without stock is listed too; the inventory's events move its counts.
+ */
 public class InventoryProjection extends BaseProjection {
 
   public InventoryProjection(ProjectionRepository repository) {
@@ -68,56 +79,65 @@ public class InventoryProjection extends BaseProjection {
   @Override
   public void process(List<EventEnvelope> events) {
     for (var envelope : events) {
-      if (envelope.event() instanceof InventoryEvent evt) {
-        switch (evt) {
-          case InventoryEvent.StockReserved e ->
-              findById(e.productId(), InventoryView.class)
-                  .ifPresent(
-                      existing ->
-                          save(
-                              e.productId(),
-                              new InventoryView(
-                                  e.productId(),
-                                  e.availableAfter(),
-                                  existing.reserved() + e.quantity(),
-                                  existing.committed())));
-          case InventoryEvent.StockReleased e ->
-              findById(e.productId(), InventoryView.class)
-                  .ifPresent(
-                      existing ->
-                          save(
-                              e.productId(),
-                              new InventoryView(
-                                  e.productId(),
-                                  e.availableAfter(),
-                                  existing.reserved() - e.quantity(),
-                                  existing.committed())));
-          case InventoryEvent.ReservationConfirmed e ->
-              findById(e.productId(), InventoryView.class)
-                  .ifPresent(
-                      existing ->
-                          save(
-                              e.productId(),
-                              new InventoryView(
-                                  e.productId(),
-                                  existing.available(),
-                                  existing.reserved() - e.quantity(),
-                                  existing.committed() + e.quantity())));
-          case InventoryEvent.ShipmentReceived e ->
-              save(
+      switch (envelope.event()) {
+        case ProductEvent.ProductCreated e ->
+            save(e.productId(), new InventoryView(e.productId(), e.name(), 0, 0, 0));
+        case InventoryEvent.StockReserved e -> {
+          InventoryView v = current(e.productId());
+          save(
+              e.productId(),
+              new InventoryView(
                   e.productId(),
-                  new InventoryView(
-                      e.productId(),
-                      e.availableAfter(),
-                      findById(e.productId(), InventoryView.class)
-                          .map(InventoryView::reserved)
-                          .orElse(0),
-                      findById(e.productId(), InventoryView.class)
-                          .map(InventoryView::committed)
-                          .orElse(0)));
+                  v.productName(),
+                  e.availableAfter(),
+                  v.reserved() + e.quantity(),
+                  v.committed()));
         }
+        case InventoryEvent.StockReleased e -> {
+          InventoryView v = current(e.productId());
+          save(
+              e.productId(),
+              new InventoryView(
+                  e.productId(),
+                  v.productName(),
+                  e.availableAfter(),
+                  v.reserved() - e.quantity(),
+                  v.committed()));
+        }
+        case InventoryEvent.ReservationConfirmed e -> {
+          InventoryView v = current(e.productId());
+          save(
+              e.productId(),
+              new InventoryView(
+                  e.productId(),
+                  v.productName(),
+                  v.available(),
+                  v.reserved() - e.quantity(),
+                  v.committed() + e.quantity()));
+        }
+        case InventoryEvent.ShipmentReceived e -> {
+          InventoryView v = current(e.productId());
+          save(
+              e.productId(),
+              new InventoryView(
+                  e.productId(), v.productName(), e.availableAfter(), v.reserved(), v.committed()));
+        }
+        case InventoryEvent.InventoryAdjusted e -> {
+          InventoryView v = current(e.productId());
+          save(
+              e.productId(),
+              new InventoryView(
+                  e.productId(), v.productName(), e.availableAfter(), v.reserved(), v.committed()));
+        }
+        default -> {}
       }
     }
+  }
+
+  /** The product's row, or an empty one when the projection has not seen the product created. */
+  private InventoryView current(String productId) {
+    return findById(productId, InventoryView.class)
+        .orElseGet(() -> new InventoryView(productId, null, 0, 0, 0));
   }
 
   public InventoryView get(String productId) {
@@ -191,7 +211,276 @@ public MultiProjectionRunner projectionRunner(
 
 All four projections are now wired. The runner assigns each its own virtual thread and its own offset namespace.
 
-`InventoryProjection` is a **counter** (`existing.reserved() + e.quantity()`). That is exactly why it must be `TRANSACTIONAL_LOCAL`: under at-least-once a crash between the write and the checkpoint would reserve the stock twice.
+`InventoryProjection` is a **counter** (`v.reserved() + e.quantity()`). That is exactly why it must be `TRANSACTIONAL_LOCAL`: under at-least-once a crash between the write and the checkpoint would reserve the stock twice.
+
+The read model is an operator's view, so it is served to an `ADMIN` only. Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryQueryController.java`:
+
+```java
+package org.streamrune.ecommerce.spring.controller;
+
+import java.util.List;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.projections.InventoryProjection;
+import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
+import org.streamrune.ecommerce.queries.dto.InventoryView;
+
+/**
+ * The inventory read model, for an {@code ADMIN} only: the units available, reserved and committed
+ * of every product of the catalogue. The storefront shows the availability on the product instead
+ * ({@code ProductQueryController}).
+ */
+@RestController
+@RequestMapping("/api/inventory")
+public class InventoryQueryController {
+
+  private final InventoryProjection inventoryProjection;
+
+  public InventoryQueryController(InventoryProjection inventoryProjection) {
+    this.inventoryProjection = inventoryProjection;
+  }
+
+  @GetMapping
+  public List<InventoryView> listInventory() {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    return inventoryProjection.listAll();
+  }
+
+  @GetMapping("/{productId}")
+  public ResponseEntity<InventoryView> getInventory(@PathVariable String productId) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    InventoryView inventory = inventoryProjection.get(productId);
+    return inventory != null ? ResponseEntity.ok(inventory) : ResponseEntity.notFound().build();
+  }
+}
+```
+
+### Step 1b: The storefront follows the inventory
+
+The product view of Chapter 5 shows the catalogue alone. A customer also wants to know whether a product is in stock, and the inventory knows. A read model may combine as many streams as its question needs, so `ProductProjection` now reads the inventory events of the same product id as well, while the two aggregates stay apart. The view carries the available units and an availability derived from them. Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/Availability.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+/**
+ * How the storefront shows a product: derived by the product projection from the catalogue's status
+ * and the inventory's available units. Not a state of either aggregate.
+ */
+public enum Availability {
+  IN_STOCK,
+  LOW_STOCK,
+  OUT_OF_STOCK,
+  DISCONTINUED
+}
+```
+
+Replace `queries/src/main/java/org/streamrune/ecommerce/queries/dto/ProductView.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+import java.time.Instant;
+import org.streamrune.ecommerce.domain.common.Money;
+import org.streamrune.ecommerce.domain.product.ProductStatus;
+
+/**
+ * The storefront's product: the catalogue's fields, the units the inventory holds available, and
+ * the {@link Availability} derived from both.
+ */
+public record ProductView(
+    String productId,
+    String name,
+    String description,
+    String category,
+    Money price,
+    ProductStatus status,
+    int available,
+    Availability availability,
+    Instant createdAt,
+    Instant updatedAt) {}
+```
+
+The cached product list must now be dropped when a product's available units change, not only when the catalogue changes. Replace `queries/src/main/java/org/streamrune/ecommerce/queries/query/ListProducts.java`:
+
+```java
+package org.streamrune.ecommerce.queries.query;
+
+import org.streamrune.core.Cacheable;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
+
+/**
+ * The storefront's product list. The product view also follows the inventory, so the cached list is
+ * dropped on every event that changes a product's available units as well as on the catalogue's
+ * events.
+ */
+@Cacheable(
+    ttlSeconds = 60,
+    invalidateOn = {
+      ProductEvent.ProductCreated.class,
+      ProductEvent.PriceUpdated.class,
+      ProductEvent.ProductDiscontinued.class,
+      InventoryEvent.ShipmentReceived.class,
+      InventoryEvent.InventoryAdjusted.class,
+      InventoryEvent.StockReserved.class,
+      InventoryEvent.StockReleased.class
+    })
+public record ListProducts()
+    implements org.streamrune.core.Query<
+        java.util.List<org.streamrune.ecommerce.queries.dto.ProductView>> {}
+```
+
+Replace `projections/src/main/java/org/streamrune/ecommerce/projections/ProductProjection.java`:
+
+```java
+package org.streamrune.ecommerce.projections;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.function.UnaryOperator;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
+import org.streamrune.ecommerce.domain.product.ProductStatus;
+import org.streamrune.ecommerce.queries.dto.Availability;
+import org.streamrune.ecommerce.queries.dto.ProductView;
+
+/**
+ * The storefront's product view, built from two streams of each product: the catalogue's {@code
+ * product:<id>} gives the name, the price and the status, the inventory's {@code inventory:<id>}
+ * the units available to order. A read model may combine as many streams as its question needs; the
+ * aggregates stay apart.
+ *
+ * <p>Every inventory event that changes the available units carries the count after it ({@code
+ * availableAfter}), so the view takes that count as it is. A product is {@link
+ * Availability#LOW_STOCK} below {@link #LOW_STOCK_THRESHOLD} units, {@link
+ * Availability#OUT_OF_STOCK} at none, and {@link Availability#DISCONTINUED} once the catalogue
+ * discontinues it, whatever it holds.
+ */
+@org.streamrune.core.ProjectionConfig(
+    name = "products",
+    deliveryMode = ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+public class ProductProjection extends BaseProjection {
+
+  /** Below this many available units the storefront shows a product as low in stock. */
+  public static final int LOW_STOCK_THRESHOLD = 10;
+
+  public ProductProjection(ProjectionRepository repository) {
+    super(repository, "products");
+  }
+
+  @Override
+  public void process(List<EventEnvelope> events) {
+    for (var envelope : events) {
+      Instant at = envelope.metadata().timestamp();
+      switch (envelope.event()) {
+        case ProductEvent.ProductCreated e ->
+            save(
+                e.productId(),
+                new ProductView(
+                    e.productId(),
+                    e.name(),
+                    e.description(),
+                    e.category(),
+                    e.price(),
+                    ProductStatus.AVAILABLE,
+                    0,
+                    availability(ProductStatus.AVAILABLE, 0),
+                    at,
+                    at));
+        case ProductEvent.PriceUpdated e ->
+            update(
+                e.productId(),
+                p ->
+                    new ProductView(
+                        p.productId(),
+                        p.name(),
+                        p.description(),
+                        p.category(),
+                        e.newPrice(),
+                        p.status(),
+                        p.available(),
+                        p.availability(),
+                        p.createdAt(),
+                        at));
+        case ProductEvent.ProductDiscontinued e ->
+            update(
+                e.productId(),
+                p ->
+                    new ProductView(
+                        p.productId(),
+                        p.name(),
+                        p.description(),
+                        p.category(),
+                        p.price(),
+                        ProductStatus.DISCONTINUED,
+                        p.available(),
+                        availability(ProductStatus.DISCONTINUED, p.available()),
+                        p.createdAt(),
+                        at));
+        case InventoryEvent.ShipmentReceived e -> available(e.productId(), e.availableAfter(), at);
+        case InventoryEvent.InventoryAdjusted e -> available(e.productId(), e.availableAfter(), at);
+        case InventoryEvent.StockReserved e -> available(e.productId(), e.availableAfter(), at);
+        case InventoryEvent.StockReleased e -> available(e.productId(), e.availableAfter(), at);
+        default -> {}
+      }
+    }
+  }
+
+  /** The storefront's availability of a product with this status and this many units. */
+  static Availability availability(ProductStatus status, int available) {
+    if (status == ProductStatus.DISCONTINUED) {
+      return Availability.DISCONTINUED;
+    }
+    if (available <= 0) {
+      return Availability.OUT_OF_STOCK;
+    }
+    if (available < LOW_STOCK_THRESHOLD) {
+      return Availability.LOW_STOCK;
+    }
+    return Availability.IN_STOCK;
+  }
+
+  private void available(String productId, int available, Instant at) {
+    update(
+        productId,
+        p ->
+            new ProductView(
+                p.productId(),
+                p.name(),
+                p.description(),
+                p.category(),
+                p.price(),
+                p.status(),
+                available,
+                availability(p.status(), available),
+                p.createdAt(),
+                at));
+  }
+
+  /**
+   * Rewrites the view of a product the projection has seen created. The inventory endpoints refuse
+   * a product the catalogue does not hold, so its {@code ProductCreated} comes first in the global
+   * stream.
+   */
+  private void update(String productId, UnaryOperator<ProductView> change) {
+    findById(productId, ProductView.class).ifPresent(p -> save(productId, change.apply(p)));
+  }
+
+  public ProductView get(String productId) {
+    return findById(productId, ProductView.class).orElse(null);
+  }
+
+  public List<ProductView> listAll() {
+    return repository.findAll(projectionName(), ProductView.class);
+  }
+}
+```
+
+Every inventory event that changes the available units carries the count after it (`availableAfter`), so the view takes that count as it is, whichever order arrives first. `LOW_STOCK_THRESHOLD` is the one place that says what "low" means.
 
 ### Step 2: Wire the Outbox Beans
 
@@ -294,8 +583,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.name(),
                       e.category(),
                       e.price().amount(),
-                      e.price().currency(),
-                      e.stock()),
+                      e.price().currency()),
                   "ProductCreated",
                   stream));
       case ProductEvent.PriceUpdated e ->
@@ -309,13 +597,6 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.newPrice().amount(),
                       e.newPrice().currency()),
                   "PriceUpdated",
-                  stream));
-      case ProductEvent.StockAdjusted e ->
-          List.of(
-              entry(
-                  eventId,
-                  new StockAdjustedDto(e.productId(), e.previousStock(), e.newStock(), e.reason()),
-                  "StockAdjusted",
                   stream));
       case ProductEvent.ProductDiscontinued e ->
           List.of(
@@ -361,12 +642,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
   record PaymentFailedDto(String paymentId, String reason) {}
 
   record ProductCreatedDto(
-      String productId,
-      String name,
-      String category,
-      BigDecimal price,
-      String currency,
-      int stock) {}
+      String productId, String name, String category, BigDecimal price, String currency) {}
 
   record PriceUpdatedDto(
       String productId,
@@ -374,8 +650,6 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
       String previousCurrency,
       BigDecimal newPrice,
       String newCurrency) {}
-
-  record StockAdjustedDto(String productId, int previousStock, int newStock, String reason) {}
 
   record ProductDiscontinuedDto(String productId) {}
 }
@@ -444,6 +718,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -503,9 +778,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -561,6 +833,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -767,7 +1042,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -818,6 +1092,7 @@ public class StreamRuneConfig {
                       case InventoryCommand.ReleaseStock c -> c.productId();
                       case InventoryCommand.ConfirmReservation c -> c.productId();
                       case InventoryCommand.ReceiveShipment c -> c.productId();
+                      case InventoryCommand.AdjustInventory c -> c.productId();
                     }),
             new InventoryDecider())
         .build();
@@ -1172,6 +1447,12 @@ public class StreamRuneConfig {
   @Bean
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */

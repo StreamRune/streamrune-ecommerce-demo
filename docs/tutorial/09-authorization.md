@@ -173,7 +173,6 @@ package org.streamrune.ecommerce.domain.product;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.PositiveOrZero;
 import org.streamrune.core.Command;
 import org.streamrune.core.RequireRole;
 import org.streamrune.ecommerce.domain.common.Money;
@@ -184,14 +183,10 @@ public sealed interface ProductCommand extends Command {
       @NotBlank String name,
       String description,
       String category,
-      @NotNull Money price,
-      @PositiveOrZero int initialStock)
+      @NotNull Money price)
       implements ProductCommand {}
 
   record UpdatePrice(@NotBlank String productId, @NotNull Money newPrice)
-      implements ProductCommand {}
-
-  record AdjustStock(@NotBlank String productId, int quantityChange, String reason)
       implements ProductCommand {}
 
   @RequireRole("ADMIN")
@@ -398,7 +393,6 @@ public VirtualThreadCommandBus commandBus(
                   switch (cmd) {
                     case ProductCommand.CreateProduct c -> c.productId();
                     case ProductCommand.UpdatePrice c -> c.productId();
-                    case ProductCommand.AdjustStock c -> c.productId();
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
@@ -506,7 +500,7 @@ Discontinuing a product is a `POST` to `/api/products/{id}/discontinue` (see `Pr
 # A product to retire
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' -H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN' \
-  -d '{"productId":"p-retired","name":"Old widget","description":"Retired","category":"Gadgets","price":9.99,"initialStock":0}'
+  -d '{"productId":"p-retired","name":"Old widget","description":"Retired","category":"Gadgets","price":9.99}'
 
 # Attempt as CUSTOMER
 curl -v -X POST http://localhost:8080/api/products/p-retired/discontinue \
@@ -1020,9 +1014,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1113,7 +1104,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -1626,7 +1616,7 @@ public class OrderCommandController {
 
 `ShipOrder` and `DeliverOrder` keep their `@RequireRole("ADMIN")` from Step 1: they are an operator's commands whoever the order belongs to.
 
-**The catalogue's writes are an operator's.** Chapter 2 left `POST /api/products`, `PUT /api/products/{id}/stock` and `PUT /api/products/{id}/price` open, and anyone who can reach the API could set a price of one cent. These routes name no customer, so there is no owner to compare: they are for an `ADMIN`. Each write handler of `ProductCommandController` asks as its first line:
+**The catalogue's writes are an operator's.** Chapter 2 left `POST /api/products` and `PUT /api/products/{id}/price` open, and anyone who can reach the API could set a price of one cent. These routes name no customer, so there is no owner to compare: they are for an `ADMIN`. Each write handler of `ProductCommandController` asks as its first line:
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
@@ -1645,10 +1635,11 @@ import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
  * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
- * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
- * ask {@link OwnerOrAdminAccess#requireAdmin} as their first line; discontinuing is guarded in the
- * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
- * ({@code ProductQueryController}).
+ * ({@code 403} for everyone else). Creating a product and changing its price ask {@link
+ * OwnerOrAdminAccess#requireAdmin} as their first line; discontinuing is guarded in the command bus
+ * by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open ({@code
+ * ProductQueryController}). The catalogue holds no stock: a product's units are received and
+ * adjusted on its inventory ({@code InventoryCommandController}).
  */
 @RestController
 @RequestMapping("/api/products")
@@ -1669,16 +1660,7 @@ public class ProductCommandController {
             req.name(),
             req.description(),
             req.category(),
-            new Money(req.price(), "USD"),
-            req.initialStock()));
-    return ResponseEntity.ok().build();
-  }
-
-  @PutMapping("/{id}/stock")
-  public ResponseEntity<Void> adjustStock(
-      @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
+            new Money(req.price(), "USD")));
     return ResponseEntity.ok().build();
   }
 
@@ -1701,10 +1683,7 @@ public class ProductCommandController {
       @NotBlank String name,
       String description,
       String category,
-      @NotNull @Positive BigDecimal price,
-      int initialStock) {}
-
-  public record AdjustStockRequest(int quantity, String reason) {}
+      @NotNull @Positive BigDecimal price) {}
 
   public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
 }
@@ -1730,7 +1709,7 @@ The endpoints that are for an `ADMIN` alone have no owner. Their four callers ar
 
 | Endpoint | No header | `X-User-Role: ADMIN`, no `X-User-Id` | A customer | `ADMIN` |
 |----------|-----------|--------------------------------------|------------|---------|
-| `POST /api/products`, `PUT /api/products/{id}/stock`, `PUT …/price` | `403` | `403` | `403` | `200` |
+| `POST /api/products`, `PUT /api/products/{id}/price` | `403` | `403` | `403` | `200` |
 | `POST /api/products/{id}/discontinue`, `POST /api/orders/{id}/ship`, `…/deliver` (`@RequireRole`) | `403` | `403` | `403` | `200` |
 | `GET /api/products`, `GET /api/products/{id}` | `200` | `200` | `200` | `200` |
 

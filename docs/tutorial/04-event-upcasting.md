@@ -17,7 +17,7 @@ In chapter 2 we defined `ProductCreated` with a `category` field from the start.
 // v1 — shipped without a category field
 record ProductCreated(
     String productId, String name, String description,
-    Money price, int stock)
+    Money price)
     implements ProductEvent {}
 ```
 
@@ -78,7 +78,6 @@ class ProductCreatedUpcasterTest {
     v1.put("name", "Widget");
     v1.put("description", "A widget");
     v1.put("price", Map.of("amount", 10, "currency", "USD"));
-    v1.put("stock", 50);
 
     Map<String, Object> v2 = upcaster.upcast(v1, 1);
 
@@ -239,9 +238,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         .build();
@@ -277,7 +273,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -316,7 +311,7 @@ SELECT
   'p-legacy',
   1,
   'ProductCreated',
-  '{"productId":"p-legacy","name":"Old Widget","description":"Pre-category product","price":{"amount":9.99,"currency":"USD"},"stock":20}'::jsonb,
+  '{"productId":"p-legacy","name":"Old Widget","description":"Pre-category product","price":{"amount":9.99,"currency":"USD"}}'::jsonb,
   jsonb_build_object(
     'eventId',       gen_random_uuid()::text,
     'commandId',     'tutorial-legacy-insert',

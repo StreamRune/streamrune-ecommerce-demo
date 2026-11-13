@@ -42,7 +42,6 @@ package org.streamrune.ecommerce.domain.product;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.PositiveOrZero;
 import org.streamrune.core.Command;
 import org.streamrune.ecommerce.domain.common.Money;
 
@@ -52,14 +51,10 @@ public sealed interface ProductCommand extends Command {
       @NotBlank String name,
       String description,
       String category,
-      @NotNull Money price,
-      @PositiveOrZero int initialStock)
+      @NotNull Money price)
       implements ProductCommand {}
 
   record UpdatePrice(@NotBlank String productId, @NotNull Money newPrice)
-      implements ProductCommand {}
-
-  record AdjustStock(@NotBlank String productId, int quantityChange, String reason)
       implements ProductCommand {}
 
   record DiscontinueProduct(@NotBlank String productId) implements ProductCommand {}
@@ -107,7 +102,6 @@ public VirtualThreadCommandBus commandBus(
                   switch (cmd) {
                     case ProductCommand.CreateProduct c -> c.productId();
                     case ProductCommand.UpdatePrice c -> c.productId();
-                    case ProductCommand.AdjustStock c -> c.productId();
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
@@ -160,9 +154,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         .build();
@@ -189,7 +180,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -211,7 +201,7 @@ Start the application and confirm the happy path still passes through:
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-valid","name":"Sprocket","description":"A sturdy sprocket","category":"Gadgets","price":4.99,"initialStock":40}'
+  -d '{"productId":"p-valid","name":"Sprocket","description":"A sturdy sprocket","category":"Gadgets","price":4.99}'
 ```
 
 > **Heads up for chapter 9:** the product writes are open as written here. Chapter 9 makes them an `ADMIN`'s, and from then on the calls of this chapter need `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'` (see the note at the end of Chapter 2).
@@ -227,7 +217,7 @@ Send a request with a negative initial stock (and an otherwise-valid body so it 
 ```bash
 curl -i -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-2","name":"Widget","price":5.00,"initialStock":-1}'
+  -d '{"productId":"p-2","name":"Widget","price":5.00}'
 ```
 
 Expected response:
@@ -250,13 +240,13 @@ The two negative cases below are *also* rejected with a 400, but by a different 
 ```bash
 curl -i -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-3","name":"","price":9.99,"initialStock":10}'
+  -d '{"productId":"p-3","name":"","price":9.99}'
 ```
 
 ```bash
 curl -i -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-4","name":"Gadget","initialStock":5}'
+  -d '{"productId":"p-4","name":"Gadget"}'
 ```
 
 Both return `400 Bad Request`, but not with the plain-text `Command validation failed for CreateProduct` message. `CreateProductRequest` carries `@NotBlank String name` and `@NotNull @Positive BigDecimal price`, so Spring rejects the blank name and the missing price at the web layer, raising a `MethodArgumentNotValidException` before `commandBus.execute(...)` is ever called. No handler of `GlobalExceptionHandler` takes that exception, so Spring Boot answers with its default error body, which names neither the field nor the constraint:

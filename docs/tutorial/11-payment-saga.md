@@ -202,6 +202,7 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/inventory/Inventory
 ```java
 package org.streamrune.ecommerce.domain.inventory;
 
+import jakarta.validation.constraints.NotBlank;
 import org.streamrune.core.Command;
 
 public sealed interface InventoryCommand extends Command {
@@ -212,6 +213,14 @@ public sealed interface InventoryCommand extends Command {
   record ConfirmReservation(String productId, String orderId) implements InventoryCommand {}
 
   record ReceiveShipment(String productId, int quantity) implements InventoryCommand {}
+
+  /**
+   * A correction of the units on hand by a signed amount, a stocktake for example: a negative
+   * change lowers the available units, a positive one raises them. Reserved and committed units are
+   * not touched. The reason is required: the command bus's Bean Validation refuses a blank one.
+   */
+  record AdjustInventory(String productId, int quantityChange, @NotBlank String reason)
+      implements InventoryCommand {}
 }
 ```
 
@@ -235,6 +244,9 @@ public sealed interface InventoryEvent extends DomainEvent {
       implements InventoryEvent {}
 
   record ShipmentReceived(String productId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+
+  record InventoryAdjusted(String productId, int quantityChange, String reason, int availableAfter)
       implements InventoryEvent {}
 }
 ```
@@ -957,6 +969,73 @@ class InventoryDeciderTest {
               assertThat(s.reservationOf("o-2")).isEqualTo(OptionalInt.empty());
             });
   }
+
+  @Test
+  void adjustInventory_changesTheAvailableUnitsAlone() {
+    fixture
+        .given(
+            new InventoryEvent.ShipmentReceived("p-1", 20, 20),
+            new InventoryEvent.StockReserved("p-1", "o-1", 3, 17))
+        .when(new InventoryCommand.AdjustInventory("p-1", -5, "Stocktake"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -5, "Stocktake", 12))
+        .expectState(
+            s -> {
+              assertThat(s.available()).isEqualTo(12);
+              assertThat(s.reserved()).isEqualTo(3);
+              assertThat(s.reservationOf("o-1")).isEqualTo(OptionalInt.of(3));
+            });
+  }
+
+  @Test
+  void adjustInventory_upwards_addsUnits() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", 4, "Found in the back room"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", 4, "Found in the back room", 14));
+  }
+
+  @Test
+  void adjustInventory_belowZero_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -11, "Stocktake"))
+        .expectFailedWith(
+            DomainException.class, "Insufficient stock for p-1: available=10, change=-11");
+  }
+
+  @Test
+  void adjustInventory_toExactlyZero_isAccepted() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -10, "Damaged"))
+        .expectEvents(new InventoryEvent.InventoryAdjusted("p-1", -10, "Damaged", 0));
+  }
+
+  @Test
+  void adjustInventory_withoutAChange_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", 0, "Stocktake"))
+        .expectFailedWith(
+            DomainException.class, "An inventory adjustment must change the quantity");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   "})
+  void adjustInventory_withABlankReason_isRefused(String reason) {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -1, reason))
+        .expectFailedWith(DomainException.class, "An inventory adjustment needs a reason");
+  }
+
+  @Test
+  void adjustInventory_withoutAReason_isRefused() {
+    fixture
+        .given(received())
+        .when(new InventoryCommand.AdjustInventory("p-1", -1, null))
+        .expectFailedWith(DomainException.class, "An inventory adjustment needs a reason");
+  }
 }
 ```
 
@@ -1035,6 +1114,29 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
           List.of(
               new InventoryEvent.ShipmentReceived(
                   c.productId(), c.quantity(), state.available() + c.quantity()));
+
+      // A correction of the units on hand, never of what orders hold: reserved and committed stay.
+      case InventoryCommand.AdjustInventory c -> {
+        if (c.quantityChange() == 0) {
+          throw new DomainException("An inventory adjustment must change the quantity");
+        }
+        if (c.reason() == null || c.reason().isBlank()) {
+          throw new DomainException("An inventory adjustment needs a reason");
+        }
+        int availableAfter = state.available() + c.quantityChange();
+        if (availableAfter < 0) {
+          throw new DomainException(
+              "Insufficient stock for "
+                  + c.productId()
+                  + ": available="
+                  + state.available()
+                  + ", change="
+                  + c.quantityChange());
+        }
+        yield List.of(
+            new InventoryEvent.InventoryAdjusted(
+                c.productId(), c.quantityChange(), c.reason(), availableAfter));
+      }
     };
   }
 
@@ -1069,6 +1171,13 @@ public class InventoryDecider implements Decider<InventoryCommand, InventoryStat
               state.reserved(),
               state.committed(),
               state.reservations());
+      case InventoryEvent.InventoryAdjusted e ->
+          new InventoryState(
+              e.productId(),
+              e.availableAfter(),
+              state.reserved(),
+              state.committed(),
+              state.reservations());
     };
   }
 
@@ -1093,7 +1202,7 @@ Run the tests. They should all pass.
 
 ### Step 1c — Receive stock: InventoryCommandController
 
-Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryCommandController.java`. This is the REST entry point for the only inventory command that operators trigger directly — receiving a new shipment. Stock reservations and releases are driven by the saga, not by direct HTTP calls.
+Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/InventoryCommandController.java`. This is the REST entry point for the two inventory commands that operators trigger directly — receiving a new shipment and adjusting the units on hand. Stock reservations and releases are driven by the saga, not by direct HTTP calls. Both routes ask `ProductCatalog` (Chapter 8) first, so stock is never received or adjusted for a product nobody created. The controller takes the catalogue as a bean; Step 7 registers it in `StreamRuneConfig`.
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
@@ -1102,29 +1211,50 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
-/** Receiving a shipment changes the stock every order reserves from: for an {@code ADMIN} only. */
+/**
+ * The inventory is the one place that holds a product's units: receiving a shipment and adjusting
+ * the units on hand change the stock every order reserves from, so both are for an {@code ADMIN}
+ * only. Both are refused with {@code 400} for a product the catalogue does not hold ({@link
+ * ProductCatalog#requireExists}), so no inventory is opened for a product nobody created.
+ */
 @RestController
 @RequestMapping("/api/inventory")
 public class InventoryCommandController {
   private final VirtualThreadCommandBus commandBus;
+  private final ProductCatalog catalog;
 
-  public InventoryCommandController(VirtualThreadCommandBus commandBus) {
+  public InventoryCommandController(VirtualThreadCommandBus commandBus, ProductCatalog catalog) {
     this.commandBus = commandBus;
+    this.catalog = catalog;
   }
 
   @PostMapping("/{productId}/receive")
   public ResponseEntity<Void> receiveShipment(
       @PathVariable String productId, @Valid @RequestBody ReceiveShipmentRequest req) {
     OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    catalog.requireExists(productId);
     commandBus.execute(new InventoryCommand.ReceiveShipment(productId, req.quantity()));
     return ResponseEntity.ok().build();
   }
 
+  @PostMapping("/{productId}/adjust")
+  public ResponseEntity<Void> adjustInventory(
+      @PathVariable String productId, @RequestBody AdjustInventoryRequest req) {
+    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
+    catalog.requireExists(productId);
+    commandBus.execute(
+        new InventoryCommand.AdjustInventory(productId, req.quantityChange(), req.reason()));
+    return ResponseEntity.ok().build();
+  }
+
   public record ReceiveShipmentRequest(@Positive int quantity) {}
+
+  public record AdjustInventoryRequest(int quantityChange, String reason) {}
 }
 ```
 
@@ -3210,7 +3340,6 @@ public VirtualThreadCommandBus commandBus(
                   switch (cmd) {
                     case ProductCommand.CreateProduct c -> c.productId();
                     case ProductCommand.UpdatePrice c -> c.productId();
-                    case ProductCommand.AdjustStock c -> c.productId();
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
@@ -3261,6 +3390,7 @@ public VirtualThreadCommandBus commandBus(
                     case InventoryCommand.ReleaseStock c -> c.productId();
                     case InventoryCommand.ConfirmReservation c -> c.productId();
                     case InventoryCommand.ReceiveShipment c -> c.productId();
+                    case InventoryCommand.AdjustInventory c -> c.productId();
                   }),
           new InventoryDecider())
       .build();
@@ -3549,6 +3679,9 @@ public MultiProjectionRunner projectionRunner(
 .registerEvent(
     "ShipmentReceived",
     org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+.registerEvent(
+    "InventoryAdjusted",
+    org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
 ```
 
 The `InventoryCommand` block goes into the `VirtualThreadCommandBus` builder, after the payment's. The inventory decider registers under its own aggregate type, `InventoryState.TYPE` (`inventory`), so `ReserveStock` for `p-1` writes to `inventory:p-1` while the product's events live in `product:p-1` — one stream per product and per type, no hand-made prefix. The framework refuses two registrations of one command type and two overlapping command roots with different types at startup.
@@ -3564,11 +3697,12 @@ The `InventoryCommand` block goes into the `VirtualThreadCommandBus` builder, af
               case InventoryCommand.ReleaseStock c -> c.productId();
               case InventoryCommand.ConfirmReservation c -> c.productId();
               case InventoryCommand.ReceiveShipment c -> c.productId();
+              case InventoryCommand.AdjustInventory c -> c.productId();
             }),
     new InventoryDecider())
 ```
 
-> Two aggregate types may share an id value without sharing a stream: `ReserveStock` for `productId = "p-1"` writes to `inventory:p-1`, and the `ProductCreated`, `PriceUpdated` and `StockAdjusted` events of the product `p-1` stay in `product:p-1`. The type is part of the stream's identity — the event store keeps it in its own `aggregate_type` column, next to `aggregate_id` — so mixing the two kinds of events in one stream cannot happen by construction.
+> Two aggregate types may share an id value without sharing a stream: `ReserveStock` for `productId = "p-1"` writes to `inventory:p-1`, and the `ProductCreated` and `PriceUpdated` events of the product `p-1` stay in `product:p-1`. The type is part of the stream's identity — the event store keeps it in its own `aggregate_type` column, next to `aggregate_id` — so mixing the two kinds of events in one stream cannot happen by construction.
 
 > The inventory id is the product id itself, so `AggregateId.of`'s 255-character bound (chapter 2) applies to it as is: a product id over the bound, or one with a control character, makes an inventory request answer `400`. An order cannot name such a product id: the `OrderCommand.OrderLine` constructor refuses it when the order is placed (chapter 8), with the same bound. If the saga meets such an id anyway, in an `OrderPlaced` event that never crossed that check, its reservation is refused here and the saga compensates the order (chapter 11).
 
@@ -3630,6 +3764,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -3689,9 +3824,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -3747,6 +3879,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -3867,7 +4002,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -3918,6 +4052,7 @@ public class StreamRuneConfig {
                       case InventoryCommand.ReleaseStock c -> c.productId();
                       case InventoryCommand.ConfirmReservation c -> c.productId();
                       case InventoryCommand.ReceiveShipment c -> c.productId();
+                      case InventoryCommand.AdjustInventory c -> c.productId();
                     }),
             new InventoryDecider())
         .build();
@@ -4262,6 +4397,12 @@ public class StreamRuneConfig {
   @Bean
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */

@@ -85,15 +85,14 @@ Create `domain/src/main/java/org/streamrune/ecommerce/domain/product/ProductStat
 ```java
 package org.streamrune.ecommerce.domain.product;
 
+/** Whether the product is on sale. Whether it is in stock is the inventory's concern. */
 public enum ProductStatus {
   AVAILABLE,
-  LOW_STOCK,
-  OUT_OF_STOCK,
   DISCONTINUED
 }
 ```
 
-The status is derived automatically from the stock level when events are applied. You never set it directly from a command — that is the `evolve` function's job.
+The status is set by `evolve` when events are applied: a created product is `AVAILABLE`, a discontinued one `DISCONTINUED`. You never set it directly from a command — that is the `evolve` function's job. How many units the shop holds is not the catalogue's concern: the inventory of Chapter 11 keeps them.
 
 ### ProductCommand
 
@@ -113,14 +112,10 @@ public sealed interface ProductCommand extends Command {
       String name,
       String description,
       String category,
-      Money price,
-      int initialStock)
+      Money price)
       implements ProductCommand {}
 
   record UpdatePrice(String productId, Money newPrice) implements ProductCommand {}
-
-  record AdjustStock(String productId, int quantityChange, String reason)
-      implements ProductCommand {}
 
   record DiscontinueProduct(String productId) implements ProductCommand {}
 }
@@ -142,13 +137,10 @@ import org.streamrune.ecommerce.domain.common.Money;
 
 public sealed interface ProductEvent extends DomainEvent {
   record ProductCreated(
-      String productId, String name, String description, String category, Money price, int stock)
+      String productId, String name, String description, String category, Money price)
       implements ProductEvent {}
 
   record PriceUpdated(String productId, Money previousPrice, Money newPrice)
-      implements ProductEvent {}
-
-  record StockAdjusted(String productId, int previousStock, int newStock, String reason)
       implements ProductEvent {}
 
   record ProductDiscontinued(String productId) implements ProductEvent {}
@@ -156,8 +148,6 @@ public sealed interface ProductEvent extends DomainEvent {
 ```
 
 Observe that `PriceUpdated` carries *both* the previous and the new price. Storing the before-value in the event is a common event-sourcing practice: it means projections and audit logs never need to look up the prior state from another source.
-
-Similarly, `StockAdjusted` carries `previousStock` and `newStock` rather than just a delta. Either representation is valid; the absolute values make projections simpler to write.
 
 ### ProductState
 
@@ -172,13 +162,16 @@ import org.streamrune.core.AggregateState;
 import org.streamrune.core.types.AggregateType;
 import org.streamrune.ecommerce.domain.common.Money;
 
+/**
+ * What the catalogue knows of a product: what it is and what it costs. How many units the shop
+ * holds is the inventory's ({@code InventoryState}).
+ */
 public record ProductState(
     String productId,
     String name,
     String description,
     String category,
     Money price,
-    int stock,
     ProductStatus status)
     implements AggregateState {
   /**
@@ -186,25 +179,13 @@ public record ProductState(
    */
   public static final AggregateType TYPE = AggregateType.of("product");
 
-  private static final int LOW_STOCK_THRESHOLD = 10;
-
   public ProductState() {
-    this(null, null, null, null, null, 0, ProductStatus.AVAILABLE);
-  }
-
-  public static ProductStatus statusForStock(int stock) {
-    if (stock <= 0) {
-      return ProductStatus.OUT_OF_STOCK;
-    }
-    if (stock < LOW_STOCK_THRESHOLD) {
-      return ProductStatus.LOW_STOCK;
-    }
-    return ProductStatus.AVAILABLE;
+    this(null, null, null, null, null, ProductStatus.AVAILABLE);
   }
 }
 ```
 
-The no-arg constructor is what `initialState()` will delegate to. `statusForStock` is a pure helper used by `evolve` to derive the status from any stock level — centralising that logic so it cannot drift out of sync between events.
+The no-arg constructor is what `initialState()` will delegate to.
 
 ---
 
@@ -259,21 +240,15 @@ class ProductDeciderTest {
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
         .expectEvents(
             new ProductEvent.ProductCreated(
                 "p-1",
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
-        .expectState(
-            s -> {
-              assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
-              assertThat(s.stock()).isEqualTo(100);
-            });
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
+        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE));
   }
 }
 ```
@@ -310,33 +285,18 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
     return switch (cmd) {
       case ProductCommand.CreateProduct c -> {
         // A product id is created once. Without this check a second CreateProduct would append
-        // another ProductCreated, and evolve would replace the product's name, price and stock.
+        // another ProductCreated, and evolve would replace the product's name and price.
         if (state.productId() != null) {
           throw new DomainException("Product already exists: " + c.productId());
         }
         yield List.of(
             new ProductEvent.ProductCreated(
-                c.productId(),
-                c.name(),
-                c.description(),
-                c.category(),
-                c.price(),
-                c.initialStock()));
+                c.productId(), c.name(), c.description(), c.category(), c.price()));
       }
 
       case ProductCommand.UpdatePrice c -> {
         requireCreated(state, c.productId());
         yield List.of(new ProductEvent.PriceUpdated(c.productId(), state.price(), c.newPrice()));
-      }
-
-      case ProductCommand.AdjustStock c -> {
-        requireCreated(state, c.productId());
-        int newStock = state.stock() + c.quantityChange();
-        if (newStock < 0) {
-          throw new DomainException("Insufficient stock for product: " + c.productId());
-        }
-        yield List.of(
-            new ProductEvent.StockAdjusted(c.productId(), state.stock(), newStock, c.reason()));
       }
 
       case ProductCommand.DiscontinueProduct c -> {
@@ -351,7 +311,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
 
   /**
    * A product that was never created takes no command but {@code CreateProduct}: without this check
-   * a price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+   * a price change or a discontinuation would open a stream for an id nobody created.
    */
   private static void requireCreated(ProductState state, String productId) {
     if (state.productId() == null) {
@@ -369,8 +329,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               e.description(),
               e.category(),
               e.price(),
-              e.stock(),
-              ProductState.statusForStock(e.stock()));
+              ProductStatus.AVAILABLE);
       case ProductEvent.PriceUpdated e ->
           new ProductState(
               state.productId(),
@@ -378,17 +337,7 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               state.description(),
               state.category(),
               e.newPrice(),
-              state.stock(),
               state.status());
-      case ProductEvent.StockAdjusted e ->
-          new ProductState(
-              state.productId(),
-              state.name(),
-              state.description(),
-              state.category(),
-              state.price(),
-              e.newStock(),
-              ProductState.statusForStock(e.newStock()));
       case ProductEvent.ProductDiscontinued e ->
           new ProductState(
               state.productId(),
@@ -396,14 +345,13 @@ public class ProductDecider implements Decider<ProductCommand, ProductState, Pro
               state.description(),
               state.category(),
               state.price(),
-              state.stock(),
               ProductStatus.DISCONTINUED);
     };
   }
 }
 ```
 
-Two guards in `decide` are about existence. `CreateProduct` refuses an id that already has a product: a second `ProductCreated` would replace its name, price and stock. `requireCreated` is the mirror of it for the three other commands: the empty state of an id nobody created has no price and no stock, and without the check `UpdatePrice`, `AdjustStock` or `DiscontinueProduct` would open a stream for a product that does not exist. They are refused with `Product not found`.
+Two guards in `decide` are about existence. `CreateProduct` refuses an id that already has a product: a second `ProductCreated` would replace its name and price. `requireCreated` is the mirror of it for the two other commands: the empty state of an id nobody created has no price, and without the check `UpdatePrice` or `DiscontinueProduct` would open a stream for a product that does not exist. They are refused with `Product not found`.
 
 Run the test again:
 
@@ -413,11 +361,11 @@ Run the test again:
 
 It should pass now. Green phase.
 
-> **Why `CreateProduct` checks the state.** The command bus loads the stream the command names, folds its events into a state with `evolve`, and hands that state to `decide`. For an id nobody used, the state is still `initialState()` and `state.productId()` is `null`. For an id that already has a product, it is not — and that is the only place where "this product exists" is known. A decider that skipped the check would accept the second `CreateProduct`, append a second `ProductCreated` to the same stream, and `evolve` would then replace the name, price and stock of the product that was there. Every command that creates an aggregate needs this guard; you will write the same one for customers (chapter 6) and orders (chapter 8).
+> **Why `CreateProduct` checks the state.** The command bus loads the stream the command names, folds its events into a state with `evolve`, and hands that state to `decide`. For an id nobody used, the state is still `initialState()` and `state.productId()` is `null`. For an id that already has a product, it is not — and that is the only place where "this product exists" is known. A decider that skipped the check would accept the second `CreateProduct`, append a second `ProductCreated` to the same stream, and `evolve` would then replace the name and price of the product that was there. Every command that creates an aggregate needs this guard; you will write the same one for customers (chapter 6) and orders (chapter 8).
 
 ### Step 4 — Add the remaining tests
 
-Expand `ProductDeciderTest` with a test for every business rule: the creation guard, the stock levels that set the status, the stock that may not go below zero, the price change, the discontinuation, and the three commands that need a product that exists (`requireCreated`). Replace the test class with the full version:
+Expand `ProductDeciderTest` with a test for every business rule: the creation guard, the price change, the discontinuation, and the two commands that need a product that exists (`requireCreated`). Replace the test class with the full version:
 
 ```java
 package org.streamrune.ecommerce.commands.product;
@@ -445,21 +393,15 @@ class ProductDeciderTest {
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
         .expectEvents(
             new ProductEvent.ProductCreated(
                 "p-1",
                 "Widget",
                 "A widget",
                 "Electronics",
-                new Money(java.math.BigDecimal.valueOf(19.99), "USD"),
-                100))
-        .expectState(
-            s -> {
-              assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE);
-              assertThat(s.stock()).isEqualTo(100);
-            });
+                new Money(java.math.BigDecimal.valueOf(19.99), "USD")))
+        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.AVAILABLE));
   }
 
   @Test
@@ -467,62 +409,11 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")))
         .when(
             new ProductCommand.CreateProduct(
-                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD"), 5))
+                "p-1", "Other", null, null, new Money(java.math.BigDecimal.ONE, "USD")))
         .expectFailedWith(DomainException.class, "Product already exists: p-1");
-  }
-
-  @Test
-  void createProduct_lowStock() {
-    fixture
-        .given()
-        .when(
-            new ProductCommand.CreateProduct(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
-  }
-
-  @Test
-  void createProduct_outOfStock() {
-    fixture
-        .given()
-        .when(
-            new ProductCommand.CreateProduct(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 0))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.OUT_OF_STOCK));
-  }
-
-  @Test
-  void adjustStock_reducesStock() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 100))
-        .when(new ProductCommand.AdjustStock("p-1", -30, "Sold"))
-        .expectEvents(new ProductEvent.StockAdjusted("p-1", 100, 70, "Sold"))
-        .expectState(s -> assertThat(s.stock()).isEqualTo(70));
-  }
-
-  @Test
-  void adjustStock_insufficientStock_throws() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 5))
-        .when(new ProductCommand.AdjustStock("p-1", -10, "Oversold"))
-        .expectException(DomainException.class);
-  }
-
-  @Test
-  void adjustStock_triggersLowStockStatus() {
-    fixture
-        .given(
-            new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 15))
-        .when(new ProductCommand.AdjustStock("p-1", -10, "Sale"))
-        .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.LOW_STOCK));
   }
 
   @Test
@@ -530,7 +421,7 @@ class ProductDeciderTest {
     var oldPrice = new Money(java.math.BigDecimal.TEN, "USD");
     var newPrice = new Money(java.math.BigDecimal.valueOf(25), "USD");
     fixture
-        .given(new ProductEvent.ProductCreated("p-1", "Widget", null, null, oldPrice, 50))
+        .given(new ProductEvent.ProductCreated("p-1", "Widget", null, null, oldPrice))
         .when(new ProductCommand.UpdatePrice("p-1", newPrice))
         .expectEvents(new ProductEvent.PriceUpdated("p-1", oldPrice, newPrice));
   }
@@ -540,7 +431,7 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50))
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")))
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectEvents(new ProductEvent.ProductDiscontinued("p-1"))
         .expectState(s -> assertThat(s.status()).isEqualTo(ProductStatus.DISCONTINUED));
@@ -551,14 +442,14 @@ class ProductDeciderTest {
     fixture
         .given(
             new ProductEvent.ProductCreated(
-                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD"), 50),
+                "p-1", "Widget", null, null, new Money(java.math.BigDecimal.TEN, "USD")),
             new ProductEvent.ProductDiscontinued("p-1"))
         .when(new ProductCommand.DiscontinueProduct("p-1"))
         .expectException(DomainException.class);
   }
 
   // A product that was never created takes no command but CreateProduct: without the check a
-  // price, a stock adjustment or a discontinuation would open a stream for an id nobody created.
+  // price change or a discontinuation would open a stream for an id nobody created.
 
   @Test
   void updatePrice_neverCreated_throws() {
@@ -567,14 +458,6 @@ class ProductDeciderTest {
         .when(
             new ProductCommand.UpdatePrice(
                 "p-none", new Money(java.math.BigDecimal.valueOf(25), "USD")))
-        .expectFailedWith(DomainException.class, "Product not found: p-none");
-  }
-
-  @Test
-  void adjustStock_neverCreated_throws() {
-    fixture
-        .given()
-        .when(new ProductCommand.AdjustStock("p-none", 5, "Restock"))
         .expectFailedWith(DomainException.class, "Product not found: p-none");
   }
 
@@ -650,9 +533,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         .build();
@@ -670,7 +550,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -725,15 +604,7 @@ public class ProductCommandController {
             req.name(),
             req.description(),
             req.category(),
-            new Money(req.price(), "USD"),
-            req.initialStock()));
-    return ResponseEntity.ok().build();
-  }
-
-  @PutMapping("/{id}/stock")
-  public ResponseEntity<Void> adjustStock(
-      @PathVariable String id, @Valid @RequestBody AdjustStockRequest req) {
-    commandBus.execute(new ProductCommand.AdjustStock(id, req.quantity(), req.reason()));
+            new Money(req.price(), "USD")));
     return ResponseEntity.ok().build();
   }
 
@@ -755,10 +626,7 @@ public class ProductCommandController {
       @NotBlank String name,
       String description,
       String category,
-      @NotNull @Positive BigDecimal price,
-      int initialStock) {}
-
-  public record AdjustStockRequest(int quantity, String reason) {}
+      @NotNull @Positive BigDecimal price) {}
 
   public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
 }
@@ -810,7 +678,7 @@ Wait for the startup banner, then create a product:
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99}'
 ```
 
 A `200 OK` response with an empty body means the command was accepted, the `ProductDecider` ran, a `ProductCreated` event was emitted, and the event was appended to the PostgreSQL event store.
@@ -829,7 +697,7 @@ Send the same request a second time, with `-i` to see the status:
 ```bash
 curl -i -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99}'
 ```
 
 It answers `400 Bad Request` with the body `Product already exists: p-1`: the command bus loaded the stream, the decider saw a state with a product id and threw `DomainException`, and the `GlobalExceptionHandler` from chapter 1 turned it into the 400. The `SELECT` above still returns the one row.
@@ -840,7 +708,7 @@ Query the product list (returns an empty array until chapter 5):
 curl http://localhost:8080/api/products
 ```
 
-> **Heads up for chapter 9: the product writes are open here.** As written in this chapter, anyone who can reach the API can create a product and change its stock and its price: no request carries an identity yet. Chapter 9 switches the identity on and makes the three writes ask for an `ADMIN` as their first line (`OwnerOrAdminAccess.requireAdmin(…)`); reading the catalogue stays open. From then on the `POST` and `PUT` calls of chapters 2 to 5 need an operator's headers, `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'`, and answer `403` without them.
+> **Heads up for chapter 9: the product writes are open here.** As written in this chapter, anyone who can reach the API can create a product and change its price: no request carries an identity yet. Chapter 9 switches the identity on and makes the two writes ask for an `ADMIN` as their first line (`OwnerOrAdminAccess.requireAdmin(…)`); reading the catalogue stays open. From then on the `POST` and `PUT` calls of chapters 2 to 5 need an operator's headers, `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'`, and answer `403` without them.
 
 ---
 

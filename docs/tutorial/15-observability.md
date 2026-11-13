@@ -1466,8 +1466,7 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *   <li>{@code inventory}: {@code ADMIN} only. A product's stock events name the orders that
  *       reserved it, which are other customers' orders.
  *   <li>{@code product}: {@code ADMIN} only. Nothing in the events is personal, but they carry
- *       operational detail the public catalogue does not show: every stock adjustment with its
- *       free-text reason, and the price history.
+ *       operational detail the public catalogue does not show: the price history.
  *   <li>any other type: refused, for {@code ADMIN} too. A new aggregate is closed until a line is
  *       added here.
  * </ul>
@@ -1608,6 +1607,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -1670,9 +1670,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1728,6 +1725,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -1972,7 +1972,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -2023,6 +2022,7 @@ public class StreamRuneConfig {
                       case InventoryCommand.ReleaseStock c -> c.productId();
                       case InventoryCommand.ConfirmReservation c -> c.productId();
                       case InventoryCommand.ReceiveShipment c -> c.productId();
+                      case InventoryCommand.AdjustInventory c -> c.productId();
                     }),
             new InventoryDecider())
         .build();
@@ -2519,6 +2519,12 @@ public class StreamRuneConfig {
   @Bean
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
