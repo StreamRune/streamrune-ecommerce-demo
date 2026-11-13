@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,6 +49,14 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
 
   private static final AttributeKey<String> REJECTION_TYPE =
       AttributeKey.stringKey("streamrune.command.rejection.type");
+
+  /**
+   * The aggregates the seed creates. The suite shares one application context, so a command a saga
+   * or a process manager of another test sends meanwhile can be refused too; the test counts only
+   * the seed's own.
+   */
+  private static final Set<String> SEED_AGGREGATES =
+      Set.of("prod-widget", "prod-gadget", "prod-doohickey", "cust-alice", "cust-bob", "order-seed-1");
 
   private static final String SAGA_SPAN_PREFIX =
       "saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/";
@@ -147,7 +156,7 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
    * A start on a seeded database sends the six creation commands again, and their deciders refuse
    * them: that is how the seed finds its data there. Each refusal is the domain's answer, not a
    * failure, so its span keeps the unset status, records no exception and names the rejection by
-   * its type alone (chapter 17, "Starting again on a seeded database").
+   * its type alone (chapter 17, the note "Where does the seed data come from?").
    */
   @Test
   void theSeedsRefusalsOnASeededDatabaseAreRejectedCommandsNotFailedSpans() {
@@ -163,6 +172,7 @@ class PlaceOrderTraceIT extends AbstractIntegrationTest {
               List<SpanData> rejected =
                   recorded.all().stream()
                       .filter(s -> s.getName().startsWith("command/"))
+                      .filter(s -> SEED_AGGREGATES.contains(s.getAttributes().get(AGGREGATE_ID)))
                       .filter(s -> s.getAttributes().get(REJECTION_TYPE) != null)
                       .toList();
               assertThat(rejected)
