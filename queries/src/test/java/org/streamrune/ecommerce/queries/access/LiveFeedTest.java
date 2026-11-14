@@ -24,6 +24,7 @@ import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.EventStore;
 import org.streamrune.core.IdGenerator;
+import org.streamrune.core.SimpleEventTypeRegistry;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.EventType;
@@ -50,7 +51,11 @@ class LiveFeedTest {
   /** How long a place waits for its client in these tests. */
   private static final Duration FOLLOW_TIMEOUT = Duration.ofMillis(400);
 
-  private final InMemoryEventStore store = new InMemoryEventStore();
+  private final InMemoryEventStore store =
+      new InMemoryEventStore(
+          SimpleEventTypeRegistry.builder()
+              .registerEvent(CustomerEvent.CustomerRegistered.class)
+              .build());
 
   /** The store the feed reads: {@link #store}, with every call counted and one of them held. */
   private final ObservedStore observed = new ObservedStore(store);

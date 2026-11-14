@@ -581,7 +581,9 @@ class PaymentProcessManagerTest {
   private static final class RealBus implements AutoCloseable {
     private final InMemoryCommandInbox inbox = new InMemoryCommandInbox();
     private final RefusingStore store =
-        new RefusingStore(new InMemoryEventStore().withCommandInbox(inbox));
+        new RefusingStore(
+            new InMemoryEventStore(new StreamRuneProducer().eventTypeRegistry())
+                .withCommandInbox(inbox));
     private final InMemoryDeadLetterQueue deadLetters = new InMemoryDeadLetterQueue();
     private final VirtualThreadCommandBus bus =
         VirtualThreadCommandBus.builder()
