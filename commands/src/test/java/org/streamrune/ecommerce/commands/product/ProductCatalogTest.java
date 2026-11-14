@@ -9,6 +9,8 @@ import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.Decider;
 import org.streamrune.core.DomainException;
+import org.streamrune.core.EventTypeRegistry;
+import org.streamrune.core.SimpleEventTypeRegistry;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
@@ -22,7 +24,18 @@ import org.streamrune.test.InMemoryEventStore;
 /** How {@link ProductCatalog} answers from the product streams of the event store. */
 class ProductCatalogTest {
 
-  private final InMemoryEventStore eventStore = new InMemoryEventStore();
+  /**
+   * The product events the bus appends and the state it folds, as the applications register them.
+   */
+  private static final EventTypeRegistry PRODUCT_TYPES =
+      SimpleEventTypeRegistry.builder()
+          .registerEvent(ProductEvent.ProductCreated.class)
+          .registerEvent(ProductEvent.PriceUpdated.class)
+          .registerEvent(ProductEvent.ProductDiscontinued.class)
+          .registerState("ProductState", ProductState.class)
+          .build();
+
+  private final InMemoryEventStore eventStore = new InMemoryEventStore(PRODUCT_TYPES);
   private final InMemoryCommandBus products = productBus();
   private final ProductCatalog catalog = new ProductCatalog(eventStore);
 

@@ -40,7 +40,6 @@ class OrderPricingTest {
       SimpleEventTypeRegistry.builder()
           .registerEvent(ProductEvent.ProductCreated.class)
           .registerEvent(ProductEvent.PriceUpdated.class)
-          .registerEvent(ProductEvent.StockAdjusted.class)
           .registerEvent(ProductEvent.ProductDiscontinued.class)
           .registerState("ProductState", ProductState.class)
           .build();
