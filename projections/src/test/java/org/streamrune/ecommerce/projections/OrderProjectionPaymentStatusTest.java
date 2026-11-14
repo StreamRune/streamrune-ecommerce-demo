@@ -100,6 +100,38 @@ class OrderProjectionPaymentStatusTest {
   }
 
   @Test
+  void aCancelledOrderShowsTheReasonOfItsFirstCancellation() {
+    process(placed("o-1"));
+    assertThat(projection.get("o-1").reason()).as("an order that is not cancelled").isNull();
+
+    process(
+        new OrderEvent.OrderCancelled("o-1", "Insufficient stock for p-1: requested 2", List.of()));
+    assertThat(projection.get("o-1").reason()).isEqualTo("Insufficient stock for p-1: requested 2");
+
+    process(new OrderEvent.OrderCancelled("o-1", "Order fulfillment did not complete", List.of()));
+    assertThat(projection.get("o-1").reason())
+        .as("a second cancellation keeps the first reason")
+        .isEqualTo("Insufficient stock for p-1: requested 2");
+
+    process(new PaymentEvent.PaymentInitiated("pay-o-1", "o-1", TWENTY));
+    assertThat(projection.get("o-1").reason())
+        .as("a payment event keeps the reason")
+        .isEqualTo("Insufficient stock for p-1: requested 2");
+  }
+
+  @Test
+  void aFirstCancellationWithoutAReasonIsNotOverwrittenByTheSecond() {
+    process(placed("o-1"), new OrderEvent.OrderCancelled("o-1", null, List.of()));
+
+    process(new OrderEvent.OrderCancelled("o-1", "Order fulfillment did not complete", List.of()));
+
+    assertThat(projection.get("o-1").status()).isEqualTo(OrderStatus.CANCELLED);
+    assertThat(projection.get("o-1").reason())
+        .as("the customer's cancellation came first and gave no reason")
+        .isNull();
+  }
+
+  @Test
   void aPaymentOfAnOrderTheReadModelDoesNotHoldChangesNothing() {
     process(
         new PaymentEvent.PaymentInitiated("pay-o-9", "o-9", TWENTY),

@@ -21,8 +21,8 @@ import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
- * Seeds the demo data at startup: three products with their opening stock, two customers and one
- * order.
+ * Seeds the demo data at startup: three products, their opening stock in the inventory, two
+ * customers and one order.
  *
  * <p>Seeding is idempotent, one command at a time. A product, a customer and an order are each
  * created by a command its decider refuses when the aggregate already exists, so on a later start
@@ -69,8 +69,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Widget",
                 "A versatile widget for all occasions",
                 "Electronics",
-                new Money(BigDecimal.valueOf(19.99), "USD"),
-                100));
+                new Money(BigDecimal.valueOf(19.99), "USD")));
     applied +=
         dispatch(
             new ProductCommand.CreateProduct(
@@ -78,8 +77,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Gadget",
                 "The latest and greatest gadget",
                 "Electronics",
-                new Money(BigDecimal.valueOf(49.99), "USD"),
-                50));
+                new Money(BigDecimal.valueOf(49.99), "USD")));
     applied +=
         dispatch(
             new ProductCommand.CreateProduct(
@@ -87,8 +85,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Doohickey",
                 "Nobody knows what it does, but everybody wants one",
                 "Accessories",
-                new Money(BigDecimal.valueOf(9.99), "USD"),
-                200));
+                new Money(BigDecimal.valueOf(9.99), "USD")));
 
     // Inventory (opening stock, before the seed order so the saga's ReserveStock succeeds)
     applied += receiveOpeningStock("prod-widget", 100);

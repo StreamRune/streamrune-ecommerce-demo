@@ -8,12 +8,12 @@
  * once; when it is present, the discard removes the entry and runs nothing.
  * Either decision leaves an audit row naming the admin.
  *
- * The `Idempotency-Key` of a stock adjustment: the backend applies a request
- * sent twice with one key once. An adjustment whose event the store refuses is
- * queued for a replay under its key (`503 QUEUED_FOR_REPLAY`); the page sends it
- * once and says where its outcome shows, and the Adjust Stock dialog opened
- * again sends the same amount under the same key, so the re-send and the replay
- * of the queued entry change the stock once.
+ * The `Idempotency-Key` of an inventory adjustment: the backend applies a
+ * request sent twice with one key once. An adjustment whose event the store
+ * refuses is queued for a replay under its key (`503 QUEUED_FOR_REPLAY`); the
+ * page sends it once and says where its outcome shows, and the Adjust dialog of
+ * Admin → Inventory opened again sends the same amount under the same key, so
+ * the re-send and the replay of the queued entry change the units once.
  *
  * Backend-dependent: skipped when the backend is not reachable. Run it with
  * the stack of the README's Quick Start up (`docker compose up -d --wait`):
@@ -24,20 +24,21 @@
  * infrastructure, which a running stack does not do on request. The test
  * therefore writes the entry into the `dead_letter_queue` table of the stack's
  * database (`docker compose exec postgres psql`), in the shape the command bus
- * writes for an unkeyed `PUT /api/products/{id}/stock` whose event could not be
- * stored. Everything after that is the backend's own behaviour. Without the
+ * writes for an unkeyed `POST /api/inventory/{id}/adjust` whose event could not
+ * be stored. Everything after that is the backend's own behaviour. Without the
  * Compose database the dead-letter test is skipped, and with
  * E2E_REQUIRE_BACKEND=1 it fails instead.
  *
  * The queued adjustment fails because the store refuses it: a trigger on
- * `event_stream` raises on the insert of the product's `StockAdjusted`, as a
+ * `event_stream` raises on the insert of the inventory's `InventoryAdjusted`, as a
  * database that fails an insert does, and is dropped once the dialog has shown
  * the answer. The command bus records the failure in the dead-letter queue and
  * counts it against its circuit breaker, which opens at three failures in a
  * row: the page's one attempt leaves it closed for the tests that follow.
  *
- * What a run leaves behind: four products of its own with their stock
- * adjustments, and a DLQ_FORCED_REPLAY and a DLQ_DISCARDED row in the audit log.
+ * What a run leaves behind: four products of its own with their opening stock
+ * and inventory adjustments, and a DLQ_FORCED_REPLAY and a DLQ_DISCARDED row in
+ * the audit log.
  */
 
 import { execFileSync } from "node:child_process";
@@ -86,6 +87,7 @@ function composeDatabaseAnswers(): boolean {
   }
 }
 
+/** A product of the run's own, with `stock` units received into its inventory. */
 async function createProduct(api: APIRequestContext, productId: string, stock: number) {
   const created = await api.post(`${BACKEND_URL}/api/products`, {
     data: {
@@ -94,10 +96,13 @@ async function createProduct(api: APIRequestContext, productId: string, stock: n
       description: "Written by the replay-safety tests",
       category: "Tests",
       price: 9.99,
-      initialStock: stock,
     },
   });
   expect(created.status(), await created.text()).toBe(200);
+  const received = await api.post(`${BACKEND_URL}/api/inventory/${productId}/receive`, {
+    data: { quantity: stock },
+  });
+  expect(received.status(), await received.text()).toBe(200);
 }
 
 /** The entry of an adjustment by `quantity` whose event the store refused: no idempotency key. */
@@ -111,8 +116,8 @@ function deadLetterAnAdjustment(
     `INSERT INTO dead_letter_queue (command_id, command_type, payload, aggregate_type,
        aggregate_id, error_type, error_message, attempts, first_attempt_at, user_id)
      VALUES ('${commandId}',
-       'org.streamrune.ecommerce.domain.product.ProductCommand$AdjustStock',
-       '{"productId":"${productId}","quantityChange":${quantity},"reason":"replayed"}', 'product',
+       'org.streamrune.ecommerce.domain.inventory.InventoryCommand$AdjustInventory',
+       '{"productId":"${productId}","quantityChange":${quantity},"reason":"replayed"}', 'inventory',
        '${productId}', 'java.lang.IllegalStateException', '${marker}', 3, NOW(), 'admin-1')`
   );
 }
@@ -128,9 +133,10 @@ function requireComposeDatabase(): void {
   test.skip(!database, "the Compose stack's database is not reachable");
 }
 
+/** The product's available units, as the inventory read model has them. */
 async function stockOf(api: APIRequestContext, productId: string): Promise<number | null> {
-  const res = await api.get(`${BACKEND_URL}/api/products/${productId}`);
-  return res.ok() ? ((await res.json()) as { stock: number }).stock : null;
+  const res = await api.get(`${BACKEND_URL}/api/inventory/${productId}`);
+  return res.ok() ? ((await res.json()) as { available: number }).available : null;
 }
 
 test.describe("Replay safety against a running backend", () => {
@@ -186,7 +192,7 @@ test.describe("Replay safety against a running backend", () => {
     );
 
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustStock?" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Replay or discard AdjustInventory?" })).toBeVisible();
     await expect(dialog.getByText(/without an idempotency key/)).toBeVisible();
     expect(await stockOf(api, productId), "the refused Retry ran nothing").toBe(10);
 
@@ -252,7 +258,7 @@ test.describe("Replay safety against a running backend", () => {
     ).toBe("admin-1 SUCCESS");
   });
 
-  test("an adjustment queued for a replay is sent once, the reopened dialog sends it again under its key, and the stock changes once", async ({
+  test("an adjustment queued for a replay is sent once, the reopened dialog sends it again under its key, and the units change once", async ({
     page,
   }) => {
     requireComposeDatabase();
@@ -265,29 +271,30 @@ test.describe("Replay safety against a running backend", () => {
     await actAs(page, "ADMIN");
     const keys: string[] = [];
     page.on("request", (r) => {
-      if (r.method() === "PUT" && new URL(r.url()).pathname === `/api/products/${productId}/stock`) {
+      if (r.method() === "POST" && new URL(r.url()).pathname === `/api/inventory/${productId}/adjust`) {
         keys.push(r.headers()["idempotency-key"]);
       }
     });
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const row = page.getByRole("row").filter({ hasText: `Replay ${productId}` });
     await expect(row).toBeVisible(SETTLED);
     const dialog = page.getByRole("dialog");
 
-    // The store refuses the product's stock adjustments, as a database that fails an insert does.
+    // The store refuses the inventory's adjustments, as a database that fails an insert does.
     const refusal = `refuse_adjustment_${suffix}`;
     sql(
       `CREATE FUNCTION ${refusal}() RETURNS trigger LANGUAGE plpgsql AS $$
        BEGIN RAISE EXCEPTION 'the test refuses this adjustment'; END $$;
        CREATE TRIGGER ${refusal} BEFORE INSERT ON event_stream FOR EACH ROW
-         WHEN (NEW.aggregate_type = 'product' AND NEW.aggregate_id = '${productId}'
-               AND NEW.event_type = 'StockAdjusted')
+         WHEN (NEW.aggregate_type = 'inventory' AND NEW.aggregate_id = '${productId}'
+               AND NEW.event_type = 'InventoryAdjusted')
          EXECUTE FUNCTION ${refusal}()`
     );
     try {
       await row.getByRole("button", { name: "Actions" }).click();
-      await page.getByRole("menuitem", { name: "Adjust Stock" }).click();
-      await dialog.getByLabel(/Delta/).fill("5");
+      await page.getByRole("menuitem", { name: "Adjust" }).click();
+      await dialog.getByLabel(/Quantity change/).fill("5");
+      await dialog.getByLabel("Reason").fill("recount");
       await dialog.getByRole("button", { name: "Adjust" }).click();
       await expect(
         page
@@ -313,12 +320,13 @@ test.describe("Replay safety against a running backend", () => {
 
     // Opened again, the dialog sends the queued adjustment under its key.
     await row.getByRole("button", { name: "Actions" }).click();
-    await page.getByRole("menuitem", { name: "Adjust Stock" }).click();
+    await page.getByRole("menuitem", { name: "Adjust" }).click();
     await expect(dialog.getByRole("status")).toContainText(
       "The adjustment of +5 is queued for a replay; its outcome shows in the admin dead-letter list."
     );
+    await dialog.getByLabel("Reason").fill("recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible(SETTLED);
+    await expect(page.getByText("Inventory adjusted")).toBeVisible(SETTLED);
     await expect.poll(() => stockOf(api, productId), SETTLED).toBe(15);
     expect(keys, "the re-send carries the queued adjustment's key").toEqual([keys[0], keys[0]]);
 
@@ -331,22 +339,22 @@ test.describe("Replay safety against a running backend", () => {
     await expect.poll(() => stockOf(api, productId), SETTLED).toBe(15);
   });
 
-  test("a stock adjustment sent twice with one Idempotency-Key changes the stock once", async () => {
+  test("an inventory adjustment sent twice with one Idempotency-Key changes the units once", async () => {
     const productId = `prod-key-${Date.now().toString(36)}`;
     await createProduct(api, productId, 10);
     await expect.poll(() => stockOf(api, productId), SETTLED).toBe(10);
 
     const key = randomUUID();
     for (let i = 0; i < 2; i++) {
-      const adjusted = await api.put(`${BACKEND_URL}/api/products/${productId}/stock`, {
+      const adjusted = await api.post(`${BACKEND_URL}/api/inventory/${productId}/adjust`, {
         headers: { "Idempotency-Key": key },
-        data: { quantity: 3, reason: "restock" },
+        data: { quantityChange: 3, reason: "restock" },
       });
       expect(adjusted.status(), await adjusted.text()).toBe(200);
     }
-    const another = await api.put(`${BACKEND_URL}/api/products/${productId}/stock`, {
+    const another = await api.post(`${BACKEND_URL}/api/inventory/${productId}/adjust`, {
       headers: { "Idempotency-Key": randomUUID() },
-      data: { quantity: 1, reason: "restock" },
+      data: { quantityChange: 1, reason: "restock" },
     });
     expect(another.status(), await another.text()).toBe(200);
 

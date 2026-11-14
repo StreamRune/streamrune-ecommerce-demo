@@ -250,7 +250,8 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
             PRICE,
             List.of(new OrderEvent.OrderLine(product, 1, PRICE)),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT);
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null);
     sagaStore.create(sagaId, FULFILLMENT, state, SagaStatus.STARTED);
     return sagaId;
   }
@@ -306,7 +307,7 @@ class FulfillmentSagaRoutingIT extends AbstractIntegrationTest {
   /** Creates the product in the catalogue, which prices the orders' lines. */
   private void createProduct(String productId) {
     commandBus.execute(
-        new ProductCommand.CreateProduct(productId, "Routing product", null, "General", PRICE, 0));
+        new ProductCommand.CreateProduct(productId, "Routing product", null, "General", PRICE));
   }
 
   private void placeOrder(String order, String customer, String product) throws Exception {

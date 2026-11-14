@@ -4,8 +4,8 @@
  * Every command the frontend sends has a contract on the backend: a method, a
  * path, the two identity headers and a JSON body whose field names are those
  * of the controller's request record. A body with another field name is not
- * refused by every app: an unknown field is ignored, so "delta" in place of
- * "quantity" adjusts the stock by zero and answers 200. These tests drive
+ * refused by every app: an unknown field is ignored, so a misspelt field is
+ * dropped and the command runs without it. These tests drive
  * each action through the page and compare the request it sends, field by
  * field, with what the three apps' controllers read.
  *
@@ -23,10 +23,19 @@ const WIDGET = {
   description: "A versatile widget for all occasions",
   category: "Electronics",
   price: { amount: 19.99, currency: "USD" },
-  stock: 100,
   status: "AVAILABLE",
+  availability: "IN_STOCK",
   createdAt: "2026-10-04T00:00:00Z",
   updatedAt: "2026-10-04T00:00:00Z",
+};
+
+/** The Widget's row of the inventory read model. */
+const WIDGET_UNITS = {
+  productId: "prod-widget",
+  productName: "Widget",
+  available: 100,
+  reserved: 2,
+  committed: 5,
 };
 
 const ALICE = {
@@ -69,6 +78,15 @@ async function pickRowAction(page: Page, item: string): Promise<void> {
   await page.getByRole("menuitem", { name: item }).click();
 }
 
+/** Sends an inventory adjustment of the only row from the Adjust dialog. */
+async function adjust(page: Page, change: string, reason: string): Promise<void> {
+  await pickRowAction(page, "Adjust");
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel(/Quantity change/).fill(change);
+  await dialog.getByLabel("Reason").fill(reason);
+  await dialog.getByRole("button", { name: "Adjust" }).click();
+}
+
 test.describe("Orders — the commands the page sends", () => {
   test("Place Order sends an order id, the product picked and its quantity, and no price", async ({
     page,
@@ -100,6 +118,37 @@ test.describe("Orders — the commands the page sends", () => {
     expect(sent[0].body?.orderId).toMatch(/^order-[0-9a-f]{8}$/);
     expect(sent[0].body?.customerId).toBe("cust-alice");
     expect(sent[0].body?.lines).toEqual([{ productId: "prod-widget", quantity: 2 }]);
+  });
+
+  test("Place Order reads each line's quantity strictly: an exponent, a fraction, nothing or zero is refused in the field", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/customers", [ALICE]);
+    const sent = await answerCommands(page, "/api/orders");
+    await actAs(page, "CUSTOMER");
+
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "Place Order" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("combobox").filter({ hasText: "Select product" }).click();
+    await page.getByRole("option", { name: /Widget/ }).click();
+    // A number field takes "1e3" as 1000 and "1.5" as is; parseInt would read both as 1.
+    for (const typed of ["1e3", "1.5", "", "0"]) {
+      await dialog.getByLabel("Quantity").fill(typed);
+      await dialog.getByRole("button", { name: "Place Order" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units above zero, e.g. 2."
+      );
+    }
+    await expect(dialog.getByLabel("Quantity")).toHaveAttribute("aria-invalid", "true");
+    expect(sent, "nothing refused in the field is sent").toHaveLength(0);
+
+    await dialog.getByLabel("Quantity").fill("3");
+    await dialog.getByRole("button", { name: "Place Order" }).click();
+    await expect(page.getByText(/Order placed: order-[0-9a-f]{8}/)).toBeVisible();
+    expect(sent.map((c) => c.body?.lines)).toEqual([[{ productId: "prod-widget", quantity: 3 }]]);
   });
 
   test("Place Order sends products and quantities, merged per product", async ({ page }) => {
@@ -398,33 +447,44 @@ test.describe("Customers — the commands the page sends", () => {
   });
 });
 
-test.describe("Products — the commands the page sends", () => {
-  test("Add Product sends a product id and the price as a plain amount", async ({ page }) => {
-    await mockBackendRoutes(page);
-    const sent = await answerCommands(page, "/api/products");
-    await actAs(page, "ADMIN");
-
-    await page.goto("/products");
+test.describe("Catalog — the commands the page sends", () => {
+  /** Fills the Create Product dialog; `openingStock` is typed only when given. */
+  async function fillNewProduct(page: Page, openingStock?: string): Promise<void> {
     await page.getByRole("button", { name: "Add Product" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel("Name").fill("Sprocket");
     await dialog.getByLabel("Description").fill("A sprocket");
     await dialog.getByLabel("Category").fill("Hardware");
     await dialog.getByLabel("Price (USD)").fill("12.50");
-    await dialog.getByLabel("Initial Stock").fill("7");
+    if (openingStock !== undefined) {
+      await dialog.getByLabel(/Opening stock/).fill(openingStock);
+    }
     await dialog.getByRole("button", { name: "Create" }).click();
+  }
+
+  test("Add Product without an opening stock sends the catalogue's fields and nothing to the inventory", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    const received = await answerCommands(page, "/api/inventory/*/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await fillNewProduct(page);
 
     await expect(page.getByText(/Product created: prod-[0-9a-f]{8}/)).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeHidden();
     expect(sent).toHaveLength(1);
     expect(sent[0].method).toBe("POST");
     expect(sent[0].path).toBe("/api/products");
     expect(sent[0].role).toBe("ADMIN");
     expect(sent[0].userId).toBe("admin-1");
-    // CreateProductRequest(productId, name, description, category, price, initialStock)
+    // CreateProductRequest(productId, name, description, category, price): a product holds no
+    // stock.
     expect(Object.keys(sent[0].body ?? {}).sort()).toEqual([
       "category",
       "description",
-      "initialStock",
       "name",
       "price",
       "productId",
@@ -435,37 +495,113 @@ test.describe("Products — the commands the page sends", () => {
       description: "A sprocket",
       category: "Hardware",
       price: 12.5,
-      initialStock: 7,
     });
+    expect(received, "no opening stock, no shipment").toHaveLength(0);
   });
 
-  test("Update Price, Adjust Stock, Receive Shipment and Discontinue send the backend's field names", async ({
+  test("Add Product with an opening stock sends ReceiveShipment for the new product as a second step", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
+    const order: string[] = [];
+    const sent = await answerCommands(page, "/api/products", (route) => {
+      order.push("create");
+      return route.fulfill({ status: 200, body: "" });
+    });
+    const received = await answerCommands(page, "/api/inventory/*/receive", (route) => {
+      order.push("receive");
+      return route.fulfill({ status: 200, body: "" });
+    });
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await fillNewProduct(page, "7");
+
+    const productId = () => sent[0].body?.productId as string;
+    await expect(page.getByText(/Product created: prod-[0-9a-f]{8}/)).toBeVisible();
+    await expect(page.getByText(/Opening stock received: 7 units of prod-[0-9a-f]{8}/)).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    expect(order, "the shipment follows the product").toEqual(["create", "receive"]);
+    expect(Object.keys(sent[0].body ?? {})).not.toContain("initialStock");
+    // ReceiveShipmentRequest(quantity), for the product just created, under a key of its own.
+    expect(received.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
+      ["POST", `/api/inventory/${productId()}/receive`, "admin-1", { quantity: 7 }],
+    ]);
+    expect(received[0].idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    );
+  });
+
+  test("an opening stock the backend refuses leaves the product, says so, and points to Admin → Inventory", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    await answerCommands(page, "/api/inventory/*/receive", (route) =>
+      route.fulfill({ status: 400, contentType: "text/plain", body: "Stock refused for the test" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await fillNewProduct(page, "7");
+
+    await expect(page.getByText(/Product created: prod-[0-9a-f]{8}/)).toBeVisible();
+    const productId = sent[0].body?.productId as string;
+    await expect(
+      page.getByText(
+        `Product ${productId} was created, but its opening stock of 7 was not received (The backend refused the request (400): Stock refused for the test). Receive it from Admin → Inventory.`
+      )
+    ).toBeVisible();
+    await expect(page.getByText(/Opening stock received/)).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  test("the opening stock is read strictly: an exponent, a fraction or a negative count is refused in the field", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    const received = await answerCommands(page, "/api/inventory/*/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    for (const typed of ["1e3", "1.5", "-1"]) {
+      await dialog.getByLabel(/Opening stock/).fill(typed);
+      await dialog.getByRole("button", { name: "Create" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units, zero or more, or leave it empty."
+      );
+    }
+    expect(sent, "nothing is created while the field is refused").toHaveLength(0);
+
+    await dialog.getByLabel(/Opening stock/).fill("12");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Opening stock received: 12 units of prod-[0-9a-f]{8}/)).toBeVisible();
+    expect(received.map((c) => c.body)).toEqual([{ quantity: 12 }]);
+  });
+
+  test("Update Price and Discontinue send the backend's field names", async ({ page }) => {
+    await mockBackendRoutes(page);
     await mockList(page, "/api/products", [WIDGET]);
     const priced = await answerCommands(page, "/api/products/prod-widget/price");
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock");
-    const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
     const discontinued = await answerCommands(page, "/api/products/prod-widget/discontinue");
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/catalog");
+    const widget = page.getByRole("row").filter({ hasText: "Widget" });
+    await expect(widget).toContainText("Electronics");
+    await expect(widget).toContainText("$19.99");
+    await expect(widget).toContainText("AVAILABLE");
+
     await pickRowAction(page, "Update Price");
     await page.getByRole("dialog").getByLabel("New Price (USD)").fill("24.50");
     await page.getByRole("dialog").getByRole("button", { name: "Update" }).click();
     await expect(page.getByText("Price updated")).toBeVisible();
-
-    await pickRowAction(page, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("-3");
-    await page.getByRole("dialog").getByLabel("Reason (optional)").fill("damaged");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
-
-    await pickRowAction(page, "Receive Shipment");
-    await page.getByRole("dialog").getByLabel("Quantity").fill("5");
-    await page.getByRole("dialog").getByRole("button", { name: "Receive" }).click();
-    await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
 
     await pickRowAction(page, "Discontinue");
     await expect(page.getByText("Product discontinued")).toBeVisible();
@@ -474,39 +610,122 @@ test.describe("Products — the commands the page sends", () => {
     expect(priced.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
       ["PUT", "/api/products/prod-widget/price", "admin-1", { price: 24.5 }],
     ]);
-    // AdjustStockRequest(quantity, reason)
-    expect(adjusted.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
-      ["PUT", "/api/products/prod-widget/stock", "admin-1", { quantity: -3, reason: "damaged" }],
-    ]);
-    // ReceiveShipmentRequest(quantity)
-    expect(received.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
-      ["POST", "/api/inventory/prod-widget/receive", "admin-1", { quantity: 5 }],
-    ]);
     expect(discontinued.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
       ["POST", "/api/products/prod-widget/discontinue", "admin-1", null],
     ]);
   });
+});
 
-  test("Adjust Stock and Receive Shipment send a new Idempotency-Key for each applied change, and the page's retry of a lost answer sends the same one", async ({
+test.describe("Inventory — the commands the page sends", () => {
+  test("Receive Shipment and Adjust send the backend's field names", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/inventory");
+    await pickRowAction(page, "Receive Shipment");
+    await page.getByRole("dialog").getByLabel("Quantity").fill("5");
+    await page.getByRole("dialog").getByRole("button", { name: "Receive" }).click();
+    await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
+
+    await adjust(page, "-3", "stocktake: three damaged");
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
+
+    // ReceiveShipmentRequest(quantity)
+    expect(received.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
+      ["POST", "/api/inventory/prod-widget/receive", "admin-1", { quantity: 5 }],
+    ]);
+    // AdjustInventoryRequest(quantityChange, reason)
+    expect(adjusted.map((c) => [c.method, c.path, c.userId, c.body])).toEqual([
+      [
+        "POST",
+        "/api/inventory/prod-widget/adjust",
+        "admin-1",
+        { quantityChange: -3, reason: "stocktake: three damaged" },
+      ],
+    ]);
+  });
+
+  test("Adjust needs a reason before anything is sent", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/inventory");
+    await pickRowAction(page, "Adjust");
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel(/Quantity change/).fill("-3");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+
+    const missing = await dialog
+      .getByLabel("Reason")
+      .evaluate((input) => (input as HTMLInputElement).validity.valueMissing);
+    expect(missing, "the browser holds the form back").toBe(true);
+    await expect(dialog).toBeVisible();
+    expect(adjusted).toHaveLength(0);
+  });
+
+  test("Receive Shipment and Adjust read their numbers strictly: an exponent, a fraction or nothing is refused in the field", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/inventory");
+    const dialog = page.getByRole("dialog");
+    await pickRowAction(page, "Receive Shipment");
+    // A number field takes "1e3" as 1000 and "1.5" as is; neither is a count of units here.
+    for (const typed of ["1e3", "1.5", "", "0"]) {
+      await dialog.getByLabel("Quantity").fill(typed);
+      await dialog.getByRole("button", { name: "Receive" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units above zero, e.g. 5."
+      );
+    }
+    await expect(dialog.getByLabel("Quantity")).toHaveAttribute("aria-invalid", "true");
+    await page.keyboard.press("Escape");
+
+    await pickRowAction(page, "Adjust");
+    await dialog.getByLabel("Reason").fill("recount");
+    for (const typed of ["1e3", "-1.5", ""]) {
+      await dialog.getByLabel(/Quantity change/).fill(typed);
+      await dialog.getByRole("button", { name: "Adjust" }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        "Enter a whole number of units, negative to remove, e.g. -3."
+      );
+    }
+    await dialog.getByLabel(/Quantity change/).fill("-3");
+    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
+
+    expect(received, "nothing refused in the field is sent").toHaveLength(0);
+    expect(adjusted.map((c) => c.body)).toEqual([{ quantityChange: -3, reason: "recount" }]);
+  });
+
+  test("Receive Shipment and Adjust send a new Idempotency-Key for each applied change, and the page's retry of a lost answer sends the same one", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     // The first adjustment's first request gets no answer (the connection fails); the page sends
     // it again. Every later request is answered 200.
     let lost = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       lost++ === 0 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
     );
     const received = await answerCommands(page, "/api/inventory/prod-widget/receive");
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
-    for (const delta of ["5", "2"]) {
-      await pickRowAction(page, "Adjust Stock");
-      await page.getByRole("dialog").getByLabel(/Delta/).fill(delta);
-      await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-      await expect(page.getByText("Stock adjusted").first()).toBeVisible();
+    await page.goto("/admin/inventory");
+    for (const change of ["5", "2"]) {
+      await adjust(page, change, "recount");
+      await expect(page.getByText("Inventory adjusted").first()).toBeVisible();
       await expect(page.getByRole("dialog")).toBeHidden();
     }
     await pickRowAction(page, "Receive Shipment");
@@ -517,9 +736,9 @@ test.describe("Products — the commands the page sends", () => {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
     const keys = adjusted.map((c) => c.idempotencyKey);
     expect(adjusted.map((c) => c.body)).toEqual([
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 2 },
+      { quantityChange: 5, reason: "recount" },
+      { quantityChange: 5, reason: "recount" },
+      { quantityChange: 2, reason: "recount" },
     ]);
     keys.forEach((key) => expect(key).toMatch(uuid));
     expect(keys[1], "the retry of the lost request carries its key").toBe(keys[0]);
@@ -529,46 +748,39 @@ test.describe("Products — the commands the page sends", () => {
     expect(received[0].idempotencyKey).not.toBe(keys[0]);
   });
 
-  test("after the page gives up, a resubmit of the unchanged Adjust Stock dialog sends the same Idempotency-Key, an edited one a new key", async ({
+  test("after the page gives up, a resubmit of the unchanged Adjust dialog sends the same Idempotency-Key, an edited one a new key", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     // The first submit and the page's two retries of it get no answer; then the backend answers.
     let lost = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       lost++ < 3 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
-    await pickRowAction(page, "Adjust Stock");
+    await page.goto("/admin/inventory");
+    await adjust(page, "5", "recount");
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
     await expect(page.getByText(/Failed to fetch|API error/).first()).toBeVisible({ timeout: 15_000 });
     expect(adjusted).toHaveLength(3);
 
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
 
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByLabel(/Delta/).fill("6");
+    await pickRowAction(page, "Adjust");
+    await dialog.getByLabel(/Quantity change/).fill("5");
+    await dialog.getByLabel(/Quantity change/).fill("6");
+    await dialog.getByLabel("Reason").fill("recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted").first()).toBeVisible();
+    await expect(page.getByText("Inventory adjusted").first()).toBeVisible();
 
     const keys = adjusted.map((c) => c.idempotencyKey);
     expect(keys).toHaveLength(5);
     expect(new Set(keys.slice(0, 4)).size, "one adjustment, one key").toBe(1);
     expect(keys[4], "an edited dialog is another adjustment").not.toBe(keys[0]);
-    expect(adjusted.map((c) => c.body)).toEqual([
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 6 },
-    ]);
+    expect(adjusted.map((c) => c.body?.quantityChange)).toEqual([5, 5, 5, 5, 6]);
   });
 });
 
@@ -599,45 +811,50 @@ function refused(reason: string, seconds: number) {
   };
 }
 
-test.describe("Products — one Idempotency-Key per intended change", () => {
-  test("Adjust Stock closed after a lost answer and opened again sends the same amount under the same key, also after a field edit", async ({
+test.describe("Inventory — one Idempotency-Key per intended change", () => {
+  test("Adjust closed after a lost answer and opened again sends the same amount under the same key, also after a field edit", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     // The first submit and the page's two retries of it get no answer; then the backend answers.
     let lost = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       lost++ < 3 ? route.abort("failed") : route.fulfill({ status: 200, body: "" })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
-    await pickRowAction(page, "Adjust Stock");
+    await page.goto("/admin/inventory");
+    await adjust(page, "5", "recount");
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
     await expect(page.getByText(/Failed to fetch|API error/).first()).toBeVisible({ timeout: 15_000 });
     expect(adjusted).toHaveLength(3);
 
     // The admin closes the dialog and opens it again: it opens on the change without an answer.
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
-    await pickRowAction(page, "Adjust Stock");
+    await pickRowAction(page, "Adjust");
     await expect(dialog.getByRole("status")).toContainText(
       "The adjustment of +5 has no answer yet: it may have been applied."
     );
-    await expect(dialog.getByLabel(/Delta/)).toHaveValue("5");
-    await dialog.getByLabel(/Delta/).fill("6");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByLabel(/Reason/).fill("recount");
+    await expect(dialog.getByLabel(/Quantity change/)).toHaveValue("5");
+    // The held adjustment opens with the reason its first request carried, and keeps it.
+    await expect(dialog.getByLabel("Reason")).toHaveValue("recount");
+    await expect(dialog.getByRole("status")).toContainText("Its reason is “recount”.");
+    await dialog.getByLabel(/Quantity change/).fill("6");
+    await dialog.getByLabel(/Quantity change/).fill("5");
+    await dialog.getByLabel("Reason").fill("recount after the lost answer");
+    await expect(dialog.getByRole("note")).toHaveText(
+      "Sent again, the held adjustment keeps its reason “recount”: the backend records the first request's. The edited reason is not sent."
+    );
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
 
     // Applied: the next adjustment is a new one, of the same amount or not.
-    await pickRowAction(page, "Adjust Stock");
+    await pickRowAction(page, "Adjust");
     await expect(dialog.getByRole("status")).toHaveCount(0);
-    await dialog.getByLabel(/Delta/).fill("5");
+    await dialog.getByLabel(/Quantity change/).fill("5");
+    await dialog.getByLabel("Reason").fill("another recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
     await expect.poll(() => adjusted.length).toBe(5);
 
@@ -645,11 +862,12 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     expect(new Set(keys.slice(0, 4)).size, "one intended adjustment, one key").toBe(1);
     expect(keys[4], "an adjustment after the first was applied is a new one").not.toBe(keys[0]);
     expect(adjusted.map((c) => c.body)).toEqual([
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 5 },
-      { quantity: 5, reason: "recount" },
-      { quantity: 5 },
+      { quantityChange: 5, reason: "recount" },
+      { quantityChange: 5, reason: "recount" },
+      { quantityChange: 5, reason: "recount" },
+      // Sent again under its key, the held adjustment carries its first reason, not the edit.
+      { quantityChange: 5, reason: "recount" },
+      { quantityChange: 5, reason: "another recount" },
     ]);
   });
 
@@ -657,11 +875,11 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     // The first request of each change is queued for a replay; the next one is applied.
-    let stockAnswers = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
-      stockAnswers++ < 1 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
+    let adjustAnswers = 0;
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
+      adjustAnswers++ < 1 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
     );
     let receiveAnswers = 0;
     const received = await answerCommands(page, "/api/inventory/prod-widget/receive", (route) =>
@@ -671,11 +889,9 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const dialog = page.getByRole("dialog");
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await adjust(page, "5", "recount");
     await expect(
       page
         .getByText(
@@ -688,12 +904,13 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     await page.waitForTimeout(3_000);
     expect(adjusted).toHaveLength(1);
 
-    await pickRowAction(page, "Adjust Stock");
+    await pickRowAction(page, "Adjust");
     await expect(dialog.getByRole("status")).toContainText(
       "The adjustment of +5 is queued for a replay; its outcome shows in the admin dead-letter list."
     );
+    await dialog.getByLabel("Reason").fill("recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
     expect(new Set(adjusted.map((c) => c.idempotencyKey)).size, "one key").toBe(1);
     expect(adjusted).toHaveLength(2);
 
@@ -713,30 +930,188 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     expect(received[0].idempotencyKey).not.toBe(adjusted[0].idempotencyKey);
   });
 
+  test("an opening stock that failed opens the Receive Shipment dialog on it, and it goes out again under its key", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    let receiveAnswers = 0;
+    const received = await answerCommands(page, "/api/inventory/*/receive", (route) =>
+      receiveAnswers++ < 1
+        ? route.fulfill(QUEUED_FOR_REPLAY)
+        : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByLabel(/Opening stock/).fill("4");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    // Queued: its outcome is not known yet, and the toast says so instead of "not received".
+    await expect(
+      page.getByText(
+        /^Product prod-[0-9a-f]{8} was created\. Its opening stock of 4 is queued for a replay, so its outcome is not known yet .*In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once\.$/
+      )
+    ).toBeVisible();
+    await expect(page.getByText(/was not received/)).toHaveCount(0);
+    const productId = sent[0].body?.productId as string;
+
+    // The new product's row in the inventory, as the read model lists it.
+    await mockList(page, "/api/inventory", [
+      { productId, productName: "Sprocket", available: 0, reserved: 0, committed: 0 },
+    ]);
+    await page.goto("/admin/inventory");
+    await pickRowAction(page, "Receive Shipment");
+    await expect(dialog.getByRole("status")).toContainText("The shipment of +4 is queued for a replay");
+    // Nothing invites a second shipment beside the held one.
+    await expect(dialog.getByRole("status")).toContainText(
+      "Start a new change only for another shipment beside this one: this one may still be applied."
+    );
+    await expect(dialog.getByLabel("Quantity")).toHaveValue("4");
+    await dialog.getByRole("button", { name: "Receive" }).click();
+    await expect(page.getByText("Shipment received into the inventory")).toBeVisible();
+
+    expect(received.map((c) => [c.path, c.body])).toEqual([
+      [`/api/inventory/${productId}/receive`, { quantity: 4 }],
+      [`/api/inventory/${productId}/receive`, { quantity: 4 }],
+    ]);
+    expect(received[1].idempotencyKey, "the opening stock keeps its key").toBe(
+      received[0].idempotencyKey
+    );
+  });
+
+  test("an opening stock without an answer is reported as of unknown outcome, not as not received", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const sent = await answerCommands(page, "/api/products");
+    // The first attempt and the page's two retries get no answer.
+    const received = await answerCommands(page, "/api/inventory/*/receive", (route) =>
+      route.abort("failed")
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByLabel(/Opening stock/).fill("4");
+    await dialog.getByRole("button", { name: "Create" }).click();
+
+    const productId = () => sent[0].body?.productId as string;
+    await expect(
+      page.getByText(
+        /Its opening stock of 4 got no answer, so its outcome is unknown: it may have been received .*In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once\.$/
+      )
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/was not received/)).toHaveCount(0);
+    expect(received.map((c) => c.path)).toEqual(Array(3).fill(`/api/inventory/${productId()}/receive`));
+    expect(new Set(received.map((c) => c.idempotencyKey)).size, "one shipment, one key").toBe(1);
+  });
+
+  test("Create after a lost answer sends the same product id, and the backend's already-exists completes the create", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    let answers = 0;
+    const sent = await answerCommands(page, "/api/products", (route) => {
+      answers += 1;
+      if (answers === 1) return route.abort("failed");
+      const id = (route.request().postDataJSON() as { productId: string }).productId;
+      return route.fulfill({
+        status: 400,
+        contentType: "text/plain",
+        body: `Product already exists: ${id}`,
+      });
+    });
+    const received = await answerCommands(page, "/api/inventory/*/receive");
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByLabel(/Opening stock/).fill("3");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Failed to fetch/).first()).toBeVisible();
+    const productId = sent[0].body?.productId as string;
+    await expect(dialog.getByRole("note")).toHaveText(
+      `The last Create of ${productId} got no answer: the product may exist. Create sends it again under the same id, so it cannot make a second product.`
+    );
+
+    // Closed and opened again, the dialog still holds the id.
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Add Product" }).click();
+    await dialog.getByRole("button", { name: "Create" }).click();
+
+    await expect(
+      page.getByText(`Product created: ${productId} (the earlier Create was applied)`)
+    ).toBeVisible();
+    await expect(page.getByText(`Opening stock received: 3 units of ${productId}`)).toBeVisible();
+    expect(sent.map((c) => c.body?.productId)).toEqual([productId, productId]);
+    expect(received.map((c) => [c.path, c.body])).toEqual([
+      [`/api/inventory/${productId}/receive`, { quantity: 3 }],
+    ]);
+  });
+
+  test("a refused Create lets its id go: the next Create picks a new one", async ({ page }) => {
+    await mockBackendRoutes(page);
+    let answers = 0;
+    const sent = await answerCommands(page, "/api/products", (route) =>
+      answers++ === 0
+        ? route.fulfill({ status: 400, contentType: "text/plain", body: "Price must be positive" })
+        : route.fulfill({ status: 200, body: "" })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/catalog");
+    await page.getByRole("button", { name: "Add Product" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Name").fill("Sprocket");
+    await dialog.getByLabel("Category").fill("Hardware");
+    await dialog.getByLabel("Price (USD)").fill("12.50");
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/refused the request \(400\): Price must be positive/)).toBeVisible();
+    await expect(dialog.getByRole("note")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByText(/Product created: prod-[0-9a-f]{8}$/)).toBeVisible();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body?.productId).not.toBe(sent[0].body?.productId);
+  });
+
   test("Start a new change makes the same amount a new adjustment with a new key", async ({
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     let answers = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       answers++ < 1 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const dialog = page.getByRole("dialog");
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await adjust(page, "5", "recount");
     await expect(dialog).toBeHidden();
 
-    // The admin means a second delivery of five, not the queued one: a new adjustment.
-    await pickRowAction(page, "Adjust Stock");
+    // The admin means a second correction of five, not the queued one: a new adjustment.
+    await pickRowAction(page, "Adjust");
     await dialog.getByRole("button", { name: "Start a new change" }).click();
     await expect(dialog.getByRole("status")).toHaveCount(0);
+    await dialog.getByLabel("Reason").fill("recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
 
     const keys = adjusted.map((c) => c.idempotencyKey);
     expect(keys).toHaveLength(2);
@@ -745,29 +1120,28 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
 
   test("a change held by the page survives a reload of the page", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     let answers = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       answers++ < 1 ? route.fulfill(QUEUED_FOR_REPLAY) : route.fulfill({ status: 200, body: "" })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const dialog = page.getByRole("dialog");
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await adjust(page, "5", "recount");
     await expect(dialog).toBeHidden();
 
     // While the backend's replay is due, the admin reloads the page: the change is still held.
     await page.reload();
-    await pickRowAction(page, "Adjust Stock");
+    await pickRowAction(page, "Adjust");
     await expect(dialog.getByRole("status")).toContainText(
       "The adjustment of +5 is queued for a replay"
     );
-    await expect(dialog.getByLabel(/Delta/)).toHaveValue("5");
+    await expect(dialog.getByLabel(/Quantity change/)).toHaveValue("5");
+    await dialog.getByLabel("Reason").fill("recount");
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
 
     expect(adjusted).toHaveLength(2);
     expect(adjusted[1].idempotencyKey, "the key survives the reload").toBe(
@@ -777,9 +1151,9 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
 
   test("a 503 refusal is sent again once, after its Retry-After", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     const sentAt: number[] = [];
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) => {
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) => {
       sentAt.push(Date.now());
       return sentAt.length === 1
         ? route.fulfill(refused("CIRCUIT_BREAKER_OPEN", 3))
@@ -787,11 +1161,9 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     });
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
-    await pickRowAction(page, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("5");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible({ timeout: 15_000 });
+    await page.goto("/admin/inventory");
+    await adjust(page, "5", "recount");
+    await expect(page.getByText("Inventory adjusted")).toBeVisible({ timeout: 15_000 });
 
     expect(adjusted).toHaveLength(2);
     expect(adjusted[1].idempotencyKey).toBe(adjusted[0].idempotencyKey);
@@ -802,20 +1174,18 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     let answers = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       answers++ < 2
         ? route.fulfill(refused("AGGREGATE_LOCK_UNAVAILABLE", 1))
         : route.fulfill({ status: 200, body: "" })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const dialog = page.getByRole("dialog");
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await adjust(page, "5", "recount");
     await expect(page.getByText(/The backend is busy, try again in a few seconds \(503\)/)).toBeVisible({
       timeout: 15_000,
     });
@@ -826,7 +1196,7 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
       "The adjustment of +5 was not applied: the backend refused it for now and wrote nothing."
     );
     await dialog.getByRole("button", { name: "Adjust" }).click();
-    await expect(page.getByText("Stock adjusted")).toBeVisible();
+    await expect(page.getByText("Inventory adjusted")).toBeVisible();
     expect(new Set(adjusted.map((c) => c.idempotencyKey)).size, "one key").toBe(1);
   });
 
@@ -834,18 +1204,16 @@ test.describe("Products — one Idempotency-Key per intended change", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
     let answers = 0;
-    const adjusted = await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       answers++ === 0 ? route.abort("failed") : route.fulfill(refused("CIRCUIT_BREAKER_OPEN", 1))
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/inventory");
     const dialog = page.getByRole("dialog");
-    await pickRowAction(page, "Adjust Stock");
-    await dialog.getByLabel(/Delta/).fill("5");
-    await dialog.getByRole("button", { name: "Adjust" }).click();
+    await adjust(page, "5", "recount");
     await expect(page.getByText(/The backend is busy/)).toBeVisible({ timeout: 15_000 });
 
     await expect(dialog.getByRole("status")).toContainText(
@@ -978,7 +1346,7 @@ test.describe("A refused command is shown", () => {
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/catalog");
     await pickRowAction(page, "Update Price");
     await page.getByRole("dialog").getByLabel(/New Price/).fill("21.50");
     await page.getByRole("dialog").getByRole("button", { name: "Update" }).click();
@@ -1037,7 +1405,7 @@ test.describe("A refused command is shown", () => {
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
+    await page.goto("/admin/catalog");
     await pickRowAction(page, "Update Price");
     await page.getByRole("dialog").getByLabel(/New Price/).fill("24.99");
     await page.getByRole("dialog").getByRole("button", { name: "Update" }).click();
@@ -1128,26 +1496,46 @@ test.describe("A refused command is shown", () => {
 
   test("a 400 shows the backend's reason", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/products", [WIDGET]);
-    await answerCommands(page, "/api/products/prod-widget/stock", (route) =>
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
       route.fulfill({
         status: 400,
         contentType: "text/plain",
-        body: "Insufficient stock for product: prod-widget",
+        body: "Insufficient stock for prod-widget: available=100, change=-500",
       })
     );
     await actAs(page, "ADMIN");
 
-    await page.goto("/products");
-    await pickRowAction(page, "Adjust Stock");
-    await page.getByRole("dialog").getByLabel(/Delta/).fill("-500");
-    await page.getByRole("dialog").getByRole("button", { name: "Adjust" }).click();
+    await page.goto("/admin/inventory");
+    await adjust(page, "-500", "stocktake");
 
     await expect(
       page.getByText(
-        "The backend refused the request (400): Insufficient stock for product: prod-widget"
+        "The backend refused the request (400): Insufficient stock for prod-widget: available=100, change=-500"
       )
     ).toBeVisible();
-    await expect(page.getByText("Stock adjusted")).toHaveCount(0);
+    await expect(page.getByText("Inventory adjusted")).toHaveCount(0);
+  });
+
+  test("a blank reason is the backend's to refuse, and its words are shown", async ({ page }) => {
+    await mockBackendRoutes(page);
+    await mockList(page, "/api/inventory", [WIDGET_UNITS]);
+    const adjusted = await answerCommands(page, "/api/inventory/prod-widget/adjust", (route) =>
+      route.fulfill({
+        status: 400,
+        contentType: "text/plain",
+        body: "An inventory adjustment needs a reason",
+      })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/admin/inventory");
+    // Spaces pass the browser's required check; the backend decides that a reason is blank.
+    await adjust(page, "-2", "   ");
+
+    await expect(
+      page.getByText("The backend refused the request (400): An inventory adjustment needs a reason")
+    ).toBeVisible();
+    expect(adjusted.map((c) => c.body)).toEqual([{ quantityChange: -2, reason: "   " }]);
   });
 });

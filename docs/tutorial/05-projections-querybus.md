@@ -69,13 +69,12 @@ public record ProductView(
     String description,
     String category,
     Money price,
-    int stock,
     ProductStatus status,
     Instant createdAt,
     Instant updatedAt) {}
 ```
 
-Note that `status` is denormalized here. The projection derives it from the stock level (or marks it `DISCONTINUED`) so the controller never needs to recompute it.
+Note that `status` is denormalized here: the projection copies it from the product's events, so the controller never needs to recompute it. The view holds no stock: the units a product holds are the inventory's, which chapter 11 introduces, and chapter 13 adds them to this view.
 
 ### Step 2 — Create the `ListProducts` query
 
@@ -92,8 +91,9 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 @Cacheable(
     ttlSeconds = 60,
     invalidateOn = {
-      ProductEvent.ProductCreated.class, ProductEvent.PriceUpdated.class,
-      ProductEvent.StockAdjusted.class, ProductEvent.ProductDiscontinued.class
+      ProductEvent.ProductCreated.class,
+      ProductEvent.PriceUpdated.class,
+      ProductEvent.ProductDiscontinued.class
     })
 public record ListProducts()
     implements org.streamrune.core.Query<
@@ -102,7 +102,7 @@ public record ListProducts()
 
 The record implements the framework's `Query<R>` marker, where `R` is the result type the query resolves to — here `List<ProductView>`. This is what makes the `QueryBus` type-safe: `register(ListProducts.class, ...)` binds the handler's return type to `List<ProductView>` at compile time, and `dispatch(new ListProducts())` returns `List<ProductView>` with no cast at the call site. (`ListProducts` carries no fields, so it uses the fully-qualified type names inline rather than adding imports.)
 
-The `@Cacheable` annotation is picked up automatically by `CachingQueryBus`. It says: cache the result of `ListProducts` for 60 seconds, and invalidate the cache whenever any of those four event types is written to the store. You do not need to write any cache management code — the bus handles it.
+The `@Cacheable` annotation is picked up automatically by `CachingQueryBus`. It says: cache the result of `ListProducts` for 60 seconds, and invalidate the cache whenever any of those three event types is written to the store. You do not need to write any cache management code — the bus handles it.
 
 ### Step 3 — Create `ProductProjection`
 
@@ -144,8 +144,7 @@ public class ProductProjection extends BaseProjection {
                       e.description(),
                       e.category(),
                       e.price(),
-                      e.stock(),
-                      ProductState.statusForStock(e.stock()),
+                      ProductStatus.AVAILABLE,
                       envelope.metadata().timestamp(),
                       envelope.metadata().timestamp()));
           case ProductEvent.PriceUpdated e ->
@@ -160,24 +159,7 @@ public class ProductProjection extends BaseProjection {
                                   existing.description(),
                                   existing.category(),
                                   e.newPrice(),
-                                  existing.stock(),
                                   existing.status(),
-                                  existing.createdAt(),
-                                  envelope.metadata().timestamp())));
-          case ProductEvent.StockAdjusted e ->
-              findById(e.productId(), ProductView.class)
-                  .ifPresent(
-                      existing ->
-                          save(
-                              e.productId(),
-                              new ProductView(
-                                  existing.productId(),
-                                  existing.name(),
-                                  existing.description(),
-                                  existing.category(),
-                                  existing.price(),
-                                  e.newStock(),
-                                  ProductState.statusForStock(e.newStock()),
                                   existing.createdAt(),
                                   envelope.metadata().timestamp())));
           case ProductEvent.ProductDiscontinued e ->
@@ -192,7 +174,6 @@ public class ProductProjection extends BaseProjection {
                                   existing.description(),
                                   existing.category(),
                                   existing.price(),
-                                  existing.stock(),
                                   ProductStatus.DISCONTINUED,
                                   existing.createdAt(),
                                   envelope.metadata().timestamp())));
@@ -214,8 +195,7 @@ public class ProductProjection extends BaseProjection {
 A few things to notice:
 
 - `ProductCreated` constructs the view from scratch, using `envelope.metadata().timestamp()` for both `createdAt` and `updatedAt`.
-- `PriceUpdated`, `StockAdjusted`, and `ProductDiscontinued` use `findById` to load the existing view and replace only the fields that changed. The `ifPresent` guard is intentional: if somehow an event arrives for an unknown product, the projection ignores it rather than crashing.
-- `ProductState.statusForStock` is the same helper used by the Decider — one source of truth for how stock level maps to status.
+- `PriceUpdated` and `ProductDiscontinued` use `findById` to load the existing view and replace only the fields that changed. The `ifPresent` guard is intentional: if somehow an event arrives for an unknown product, the projection ignores it rather than crashing.
 - The name `"products"` is passed to `super(repository, "products")`, and `projectionName()` returns it. All projections in this demo use explicit lowercase-plural names: `JdbcProjectionRepository` stores each name in a table of its own (`products_view`) and accepts only lower-case snake_case names (`[a-z_][a-z0-9_]{0,57}`), and the explicit name keeps the read model's name equal to the name the projection is registered under. (Without an explicit name, `BaseProjection` derives one from the class name in snake_case: `ProductProjection` would save under `product`.)
 - `@ProjectionConfig(name = "products", deliveryMode = TRANSACTIONAL_LOCAL)` is read by the framework's annotation-driven auto-discovery (the Quarkus and Micronaut apps discover their projections this way, through small `Discoverable*` subclasses that carry the same annotation). The Spring app registers projections explicitly and sets `streamrune.projections.auto-discovery.enabled: false` in `application.yml`, so here only the `deliveryMode` matters, as documentation of what this projection promises — the same value is passed to `register(...)` when you wire the runner at the end of this chapter (see [Delivery modes — what you are promising](#delivery-modes--what-you-are-promising)).
 
@@ -330,7 +310,7 @@ public class ProductQueryController {
 }
 ```
 
-`queryBus.dispatch(new ListProducts())` returns the cached list when the cache is warm and a `ProductCreated` / `PriceUpdated` / `StockAdjusted` / `ProductDiscontinued` event has not invalidated it; otherwise it routes to the registered handler, which calls `productProjection.listAll()`.
+`queryBus.dispatch(new ListProducts())` returns the cached list when the cache is warm and a `ProductCreated` / `PriceUpdated` / `ProductDiscontinued` event has not invalidated it; otherwise it routes to the registered handler, which calls `productProjection.listAll()`.
 
 ### Step 7 — Run the projection: `MultiProjectionRunner`
 
@@ -446,9 +426,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         .build();
@@ -492,7 +469,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -578,11 +554,11 @@ Create two products. If your database still holds `p-1` from chapter 2, the firs
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99,"initialStock":100}'
+  -d '{"productId":"p-1","name":"Widget","description":"A fine widget","category":"Gadgets","price":29.99}'
 
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId":"p-2","name":"Gizmo","description":"A handy gizmo","category":"Gadgets","price":14.99,"initialStock":5}'
+  -d '{"productId":"p-2","name":"Gizmo","description":"A handy gizmo","category":"Gadgets","price":14.99}'
 ```
 
 > **Heads up for chapter 9:** the product writes are open as written here. Chapter 9 makes them an `ADMIN`'s, and from then on the three writes of this chapter need `-H 'X-User-Id: admin-1' -H 'X-User-Role: ADMIN'` (see the note at the end of Chapter 2).
@@ -593,7 +569,7 @@ List them:
 curl http://localhost:8080/api/products
 ```
 
-You should receive a JSON array that holds both products (and any other product you created in earlier chapters, such as `p-valid` from chapter 3). `p-2` has `"status":"LOW_STOCK"` because its initial stock of 5 is below the threshold.
+You should receive a JSON array that holds both products (and any other product you created in earlier chapters, such as `p-valid` from chapter 3). Both are `"status":"AVAILABLE"`: a product is on sale until it is discontinued.
 
 Fetch a single product:
 

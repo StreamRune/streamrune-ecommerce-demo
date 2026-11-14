@@ -56,16 +56,17 @@ public class OrderProjection extends BaseProjection {
                   e.total(),
                   OrderStatus.CREATED,
                   null,
+                  null,
                   at,
                   at));
       case OrderEvent.OrderConfirmed e -> updateStatus(e.orderId(), OrderStatus.CONFIRMED, at);
       case OrderEvent.OrderShipped e -> updateStatus(e.orderId(), OrderStatus.SHIPPED, at);
       case OrderEvent.OrderDelivered e -> updateStatus(e.orderId(), OrderStatus.DELIVERED, at);
-      case OrderEvent.OrderCancelled e -> updateStatus(e.orderId(), OrderStatus.CANCELLED, at);
+      case OrderEvent.OrderCancelled e -> cancel(e.orderId(), e.reason(), at);
     }
   }
 
-  /** The status of the order's row; its payment status stays as it is. */
+  /** The status of the order's row; its payment status and reason stay as they are. */
   private void updateStatus(String id, OrderStatus status, Instant timestamp) {
     findById(id, OrderView.class)
         .ifPresent(
@@ -79,6 +80,30 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         status,
                         existing.paymentStatus(),
+                        existing.reason(),
+                        existing.createdAt(),
+                        timestamp)));
+  }
+
+  /**
+   * The order cancelled, with the reason of its {@code OrderCancelled}. An order cancelled twice
+   * (its customer, then the fulfillment saga) shows the first cancellation's reason, even when that
+   * one gave none: the second cancellation changes nothing the customer sees.
+   */
+  private void cancel(String id, String reason, Instant timestamp) {
+    findById(id, OrderView.class)
+        .ifPresent(
+            existing ->
+                save(
+                    id,
+                    new OrderView(
+                        existing.orderId(),
+                        existing.customerId(),
+                        existing.lines(),
+                        existing.total(),
+                        OrderStatus.CANCELLED,
+                        existing.paymentStatus(),
+                        existing.status() == OrderStatus.CANCELLED ? existing.reason() : reason,
                         existing.createdAt(),
                         timestamp)));
   }
@@ -100,6 +125,7 @@ public class OrderProjection extends BaseProjection {
                         existing.total(),
                         existing.status(),
                         paymentStatus,
+                        existing.reason(),
                         existing.createdAt(),
                         timestamp)));
   }

@@ -38,6 +38,33 @@ function order(orderId: string, customerId: string, paymentStatus: string | null
 }
 
 test.describe("Orders page — surface (no backend required)", () => {
+  test("a cancelled order shows why it was cancelled", async ({ page }) => {
+    await mockBackendRoutes(page);
+    const reason = "Insufficient stock for prod-widget: requested 3";
+    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { ...order("order-a1", "cust-alice", "REFUNDED"), status: "CANCELLED", reason },
+          { ...order("order-a2", "cust-alice"), reason: null },
+        ]),
+      })
+    );
+    await actAs(page, "ADMIN");
+
+    await page.goto("/orders");
+
+    const cancelled = page.getByRole("row").filter({ hasText: "order-a1" });
+    await expect(cancelled).toContainText("CANCELLED");
+    await expect(cancelled.getByText(reason)).toBeVisible();
+    await expect(cancelled).toContainText(`Cancellation reason: ${reason}`);
+    // A confirmed order has no reason to show.
+    await expect(page.getByRole("row").filter({ hasText: "order-a2" })).not.toContainText(
+      "Cancellation reason"
+    );
+  });
+
   test("a GUEST is told what the page requires and sends no order or customer request", async ({
     page,
   }) => {

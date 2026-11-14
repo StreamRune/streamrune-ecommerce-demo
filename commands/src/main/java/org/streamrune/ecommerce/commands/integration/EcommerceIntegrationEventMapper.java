@@ -9,6 +9,7 @@ import org.streamrune.core.outbox.OutboxEntry;
 import org.streamrune.core.outbox.OutboxEntryId;
 import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.types.StreamId;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.product.ProductEvent;
@@ -17,16 +18,18 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
  * Curated, PII-safe outbox mapper for the e-commerce demo.
  *
  * <p>ONLY the allowlisted integration events below are published to the broker. All {@code
- * CustomerEvent.*} and {@code InventoryEvent.*} types — and {@code OrderPlaced} (carries {@code
- * customerId}) and {@code PaymentInitiated} — are explicitly excluded. Each published entry
- * contains a small, hand-crafted integration DTO with ONLY non-PII business fields. The payment
- * outcomes published are {@code PaymentCaptured}, {@code PaymentRefunded}, {@code PaymentVoided}
- * and {@code PaymentFailed}.
+ * CustomerEvent.*} types, the inventory's reservation events (they name the orders that reserve,
+ * release, commit or are refused stock), {@code OrderPlaced} (carries {@code customerId}) and
+ * {@code PaymentInitiated} are explicitly excluded. Each published entry contains a small,
+ * hand-crafted integration DTO with ONLY non-PII business fields. The payment outcomes published
+ * are {@code PaymentCaptured}, {@code PaymentRefunded}, {@code PaymentVoided} and {@code
+ * PaymentFailed}; the stock on hand is published as {@code ShipmentReceived} and {@code
+ * InventoryAdjusted}, with the units available after each.
  *
  * <p>Every entry carries a {@code streamId} — the stream the event was appended to ({@code
- * order:<id>}, {@code payment:<id>}, {@code product:<id>}): the demo's outbox channel is {@code
- * STRICT_PER_AGGREGATE}, where a {@code null} stream fails the append with {@code
- * OutboxOrderingViolationException}.
+ * order:<id>}, {@code payment:<id>}, {@code product:<id>}, {@code inventory:<id>}): the demo's
+ * outbox channel is {@code STRICT_PER_AGGREGATE}, where a {@code null} stream fails the append with
+ * {@code OutboxOrderingViolationException}.
  */
 public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
 
@@ -92,8 +95,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.name(),
                       e.category(),
                       e.price().amount(),
-                      e.price().currency(),
-                      e.stock()),
+                      e.price().currency()),
                   "ProductCreated",
                   stream));
       case ProductEvent.PriceUpdated e ->
@@ -108,13 +110,6 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                       e.newPrice().currency()),
                   "PriceUpdated",
                   stream));
-      case ProductEvent.StockAdjusted e ->
-          List.of(
-              entry(
-                  eventId,
-                  new StockAdjustedDto(e.productId(), e.previousStock(), e.newStock(), e.reason()),
-                  "StockAdjusted",
-                  stream));
       case ProductEvent.ProductDiscontinued e ->
           List.of(
               entry(
@@ -123,8 +118,25 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
                   "ProductDiscontinued",
                   stream));
 
-      // --- Everything else: CustomerEvent.*, InventoryEvent.*, OrderPlaced,
-      //                       PaymentInitiated — excluded to prevent PII leakage ---
+      // --- Stock on hand: the two inventory events that name no order ---
+      case InventoryEvent.ShipmentReceived e ->
+          List.of(
+              entry(
+                  eventId,
+                  new ShipmentReceivedDto(e.productId(), e.quantity(), e.availableAfter()),
+                  "ShipmentReceived",
+                  stream));
+      case InventoryEvent.InventoryAdjusted e ->
+          List.of(
+              entry(
+                  eventId,
+                  new InventoryAdjustedDto(
+                      e.productId(), e.quantityChange(), e.reason(), e.availableAfter()),
+                  "InventoryAdjusted",
+                  stream));
+
+      // --- Everything else: CustomerEvent.*, the reservation events (they name orders),
+      //                       OrderPlaced, PaymentInitiated — excluded to prevent PII leakage ---
       default -> List.of();
     };
   }
@@ -159,12 +171,7 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
   record PaymentFailedDto(String paymentId, String reason) {}
 
   record ProductCreatedDto(
-      String productId,
-      String name,
-      String category,
-      BigDecimal price,
-      String currency,
-      int stock) {}
+      String productId, String name, String category, BigDecimal price, String currency) {}
 
   record PriceUpdatedDto(
       String productId,
@@ -173,7 +180,10 @@ public class EcommerceIntegrationEventMapper implements OutboxEventMapper {
       BigDecimal newPrice,
       String newCurrency) {}
 
-  record StockAdjustedDto(String productId, int previousStock, int newStock, String reason) {}
-
   record ProductDiscontinuedDto(String productId) {}
+
+  record ShipmentReceivedDto(String productId, int quantity, int availableAfter) {}
+
+  record InventoryAdjustedDto(
+      String productId, int quantityChange, String reason, int availableAfter) {}
 }

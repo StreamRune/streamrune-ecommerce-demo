@@ -34,9 +34,9 @@ import org.streamrune.core.types.IdempotencyKey;
 import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.UserId;
 import org.streamrune.core.types.Version;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
-import org.streamrune.ecommerce.domain.product.ProductEvent;
-import org.streamrune.ecommerce.domain.product.ProductState;
+import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
+import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
+import org.streamrune.ecommerce.domain.inventory.InventoryState;
 import org.streamrune.runtime.DeadLetterRetryRunner;
 
 /**
@@ -78,7 +78,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     await()
         .atMost(SCHEDULE)
         .untilAsserted(() -> assertThat(deadLetterQueue.find(commandId)).isEmpty());
-    assertThat(stockAdjustments(pid)).as("the scheduled replay applied the adjustment").isOne();
+    assertThat(inventoryAdjustments(pid)).as("the scheduled replay applied the adjustment").isOne();
   }
 
   @Test
@@ -88,15 +88,15 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     CommandId commandId = failedAdjustment(pid, key);
 
     // The caller saw the 500 and sent the request again, with the same key: it succeeds.
-    assertThat(send(adjustStock(pid, key)).status()).isEqualTo(200);
-    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(send(adjustInventory(pid, key)).status()).isEqualTo(200);
+    assertThat(inventoryAdjustments(pid)).isOne();
 
     becomeDue(commandId);
 
     await()
         .atMost(SCHEDULE)
         .untilAsserted(() -> assertThat(deadLetterQueue.find(commandId)).isEmpty());
-    assertThat(stockAdjustments(pid))
+    assertThat(inventoryAdjustments(pid))
         .as("the inbox answered the replay with the result of the caller's retry")
         .isOne();
   }
@@ -105,8 +105,8 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
   void anUnkeyedAdjustmentTheCallerRetried_waitsForAnOperator_andIsCounted() throws Exception {
     String pid = createProduct();
     CommandId commandId = failedAdjustment(pid, null);
-    assertThat(send(adjustStock(pid, null)).status()).isEqualTo(200);
-    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(send(adjustInventory(pid, null)).status()).isEqualTo(200);
+    assertThat(inventoryAdjustments(pid)).isOne();
 
     becomeDue(commandId);
     // A keyed entry made due after it: once the schedule has replayed this one, a poll has run
@@ -130,7 +130,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     var refused = send(retry(commandId, false, "ops-1"));
     assertThat(refused.status()).isEqualTo(409);
     assertThat(refused.body()).contains("NOT_DEDUPLICATED").contains("?force=true");
-    assertThat(stockAdjustments(pid)).as("a plain Retry never runs it a second time").isOne();
+    assertThat(inventoryAdjustments(pid)).as("a plain Retry never runs it a second time").isOne();
     assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
 
@@ -143,10 +143,10 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(replayed.status()).isEqualTo(200);
     assertThat(replayed.body()).contains("REPLAYED");
 
-    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(inventoryAdjustments(pid)).isOne();
     assertThat(deadLetterQueue.find(commandId)).isEmpty();
     assertThat(decisions(commandId, "DLQ_FORCED_REPLAY"))
-        .containsExactly("ops-7 SUCCESS product:" + pid);
+        .containsExactly("ops-7 SUCCESS inventory:" + pid);
   }
 
   @Test
@@ -158,7 +158,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
       assertThat(send(retry(commandId, true, "ops-7")).status()).isGreaterThanOrEqualTo(500);
     }
 
-    assertThat(stockAdjustments(pid)).as("an unrecorded decision is not acted on").isZero();
+    assertThat(inventoryAdjustments(pid)).as("an unrecorded decision is not acted on").isZero();
     assertThat(deadLetterQueue.find(commandId)).isPresent();
     assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
@@ -168,7 +168,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     String pid = createProduct();
     CommandId commandId = failedAdjustment(pid, null);
     // The caller's retry succeeded: the effect is present, so the operator discards the entry.
-    assertThat(send(adjustStock(pid, null)).status()).isEqualTo(200);
+    assertThat(send(adjustInventory(pid, null)).status()).isEqualTo(200);
     await()
         .atMost(SCHEDULE)
         .untilAsserted(() -> assertThat(awaitingOperatorGauge()).isEqualTo(awaitingOperator()));
@@ -179,9 +179,9 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(discarded.body()).contains("DISCARDED");
 
     assertThat(deadLetterQueue.find(commandId)).isEmpty();
-    assertThat(stockAdjustments(pid)).as("a discard runs nothing").isOne();
+    assertThat(inventoryAdjustments(pid)).as("a discard runs nothing").isOne();
     assertThat(decisions(commandId, "DLQ_DISCARDED"))
-        .containsExactly("ops-7 SUCCESS product:" + pid);
+        .containsExactly("ops-7 SUCCESS inventory:" + pid);
     await()
         .atMost(SCHEDULE)
         .untilAsserted(() -> assertThat(awaitingOperatorGauge()).isEqualTo(before - 1));
@@ -216,9 +216,9 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     deadLetterQueue.publish(
         new DeadLetterPublishRequest(
             "{\"productId\":\"" + pid + "\",\"quantityChange\":5,\"reason\":\"restock\"}",
-            ProductCommand.AdjustStock.class.getName(),
+            InventoryCommand.AdjustInventory.class.getName(),
             commandId,
-            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
             IllegalStateException.class.getName(),
             "transient downstream failure",
             3,
@@ -233,19 +233,19 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(refused.status()).isEqualTo(409);
     assertThat(refused.body()).contains("STALE_REPLAY_BLOCKED");
     assertThat(staleRefusals() - refusedBefore).isEqualTo(1.0);
-    assertThat(stockAdjustments(pid)).isZero();
+    assertThat(inventoryAdjustments(pid)).isZero();
 
     assertThat(send(retry(commandId, true, "ops-1")).status()).isEqualTo(200);
-    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(inventoryAdjustments(pid)).isOne();
   }
 
   /**
-   * A replay on a replica whose code reads the product's stream at an older event schema than one
+   * A replay on a replica whose code reads the inventory's stream at an older event schema than one
    * it holds — a replica still on the previous release during a rolling deployment — fails before
    * anything is appended ({@code READER_BEHIND}): the endpoint answers {@code 503} with {@code
    * Retry-After}, the entry keeps its attempt count, and the replay succeeds once the stream is
-   * readable. The test raises the stored {@code schema_version} of the product's events above every
-   * version the app's upcasters reach, then puts it back.
+   * readable. The test raises the stored {@code schema_version} of the inventory's events above
+   * every version the app's upcasters reach, then puts it back.
    */
   @Test
   void aReplayOnAReplicaBehindTheStoredSchema_is503_andLeavesTheEntryAsItWas() throws Exception {
@@ -254,9 +254,9 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     deadLetterQueue.publish(
         new DeadLetterPublishRequest(
             "{\"productId\":\"" + pid + "\",\"quantityChange\":5,\"reason\":\"restock\"}",
-            ProductCommand.AdjustStock.class.getName(),
+            InventoryCommand.AdjustInventory.class.getName(),
             commandId,
-            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
             IllegalStateException.class.getName(),
             "transient downstream failure",
             3,
@@ -276,12 +276,12 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     var entry = deadLetterQueue.find(commandId);
     assertThat(entry).as("the entry stays for a replica that reads the stream").isPresent();
     assertThat(entry.get().dlqAttempts()).as("the refusal is not counted").isZero();
-    assertThat(stockAdjustments(pid)).isZero();
+    assertThat(inventoryAdjustments(pid)).isZero();
 
     var replayed = send(retry(commandId, false, "ops-1"));
     assertThat(replayed.status()).as(replayed.body()).isEqualTo(200);
     assertThat(replayed.body()).contains("REPLAYED");
-    assertThat(stockAdjustments(pid)).isOne();
+    assertThat(inventoryAdjustments(pid)).isOne();
   }
 
   @Test
@@ -293,12 +293,12 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     assertThat(decisions(commandId, "DLQ_FORCED_REPLAY")).isEmpty();
   }
 
-  /** {@code PUT /stock} while the store refuses the event: the bus dead-letters the command. */
+  /** {@code POST /adjust} while the store refuses the event: the bus dead-letters the command. */
   private CommandId failedAdjustment(String pid, String key) throws Exception {
     Answer answer;
     try (var failures = new AppendFailureInjection(dataSource)) {
-      failures.failAppend(ProductState.TYPE, pid, "StockAdjusted");
-      answer = send(adjustStock(pid, key));
+      failures.failAppend(InventoryState.TYPE, pid, "InventoryAdjusted");
+      answer = send(adjustInventory(pid, key));
     }
     assertThat(answer.status()).as(answer.body()).isEqualTo(key == null ? 500 : 503);
     assertThat(answer.retryAfter()).isEqualTo(key == null ? null : "60");
@@ -327,8 +327,9 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
   }
 
   /**
-   * Raises the stored {@code schema_version} of every event of one product above what the app's
-   * upcasters reach, as a newer release would have stored them; {@link #close()} puts it back.
+   * Raises the stored {@code schema_version} of every event of one product's inventory above what
+   * the app's upcasters reach, as a newer release would have stored them; {@link #close()} puts it
+   * back.
    */
   private static final class StoredSchemaAhead implements AutoCloseable {
 
@@ -353,7 +354,7 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
           PreparedStatement ps =
               conn.prepareStatement(
                   "UPDATE event_stream SET schema_version = schema_version + ?"
-                      + " WHERE aggregate_type = 'product' AND aggregate_id = ?")) {
+                      + " WHERE aggregate_type = 'inventory' AND aggregate_id = ?")) {
         ps.setInt(1, by);
         ps.setString(2, productId);
         assertThat(ps.executeUpdate()).isPositive();
@@ -431,19 +432,27 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
                     "/api/products",
                     """
                     {"productId": "%s", "name": "Replayed", "description": "dead-letter policy",
-                     "category": "Test", "price": 5.00, "initialStock": 3}"""
+                     "category": "Test", "price": 5.00}"""
                         .formatted(pid))
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-User-Role", "ADMIN")
                 .header("X-User-Id", "admin-1"));
     assertThat(created.status()).isEqualTo(200);
+    var received =
+        send(
+            HttpRequest.POST("/api/inventory/" + pid + "/receive", "{\"quantity\": 3}")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Role", "ADMIN")
+                .header("X-User-Id", "admin-1"));
+    assertThat(received.status()).isEqualTo(200);
     return pid;
   }
 
-  private static MutableHttpRequest<String> adjustStock(String pid, String key) {
+  private static MutableHttpRequest<String> adjustInventory(String pid, String key) {
     var request =
-        HttpRequest.PUT(
-                "/api/products/" + pid + "/stock", "{\"quantity\": 5, \"reason\": \"restock\"}")
+        HttpRequest.POST(
+                "/api/inventory/" + pid + "/adjust",
+                "{\"quantityChange\": 5, \"reason\": \"restock\"}")
             .contentType(MediaType.APPLICATION_JSON)
             .header("X-User-Role", "ADMIN")
             .header("X-User-Id", "admin-1");
@@ -486,14 +495,14 @@ class DeadLetterReplayPolicyIT extends AbstractIntegrationTest {
     }
   }
 
-  private long stockAdjustments(String pid) {
+  private long inventoryAdjustments(String pid) {
     return eventStore
         .readStream(
-            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
             Version.initial(),
             Integer.MAX_VALUE)
         .stream()
-        .filter(e -> e.event() instanceof ProductEvent.StockAdjusted)
+        .filter(e -> e.event() instanceof InventoryEvent.InventoryAdjusted)
         .count();
   }
 }

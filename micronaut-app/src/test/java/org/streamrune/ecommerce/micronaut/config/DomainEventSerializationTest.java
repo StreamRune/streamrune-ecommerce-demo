@@ -31,9 +31,8 @@ class DomainEventSerializationTest {
   /** One instance of every registered event, with every component set. */
   private static final List<DomainEvent> SAMPLES =
       List.of(
-          new ProductEvent.ProductCreated("p-1", "Widget", "A widget", "tools", PRICE, 7),
+          new ProductEvent.ProductCreated("p-1", "Widget", "A widget", "tools", PRICE),
           new ProductEvent.PriceUpdated("p-1", PRICE, Money.usd(new BigDecimal("13.00"))),
-          new ProductEvent.StockAdjusted("p-1", 7, 9, "recount"),
           new ProductEvent.ProductDiscontinued("p-1"),
           new OrderEvent.OrderPlaced(
               "o-1", "c-1", List.of(new OrderEvent.OrderLine("p-1", 2, PRICE)), PRICE.multiply(2)),
@@ -54,9 +53,11 @@ class DomainEventSerializationTest {
           new PaymentEvent.PaymentFailed("pay-1", "o-1", "card declined"),
           new PaymentEvent.PaymentVoided("pay-1", "o-1", "order cancelled"),
           new InventoryEvent.StockReserved("p-1", "o-1", 2, 5),
+          new InventoryEvent.StockReservationRefused("p-1", "o-1", 9, 5),
           new InventoryEvent.StockReleased("p-1", "o-1", 2, 7),
           new InventoryEvent.ReservationConfirmed("p-1", "o-1", 2),
-          new InventoryEvent.ShipmentReceived("p-1", 10, 17));
+          new InventoryEvent.ShipmentReceived("p-1", 10, 17),
+          new InventoryEvent.InventoryAdjusted("p-1", -2, "recount", 15));
 
   @Test
   void thereIsASampleOfEveryRegisteredEvent() {

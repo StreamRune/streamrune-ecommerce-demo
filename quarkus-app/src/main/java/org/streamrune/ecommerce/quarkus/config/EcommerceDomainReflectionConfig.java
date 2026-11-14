@@ -25,6 +25,7 @@ import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.domain.product.ProductStatus;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 import org.streamrune.ecommerce.projections.AuditEntry;
+import org.streamrune.ecommerce.queries.dto.Availability;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
 import org.streamrune.ecommerce.queries.dto.OrderView;
@@ -70,13 +71,11 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
       // ── product ──────────────────────────────────────────────────────────────
       ProductEvent.ProductCreated.class,
       ProductEvent.PriceUpdated.class,
-      ProductEvent.StockAdjusted.class,
       ProductEvent.ProductDiscontinued.class,
       ProductState.class,
       ProductStatus.class,
       ProductCommand.CreateProduct.class,
       ProductCommand.UpdatePrice.class,
-      ProductCommand.AdjustStock.class,
       ProductCommand.DiscontinueProduct.class,
 
       // ── order ────────────────────────────────────────────────────────────────
@@ -122,14 +121,17 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
 
       // ── inventory ────────────────────────────────────────────────────────────
       InventoryEvent.StockReserved.class,
+      InventoryEvent.StockReservationRefused.class,
       InventoryEvent.StockReleased.class,
       InventoryEvent.ReservationConfirmed.class,
       InventoryEvent.ShipmentReceived.class,
+      InventoryEvent.InventoryAdjusted.class,
       InventoryState.class,
       InventoryCommand.ReserveStock.class,
       InventoryCommand.ReleaseStock.class,
       InventoryCommand.ConfirmReservation.class,
       InventoryCommand.ReceiveShipment.class,
+      InventoryCommand.AdjustInventory.class,
 
       // ── saga ─────────────────────────────────────────────────────────────────
       OrderFulfillmentState.class,
@@ -137,6 +139,7 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
 
       // ── query view DTOs ───────────────────────────────────────────────────────
       ProductView.class,
+      Availability.class,
       OrderView.class,
       OrderView.OrderLineView.class,
       CustomerView.class,

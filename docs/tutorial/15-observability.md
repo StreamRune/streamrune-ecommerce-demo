@@ -1466,8 +1466,7 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *   <li>{@code inventory}: {@code ADMIN} only. A product's stock events name the orders that
  *       reserved it, which are other customers' orders.
  *   <li>{@code product}: {@code ADMIN} only. Nothing in the events is personal, but they carry
- *       operational detail the public catalogue does not show: every stock adjustment with its
- *       free-text reason, and the price history.
+ *       operational detail the public catalogue does not show: the price history.
  *   <li>any other type: refused, for {@code ADMIN} too. A new aggregate is closed until a line is
  *       added here.
  * </ul>
@@ -1544,8 +1543,8 @@ The framework asks an `SseAuthorizer` one question, `isAuthorized(StreamRuneCont
 | `customer:<id>` | `ADMIN`, or the caller whose id is `<id>` | The events carry the customer's name, e-mail, address and phone. |
 | `order:<id>` | `ADMIN`, or the customer the order read model names for that order | The read model from Chapter 8 already knows each order's `customerId`; one `OrderProjection.get` is the cheapest honest proof of ownership. |
 | `payment:<id>` | `ADMIN` | The amount and the refund or failure reason of one customer's purchase, and no read model links a payment to its customer. |
-| `inventory:<id>` | `ADMIN` | A product's stock events name the orders that reserved it — other customers' orders. |
-| `product:<id>` | `ADMIN` | Nothing personal, but operational detail the public catalogue does not show: stock adjustments with their free-text reason, the price history. |
+| `inventory:<id>` | `ADMIN` | A product's stock events name the orders that reserved it — other customers' orders — and carry the free-text reason of each adjustment. |
+| `product:<id>` | `ADMIN` | Nothing personal, but operational detail the public catalogue does not show: the price history. |
 | any other type | nobody, `ADMIN` included | A new aggregate stays closed until you add a line for it. |
 
 Mind the `order` line: the read model is eventually consistent. `OrderProjection` writes the row a moment after `POST /api/orders` returns, and until it has, the order has no known owner — the customer is refused exactly as for an order that was never placed, and subscribes once `GET /api/orders/{id}` answers.
@@ -1608,6 +1607,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -1670,9 +1670,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1720,6 +1717,9 @@ public class StreamRuneConfig {
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
         .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
+        .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
         .registerEvent(
@@ -1728,6 +1728,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -1972,7 +1975,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -2023,6 +2025,7 @@ public class StreamRuneConfig {
                       case InventoryCommand.ReleaseStock c -> c.productId();
                       case InventoryCommand.ConfirmReservation c -> c.productId();
                       case InventoryCommand.ReceiveShipment c -> c.productId();
+                      case InventoryCommand.AdjustInventory c -> c.productId();
                     }),
             new InventoryDecider())
         .build();
@@ -2519,6 +2522,12 @@ public class StreamRuneConfig {
   @Bean
   public OrderPricing orderPricing(EventStore eventStore) {
     return new OrderPricing(eventStore);
+  }
+
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
   }
 
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */

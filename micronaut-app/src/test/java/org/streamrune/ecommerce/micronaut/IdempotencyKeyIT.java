@@ -18,14 +18,12 @@ import org.streamrune.core.types.StreamId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.inventory.InventoryEvent;
 import org.streamrune.ecommerce.domain.inventory.InventoryState;
-import org.streamrune.ecommerce.domain.product.ProductEvent;
-import org.streamrune.ecommerce.domain.product.ProductState;
 
 /**
- * The {@code Idempotency-Key} header of the two relative writes, {@code PUT
- * /api/products/{id}/stock} and {@code POST /api/inventory/{productId}/receive}, as in the Spring
- * and Quarkus apps: the command runs once per key, every time without one, and the key lives in the
- * caller's namespace.
+ * The {@code Idempotency-Key} header of the two relative writes, {@code POST
+ * /api/inventory/{productId}/adjust} and {@code POST /api/inventory/{productId}/receive}, as in the
+ * Spring and Quarkus apps: the command runs once per key, every time without one, and the key lives
+ * in the caller's namespace.
  */
 @MicronautTest(transactional = false)
 class IdempotencyKeyIT extends AbstractIntegrationTest {
@@ -37,34 +35,36 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
   @Inject EventStore eventStore;
 
   @Test
-  void theSameKeyTwiceAdjustsTheStockOnce() {
+  void theSameKeyTwiceAdjustsTheInventoryOnce() {
     String pid = createProduct();
     String key = UUID.randomUUID().toString();
 
-    assertThat(status(adjustStock(pid, "admin-1", key))).isEqualTo(200);
-    assertThat(status(adjustStock(pid, "admin-1", key))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", key))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", key))).isEqualTo(200);
 
-    assertThat(stockAdjustments(pid)).as("the second request is the first one's retry").isOne();
+    assertThat(inventoryAdjustments(pid)).as("the second request is the first one's retry").isOne();
   }
 
   @Test
   void aNewKeyIsANewAdjustment() {
     String pid = createProduct();
 
-    assertThat(status(adjustStock(pid, "admin-1", UUID.randomUUID().toString()))).isEqualTo(200);
-    assertThat(status(adjustStock(pid, "admin-1", UUID.randomUUID().toString()))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", UUID.randomUUID().toString())))
+        .isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", UUID.randomUUID().toString())))
+        .isEqualTo(200);
 
-    assertThat(stockAdjustments(pid)).isEqualTo(2);
+    assertThat(inventoryAdjustments(pid)).isEqualTo(2);
   }
 
   @Test
   void withoutAKeyEveryRequestAdjusts() {
     String pid = createProduct();
 
-    assertThat(status(adjustStock(pid, "admin-1", null))).isEqualTo(200);
-    assertThat(status(adjustStock(pid, "admin-1", null))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", null))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", null))).isEqualTo(200);
 
-    assertThat(stockAdjustments(pid)).isEqualTo(2);
+    assertThat(inventoryAdjustments(pid)).isEqualTo(2);
   }
 
   @Test
@@ -72,10 +72,10 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
     String pid = createProduct();
     String key = UUID.randomUUID().toString();
 
-    assertThat(status(adjustStock(pid, "admin-1", key))).isEqualTo(200);
-    assertThat(status(adjustStock(pid, "admin-2", key))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-1", key))).isEqualTo(200);
+    assertThat(status(adjustInventory(pid, "admin-2", key))).isEqualTo(200);
 
-    assertThat(stockAdjustments(pid)).isEqualTo(2);
+    assertThat(inventoryAdjustments(pid)).isEqualTo(2);
   }
 
   @Test
@@ -84,24 +84,24 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
     String second = createProduct();
     String key = UUID.randomUUID().toString();
 
-    assertThat(status(adjustStock(first, "admin-1", key))).isEqualTo(200);
-    assertThat(status(adjustStock(second, "admin-1", key))).isEqualTo(400);
+    assertThat(status(adjustInventory(first, "admin-1", key))).isEqualTo(200);
+    assertThat(status(adjustInventory(second, "admin-1", key))).isEqualTo(400);
 
-    assertThat(stockAdjustments(second)).isZero();
+    assertThat(inventoryAdjustments(second)).isZero();
   }
 
   @Test
   void aKeyLongerThanTheFrameworkAcceptsIsRefused() {
     String pid = createProduct();
 
-    assertThat(status(adjustStock(pid, "admin-1", "k".repeat(600)))).isEqualTo(400);
+    assertThat(status(adjustInventory(pid, "admin-1", "k".repeat(600)))).isEqualTo(400);
 
-    assertThat(stockAdjustments(pid)).isZero();
+    assertThat(inventoryAdjustments(pid)).isZero();
   }
 
   @Test
   void theSameKeyTwiceReceivesAShipmentOnce() {
-    String pid = "m-idem-recv-" + System.nanoTime();
+    String pid = createProduct();
     String key = UUID.randomUUID().toString();
 
     assertThat(status(receiveShipment(pid, key))).isEqualTo(200);
@@ -118,7 +118,7 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
                         "/api/products",
                         """
                         {"productId": "%s", "name": "Keyed", "description": "idempotency key",
-                         "category": "Test", "price": 5.00, "initialStock": 3}"""
+                         "category": "Test", "price": 5.00}"""
                             .formatted(pid))
                     .contentType(MediaType.APPLICATION_JSON)
                     .header("X-User-Role", "ADMIN")
@@ -127,10 +127,11 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
     return pid;
   }
 
-  private static MutableHttpRequest<String> adjustStock(String pid, String userId, String key) {
+  private static MutableHttpRequest<String> adjustInventory(String pid, String userId, String key) {
     var request =
-        HttpRequest.PUT(
-                "/api/products/" + pid + "/stock", "{\"quantity\": 5, \"reason\": \"restock\"}")
+        HttpRequest.POST(
+                "/api/inventory/" + pid + "/adjust",
+                "{\"quantityChange\": 5, \"reason\": \"restock\"}")
             .contentType(MediaType.APPLICATION_JSON)
             .header("X-User-Role", "ADMIN")
             .header("X-User-Id", userId);
@@ -153,14 +154,14 @@ class IdempotencyKeyIT extends AbstractIntegrationTest {
     }
   }
 
-  private long stockAdjustments(String pid) {
+  private long inventoryAdjustments(String pid) {
     return eventStore
         .readStream(
-            StreamId.of(ProductState.TYPE, AggregateId.of(pid)),
+            StreamId.of(InventoryState.TYPE, AggregateId.of(pid)),
             Version.initial(),
             Integer.MAX_VALUE)
         .stream()
-        .filter(e -> e.event() instanceof ProductEvent.StockAdjusted)
+        .filter(e -> e.event() instanceof InventoryEvent.InventoryAdjusted)
         .count();
   }
 

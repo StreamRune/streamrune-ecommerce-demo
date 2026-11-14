@@ -30,6 +30,7 @@ const SSEContext = createContext<SSEContextValue>({
 /** The root of every query key of `queries.ts`: what is read again when the feed is back. */
 const EVERY_KEY: string[][] = [
   ["products"],
+  ["inventory"],
   ["orders"],
   ["customers"],
   ["fulfillment"],
@@ -47,12 +48,10 @@ const EVERY_KEY: string[][] = [
 function invalidationKeysFor(eventType: string): string[][] {
   const keys: string[][] = [["dashboard"], ["events"]];
 
-  if (
-    ["ProductCreated", "PriceUpdated", "StockAdjusted", "ProductDiscontinued"].includes(
-      eventType
-    )
-  ) {
+  if (["ProductCreated", "PriceUpdated", "ProductDiscontinued"].includes(eventType)) {
     keys.push(["products"]);
+    // The inventory opens a row with no units for a new product, under the product's name.
+    keys.push(["inventory"]);
   }
   if (
     [
@@ -92,12 +91,17 @@ function invalidationKeysFor(eventType: string): string[][] {
   }
   if (
     [
+      "ShipmentReceived",
+      "InventoryAdjusted",
       "StockReserved",
       "StockReleased",
       "ReservationConfirmed",
-      "ShipmentReceived",
+      "StockReservationRefused",
     ].includes(eventType)
   ) {
+    // The inventory's counts move, and with them the storefront's availability, which the
+    // product read model derives from the inventory events of the same product.
+    keys.push(["inventory"]);
     keys.push(["products"]);
     keys.push(["fulfillment"]);
   }

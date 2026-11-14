@@ -388,7 +388,8 @@ class OwnerOrAdminRestAccessIT {
             "orderTotal",
             "lines",
             "reservedProductIds",
-            "fulfillmentStatus");
+            "fulfillmentStatus",
+            "cancellationReason");
     assertThat(state.get("orderId").asText()).isEqualTo(order);
     assertThat(state.get("customerId").asText()).isEqualTo(alice);
     assertThat(state.get("paymentId").asText()).isEqualTo("pay-" + order);
@@ -514,7 +515,8 @@ class OwnerOrAdminRestAccessIT {
     assertThat(get("/api/admin/payment-outage", OPERATOR, ADMIN).body()).isEqualTo(outageSwitch);
   }
 
-  // --- POST /api/products, PUT …/price, PUT …/stock, POST …/discontinue, POST /api/inventory ---
+  // --- POST /api/products, PUT …/price, POST …/discontinue, POST /api/inventory/…/adjust|receive
+  // ---
 
   @Test
   void productAndInventoryWritesAreForAnAdmin() throws Exception {
@@ -522,13 +524,15 @@ class OwnerOrAdminRestAccessIT {
     String product = uniqueId("p");
     String[] create = {"POST", "/api/products", productBody(product)};
     String[] price = {"PUT", "/api/products/" + product + "/price", "{\"price\": 0.01}"};
-    String[] stock = {
-      "PUT", "/api/products/" + product + "/stock", "{\"quantity\": 5, \"reason\": \"recount\"}"
+    String[] adjust = {
+      "POST",
+      "/api/inventory/" + product + "/adjust",
+      "{\"quantityChange\": 5, \"reason\": \"recount\"}"
     };
     String[] receive = {"POST", "/api/inventory/" + product + "/receive", "{\"quantity\": 1}"};
     String[] discontinue = {"POST", "/api/products/" + product + "/discontinue", "{}"};
 
-    for (String[] write : new String[][] {create, price, stock, receive, discontinue}) {
+    for (String[] write : new String[][] {create, price, adjust, receive, discontinue}) {
       assertRefusedForEveryoneButAnAdmin(write[0], write[1], write[2], customer);
     }
     // Nothing a refused caller sent was written: neither stream holds an event.
@@ -537,15 +541,15 @@ class OwnerOrAdminRestAccessIT {
     assertThat(JSON.readTree(get("/api/events/inventory/" + product, OPERATOR, ADMIN).body()))
         .isEmpty();
 
-    for (String[] write : new String[][] {create, price, stock, receive, discontinue}) {
+    for (String[] write : new String[][] {create, price, adjust, receive, discontinue}) {
       assertThat(send(write[0], write[1], OPERATOR, ADMIN, write[2]).statusCode())
           .as("%s %s as an ADMIN", write[0], write[1])
           .isBetween(200, 299);
     }
     assertThat(JSON.readTree(get("/api/events/product/" + product, OPERATOR, ADMIN).body()))
-        .hasSize(4);
+        .hasSize(3);
     assertThat(JSON.readTree(get("/api/events/inventory/" + product, OPERATOR, ADMIN).body()))
-        .hasSize(1);
+        .hasSize(2);
   }
 
   @Test
@@ -606,8 +610,13 @@ class OwnerOrAdminRestAccessIT {
     String product = uniqueId("p-none");
     String[][] writes = {
       {"PUT", "/api/products/" + product + "/price", "{\"price\": 0.01}"},
-      {"PUT", "/api/products/" + product + "/stock", "{\"quantity\": 5, \"reason\": \"recount\"}"},
-      {"POST", "/api/products/" + product + "/discontinue", "{}"}
+      {"POST", "/api/products/" + product + "/discontinue", "{}"},
+      {
+        "POST",
+        "/api/inventory/" + product + "/adjust",
+        "{\"quantityChange\": 5, \"reason\": \"recount\"}"
+      },
+      {"POST", "/api/inventory/" + product + "/receive", "{\"quantity\": 5}"}
     };
     for (String[] write : writes) {
       assertThat(send(write[0], write[1], OPERATOR, ADMIN, write[2]).statusCode())
@@ -615,6 +624,8 @@ class OwnerOrAdminRestAccessIT {
           .isEqualTo(400);
     }
     assertThat(JSON.readTree(get("/api/events/product/" + product, OPERATOR, ADMIN).body()))
+        .isEmpty();
+    assertThat(JSON.readTree(get("/api/events/inventory/" + product, OPERATOR, ADMIN).body()))
         .isEmpty();
   }
 
@@ -640,7 +651,7 @@ class OwnerOrAdminRestAccessIT {
       {"POST", "/api/products", noBody},
       {"POST", "/api/products", "{}"},
       {"PUT", "/api/products/" + uniqueId("p") + "/price", "{}"},
-      {"PUT", "/api/products/" + uniqueId("p") + "/stock", noBody},
+      {"POST", "/api/inventory/" + uniqueId("p") + "/adjust", noBody},
       {"POST", "/api/inventory/" + uniqueId("p") + "/receive", "{\"quantity\": 0}"}
     };
     String[][] callers = {{null, null}, {null, ADMIN}, {customer, CUSTOMER}, {OPERATOR, ADMIN}};
@@ -766,7 +777,7 @@ class OwnerOrAdminRestAccessIT {
   private static String productBody(String product) {
     return """
         {"productId": "%s", "name": "Product %s", "description": "For the access test",
-         "category": "Test", "price": 12.50, "initialStock": 3}"""
+         "category": "Test", "price": 12.50}"""
         .formatted(product, product);
   }
 

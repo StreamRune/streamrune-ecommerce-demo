@@ -51,6 +51,7 @@ class OwnerOrAdminStreamAccessTest {
               Money.usd(new BigDecimal("10.00")),
               OrderStatus.CREATED,
               null,
+              null,
               Instant.EPOCH,
               Instant.EPOCH));
 

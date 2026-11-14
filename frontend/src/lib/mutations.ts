@@ -2,10 +2,10 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import {
   createProduct,
-  adjustStock,
   updatePrice,
   discontinueProduct,
   receiveShipment,
+  adjustInventory,
   placeOrder,
   shipOrder,
   deliverOrder,
@@ -82,32 +82,9 @@ function keyedCommandRetryDelay(failureCount: number, error: Error): number {
 
 // ─── Products ────────────────────────────────────────────────────────────────
 
+/** A new product is a row of the catalogue and, with no units yet, of the inventory. */
 export function useCreateProduct() {
-  return useInvalidatingMutation(createProduct, [["products"]]);
-}
-
-/**
- * The caller sends the key of the intended change (`pending-operations.ts`),
- * which records what each attempt's answer says about the change.
- */
-export function useAdjustStock() {
-  return useInvalidatingMutation(
-    ({
-      productId,
-      body,
-      idempotencyKey,
-    }: {
-      productId: string;
-      body: { quantity: number; reason?: string };
-      idempotencyKey: string;
-    }) =>
-      sendHeldOperation("adjust-stock", productId, idempotencyKey, () =>
-        adjustStock(productId, body, idempotencyKey)
-      ),
-    [["products"]],
-    retryKeyedCommand,
-    keyedCommandRetryDelay
-  );
+  return useInvalidatingMutation(createProduct, [["products"], ["inventory"]]);
 }
 
 export function useUpdatePrice() {
@@ -128,6 +105,12 @@ export function useDiscontinueProduct() {
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 /**
+ * A change of the inventory shows in the inventory table and in the
+ * storefront's availability, which the product read model derives from it.
+ */
+const INVENTORY_KEYS: QueryKey[] = [["inventory"], ["products"]];
+
+/**
  * The caller sends the key of the intended change (`pending-operations.ts`),
  * which records what each attempt's answer says about the change.
  */
@@ -145,7 +128,28 @@ export function useReceiveShipment() {
       sendHeldOperation("receive-shipment", productId, idempotencyKey, () =>
         receiveShipment(productId, body, idempotencyKey)
       ),
-    [["products"]],
+    INVENTORY_KEYS,
+    retryKeyedCommand,
+    keyedCommandRetryDelay
+  );
+}
+
+/** Keyed like a shipment: the caller sends the key of the intended adjustment. */
+export function useAdjustInventory() {
+  return useInvalidatingMutation(
+    ({
+      productId,
+      body,
+      idempotencyKey,
+    }: {
+      productId: string;
+      body: { quantityChange: number; reason: string };
+      idempotencyKey: string;
+    }) =>
+      sendHeldOperation("adjust-inventory", productId, idempotencyKey, () =>
+        adjustInventory(productId, body, idempotencyKey)
+      ),
+    INVENTORY_KEYS,
     retryKeyedCommand,
     keyedCommandRetryDelay
   );

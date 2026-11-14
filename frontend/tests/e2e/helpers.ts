@@ -129,6 +129,9 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
   await page.route(`${BACKEND_URL}/api/orders`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
+  await page.route(`${BACKEND_URL}/api/inventory`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  );
   await page.route(`${BACKEND_URL}/api/customers`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
@@ -204,7 +207,7 @@ export interface SentCommand {
   role: string | undefined;
   userId: string | undefined;
   contentType: string | undefined;
-  /** The `Idempotency-Key` header, which the stock and shipment writes send. */
+  /** The `Idempotency-Key` header, which the inventory's receive and adjust writes send. */
   idempotencyKey: string | undefined;
   /** The parsed JSON body, or null for a request without one. */
   body: Record<string, unknown> | null;

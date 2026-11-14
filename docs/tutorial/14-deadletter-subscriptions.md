@@ -77,7 +77,6 @@ public VirtualThreadCommandBus commandBus(
                   switch (cmd) {
                     case ProductCommand.CreateProduct c -> c.productId();
                     case ProductCommand.UpdatePrice c -> c.productId();
-                    case ProductCommand.AdjustStock c -> c.productId();
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
@@ -128,6 +127,7 @@ public VirtualThreadCommandBus commandBus(
                     case InventoryCommand.ReleaseStock c -> c.productId();
                     case InventoryCommand.ConfirmReservation c -> c.productId();
                     case InventoryCommand.ReceiveShipment c -> c.productId();
+                    case InventoryCommand.AdjustInventory c -> c.productId();
                   }),
           new InventoryDecider())
       .build();
@@ -144,7 +144,7 @@ The bus stores the command as JSON, written by the mapper you pass to `.objectMa
 
 `DeadLetterRetryRunner` polls the `DeadLetterQueue` on a virtual thread, deserializes each stored command, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments a DLQ attempt counter so that poison messages eventually stop being retried.
 
-**Which entries the schedule replays.** A command lands in the queue because its first attempt failed on infrastructure, and the caller saw that failure. The caller may send the request again on its own, and that retry may succeed. A replay of the dead-letter entry afterwards is then a second execution of the same request: for `AdjustStock`, which changes the stock *by* a quantity, a second, silent change of the stock. The runner cannot tell this case from a command that never ran. It can rely on one thing: the command inbox (Chapter 11, Step 6). A command the caller sent with an idempotency key keeps that key in its entry, and the runner replays it under the same key, so if the caller's own retry already ran, the inbox answers the replay with the recorded result and nothing runs twice. The default policy (`DeadLetterRetryPolicy.DEFAULT`, `UnkeyedReplay.OPERATOR_ONLY`) therefore replays on the schedule only the entries of keyed commands. The bean passes it as `.policy(DeadLetterRetryPolicy.DEFAULT)`, the policy the command bus of Step 2 answers a keyed re-send by. An entry of an unkeyed command waits for an operator, who checks whether its effect is there and then replays it on purpose or discards it (Step 5); an entry nobody decides about is removed by the retention sweeper after `streamrune.dead-letter.retention-max-age` (7 days, the inbox's window). Step 3b gives the demo's stock adjustment and shipment receipt their keys.
+**Which entries the schedule replays.** A command lands in the queue because its first attempt failed on infrastructure, and the caller saw that failure. The caller may send the request again on its own, and that retry may succeed. A replay of the dead-letter entry afterwards is then a second execution of the same request: for `AdjustInventory`, which changes the stock *by* a quantity, a second, silent change of the stock. The runner cannot tell this case from a command that never ran. It can rely on one thing: the command inbox (Chapter 11, Step 6). A command the caller sent with an idempotency key keeps that key in its entry, and the runner replays it under the same key, so if the caller's own retry already ran, the inbox answers the replay with the recorded result and nothing runs twice. The default policy (`DeadLetterRetryPolicy.DEFAULT`, `UnkeyedReplay.OPERATOR_ONLY`) therefore replays on the schedule only the entries of keyed commands. The bean passes it as `.policy(DeadLetterRetryPolicy.DEFAULT)`, the policy the command bus of Step 2 answers a keyed re-send by. An entry of an unkeyed command waits for an operator, who checks whether its effect is there and then replays it on purpose or discards it (Step 5); an entry nobody decides about is removed by the retention sweeper after `streamrune.dead-letter.retention-max-age` (7 days, the inbox's window). Step 3b gives the demo's stock adjustment and shipment receipt their keys.
 
 You must tell the runner which Java types to use when deserializing each command type. The DLQ entry stores the command's fully-qualified class name (`Class#getName()`) — the **concrete** class, e.g. `InventoryCommand$ReceiveShipment` — and `registerCommand` keys each class by that same name, so the runner resolves a stored entry with one exact lookup. Two commands with the same simple name in different packages never collide. You do not have to list every concrete command: registering a sealed root such as `InventoryCommand.class` also registers every command it permits, recursively. The demo registers the five sealed command roots, the same roots the command bus routes to deciders, so a dead-lettered command of any of the five aggregates resolves.
 
@@ -238,7 +238,7 @@ public class EcommerceNativeHints implements RuntimeHintsRegistrar {
 
 and annotate `StreamRuneConfig` with `@ImportRuntimeHints(EcommerceNativeHints.class)` (import `org.springframework.context.annotation.ImportRuntimeHints`), next to `@Configuration`. A JVM run ignores both; Chapter 17 builds the native image that reads them.
 
-A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (the policy the framework builds their command bus with, from `streamrune.dead-letter.*`: 5 attempts, 60 s initial backoff and `OPERATOR_ONLY` unless configured; the inbox window; the metrics bean; `app.dead-letter.poll-interval`; the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean, the crypto-aware mapper and the runner's policy and inbox window by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse a `StockAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
+A runner you define yourself **replaces** the framework's default one, on all three frameworks, and the framework then starts nothing of that type: the runner is yours to start and stop. On Spring the bean method above calls `runner.start()` (Spring closes it at shutdown). The demo's Quarkus and Micronaut apps define their runner the same way (the policy the framework builds their command bus with, from `streamrune.dead-letter.*`: 5 attempts, 60 s initial backoff and `OPERATOR_ONLY` unless configured; the inbox window; the metrics bean; `app.dead-letter.poll-interval`; the same crypto-aware mapper) and start it from their `EcommerceSubscriptionLifecycle`, next to the saga subscriptions, closing it at shutdown; their `DeadLetterRetryRunnerOwnershipIT` checks that the demo's runner is running and that the framework built none of its own. Their command bus comes from the framework, which hands it the `DeadLetterQueue` bean, the crypto-aware mapper and the runner's policy and inbox window by itself. In all three apps `CustomerCommandDeadLetterIT` makes the event store refuse a customer's event, then checks that the dead-lettered command holds no plaintext, that a replay registers the customer with the original values, and that after a forget the queued copy reads `[REDACTED]` and is not replayed. `DeadLetterReplayPolicyIT` makes the store refuse an `InventoryAdjusted` event and checks the policy: a keyed adjustment is replayed on the schedule, and is not applied a second time when its caller already retried it with the same key; an unkeyed one stays in the queue, is counted by `awaiting_operator`, and is refused by a plain Retry.
 
 Without `.pollInterval(...)` the runner polls every minute. The batch size defaults to 10, configurable with `.batchSize(20)`.
 
@@ -250,9 +250,9 @@ app:
     poll-interval: 60s
 ```
 
-### Step 3b: Give the stock adjustment an idempotency key
+### Step 3b: Give the stock changes an idempotency key
 
-`PUT /api/products/{id}/stock` sends `AdjustStock`, a change *by* a quantity, and `POST /api/inventory/{productId}/receive` sends `ReceiveShipment`, which adds to the inventory. A client that sends either request twice — after a timeout, or from a retry button — changes the stock twice, and so would a replay of its dead-letter entry. The other writes of the demo do not have this problem: a create names the id the client chose, and a second create answers `400 already exists`; a price is set, not changed by an amount; shipping, delivering and cancelling move an order from one state to the next, and the decider refuses the second move.
+`POST /api/inventory/{productId}/adjust` sends `AdjustInventory`, a change *by* a quantity, and `POST /api/inventory/{productId}/receive` sends `ReceiveShipment`, which adds to the inventory. A client that sends either request twice — after a timeout, or from a retry button — changes the stock twice, and so would a replay of its dead-letter entry. The other writes of the demo do not have this problem: a create names the id the client chose, and a second create answers `400 already exists`; a price is set, not changed by an amount; shipping, delivering and cancelling move an order from one state to the next, and the decider refuses the second move.
 
 The two endpoints take an optional `Idempotency-Key` header. With it the command goes through `commandBus.execute(command, key)`: the bus runs the command once per key and answers a repeat with the recorded result. Without it the request runs unkeyed, like every other command of the demo. The value comes from the client, and a key is a bearer token for the result recorded under it, so the key is built inside the caller's namespace with `IdempotencyKey.scopedTo` — two admins who happen to send the same value get two keys. The three apps share the helper, in the `commands` module:
 
@@ -268,10 +268,10 @@ import org.streamrune.core.types.UserId;
 /**
  * Dispatches a request's command under the {@code Idempotency-Key} the client sent, or without a
  * key when it sent none. The three apps call it from the endpoints whose command changes a quantity
- * by an amount ({@code PUT /api/products/{id}/stock}, {@code POST
- * /api/inventory/{productId}/receive}): applied twice, such a command is a different stock. A
- * client that sends such a request again — after a timeout, from a retry button — sends the same
- * key, and the command bus runs the command once and answers the repeat with the recorded result.
+ * by an amount ({@code POST /api/inventory/{productId}/receive}, {@code POST
+ * /api/inventory/{productId}/adjust}): applied twice, such a command is a different stock. A client
+ * that sends such a request again — after a timeout, from a retry button — sends the same key, and
+ * the command bus runs the command once and answers the repeat with the recorded result.
  *
  * <p>The key is also what makes the command safe to replay from the dead-letter queue: an entry
  * keeps the key, and the replay runs under it, so a replay after the caller's own successful retry
@@ -318,104 +318,7 @@ public final class IdempotentDispatch {
 }
 ```
 
-The stock handler of `ProductCommandController` binds the header and dispatches through the helper:
-
-```java
-package org.streamrune.ecommerce.spring.controller;
-
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Positive;
-import java.math.BigDecimal;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.streamrune.ecommerce.commands.IdempotentDispatch;
-import org.streamrune.ecommerce.domain.common.Money;
-import org.streamrune.ecommerce.domain.product.ProductCommand;
-import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
-import org.streamrune.runtime.VirtualThreadCommandBus;
-
-/**
- * The product commands: the catalogue is the operators', so every write is for an {@code ADMIN}
- * ({@code 403} for everyone else). Creating a product, adjusting its stock and changing its price
- * ask {@link OwnerOrAdminAccess#requireAdmin} as their first line; discontinuing is guarded in the
- * command bus by {@code @RequireRole("ADMIN")} on the command. Reading the catalogue is open
- * ({@code ProductQueryController}).
- */
-@RestController
-@RequestMapping("/api/products")
-public class ProductCommandController {
-
-  private final VirtualThreadCommandBus commandBus;
-
-  public ProductCommandController(VirtualThreadCommandBus commandBus) {
-    this.commandBus = commandBus;
-  }
-
-  @PostMapping
-  public ResponseEntity<Void> createProduct(@Valid @RequestBody CreateProductRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    commandBus.execute(
-        new ProductCommand.CreateProduct(
-            req.productId(),
-            req.name(),
-            req.description(),
-            req.category(),
-            new Money(req.price(), "USD"),
-            req.initialStock()));
-    return ResponseEntity.ok().build();
-  }
-
-  /**
-   * A change of the stock by {@code quantity}: sent twice, it is applied twice, unless the client
-   * sends an {@code Idempotency-Key}. With the header the bus runs the command once per key and
-   * answers a repeat with the recorded result, and a dead-lettered adjustment is replayed under the
-   * same key, so the retry runner replays it on its schedule.
-   */
-  @PutMapping("/{id}/stock")
-  public ResponseEntity<Void> adjustStock(
-      @PathVariable String id,
-      @RequestHeader(name = IdempotentDispatch.HEADER, required = false) String idempotencyKey,
-      @Valid @RequestBody AdjustStockRequest req) {
-    var caller = RequestCaller.current();
-    OwnerOrAdminAccess.requireAdmin(caller);
-    IdempotentDispatch.execute(
-        commandBus,
-        new ProductCommand.AdjustStock(id, req.quantity(), req.reason()),
-        IdempotentDispatch.keyFor(idempotencyKey, caller.userId()));
-    return ResponseEntity.ok().build();
-  }
-
-  @PutMapping("/{id}/price")
-  public ResponseEntity<Void> updatePrice(
-      @PathVariable String id, @Valid @RequestBody UpdatePriceRequest req) {
-    OwnerOrAdminAccess.requireAdmin(RequestCaller.current());
-    commandBus.execute(new ProductCommand.UpdatePrice(id, new Money(req.price(), "USD")));
-    return ResponseEntity.ok().build();
-  }
-
-  @PostMapping("/{id}/discontinue")
-  public ResponseEntity<Void> discontinueProduct(@PathVariable String id) {
-    commandBus.execute(new ProductCommand.DiscontinueProduct(id));
-    return ResponseEntity.ok().build();
-  }
-
-  public record CreateProductRequest(
-      @NotBlank String productId,
-      @NotBlank String name,
-      String description,
-      String category,
-      @NotNull @Positive BigDecimal price,
-      int initialStock) {}
-
-  public record AdjustStockRequest(int quantity, String reason) {}
-
-  public record UpdatePriceRequest(@NotNull @Positive BigDecimal price) {}
-}
-```
-
-`InventoryCommandController#receiveShipment` (Chapter 11) does the same with `ReceiveShipment`:
+The two handlers of `InventoryCommandController` (Chapter 11) bind the header and dispatch through the helper:
 
 ```java
 package org.streamrune.ecommerce.spring.controller;
@@ -425,23 +328,31 @@ import jakarta.validation.constraints.Positive;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.commands.IdempotentDispatch;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.domain.inventory.InventoryCommand;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
-/** Receiving a shipment changes the stock every order reserves from: for an {@code ADMIN} only. */
+/**
+ * The inventory is the one place that holds a product's units: receiving a shipment and adjusting
+ * the units on hand change the stock every order reserves from, so both are for an {@code ADMIN}
+ * only. Both are refused with {@code 400} for a product the catalogue does not hold ({@link
+ * ProductCatalog#requireExists}), so no inventory is opened for a product nobody created.
+ */
 @RestController
 @RequestMapping("/api/inventory")
 public class InventoryCommandController {
   private final VirtualThreadCommandBus commandBus;
+  private final ProductCatalog catalog;
 
-  public InventoryCommandController(VirtualThreadCommandBus commandBus) {
+  public InventoryCommandController(VirtualThreadCommandBus commandBus, ProductCatalog catalog) {
     this.commandBus = commandBus;
+    this.catalog = catalog;
   }
 
   /**
-   * Adds {@code quantity} to the inventory: like a stock adjustment, it is applied once per {@code
-   * Idempotency-Key} the client sends, and every time without one.
+   * Adds {@code quantity} to the inventory: applied once per {@code Idempotency-Key} the client
+   * sends, and every time without one.
    */
   @PostMapping("/{productId}/receive")
   public ResponseEntity<Void> receiveShipment(
@@ -450,27 +361,54 @@ public class InventoryCommandController {
       @Valid @RequestBody ReceiveShipmentRequest req) {
     var caller = RequestCaller.current();
     OwnerOrAdminAccess.requireAdmin(caller);
+    var key = IdempotentDispatch.keyFor(idempotencyKey, caller.userId());
+    catalog.requireExists(productId);
+    IdempotentDispatch.execute(
+        commandBus, new InventoryCommand.ReceiveShipment(productId, req.quantity()), key);
+    return ResponseEntity.ok().build();
+  }
+
+  /**
+   * Changes the units on hand by a signed {@code quantityChange}, a stocktake for example, with the
+   * reason the operator gives. Like a shipment, it is applied once per {@code Idempotency-Key}, and
+   * every time without one. A change to zero, without a reason, or one that would leave fewer than
+   * no units available is refused with {@code 400}.
+   */
+  @PostMapping("/{productId}/adjust")
+  public ResponseEntity<Void> adjustInventory(
+      @PathVariable String productId,
+      @RequestHeader(name = IdempotentDispatch.HEADER, required = false) String idempotencyKey,
+      @Valid @RequestBody AdjustInventoryRequest req) {
+    if (req.quantityChange() == null) {
+      throw new IllegalArgumentException("quantityChange is required");
+    }
+    var caller = RequestCaller.current();
+    OwnerOrAdminAccess.requireAdmin(caller);
+    var key = IdempotentDispatch.keyFor(idempotencyKey, caller.userId());
+    catalog.requireExists(productId);
     IdempotentDispatch.execute(
         commandBus,
-        new InventoryCommand.ReceiveShipment(productId, req.quantity()),
-        IdempotentDispatch.keyFor(idempotencyKey, caller.userId()));
+        new InventoryCommand.AdjustInventory(productId, req.quantityChange(), req.reason()),
+        key);
     return ResponseEntity.ok().build();
   }
 
   public record ReceiveShipmentRequest(@Positive int quantity) {}
+
+  public record AdjustInventoryRequest(Integer quantityChange, String reason) {}
 }
 ```
 
-A key that is blank, that is longer than 512 characters together with the caller's id (the scoped key is `<userId>|<key>`), or that holds a control character is refused with `400`, and so is a key presented again for another product: the bus never hands one stream's result to another. Try it — the second request answers `200` and leaves the stock of `p-1` as the first one set it (`curl http://localhost:8080/api/products/p-1` shows it five above where it was):
+A key that is blank, that is longer than 512 characters together with the caller's id (the scoped key is `<userId>|<key>`), or that holds a control character is refused with `400`, and so is a key presented again for another product: the bus never hands one stream's result to another. Try it — the second request answers `200` and leaves the stock of `p-1` as the first one set it (`curl http://localhost:8080/api/products/p-1` shows `available` five above where it was):
 
 ```bash
 # One key for one intended change, this restock of five: mint it once, and send the request again
 # with the same key after a lost answer or a 5xx, until a 2xx or a 4xx answers it.
 KEY=$(uuidgen)
 for i in 1 2; do
-  curl -s -o /dev/null -w '%{http_code}\n' -X PUT http://localhost:8080/api/products/p-1/stock \
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/api/inventory/p-1/adjust \
     -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" -H "Idempotency-Key: $KEY" \
-    -H "Content-Type: application/json" -d '{"quantity": 5, "reason": "restock"}'
+    -H "Content-Type: application/json" -d '{"quantityChange": 5, "reason": "restock"}'
 done
 ```
 
@@ -811,7 +749,7 @@ public class GlobalExceptionHandler {
 
 The Quarkus and Micronaut apps answer the same: JAX-RS and Micronaut pick a mapper by the thrown type, so each app has one more, `CommandDeadLettered`, nested in `CommandRefusalExceptionMappers` and `CommandRefusalExceptionHandlers`; a lock timeout or a version conflict that the bus dead-lettered reaches it, not the lock's mapper. `CommandRefusalStatusIT` in each app sends a keyed and an unkeyed stock adjustment while the product's lock is held, and again while every append meets a version conflict, and checks the two answers and the entries they name; with the entry's write refused as well, the version conflict reaches the caller as itself, `AGGREGATE_VERSION_CONFLICT`. `DeadLetterReplayPolicyIT` checks the answer to every adjustment it dead-letters.
 
-The frontend's Adjust Stock and Receive Shipment dialogs keep the key of a change until it is answered for good, and say that a `QUEUED_FOR_REPLAY` change will be applied (Chapter 16). `IdempotencyKeyIT` in each app checks the rules above.
+The frontend's Adjust and Receive Shipment dialogs of Admin → Inventory keep the key of a change until it is answered for good, and say that a `QUEUED_FOR_REPLAY` change will be applied (Chapter 16). `IdempotencyKeyIT` in each app checks the rules above.
 
 ### Step 4: Configure `ProjectionErrorStrategy.DLQ` per projection (optional production hardening)
 
@@ -1300,7 +1238,7 @@ public class AdminController {
 
 Without `force` the endpoint refuses exactly what the schedule leaves alone, so a plain click is never the second execution the policy of Step 3 prevents. A keyed, fresh entry the endpoint replays at once, as the schedule would on its next poll.
 
-**The operator's two ways out.** A `409` leaves the decision to the operator, who looks at the command's effect — for a stock adjustment, whether the product's stock changed — and the message names both remedies. When the effect is missing, `?force=true` replays the entry, and the runner logs a `WARN` naming the operator. When it is present, the command already ran (its caller retried it), and `DELETE /api/admin/dead-letters/{id}` removes the entry through `deadLetterQueue.discard(commandId)`, so that nothing replays it; it answers `200 {"outcome": "DISCARDED"}`, or `404` when the entry is gone. Either way the entry leaves `streamrune.dlq.awaiting_operator`.
+**The operator's two ways out.** A `409` leaves the decision to the operator, who looks at the command's effect — for an inventory adjustment, whether the product's available units changed — and the message names both remedies. When the effect is missing, `?force=true` replays the entry, and the runner logs a `WARN` naming the operator. When it is present, the command already ran (its caller retried it), and `DELETE /api/admin/dead-letters/{id}` removes the entry through `deadLetterQueue.discard(commandId)`, so that nothing replays it; it answers `200 {"outcome": "DISCARDED"}`, or `404` when the entry is gone. Either way the entry leaves `streamrune.dlq.awaiting_operator`.
 
 **The decision is audited before it is acted on.** `auditOperatorDecision` writes the decision into Chapter 10's `audit_log` (beside the command's own rows, shown by `GET /api/audit/commands`): command type `DLQ_FORCED_REPLAY` or `DLQ_DISCARDED`, the entry's command id and stream, and the operator. Both endpoints look the entry up first — that answers the `404` and supplies the stream — then write the row, and only then replay or discard. A row that cannot be written throws, so nothing is replayed or removed without its record; written afterwards, a crash or an audit store that is down for a moment would leave a second execution that names nobody. The row records the request, not its result: a forced replay that fails leaves the entry listed with one more attempt, and one that succeeds shows as the replayed command's own audit row. A `?force=true` for an entry the runner would have replayed anyway (a keyed, fresh one) is recorded too, because the operator asked for it. `DeadLetterReplayPolicyIT` makes the audit store refuse the row and checks that the entry is then neither replayed nor discarded.
 
@@ -1401,6 +1339,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -1461,9 +1400,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1511,6 +1447,9 @@ public class StreamRuneConfig {
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
         .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
+        .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
         .registerEvent(
@@ -1519,6 +1458,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -1744,7 +1686,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -1795,6 +1736,7 @@ public class StreamRuneConfig {
                       case InventoryCommand.ReleaseStock c -> c.productId();
                       case InventoryCommand.ConfirmReservation c -> c.productId();
                       case InventoryCommand.ReceiveShipment c -> c.productId();
+                      case InventoryCommand.AdjustInventory c -> c.productId();
                     }),
             new InventoryDecider())
         .build();
@@ -2259,6 +2201,12 @@ public class StreamRuneConfig {
     return new OrderPricing(eventStore);
   }
 
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
+  }
+
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
   @Bean
   public OrderCancellationProcessManager orderCancellationProcessManager(
@@ -2502,7 +2450,7 @@ With the application running and idle, every projection's `last_offset` is at th
 
 **`DeadLetterRetryRunner`** polls the `DeadLetterQueue` on a virtual thread. For each retryable entry it deserializes the command using the `commandTypeRegistry`, re-dispatches it through the `CommandBus`, and discards the entry on success. On failure it increments `dlqAttempts`. Once `dlqAttempts` reaches the policy's `maxRetries`, the entry is either discarded (if `discardAfterMaxRetries` is true) or left in place as a permanent record of a poison message. The default policy (`DeadLetterRetryPolicy.DEFAULT`) retries up to five times with exponential backoff, does **not** auto-discard, and replays on its schedule only entries whose command ran under an idempotency key (`UnkeyedReplay.OPERATOR_ONLY`): a keyed replay is deduplicated by the command inbox against the caller's own retry, an unkeyed one could be a second execution. An unkeyed entry waits for an operator, who replays it (`retry(commandId, true)`) when its effect is missing or discards it (`deadLetterQueue.discard(commandId)`) when it is present, each decision audited before it is acted on; a keyed entry older than the inbox window (`inboxRetentionMaxAge`) is refused as `STALE_REPLAY_BLOCKED` until forced. `streamrune.dlq.awaiting_operator` counts the entries waiting for a person.
 
-**`Idempotency-Key`** on `PUT /api/products/{id}/stock` and `POST /api/inventory/{productId}/receive` turns the two relative writes into keyed commands (`IdempotentDispatch`, `commandBus.execute(command, key)`): a repeat of the request is answered with the recorded result, and a failed one is replayed on the schedule. The key is scoped to the caller with `IdempotencyKey.scopedTo`.
+**`Idempotency-Key`** on `POST /api/inventory/{productId}/adjust` and `POST /api/inventory/{productId}/receive` turns the two relative writes into keyed commands (`IdempotentDispatch`, `commandBus.execute(command, key)`): a repeat of the request is answered with the recorded result, and a failed one is replayed on the schedule. The key is scoped to the caller with `IdempotencyKey.scopedTo`.
 
 **`SagaDeadLetterReplayer`** is the saga-side counterpart introduced in this chapter: manual, operator-triggered recovery of `FAULTED` sagas. Unlike `DeadLetterRetryRunner`, it has no polling loop — poison saga failures are deterministic orchestrator bugs that only resolve once a fix is deployed, so recovery is always explicit. `replayAll` drains a saga's quarantined events oldest first and `replay` feeds one, through the same saga runner; `resumeFaulted` re-runs a compensation the retry sweeper gave up on. It never un-faults a saga itself: only the fed step's own write clears the fault. Built with the deployment's inbox retention window, it refuses a re-drive or a compensation older than that window (`STALE_REDRIVE_BLOCKED`, `STALE_COMPENSATION_BLOCKED`) until an operator who has checked what already ran repeats it with `force`.
 

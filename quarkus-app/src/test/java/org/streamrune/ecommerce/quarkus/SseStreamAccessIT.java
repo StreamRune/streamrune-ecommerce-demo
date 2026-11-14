@@ -225,8 +225,7 @@ class SseStreamAccessIT {
   private void createProduct(String product) throws Exception {
     String body =
         """
-        {"productId": "%s", "name": "Stream product", "category": "General", "price": 12.50,
-         "initialStock": 0}"""
+        {"productId": "%s", "name": "Stream product", "category": "General", "price": 12.50}"""
             .formatted(product);
     assertThat(send("POST", "/api/products", "stock-clerk", ADMIN, body).statusCode())
         .isBetween(200, 299);

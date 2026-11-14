@@ -6,35 +6,27 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import org.streamrune.core.DomainException;
-import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
-import org.streamrune.core.types.AggregateId;
-import org.streamrune.core.types.StreamId;
-import org.streamrune.core.types.Version;
-import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
-import org.streamrune.ecommerce.domain.product.ProductEvent;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.domain.product.ProductStatus;
 
 /**
  * Prices an order from the product catalogue. Each line's unit price is the product's price as its
  * event stream holds it when the order is placed; the client names products and quantities only.
- * Read from the event store, not from the product read model, so a product created a moment ago is
- * orderable and a price change applies at once. A product nobody created, or one that is
- * discontinued, is refused ({@code DomainException}, {@code 400}). An order id too long for its
- * saga id, a malformed product id and two lines of one product are refused before the store is
- * read.
+ * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
+ * product created a moment ago is orderable and a price change applies at once. A product nobody
+ * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
+ * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
+ * two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
-  private static final int PAGE_SIZE = 100;
-
-  private final EventStore eventStore;
-  private final ProductDecider products = new ProductDecider();
+  private final ProductCatalog catalog;
 
   public OrderPricing(EventStore eventStore) {
-    this.eventStore = Objects.requireNonNull(eventStore, "eventStore is required");
+    this.catalog = new ProductCatalog(Objects.requireNonNull(eventStore, "eventStore is required"));
   }
 
   /** One line of an order as a client asks for it: a product and a quantity. */
@@ -60,38 +52,12 @@ public final class OrderPricing {
     }
     List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
     for (RequestedLine line : lines) {
-      ProductState product = current(line.productId());
-      if (product.productId() == null) {
-        throw new DomainException("Product not found");
-      }
+      ProductState product = catalog.require(line.productId());
       if (product.status() == ProductStatus.DISCONTINUED) {
         throw new DomainException("Product is discontinued");
       }
       priced.add(new OrderCommand.OrderLine(line.productId(), line.quantity(), product.price()));
     }
     return new OrderCommand.PlaceOrder(orderId, customerId, priced);
-  }
-
-  /**
-   * The product as its stream holds it, folded from its first event. This reads and folds the whole
-   * stream for each line of each order, so its cost grows with the product's history, not with the
-   * order. A product's stream is small in the demo (its creation, a few price changes and stock
-   * adjustments), so the read is cheap here; a catalogue whose products have long histories would
-   * price from a snapshot or a read model instead, and accept the lag of the read model.
-   */
-  private ProductState current(String productId) {
-    StreamId stream = StreamId.of(ProductState.TYPE, AggregateId.of(productId));
-    ProductState state = products.initialState();
-    Version after = Version.initial();
-    while (true) {
-      List<EventEnvelope> page = eventStore.readStream(stream, after, PAGE_SIZE);
-      for (EventEnvelope envelope : page) {
-        state = products.evolve(state, (ProductEvent) envelope.event());
-        after = envelope.version();
-      }
-      if (page.size() < PAGE_SIZE) {
-        return state;
-      }
-    }
   }
 }

@@ -47,6 +47,8 @@ AUDIT_QUEUE = "soak.audit"
 EXCHANGE = "streamrune.events"
 INTEGRATION_QUEUE = "streamrune.integration"
 TERMINAL_SAGA = ("COMPLETED", "COMPENSATED", "FAILED")
+# Below this many available units the storefront shows a product LOW_STOCK (ProductProjection).
+LOW_STOCK_THRESHOLD = 10
 
 
 def now():
@@ -368,7 +370,7 @@ def customer_headers(cid):
 
 class Driver:
     WEIGHTS = [("place_order", 45), ("register_customer", 12), ("receive_shipment", 10),
-               ("adjust_stock", 6), ("update_profile", 4), ("update_price", 3), ("create_product", 2)]
+               ("adjust_inventory", 6), ("update_profile", 4), ("update_price", 3), ("create_product", 2)]
 
     def __init__(self, run, apps, rate, workers):
         self.run, self.apps, self.rate = run, apps, rate
@@ -518,7 +520,7 @@ class Driver:
     def op_create_product(self, initial=None):
         pid = self.next_id("p")
         body = {"productId": pid, "name": f"Soak product {pid}", "description": "soak",
-                "category": "Soak", "price": round(random.uniform(5, 50), 2), "initialStock": 0}
+                "category": "Soak", "price": round(random.uniform(5, 50), 2)}
         key = str(uuid.uuid4())
         status, _ = self.send("create_product", "POST", "/api/products", admin_headers(), body, key, pid)
         if random.random() < 0.05:
@@ -556,17 +558,22 @@ class Driver:
         if pid:
             self.receive(pid, random.randint(50, 200))
 
-    def op_adjust_stock(self):
+    def op_adjust_inventory(self):
         pid = self.random_of("products")
         if not pid:
             return
         key = str(uuid.uuid4())
-        body = {"quantity": random.randint(1, 5), "reason": "soak count"}
-        path = f"/api/products/{pid}/stock"
-        self.send("adjust_stock", "PUT", path, admin_headers(), body, key, pid)
-        if random.random() < 0.15:
+        # A signed change: a count down may find fewer units available than it removes, and the
+        # backend answers 400 "Insufficient stock ..." for it, an expected outcome. Only a count up
+        # is sent again under its key: a count down refused once could pass on a resend after a
+        # shipment, and one key would then have answered both 400 and 2xx.
+        change = random.choice([c for c in range(-5, 6) if c != 0])
+        body = {"quantityChange": change, "reason": "soak count"}
+        path = f"/api/inventory/{pid}/adjust"
+        self.send("adjust_inventory", "POST", path, admin_headers(), body, key, pid)
+        if change > 0 and random.random() < 0.15:
             self.schedule(random.uniform(0.05, 5), lambda: self.send(
-                "adjust_stock", "PUT", path, admin_headers(), body, key, pid, resend=True))
+                "adjust_inventory", "POST", path, admin_headers(), body, key, pid, resend=True))
 
     def op_update_price(self):
         pid = self.random_of("products")
@@ -1437,13 +1444,13 @@ def check(run, stop_apps=None):
 
     # 2. Keyed commands: once per key, nothing applied outside the inbox.
     keyed_ops = {"receive_shipment": ("inventory", "ShipmentReceived", "ReceiveShipment"),
-                 "adjust_stock": ("product", "StockAdjusted", "AdjustStock")}
+                 "adjust_inventory": ("inventory", "InventoryAdjusted", "AdjustInventory")}
     inbox = {r["k"][len(ADMIN) + 1:]: r for r in sql_rows(f"""
         SELECT idempotency_key AS k, command_type, aggregate_id, global_offsets FROM command_inbox
          WHERE idempotency_key LIKE '{ADMIN}|%'""")}
     events_per = {(r["aggregate_type"], r["aggregate_id"], r["event_type"]): r["n"] for r in sql_rows(f"""
         SELECT aggregate_type, aggregate_id, event_type, count(*) AS n FROM event_stream
-         WHERE event_type IN ('ShipmentReceived','StockAdjusted') AND aggregate_id LIKE 'soak-{rid}-%'
+         WHERE event_type IN ('ShipmentReceived','InventoryAdjusted') AND aggregate_id LIKE 'soak-{rid}-%'
          GROUP BY 1, 2, 3""")}
     bad = []
     keys = collections.defaultdict(list)
@@ -1509,6 +1516,12 @@ def check(run, stop_apps=None):
         SELECT payload->>'orderId' AS order_id, extract(epoch FROM created_at) AS t FROM event_stream
          WHERE aggregate_type = 'payment' AND event_type = 'PaymentFailed' AND aggregate_id LIKE 'pay-soak-{rid}-%'""")}
     decline_wins = windows([c for c in chaos if c["kind"] == "payment-decline"], 2, 15)
+    # The reason of each order's first cancellation, the one the orders view shows.
+    cancelled_for = {r["order_id"]: r["reason"] for r in sql_rows(f"""
+        SELECT DISTINCT ON (aggregate_id) aggregate_id AS order_id, payload->>'reason' AS reason
+          FROM event_stream
+         WHERE aggregate_type = 'order' AND event_type = 'OrderCancelled' AND aggregate_id LIKE 'soak-{rid}-%'
+         ORDER BY aggregate_id, global_offset""")}
     bad, explained = [], collections.Counter()
     for oid, r in orders_ok.items():
         s = sagas.get(oid)
@@ -1522,9 +1535,13 @@ def check(run, stop_apps=None):
                 cause = "deadline" if s["by_deadline"] else ("payment failed outside a decline window" if oid in declined else "unknown")
                 bad.append(f"{oid}: healthy flow ended {s['status']} ({cause}); placed {iso(r['t'])} "
                            f"in window {in_window(r['t'], chaos_wins + decline_wins)}")
-        if (r["intent"] == "oos" and s["status"] != "COMPENSATED"
-                and not (oid in declined and in_window(declined[oid], decline_wins))):
-            bad.append(f"{oid}: out-of-stock order ended {s['status']}")
+        # An order of more than the product holds is refused by the inventory, and the saga cancels
+        # it with the refusal's reason: FAILED, and the order's cancellation names the stock. A
+        # payment declined in a decline window ends it FAILED before the stock is asked.
+        if r["intent"] == "oos" and not (oid in declined and in_window(declined[oid], decline_wins)):
+            reason = cancelled_for.get(oid) or ""
+            if s["status"] != "FAILED" or not reason.startswith("Insufficient stock for "):
+                bad.append(f"{oid}: out-of-stock order ended {s['status']}, cancelled for {reason!r}")
     rep.add("no healthy flow compensated", not bad,
             f"{len(orders_ok)} orders; {sum(1 for o, r in orders_ok.items() if r['intent'] == 'happy')} healthy; "
             f"explained {dict(explained)}; {len(bad)} unexplained", bad)
@@ -1583,7 +1600,7 @@ def check(run, stop_apps=None):
              coalesce(v.data->>'available', 'missing') || '/' || coalesce(v.data->>'reserved', '-') || '/' || coalesce(v.data->>'committed', '-')
         FROM (SELECT aggregate_id AS id,
                      (array_agg((payload->>'availableAfter')::int ORDER BY global_offset DESC)
-                        FILTER (WHERE event_type <> 'ReservationConfirmed'))[1] AS available,
+                        FILTER (WHERE event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')))[1] AS available,
                      coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type = 'StockReserved'), 0)
                        - coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type IN ('StockReleased','ReservationConfirmed')), 0) AS reserved,
                      coalesce(sum((payload->>'quantity')::int) FILTER (WHERE event_type = 'ReservationConfirmed'), 0) AS committed
@@ -1592,20 +1609,28 @@ def check(run, stop_apps=None):
        WHERE v.id IS NULL OR (v.data->>'available')::int <> e.available OR (v.data->>'reserved')::int <> e.reserved
           OR (v.data->>'committed')::int <> e.committed
       UNION ALL
-      SELECT 'products', e.id, e.stock || '/' || e.price, coalesce(v.data->>'stock', 'missing') || '/' || coalesce(v.data->'price'->>'amount', '-')
-        FROM (SELECT aggregate_id AS id,
-                     (array_agg(coalesce(payload->>'newStock', payload->>'stock')::int ORDER BY global_offset DESC)
-                        FILTER (WHERE event_type IN ('ProductCreated','StockAdjusted')))[1] AS stock,
-                     (array_agg(coalesce(payload->'newPrice'->>'amount', payload->'price'->>'amount')::numeric ORDER BY global_offset DESC)
-                        FILTER (WHERE event_type IN ('ProductCreated','PriceUpdated')))[1] AS price
-                FROM event_stream WHERE aggregate_type = 'product' GROUP BY aggregate_id) e
+      SELECT 'products', e.id, e.availability || '/' || e.price,
+             coalesce(v.data->>'availability', 'missing') || '/' || coalesce(v.data->'price'->>'amount', '-')
+        FROM (SELECT id, price,
+                     CASE WHEN discontinued THEN 'DISCONTINUED' WHEN available <= 0 THEN 'OUT_OF_STOCK'
+                       WHEN available < %(low)s THEN 'LOW_STOCK' ELSE 'IN_STOCK' END AS availability
+                FROM (SELECT p.aggregate_id AS id,
+                             (array_agg(coalesce(p.payload->'newPrice'->>'amount', p.payload->'price'->>'amount')::numeric ORDER BY p.global_offset DESC)
+                                FILTER (WHERE p.event_type IN ('ProductCreated','PriceUpdated')))[1] AS price,
+                             bool_or(p.event_type = 'ProductDiscontinued') AS discontinued,
+                             coalesce((SELECT (i.payload->>'availableAfter')::int FROM event_stream i
+                                        WHERE i.aggregate_type = 'inventory' AND i.aggregate_id = p.aggregate_id
+                                          AND i.event_type NOT IN ('ReservationConfirmed', 'StockReservationRefused')
+                                        ORDER BY i.global_offset DESC LIMIT 1), 0) AS available
+                        FROM event_stream p WHERE p.aggregate_type = 'product' GROUP BY p.aggregate_id) x) e
         LEFT JOIN products_view v ON v.id = e.id
-       WHERE v.id IS NULL OR (v.data->>'stock')::int <> e.stock OR (v.data->'price'->>'amount')::numeric <> e.price
+       WHERE v.id IS NULL OR v.data->>'availability' IS DISTINCT FROM e.availability
+          OR (v.data->'price'->>'amount')::numeric <> e.price
       UNION ALL
       SELECT 'customers', c.aggregate_id, 'present', 'missing'
         FROM (SELECT aggregate_id FROM event_stream WHERE aggregate_type = 'customer' GROUP BY aggregate_id
                HAVING NOT bool_or(event_type = 'CustomerForgotten')) c
-        LEFT JOIN customers_view v ON v.id = c.aggregate_id WHERE v.id IS NULL""")
+        LEFT JOIN customers_view v ON v.id = c.aggregate_id WHERE v.id IS NULL""" % {"low": LOW_STOCK_THRESHOLD})
     counts = sql_one("SELECT (SELECT count(*) FROM orders_view) AS orders, (SELECT count(*) FROM inventory_view) AS inventory,"
                      " (SELECT count(*) FROM products_view) AS products, (SELECT count(*) FROM customers_view) AS customers")
     bad = [f"subscription {b['projection_name']} at {b['last_offset']}, behind the head" for b in behind]

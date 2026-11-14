@@ -72,7 +72,7 @@ class OrderPricingTest {
   void anUnknownProductIsRefused() {
     assertThatThrownBy(() -> priceOf("p-nobody"))
         .isExactlyInstanceOf(DomainException.class)
-        .hasMessage("Product not found");
+        .hasMessage("Product not found: p-nobody");
   }
 
   @Test
@@ -89,7 +89,7 @@ class OrderPricingTest {
   void aProductWithMoreEventsThanOnePageIsFoldedWhole() {
     createProduct("p-widget", "9.99");
     for (int i = 0; i < 120; i++) {
-      products.execute(new ProductCommand.AdjustStock("p-widget", 1, "restock " + i));
+      products.execute(new ProductCommand.UpdatePrice("p-widget", usd("10." + (i % 100))));
     }
     products.execute(new ProductCommand.UpdatePrice("p-widget", usd("15.00")));
 
@@ -173,7 +173,7 @@ class OrderPricingTest {
   private void createProduct(String productId, String price) {
     products.execute(
         new ProductCommand.CreateProduct(
-            productId, "Product " + productId, null, "General", usd(price), 50));
+            productId, "Product " + productId, null, "General", usd(price)));
   }
 
   private static Money usd(String amount) {
@@ -201,9 +201,6 @@ class OrderPricingTest {
         .register(
             registration(
                 ProductCommand.UpdatePrice.class, ProductCommand.UpdatePrice::productId, decider))
-        .register(
-            registration(
-                ProductCommand.AdjustStock.class, ProductCommand.AdjustStock::productId, decider))
         .register(
             registration(
                 ProductCommand.DiscontinueProduct.class,

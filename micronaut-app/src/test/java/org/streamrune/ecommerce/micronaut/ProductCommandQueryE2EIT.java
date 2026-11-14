@@ -23,8 +23,9 @@ import org.streamrune.ecommerce.queries.dto.ProductView;
  * round-trip (POST/PUT command → event → projection → GET query) over real HTTP against the running
  * Micronaut app backed by a real PostgreSQL (Testcontainers).
  *
- * <p>The suite covers create, adjust-stock and update-price. Discontinuing a product, and who may
- * call each of the four writes, is {@code OwnerOrAdminRestAccessIT}'s.
+ * <p>The suite covers create and update-price. Discontinuing a product, and who may call each of
+ * the writes, is {@code OwnerOrAdminRestAccessIT}'s; the stock a product shows is {@code
+ * CatalogInventoryE2EIT}'s.
  */
 @MicronautTest(transactional = false)
 class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
@@ -35,7 +36,7 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
 
   private record GetResult(int status, ProductView body) {}
 
-  private void createProduct(String id, String name, double price, int stock) {
+  private void createProduct(String id, String name, double price) {
     String body =
         """
         {
@@ -43,10 +44,9 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
           "name": "%s",
           "description": "test product",
           "category": "Test",
-          "price": %s,
-          "initialStock": %d
+          "price": %s
         }"""
-            .formatted(id, name, price, stock);
+            .formatted(id, name, price);
     var response =
         client
             .toBlocking()
@@ -71,10 +71,12 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
   @Test
   void createProductReturns2xxAndProjectionEventuallyExposesIt() {
     String pid = "m-p-create-" + System.nanoTime();
-    createProduct(pid, "Widget", 19.99, 100);
+    createProduct(pid, "Widget", 19.99);
 
+    // 30s, not the usual 10s: under a full parallel suite this can be the first projection await
+    // after container startup, and it also absorbs the subscription's cold-start catch-up.
     await()
-        .atMost(Duration.ofSeconds(10))
+        .atMost(Duration.ofSeconds(30))
         .pollInterval(Duration.ofMillis(200))
         .untilAsserted(
             () -> {
@@ -84,6 +86,7 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
               assertThat(r.body().productId()).isEqualTo(pid);
               assertThat(r.body().name()).isEqualTo("Widget");
               assertThat(r.body().status().name()).isEqualTo("AVAILABLE");
+              assertThat(r.body().availability().name()).isEqualTo("OUT_OF_STOCK");
             });
   }
 
@@ -91,8 +94,8 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
   void listProductsReturnsAllCreated() {
     String pid1 = "m-p-list-1-" + System.nanoTime();
     String pid2 = "m-p-list-2-" + System.nanoTime();
-    createProduct(pid1, "ListA", 9.99, 50);
-    createProduct(pid2, "ListB", 14.99, 30);
+    createProduct(pid1, "ListA", 9.99);
+    createProduct(pid2, "ListB", 14.99);
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -117,7 +120,7 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
   @Test
   void updatePriceReflectsInProjection() {
     String pid = "m-p-price-" + System.nanoTime();
-    createProduct(pid, "PriceWidget", 10.00, 10);
+    createProduct(pid, "PriceWidget", 10.00);
     await()
         .atMost(Duration.ofSeconds(10))
         .pollInterval(Duration.ofMillis(200))
@@ -148,44 +151,6 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
   }
 
   @Test
-  void adjustStockBelowThresholdMarksLowStock() {
-    String pid = "m-p-stock-" + System.nanoTime();
-    createProduct(pid, "StockWidget", 5.00, 100);
-    // 30s, not the usual 10s: this is the FIRST projection await after container startup, so under
-    // a full parallel suite it also absorbs the subscription's cold-start catch-up. Failed once at
-    // 10s in a full-suite run (404 for the whole window) while passing 3/3 in isolation; the 30s
-    // bound matches the existing cold-start awaits elsewhere in these ITs.
-    await()
-        .atMost(Duration.ofSeconds(30))
-        .pollInterval(Duration.ofMillis(200))
-        .untilAsserted(() -> assertThat(getProduct(pid).status()).isEqualTo(200));
-
-    var response =
-        client
-            .toBlocking()
-            .exchange(
-                HttpRequest.PUT(
-                        "/api/products/" + pid + "/stock",
-                        """
-                        {"quantity": -95, "reason": "test adjustment"}""")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .header("X-User-Role", "ADMIN")
-                    .header("X-User-Id", "test-admin"));
-    assertThat(response.getStatus().getCode()).isBetween(200, 299);
-
-    await()
-        .atMost(Duration.ofSeconds(10))
-        .pollInterval(Duration.ofMillis(200))
-        .untilAsserted(
-            () -> {
-              GetResult r = getProduct(pid);
-              assertThat(r.status()).isEqualTo(200);
-              assertThat(r.body().stock()).isEqualTo(5);
-              assertThat(r.body().status().name()).isEqualTo("LOW_STOCK");
-            });
-  }
-
-  @Test
   void invalidPayloadReturns400() {
     // Blank productId: the command bus rejects the blank aggregate id with an
     // IllegalArgumentException, mapped to 400 by IllegalArgumentExceptionHandler.
@@ -204,38 +169,5 @@ class ProductCommandQueryE2EIT extends AbstractIntegrationTest {
                             .header("X-User-Role", "ADMIN")
                             .header("X-User-Id", "test-admin")));
     assertThat(ex.getStatus().getCode()).isEqualTo(400);
-  }
-
-  /**
-   * A negative initial stock passes the handler's checks, which leave {@code initialStock} open,
-   * and the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
-   * CreateProduct}) with {@code 400} and the interceptor's message, as in the Spring app. The
-   * product is never created.
-   */
-  @Test
-  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
-    String pid = "m-p-negative-stock-" + System.nanoTime();
-    HttpClientResponseException ex =
-        assertThrows(
-            HttpClientResponseException.class,
-            () ->
-                client
-                    .toBlocking()
-                    .exchange(
-                        HttpRequest.POST(
-                                "/api/products",
-                                """
-                                {"productId": "%s", "name": "Widget", "price": 5.00,
-                                 "initialStock": -1}"""
-                                    .formatted(pid))
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .header("X-User-Role", "ADMIN")
-                            .header("X-User-Id", "test-admin"),
-                        String.class));
-    assertThat(ex.getStatus().getCode()).isEqualTo(400);
-    assertThat(ex.getResponse().getBody(String.class))
-        .hasValue("Command validation failed for CreateProduct");
-
-    assertThat(getProduct(pid).status()).isEqualTo(404);
   }
 }

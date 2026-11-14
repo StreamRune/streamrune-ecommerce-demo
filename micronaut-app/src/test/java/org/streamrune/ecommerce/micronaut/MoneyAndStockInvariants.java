@@ -49,17 +49,20 @@ final class MoneyAndStockInvariants {
 
   /**
    * The product's stock from its stream: the available quantity its last stock event recorded, what
-   * was received, the open reservations (reserved, less released, less committed) and the committed
-   * quantity.
+   * was received, the sum of the adjustments, the open reservations (reserved, less released, less
+   * committed) and the committed quantity.
    */
   private static final String STOCK_OF_PRODUCT =
       """
       SELECT (SELECT (payload->>'availableAfter')::int FROM event_stream
                WHERE aggregate_type = 'inventory' AND aggregate_id = ?
-                 AND event_type IN ('ShipmentReceived', 'StockReserved', 'StockReleased')
+                 AND event_type IN ('ShipmentReceived', 'InventoryAdjusted', 'StockReserved',
+                                    'StockReleased')
                ORDER BY version DESC LIMIT 1) AS available,
              coalesce(sum((payload->>'quantity')::int)
                       FILTER (WHERE event_type = 'ShipmentReceived'), 0) AS received,
+             coalesce(sum((payload->>'quantityChange')::int)
+                      FILTER (WHERE event_type = 'InventoryAdjusted'), 0) AS adjusted,
              coalesce(sum((payload->>'quantity')::int)
                       FILTER (WHERE event_type = 'StockReserved'), 0) AS reserved,
              coalesce(sum((payload->>'quantity')::int)
@@ -124,8 +127,9 @@ final class MoneyAndStockInvariants {
 
   /**
    * Checks the stock of one product against its stream: the available quantity the last stock event
-   * recorded equals what was received, less the open reservations, less the committed quantity.
-   * Returns a description of the mismatch, or {@code null} when the stock is conserved.
+   * recorded equals what was received, plus the adjustments, less the open reservations, less the
+   * committed quantity. Returns a description of the mismatch, or {@code null} when the stock is
+   * conserved.
    */
   static String stockMismatch(DataSource dataSource, String productId) throws SQLException {
     try (Connection conn = dataSource.getConnection();
@@ -135,13 +139,13 @@ final class MoneyAndStockInvariants {
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         int available = rs.getInt("available");
-        int received = rs.getInt("received");
+        int received = rs.getInt("received") + rs.getInt("adjusted");
         int open = rs.getInt("reserved") - rs.getInt("released") - rs.getInt("committed");
         int committed = rs.getInt("committed");
         if (available == received - open - committed && open >= 0) {
           return null;
         }
-        return "product %s: available %d, received %d, open reservations %d, committed %d"
+        return "product %s: available %d, received and adjusted %d, open reservations %d, committed %d"
             .formatted(productId, available, received, open, committed);
       }
     }

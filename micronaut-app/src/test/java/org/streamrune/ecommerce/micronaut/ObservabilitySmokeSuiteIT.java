@@ -524,8 +524,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                       "name": "Smoke Widget",
                       "description": "audit smoke test",
                       "category": "Test",
-                      "price": 1.00,
-                      "initialStock": 1
+                      "price": 1.00
                     }"""
                         .formatted(System.nanoTime()))
                 .contentType(MediaType.APPLICATION_JSON)
@@ -595,8 +594,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                       "name": "Events Widget",
                       "description": "event explorer smoke",
                       "category": "Test",
-                      "price": 5.00,
-                      "initialStock": 10
+                      "price": 5.00
                     }"""
                         .formatted(pid))
                 .contentType(MediaType.APPLICATION_JSON)
@@ -661,7 +659,7 @@ class ObservabilitySmokeSuiteIT extends AbstractIntegrationTest {
                     "/api/products",
                     """
                     {"productId": "%s", "name": "Metered Widget", "description": "metrics smoke",
-                     "category": "Test", "price": 5.00, "initialStock": 1}"""
+                     "category": "Test", "price": 5.00}"""
                         .formatted("smoke-metrics-" + System.nanoTime()))
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-User-Role", "ADMIN")

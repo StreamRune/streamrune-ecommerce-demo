@@ -16,8 +16,8 @@ export function newId(kind: IdKind): string {
 }
 
 /**
- * A fresh `Idempotency-Key` for one intended change: a stock adjustment or a
- * received shipment. `pending-operations.ts` takes one when the change is
+ * A fresh `Idempotency-Key` for one intended change of the inventory: a
+ * received shipment or an adjustment. `pending-operations.ts` takes one when the change is
  * first sent and sends it again with every request of the same change — the
  * page's own retry, the same amount sent from the dialog again — until the
  * backend's answer is final, so the backend applies the change once.

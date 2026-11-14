@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchProducts,
   fetchProduct,
+  fetchInventory,
   fetchOrders,
   fetchOrder,
   fetchCustomers,
@@ -30,6 +31,18 @@ export function useProduct(id: string) {
     queryKey: ["products", id],
     queryFn: () => fetchProduct(id),
     enabled: Boolean(id),
+  });
+}
+
+/**
+ * The inventory is served to an ADMIN only; the caller passes `enabled: false`
+ * for any other role and no request is sent.
+ */
+export function useInventory(enabled = true) {
+  return useQuery({
+    queryKey: ["inventory"],
+    queryFn: fetchInventory,
+    enabled,
   });
 }
 

@@ -225,10 +225,11 @@ function DeadLetterCard({ locked }: { locked: boolean }) {
             </DialogHeader>
             <p className="text-sm">{pending.reason}</p>
             <p className="text-sm text-muted-foreground">
-              Check the command&apos;s effect first — for a stock adjustment, whether the
-              product&apos;s stock changed. If the effect is absent, replay the entry. If it is
-              present, the command already ran and a replay applies it a second time: discard the
-              entry. Either decision is recorded in the audit log under your id.
+              Check the command&apos;s effect first — for an inventory adjustment, whether the
+              product&apos;s available units changed (Admin → Inventory). If the effect is
+              absent, replay the entry. If it is present, the command already ran and a replay
+              applies it a second time: discard the entry. Either decision is recorded in the
+              audit log under your id.
             </p>
             <DialogFooter showCloseButton>
               <Button variant="outline" onClick={() => handleDiscard(pending)} disabled={busy}>

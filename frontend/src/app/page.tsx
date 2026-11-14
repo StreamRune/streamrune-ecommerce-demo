@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { cn, formatMoney } from "@/lib/utils";
-import type { OrderStatus } from "@/lib/types";
+import type { OrderStatus, ProductView } from "@/lib/types";
 
 const ORDER_STATUS_STYLES: Record<OrderStatus, string> = {
   CREATED: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -35,6 +35,11 @@ const ORDER_STATUS_STYLES: Record<OrderStatus, string> = {
 };
 
 const REQUIRES_IDENTITY = "Requires CUSTOMER or ADMIN role";
+
+/** A product a customer can order now: in stock or low in stock, not out of stock or discontinued. */
+function onSale(product: ProductView): boolean {
+  return product.availability === "IN_STOCK" || product.availability === "LOW_STOCK";
+}
 
 export default function DashboardPage() {
   const { role, hasPermission } = useRole();
@@ -63,7 +68,7 @@ export default function DashboardPage() {
         <StatCard
           title="Products"
           value={products.length}
-          subtitle={`${products.filter((p) => p.status === "AVAILABLE").length} available`}
+          subtitle={`${products.filter(onSale).length} available`}
           icon={Package}
           href="/products"
         />

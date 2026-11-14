@@ -64,7 +64,7 @@ class TutorialLedgerTest {
           header("X-User-Id", 9, "the trusted-gateway mode switches the request identity on"),
           header("X-User-Role", 9, "the role resolver reads it"),
           header("X-Correlation-Id", 11, "the saga's correlation id"),
-          header("Idempotency-Key", 14, "the keyed stock adjustment"),
+          header("Idempotency-Key", 14, "the keyed inventory adjustment"),
           // Endpoints the framework, Spring Boot or a service of the stack serves
           framework("GET /actuator/health", 1, "Spring Boot Actuator"),
           framework("GET /actuator/metrics/{*}", 15, "Spring Boot Actuator"),
@@ -74,7 +74,6 @@ class TutorialLedgerTest {
           controller("POST /api/products", 2),
           controller("GET /api/products", 2),
           controller("GET /api/products/{id}", 2),
-          controller("PUT /api/products/{id}/stock", 2),
           controller("PUT /api/products/{id}/price", 2),
           controller("POST /api/products/{id}/discontinue", 2),
           controller("POST /api/customers", 6),
@@ -96,6 +95,9 @@ class TutorialLedgerTest {
           controller("POST /api/admin/payment-failure/toggle", 12),
           controller("POST /api/admin/payment-outage/toggle", 12),
           controller("POST /api/inventory/{id}/receive", 11),
+          controller("POST /api/inventory/{id}/adjust", 11),
+          controller("GET /api/inventory/{id}", 13),
+          controller("GET /api/inventory", 13),
           controller("GET /received", 13),
           controller("GET /health", 13),
           controller("GET /api/admin/outbox", 14),
@@ -121,7 +123,7 @@ class TutorialLedgerTest {
           // Products
           created("p-1", 2),
           created("p-valid", 3),
-          named("p-2", 3, "refused by validation here; chapter 5 creates it"),
+          created("p-2", 5),
           named("p-3", 3, "refused by validation"),
           named("p-4", 3, "refused by validation"),
           named("p-legacy", 4, "written as a raw version-1 event with psql"),
@@ -163,6 +165,7 @@ class TutorialLedgerTest {
           created("ord-1", 17),
           named("fulfillment-ord-1", 17, "the fulfillment saga of order ord-1"),
           created("ord-2", 17),
+          created("ord-3", 17),
           named("pay-ord-2", 17, "the payment of order ord-2"),
           named("fulfillment-walk-cb-1", 17, "the fulfillment saga of the first breaker order"));
 

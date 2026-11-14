@@ -282,7 +282,7 @@ class SagaDeadlineUndoE2EIT {
     VirtualThreadCommandBus bus = context.getBean(VirtualThreadCommandBus.class);
     bus.execute(
         new ProductCommand.CreateProduct(
-            product, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD"), 0));
+            product, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD")));
     bus.execute(new InventoryCommand.ReceiveShipment(product, quantity));
   }
 

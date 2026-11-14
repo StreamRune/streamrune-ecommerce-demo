@@ -90,8 +90,8 @@ import org.streamrune.ecommerce.domain.product.ProductCommand;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
- * Seeds the demo data at startup: three products with their opening stock, two customers and one
- * order.
+ * Seeds the demo data at startup: three products, their opening stock in the inventory, two
+ * customers and one order.
  *
  * <p>Seeding is idempotent, one command at a time. A product, a customer and an order are each
  * created by a command its decider refuses when the aggregate already exists, so on a later start
@@ -138,8 +138,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Widget",
                 "A versatile widget for all occasions",
                 "Electronics",
-                new Money(BigDecimal.valueOf(19.99), "USD"),
-                100));
+                new Money(BigDecimal.valueOf(19.99), "USD")));
     applied +=
         dispatch(
             new ProductCommand.CreateProduct(
@@ -147,8 +146,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Gadget",
                 "The latest and greatest gadget",
                 "Electronics",
-                new Money(BigDecimal.valueOf(49.99), "USD"),
-                50));
+                new Money(BigDecimal.valueOf(49.99), "USD")));
     applied +=
         dispatch(
             new ProductCommand.CreateProduct(
@@ -156,8 +154,7 @@ public class SeedDataRunner implements ApplicationRunner {
                 "Doohickey",
                 "Nobody knows what it does, but everybody wants one",
                 "Accessories",
-                new Money(BigDecimal.valueOf(9.99), "USD"),
-                200));
+                new Money(BigDecimal.valueOf(9.99), "USD")));
 
     // Inventory (opening stock, before the seed order so the saga's ReserveStock succeeds)
     applied += receiveOpeningStock("prod-widget", 100);
@@ -327,8 +324,7 @@ curl -s -X POST http://localhost:8080/api/products \
     "name": "Sprocket",
     "description": "A reliable sprocket",
     "category": "General",
-    "price": 29.99,
-    "initialStock": 100
+    "price": 29.99
   }' | jq .
 
 curl -s -X POST http://localhost:8080/api/products \
@@ -340,8 +336,7 @@ curl -s -X POST http://localhost:8080/api/products \
     "name": "Gizmo",
     "description": "A handy gizmo",
     "category": "General",
-    "price": 49.99,
-    "initialStock": 50
+    "price": 49.99
   }' | jq .
 ```
 
@@ -366,7 +361,22 @@ curl -s "http://localhost:8080/api/products" | jq .
 
 The response comes from the `QueryBus` (with caching from Chapter 5). The first call executes the query against the projection. A second call within the cache TTL is served entirely from memory — no SQL executed.
 
-Switch to the Products page in the frontend. Both products are listed next to the three seeded ones. The SSE live feed on the Dashboard already shows two `ProductCreated` events. The page's **Add Product** dialog sends the same request with a generated id (`prod-` and eight hex digits); a product created either way has no inventory until a shipment is received for it (**Receive Shipment** in the row's menu, `POST /api/inventory/{id}/receive`), and the saga cancels an order for it until then.
+Each product in the answer carries its `availability`, not a unit count: the catalogue is public, and the counts are the inventory's, for an `ADMIN`. The two new products read `"availability": "OUT_OF_STOCK"`: the catalogue holds no stock, and a product has none until a shipment is received for it. Receive one for the sprocket, as an `ADMIN`, and read it back:
+
+```bash
+curl -s -X POST http://localhost:8080/api/inventory/prod-sprocket/receive \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: admin-1" \
+  -H "X-User-Role: ADMIN" \
+  -d '{"quantity": 8}'
+
+curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
+  http://localhost:8080/api/inventory/prod-sprocket | jq .
+```
+
+The inventory answers `{"productId": "prod-sprocket", "productName": "Sprocket", "available": 8, "reserved": 0, "committed": 0}`, the inventory's own read model (`GET /api/inventory` lists every product's). A moment later `GET /api/products/prod-sprocket` reads `"availability": "LOW_STOCK"`: the storefront's view follows the inventory, and anything below ten units is low. The same request for a product nobody created, `prod-nope`, answers `400 Product not found: prod-nope` and writes nothing. A correction after a stocktake is `POST /api/inventory/prod-sprocket/adjust` with `{"quantityChange": -3, "reason": "Stocktake"}`; a change that would leave fewer than zero units answers `400 Insufficient stock for prod-sprocket: available=8, change=-20`.
+
+Switch to the frontend. The Products page lists both products next to the three seeded ones as a storefront: a price and an availability badge, no unit counts, and an **Order** button. Admin → Catalog lists them with their status and creates products: its **Add Product** dialog sends the same request with a generated id (`prod-` and eight hex digits) and an optional **Opening stock**, which it sends as a second request, the shipment above. Admin → Inventory shows the three counts of each product, live, and has the **Receive Shipment** and **Adjust** actions. The SSE live feed on the Dashboard already shows the `ProductCreated` events and the `ShipmentReceived`.
 
 ### Step 5: Place an Order — Watch the Saga
 
@@ -450,13 +460,32 @@ curl -s -H "X-User-Id: admin-1" -H "X-User-Role: ADMIN" \
 # ["StockReserved", "StockReleased"]
 
 curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
-  http://localhost:8080/api/orders/ord-2 | jq '{status, paymentStatus}'
-# {"status": "CANCELLED", "paymentStatus": "REFUNDED"}
+  http://localhost:8080/api/orders/ord-2 | jq '{status, paymentStatus, reason}'
+# {"status": "CANCELLED", "paymentStatus": "REFUNDED", "reason": "changed my mind"}
 ```
 
 The saga of `ord-2` completed before the cancel and stays `COMPLETED`; the undo runs through the cancellation's event, not through the saga. A shipped order is not cancelled: ship `ord-1` as an `ADMIN` (`POST /api/orders/ord-1/ship`), and a cancel of it afterwards answers `400 Cannot cancel SHIPPED orders`. Shipping commits the order's reservation instead (`ReservationConfirmed` in the inventory stream).
 
-The bus snapshots a stream after every 5 of its events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). The count is per stream, so more orders never snapshot an order: an order stream reaches five events only by being cancelled again, as Chapter 8's `order-5` was. A product's stream gets there with stock and price changes, and an inventory stream with its reservations: `SELECT aggregate_type, aggregate_id, version FROM snapshot_store WHERE state_payload IS NOT NULL` lists the streams that have one, and the next load of such a stream starts from the snapshot rather than from its first event.
+#### Order more than the inventory holds
+
+The sprocket has eight units available. Order twenty:
+
+```bash
+curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -H "X-User-Role: CUSTOMER" \
+  -H "X-User-Id: cust-walkthrough" \
+  -d '{"orderId": "ord-3", "customerId": "cust-walkthrough", "lines": [{"productId": "prod-sprocket", "quantity": 20}]}'
+
+# a few seconds later
+curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
+  http://localhost:8080/api/orders/ord-3 | jq '{status, paymentStatus, reason}'
+# {"status": "CANCELLED", "paymentStatus": "REFUNDED", "reason": "Insufficient stock for prod-sprocket: requested 20"}
+```
+
+The order is accepted, not refused: the request answers `200` and the saga finds out at its reservation step. The inventory records `StockReservationRefused` and reserves nothing, the saga cancels the order with the refusal's reason, and the cancellation is undone like any other, so the captured payment is refunded. The saga ends `FAILED` (`GET /api/saga/fulfillments/fulfillment-ord-3` reads `"fulfillmentStatus": "FAILED"`), not `COMPENSATED`, and the reason is the one the Orders page shows under the order's badges. It names what the customer asked for, not what the inventory holds: the count is for an `ADMIN`. `GET /api/inventory/prod-sprocket` still reads `"available": 8`, `"reserved": 0`. A reservation moves units from available to reserved when the saga makes it, and from reserved to committed when the order ships: after `POST /api/orders/ord-1/ship`, the widget's `committed` count rises by two.
+
+The bus snapshots a stream after every 5 of its events (`SnapshotPolicy.everyNEvents(5)` from Chapter 8). The count is per stream, so more orders never snapshot an order: an order stream reaches five events only by being cancelled again, as Chapter 8's `order-5` was. A product's stream gets there with price changes, and an inventory stream with its shipments, adjustments and reservations: `SELECT aggregate_type, aggregate_id, version FROM snapshot_store WHERE state_payload IS NOT NULL` lists the streams that have one, and the next load of such a stream starts from the snapshot rather than from its first event.
 
 ### Step 6: Check the Audit Log — Verify All Commands Were Tracked
 
@@ -862,7 +891,6 @@ public VirtualThreadCommandBus commandBus(
                       switch (cmd) {
                         case ProductCommand.CreateProduct c -> c.productId();
                         case ProductCommand.UpdatePrice c -> c.productId();
-                        case ProductCommand.AdjustStock c -> c.productId();
                         case ProductCommand.DiscontinueProduct c -> c.productId();
                       }),
               new ProductDecider())
@@ -913,6 +941,7 @@ public VirtualThreadCommandBus commandBus(
                         case InventoryCommand.ReleaseStock c -> c.productId();
                         case InventoryCommand.ConfirmReservation c -> c.productId();
                         case InventoryCommand.ReceiveShipment c -> c.productId();
+                        case InventoryCommand.AdjustInventory c -> c.productId();
                       }),
               new InventoryDecider());
   if (sagaCommandDelayMax.isPositive()) {
@@ -976,6 +1005,7 @@ import org.streamrune.ecommerce.commands.order.OrderDecider;
 import org.streamrune.ecommerce.commands.order.OrderPricing;
 import org.streamrune.ecommerce.commands.order.OrderShipmentProcessManager;
 import org.streamrune.ecommerce.commands.payment.PaymentDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.commands.product.ProductDecider;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentSaga;
 import org.streamrune.ecommerce.commands.saga.OrderFulfillmentState;
@@ -1038,9 +1068,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1088,6 +1115,9 @@ public class StreamRuneConfig {
             "StockReserved",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReserved.class)
         .registerEvent(
+            "StockReservationRefused",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReservationRefused.class)
+        .registerEvent(
             "StockReleased",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.StockReleased.class)
         .registerEvent(
@@ -1096,6 +1126,9 @@ public class StreamRuneConfig {
         .registerEvent(
             "ShipmentReceived",
             org.streamrune.ecommerce.domain.inventory.InventoryEvent.ShipmentReceived.class)
+        .registerEvent(
+            "InventoryAdjusted",
+            org.streamrune.ecommerce.domain.inventory.InventoryEvent.InventoryAdjusted.class)
         // Aggregate states, by simple class name: the bus snapshots a state under that name and
         // refuses to write a snapshot for a state the registry does not resolve.
         .registerState("ProductState", ProductState.class)
@@ -1347,7 +1380,6 @@ public class StreamRuneConfig {
                         switch (cmd) {
                           case ProductCommand.CreateProduct c -> c.productId();
                           case ProductCommand.UpdatePrice c -> c.productId();
-                          case ProductCommand.AdjustStock c -> c.productId();
                           case ProductCommand.DiscontinueProduct c -> c.productId();
                         }),
                 new ProductDecider())
@@ -1398,6 +1430,7 @@ public class StreamRuneConfig {
                           case InventoryCommand.ReleaseStock c -> c.productId();
                           case InventoryCommand.ConfirmReservation c -> c.productId();
                           case InventoryCommand.ReceiveShipment c -> c.productId();
+                          case InventoryCommand.AdjustInventory c -> c.productId();
                         }),
                 new InventoryDecider());
     if (sagaCommandDelayMax.isPositive()) {
@@ -1900,6 +1933,12 @@ public class StreamRuneConfig {
     return new OrderPricing(eventStore);
   }
 
+  /** The catalogue the inventory endpoints ask whether a product exists. */
+  @Bean
+  public ProductCatalog productCatalog(EventStore eventStore) {
+    return new ProductCatalog(eventStore);
+  }
+
   /** Undoes the money and stock of every cancelled order (OrderCancellationProcessManager). */
   @Bean
   public OrderCancellationProcessManager orderCancellationProcessManager(
@@ -2026,16 +2065,17 @@ Checking money and stock (scripts/money-and-stock-invariants.sql) …
 
 The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many orders end cancelled, how many forward commands a claim catches in flight — the last line does not. (Sixty orders a second apart leave the leader time to confirm most of them; with `PAUSE_SECONDS=0 ORDERS=120` the leader falls behind its deadline, nearly every saga is compensated and every one of those orders is cancelled, with its payment refunded or voided and its stock released, which is the heavier test of the undo.)
 
-**What the invariant queries check.** `scripts/money-and-stock-invariants.sql` holds eight `SELECT` statements. Each returns one row per inconsistency — the columns `violation` (what it checks, in words), `order_id` and `detail` — and none once the run is quiet. The script pipes the file to `psql`, and the three apps' integration tests and `TwoInstanceSagaIT` run the same file over their databases, keeping the rows whose `order_id` starts with the test's own prefix, because a shared test database also holds orders other test classes left inconsistent on purpose. Each statement reads the event log (`event_stream`) and, for the last, the command inbox:
+**What the invariant queries check.** `scripts/money-and-stock-invariants.sql` holds nine `SELECT` statements. Each returns one row per inconsistency — the columns `violation` (what it checks, in words), `order_id` and `detail` — and none once the run is quiet. The script pipes the file to `psql`, and the three apps' integration tests and `TwoInstanceSagaIT` run the same file over their databases, keeping the rows whose `order_id` starts with the test's own prefix, because a shared test database also holds orders other test classes left inconsistent on purpose. Each statement reads the event log (`event_stream`) and, for the last, the command inbox:
 
 1. **A cancelled order with its payment captured and not refunded.** It counts the `PaymentCaptured` and the `PaymentRefunded` events of the order's payment, `pay-<orderId>`, for every order with an `OrderCancelled`. It is empty because every `OrderCancelled` — a customer's, an `ADMIN`'s or the saga's compensation — starts the undo of the order (Chapter 11, Step 5c), whose `CancelPayment` refunds a captured payment, and a capture that is recorded after a void or a failure is refunded in the same append.
 2. **A cancelled order still holding stock.** For every order with an `OrderCancelled` it adds up, per product, what the inventory stream reserved for the order and subtracts what it released or committed; a sum other than zero is a row. It is empty because the undo sends `ReleaseStock` for every line, and a reservation stored after an earlier cancellation's undo ran is released by the undo of the next `OrderCancelled`, which the saga's compensation always produces.
 3. **Stock reserved twice for one order at one product, or released or committed beyond its reservation.** It groups the order's stock events per product. It is empty because the inventory aggregate holds one reservation per order and product, and a release or a confirmation acts only on that reservation and stores nothing when it is not there — a second release, or a release after the shipment, changes nothing.
-4. **A payment captured twice, or refunded beyond its capture.** It groups a payment's events. It is empty because of what `PaymentDecider` does with each command in each status (Chapter 11, Step 1): a capture is recorded once, `CancelPayment` voids a pending payment, refunds a captured one and stores nothing for a payment that is already refunded, voided or failed.
-5. **An order both shipped and cancelled.** It is empty because the order aggregate refuses a cancellation of a shipped or delivered order, and a shipment of a cancelled one.
-6. **A confirmed order with a line that was never reserved in the line's quantity, or a shipped order with a line whose reservation was never committed in the line's quantity.** The first half compares the lines of `OrderPlaced` with the `StockReserved` events of the order, product and quantity; the second compares the lines of `OrderShipped` with its `ReservationConfirmed` events. A reservation of 1 for a line of 3 is a row. It is empty because the saga confirms an order only after every line is reserved, and the order shipment process manager (Chapter 11, Step 5c) sends `ConfirmReservation` for every line of `OrderShipped`.
-7. **A confirmed order that is not cancelled and whose payment is not captured, or is refunded or voided.** It is empty because the saga confirms after the capture, and a payment is voided or refunded only by a cancellation of its order.
-8. **A forward command stored after its saga's compensation.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The statement joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
+4. **Stock reserved for an order after the inventory refused it.** It joins each `StockReservationRefused` with a later `StockReserved` of the same order at the same product. It is empty because the refusal is final for the order at that product: the inventory keeps the refused orders in its state, so a reservation request that arrives after the refusal — a late one, or one sent again — stores nothing, and the saga cancels the order instead.
+5. **A payment captured twice, or refunded beyond its capture.** It groups a payment's events. It is empty because of what `PaymentDecider` does with each command in each status (Chapter 11, Step 1): a capture is recorded once, `CancelPayment` voids a pending payment, refunds a captured one and stores nothing for a payment that is already refunded, voided or failed.
+6. **An order both shipped and cancelled.** It is empty because the order aggregate refuses a cancellation of a shipped or delivered order, and a shipment of a cancelled one.
+7. **A confirmed order with a line that was never reserved in the line's quantity, or a shipped order with a line whose reservation was never committed in the line's quantity.** The first half compares the lines of `OrderPlaced` with the `StockReserved` events of the order, product and quantity; the second compares the lines of `OrderShipped` with its `ReservationConfirmed` events. A reservation of 1 for a line of 3 is a row. It is empty because the saga confirms an order only after every line is reserved, and the order shipment process manager (Chapter 11, Step 5c) sends `ConfirmReservation` for every line of `OrderShipped`.
+8. **A confirmed order that is not cancelled and whose payment is not captured, or is refunded or voided.** It is empty because the saga confirms after the capture, and a payment is voided or refunded only by a cancellation of its order.
+9. **A forward command stored after its saga's compensation.** Every command a saga dispatches is recorded in `command_inbox` under its idempotency key, together with the global offsets of the events it stored (`global_offsets`). A forward command's key is `saga:<sagaId>:<offset>:<index>`, a compensation command's `saga:<sagaId>:episode:<version>:comp:<index>`, and a fulfillment's saga id starts with `fulfillment-` and holds no `:`. The statement joins the two kinds on the saga id, for the fulfillment saga only, and returns a forward command whose last event comes after the first event of a compensation command of the same saga:
 
 ```sql
 SELECT 'forward command stored after its saga''s compensation' AS violation,
@@ -2053,7 +2093,7 @@ SELECT 'forward command stored after its saga''s compensation' AS violation,
 
    Such a row is a forward command — `InitiatePayment`, `ReserveStock` or `ConfirmOrder` — stored after the saga began to undo the order: a payment initiated, stock reserved or an order confirmed after the compensation that was to cancel it. The statement is proven on crafted histories only: a saga whose compensation episode has begun is resumed, never advanced, so a forward command can reach the log after the compensation only when it was held at its commit while the claim landed, which the framework's own fence tests hold deterministically and the demo has no seam to reproduce. The fence makes the statement return nothing: a forward command that reaches its commit after the claim is refused there, and stores no event and no inbox row. A command that stored no event has no offset, and the statement cannot place it; every command of the fulfillment saga stores one.
 
-"Once the run is quiet" matters: while a saga is open, or while the cancellation process manager has not yet delivered an `OrderCancelled`, an order is legitimately between two steps, and checks 1, 2 and 6 would report it. That is why the script, and the tests, wait for the sagas to end and for the four subscriptions to reach the head of the event store before they run the file. Each statement was run against crafted histories that contain the one inconsistency it names (`MoneyAndStockInvariantsQueriesIT` in `spring-app/src/test`), so a statement that returns nothing is a statement that found nothing. Run the file by hand against the Compose stack when you want to look at the database yourself:
+"Once the run is quiet" matters: while a saga is open, or while the cancellation process manager has not yet delivered an `OrderCancelled`, an order is legitimately between two steps, and checks 1, 2 and 7 would report it. That is why the script, and the tests, wait for the sagas to end and for the four subscriptions to reach the head of the event store before they run the file. Each statement was run against crafted histories that contain the one inconsistency it names (`MoneyAndStockInvariantsQueriesIT` in `spring-app/src/test`), so a statement that returns nothing is a statement that found nothing. Run the file by hand against the Compose stack when you want to look at the database yourself:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d streamrune_ecommerce \

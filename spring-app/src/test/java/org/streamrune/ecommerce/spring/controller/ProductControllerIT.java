@@ -13,7 +13,7 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 
 class ProductControllerIT extends AbstractIntegrationTest {
 
-  private void createProduct(String id, String name, double price, int stock) {
+  private void createProduct(String id, String name, double price) {
     String body =
         """
         {
@@ -21,10 +21,9 @@ class ProductControllerIT extends AbstractIntegrationTest {
           "name": "%s",
           "description": "test product",
           "category": "Test",
-          "price": %s,
-          "initialStock": %d
+          "price": %s
         }"""
-            .formatted(id, name, price, stock);
+            .formatted(id, name, price);
     client
         .post()
         .uri("/api/products")
@@ -54,7 +53,7 @@ class ProductControllerIT extends AbstractIntegrationTest {
   @Test
   void createProductReturns2xxAndProjectionEventuallyExposesIt() {
     String pid = "p-create-" + System.nanoTime();
-    createProduct(pid, "Widget", 19.99, 100);
+    createProduct(pid, "Widget", 19.99);
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -66,6 +65,7 @@ class ProductControllerIT extends AbstractIntegrationTest {
               assertThat(v.productId()).isEqualTo(pid);
               assertThat(v.name()).isEqualTo("Widget");
               assertThat(v.status().name()).isEqualTo("AVAILABLE");
+              assertThat(v.availability().name()).isEqualTo("OUT_OF_STOCK");
             });
   }
 
@@ -73,8 +73,8 @@ class ProductControllerIT extends AbstractIntegrationTest {
   void listProductsViaQueryBusReturnsAllCreated() {
     String pid1 = "p-list-1-" + System.nanoTime();
     String pid2 = "p-list-2-" + System.nanoTime();
-    createProduct(pid1, "ListA", 9.99, 50);
-    createProduct(pid2, "ListB", 14.99, 30);
+    createProduct(pid1, "ListA", 9.99);
+    createProduct(pid2, "ListB", 14.99);
 
     await()
         .atMost(Duration.ofSeconds(10))
@@ -115,7 +115,7 @@ class ProductControllerIT extends AbstractIntegrationTest {
   @Test
   void updatePriceReflectsInProjection() {
     String pid = "p-price-" + System.nanoTime();
-    createProduct(pid, "PriceWidget", 10.00, 10);
+    createProduct(pid, "PriceWidget", 10.00);
 
     client
         .put()
@@ -141,38 +141,9 @@ class ProductControllerIT extends AbstractIntegrationTest {
   }
 
   @Test
-  void adjustStockBelowThresholdMarksLowStock() {
-    String pid = "p-stock-" + System.nanoTime();
-    createProduct(pid, "StockWidget", 5.00, 100);
-
-    client
-        .put()
-        .uri("/api/products/" + pid + "/stock")
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "test-admin")
-        .contentType(MediaType.APPLICATION_JSON)
-        .bodyValue(
-            """
-            {"quantity": -95, "reason": "test adjustment"}""")
-        .exchange()
-        .expectStatus()
-        .is2xxSuccessful();
-
-    await()
-        .atMost(Duration.ofSeconds(10))
-        .pollInterval(Duration.ofMillis(200))
-        .untilAsserted(
-            () -> {
-              ProductView v = fetchProduct(pid);
-              assertThat(v.stock()).isEqualTo(5);
-              assertThat(v.status().name()).isEqualTo("LOW_STOCK");
-            });
-  }
-
-  @Test
   void discontinueMarksDiscontinued() {
     String pid = "p-discontinue-" + System.nanoTime();
-    createProduct(pid, "Doomed", 1.00, 1);
+    createProduct(pid, "Doomed", 1.00);
 
     // Wait for projection to receive ProductCreated before discontinuing — discontinue dispatches
     // a command that the domain validates against current aggregate state.
@@ -220,33 +191,5 @@ class ProductControllerIT extends AbstractIntegrationTest {
         .exchange()
         .expectStatus()
         .is4xxClientError();
-  }
-
-  /**
-   * A negative initial stock passes the request record, which leaves {@code initialStock} open, and
-   * the command bus's Bean Validation refuses the command ({@code @PositiveOrZero} on {@code
-   * CreateProduct}) with {@code 400} and the interceptor's message. The product is never created.
-   * The Quarkus and Micronaut apps answer the same request alike.
-   */
-  @Test
-  void aCommandThatBreaksADomainConstraintIsRefusedWith400() {
-    String pid = "p-negative-stock-" + System.nanoTime();
-    client
-        .post()
-        .uri("/api/products")
-        .header("X-User-Role", "ADMIN")
-        .header("X-User-Id", "test-admin")
-        .contentType(MediaType.APPLICATION_JSON)
-        .bodyValue(
-            """
-            {"productId": "%s", "name": "Widget", "price": 5.00, "initialStock": -1}"""
-                .formatted(pid))
-        .exchange()
-        .expectStatus()
-        .isBadRequest()
-        .expectBody(String.class)
-        .isEqualTo("Command validation failed for CreateProduct");
-
-    client.get().uri("/api/products/" + pid).exchange().expectStatus().isNotFound();
   }
 }

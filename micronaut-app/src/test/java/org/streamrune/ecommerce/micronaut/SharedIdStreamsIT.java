@@ -42,7 +42,7 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
     String product =
         """
         {"productId": "%s", "name": "Shared", "description": "shared id", "category": "Test",
-         "price": 1.00, "initialStock": 1}"""
+         "price": 1.00}"""
             .formatted(id);
     var created =
         client

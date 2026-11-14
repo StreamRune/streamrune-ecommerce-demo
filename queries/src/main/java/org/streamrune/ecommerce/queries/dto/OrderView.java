@@ -8,7 +8,9 @@ import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 
 /**
  * An order as the read model holds it. {@code paymentStatus} is the status of the order's payment,
- * {@code null} until the payment is initiated.
+ * {@code null} until the payment is initiated. {@code reason} is why the order was cancelled: the
+ * customer's or an operator's reason, or the fulfillment's, such as the stock a line asked for and
+ * its product did not hold; {@code null} for an order that is not cancelled.
  */
 public record OrderView(
     String orderId,
@@ -17,6 +19,7 @@ public record OrderView(
     Money total,
     OrderStatus status,
     PaymentStatus paymentStatus,
+    String reason,
     Instant createdAt,
     Instant updatedAt) {
   public record OrderLineView(String productId, int quantity, Money unitPrice) {}

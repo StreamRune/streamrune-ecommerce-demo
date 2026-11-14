@@ -14,9 +14,44 @@ import {
   collectConsoleErrors,
   recordApiRequests,
   requestsTo,
+  BACKEND_URL,
 } from "./helpers";
 
 test.describe("Dashboard page", () => {
+  test("the Products card counts as available only the products that can be ordered now", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const product = (productId: string, availability: string) => ({
+      productId,
+      name: productId,
+      description: "",
+      category: "Tests",
+      price: { amount: 1, currency: "USD" },
+      status: availability === "DISCONTINUED" ? "DISCONTINUED" : "AVAILABLE",
+      availability,
+      createdAt: "2026-10-04T00:00:00Z",
+      updatedAt: "2026-10-04T00:00:00Z",
+    });
+    await page.route(`${BACKEND_URL}/api/products`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          product("p-in", "IN_STOCK"),
+          product("p-low", "LOW_STOCK"),
+          product("p-out", "OUT_OF_STOCK"),
+          product("p-gone", "DISCONTINUED"),
+        ]),
+      })
+    );
+
+    await page.goto("/");
+
+    // Of four products, the one out of stock and the discontinued one cannot be ordered now.
+    await expect(page.getByText("2 available")).toBeVisible();
+  });
+
   test("the live event feed lists a frame that names no stream", async ({ page }) => {
     await mockBackendRoutes(page);
     // An unnamed frame, as the backend sends it: an id and a data line with the offset, the two

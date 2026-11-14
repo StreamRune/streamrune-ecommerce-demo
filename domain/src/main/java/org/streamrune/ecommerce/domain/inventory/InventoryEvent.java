@@ -6,6 +6,13 @@ public sealed interface InventoryEvent extends DomainEvent {
   record StockReserved(String productId, String orderId, int quantity, int availableAfter)
       implements InventoryEvent {}
 
+  /**
+   * The order asked for more units than the product holds available. Nothing is reserved; the
+   * fulfillment saga cancels the order with the reason this event gives.
+   */
+  record StockReservationRefused(String productId, String orderId, int requested, int available)
+      implements InventoryEvent {}
+
   record StockReleased(String productId, String orderId, int quantity, int availableAfter)
       implements InventoryEvent {}
 
@@ -13,5 +20,8 @@ public sealed interface InventoryEvent extends DomainEvent {
       implements InventoryEvent {}
 
   record ShipmentReceived(String productId, int quantity, int availableAfter)
+      implements InventoryEvent {}
+
+  record InventoryAdjusted(String productId, int quantityChange, String reason, int availableAfter)
       implements InventoryEvent {}
 }

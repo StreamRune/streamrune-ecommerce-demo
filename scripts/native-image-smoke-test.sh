@@ -3,7 +3,9 @@
 # Builds a native binary for the chosen framework, starts it against an empty Postgres database and
 # RabbitMQ, and probes it: health, the schema the binary created at startup, a command-to-read-model
 # round trip, a dead-lettered command replayed through its sealed root, a read model larger than
-# 1 MiB written and read back, and an order fulfilled by its saga from OrderPlaced to COMPLETED.
+# 1 MiB written and read back, an order fulfilled by its saga from OrderPlaced to COMPLETED, the
+# inventory and storefront views that follow its reservation, and an order for more units than the
+# inventory holds, which its saga cancels with the stock reason.
 # It then stops the binary with SIGTERM, waits for it to exit, prints its output, and fails the run
 # when that output (startup, requests and shutdown) holds a GraalVM UnsupportedFeatureError.
 #
@@ -179,7 +181,7 @@ functional_smoke() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
-    -d "{\"productId\":\"$pid\",\"name\":\"SmokeWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99,\"initialStock\":10}")
+    -d "{\"productId\":\"$pid\",\"name\":\"SmokeWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99}")
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/products returned $code"
     return 1
@@ -286,7 +288,7 @@ large_read_model_smoke() {
   {
     printf '{"productId":"%s","name":"BigWidget","description":"' "$pid"
     head -c "$min_bytes" /dev/zero | tr '\0' 'x'
-    printf '","category":"Smoke","price":1.00,"initialStock":1}'
+    printf '","category":"Smoke","price":1.00}'
   } > "$body"
 
   local code
@@ -333,7 +335,7 @@ saga_origin_smoke() {
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
     -H 'Content-Type: application/json' \
     -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
-    -d "{\"productId\":\"$pid\",\"name\":\"SagaWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99,\"initialStock\":0}")
+    -d "{\"productId\":\"$pid\",\"name\":\"SagaWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":9.99}")
   if [[ ! "$code" =~ ^2 ]]; then
     echo "  ✗ POST /api/products returned $code"
     return 1
@@ -390,6 +392,29 @@ saga_origin_smoke() {
   fi
   echo "  ✓ Saga fulfillment-$oid completed (${i}s); PaymentCaptured carries its origin; a reserved correlation id is refused."
 
+  # The inventory read model and the storefront follow the order's reservation: 5 received, 1
+  # reserved. Both views are records the binary serializes by reflection.
+  local inventory="" product=""
+  for i in $(seq 1 20); do
+    inventory=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/inventory/$pid")
+    product=$(curl -s "$base/api/products/$pid")
+    if printf '%s' "$inventory" | grep -q '"productName":"SagaWidget"' \
+        && printf '%s' "$inventory" | grep -Eq '"available":4[,}]' \
+        && printf '%s' "$inventory" | grep -Eq '"reserved":1[,}]' \
+        && printf '%s' "$product" | grep -q '"availability":"LOW_STOCK"'; then
+      break
+    fi
+    inventory=""
+    sleep 1
+  done
+  if [ -z "$inventory" ]; then
+    echo "  ✗ The inventory or the storefront of $pid did not follow the reservation within 20s."
+    echo "    inventory: $(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/inventory/$pid")"
+    echo "    product:   $product"
+    return 1
+  fi
+  echo "  ✓ The inventory of $pid shows the reservation and the storefront shows it low in stock."
+
   # The cancellation of the completed order is undone by the order cancellation process manager:
   # its stock is released and its payment refunded. In a native image the process manager's
   # commands and the events they store are records Jackson writes and reads by reflection. The
@@ -429,6 +454,97 @@ saga_origin_smoke() {
   return 0
 }
 
+over_order_smoke() {
+  # An order for more units than the inventory holds is accepted and then cancelled by its saga:
+  # the inventory records StockReservationRefused instead of a reservation, the saga moves to
+  # CANCELLING with the refusal's reason, its CancelOrder stores OrderCancelled, and the saga ends
+  # FAILED. In a native image the new event, the saga state's cancellationReason and the order
+  # view's reason are records Jackson writes and reads by reflection: a missing registration leaves
+  # the saga waiting at its reservation step or the reason empty. The order's customer reads the
+  # reason, which names the units asked for and not the units the inventory holds.
+  local base="$1"
+  local pid="over-smoke-$$-$(date +%s)"
+  local oid="$pid-order"
+  local reason="Insufficient stock for $pid: requested 3"
+  echo "  Running over-order probe (order $oid, 3 units of 2) …"
+
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/products" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
+    -d "{\"productId\":\"$pid\",\"name\":\"ScarceWidget\",\"description\":\"smoke\",\"category\":\"Smoke\",\"price\":4.99}")
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/products returned $code"
+    return 1
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/inventory/$pid/receive" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: ADMIN' -H 'X-User-Id: smoke' \
+    -d '{"quantity":2}')
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/inventory/$pid/receive returned $code"
+    return 1
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/api/orders" \
+    -H 'Content-Type: application/json' \
+    -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+    -d "{\"orderId\":\"$oid\",\"customerId\":\"smoke-customer\",\"lines\":[{\"productId\":\"$pid\",\"quantity\":3}]}")
+  if [[ ! "$code" =~ ^2 ]]; then
+    echo "  ✗ POST /api/orders returned $code (an over-order is accepted, then cancelled by its saga)"
+    return 1
+  fi
+
+  # The saga captures the payment first and reserves afterwards, and the cancellation is one hop
+  # more than a completion: it gets longer than the completed saga of the probe before.
+  local saga=""
+  for i in $(seq 1 45); do
+    saga=$(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' \
+      "$base/api/saga/fulfillments/fulfillment-$oid")
+    if printf '%s' "$saga" | grep -q '"fulfillmentStatus":"FAILED"' \
+        && printf '%s' "$saga" | grep -qF "\"cancellationReason\":\"$reason\""; then
+      break
+    fi
+    saga=""
+    sleep 1
+  done
+  if [ -z "$saga" ]; then
+    echo "  ✗ The saga fulfillment-$oid did not end FAILED with the stock reason within 45s."
+    echo "    saga: $(curl -s -H 'X-User-Id: smoke' -H 'X-User-Role: ADMIN' "$base/api/saga/fulfillments/fulfillment-$oid")"
+    pg_sql "SELECT aggregate_type || ':' || event_type FROM event_stream
+        WHERE aggregate_id IN ('$oid', 'pay-$oid', '$pid') ORDER BY global_offset" || true
+    return 1
+  fi
+
+  local stored
+  stored=$(pg_sql "SELECT count(*) FILTER (WHERE event_type = 'StockReservationRefused') || '/'
+        || count(*) FILTER (WHERE event_type = 'StockReserved')
+      FROM event_stream WHERE aggregate_type = 'inventory' AND aggregate_id = '$pid'")
+  if [ "$stored" != "1/0" ]; then
+    echo "  ✗ The inventory of $pid holds refusals/reservations $stored, not 1/0."
+    return 1
+  fi
+
+  # The customer's read of the order follows the saga by a poll of the orders projection; until
+  # the row is there, the read is answered 403.
+  local order=""
+  for i in $(seq 1 20); do
+    order=$(curl -s -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' "$base/api/orders/$oid")
+    if printf '%s' "$order" | grep -q '"status":"CANCELLED"' \
+        && printf '%s' "$order" | grep -qF "\"reason\":\"$reason\""; then
+      break
+    fi
+    order=""
+    sleep 1
+  done
+  if [ -z "$order" ]; then
+    echo "  ✗ The order $oid did not read CANCELLED with the stock reason within 20s."
+    echo "    order: $(curl -s -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' "$base/api/orders/$oid")"
+    return 1
+  fi
+  echo "  ✓ The over-order $oid was cancelled by its saga (FAILED) with \"$reason\"; nothing was reserved."
+  return 0
+}
+
 stop_binary() {
   # SIGTERM, then wait for the process to exit, so its shutdown runs and logs before the output is
   # scanned (the Micronaut binary's Netty event loops free their pooled direct buffers there); after
@@ -455,7 +571,7 @@ probe_and_stop() {
   # records the framework's result.
   local fw="$1" health_url="$2" base="$3" app_log="$4"
   local outcome="PASS"
-  local detail="health + schema created at startup + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + fulfillment saga + clean output"
+  local detail="health + schema created at startup + CQRS round-trip + sealed-root DLQ replay + 1.5 MiB read model + fulfillment saga + over-order cancelled + clean output"
   if ! wait_for_health "$health_url"; then
     outcome="FAIL"; detail="health check timeout"
   elif ! schema_smoke; then
@@ -468,6 +584,8 @@ probe_and_stop() {
     outcome="FAIL"; detail="large read-model probe failed"
   elif ! saga_origin_smoke "$base"; then
     outcome="FAIL"; detail="fulfillment saga probe failed"
+  elif ! over_order_smoke "$base"; then
+    outcome="FAIL"; detail="over-order probe failed"
   fi
 
   stop_binary

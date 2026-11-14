@@ -180,7 +180,7 @@ class TwoInstanceSagaIT {
           "admin-1",
           """
           {"productId":"two-prod-%d","name":"Two %d","description":"Two-instance product",
-           "category":"General","price":10.00,"initialStock":0}
+           "category":"General","price":10.00}
           """
               .formatted(p, p));
       post(
@@ -429,7 +429,7 @@ class TwoInstanceSagaIT {
    * A command holds its aggregate's lock on both backends, and commands on one aggregate from both
    * are serialized. First a price change on one backend stops in its audit write, which the command
    * bus makes with the product's lock held (a trigger on {@code audit_log} waits for an advisory
-   * lock the test holds): a stock adjustment of the product on the other backend waits for that
+   * lock the test holds): a discontinuation of the product on the other backend waits for that
    * lock, and completes once the price change does. An in-process lock would let it through at
    * once. Then {@value #RECEIPTS} shipments of the product are received through both backends at
    * once, {@value #RECEIPT_CLIENTS} at a time: every one is applied, none is refused with a version
@@ -448,7 +448,7 @@ class TwoInstanceSagaIT {
         "admin-1",
         """
         {"productId":"%s","name":"Locked","description":"Two-instance lock",
-         "category":"General","price":10.00,"initialStock":0}
+         "category":"General","price":10.00}
         """
             .formatted(product));
 
@@ -492,24 +492,24 @@ class TwoInstanceSagaIT {
                                 + "' AND event_type = 'PriceUpdated'")
                         == 1);
 
-        Future<HttpResponse<String>> adjustment =
+        Future<HttpResponse<String>> discontinuation =
             requests.submit(
                 () ->
                     request(
                         ports[1],
-                        "PUT",
-                        "/api/products/" + product + "/stock",
+                        "POST",
+                        "/api/products/" + product + "/discontinue",
                         "ADMIN",
                         "admin-1",
-                        "{\"quantity\": 4, \"reason\": \"recount\"}"));
+                        "{}"));
         Thread.sleep(LOCK_HELD_FOR.toMillis());
-        assertThat(adjustment.isDone())
-            .as("the other backend's adjustment waits for the lock the price change holds")
+        assertThat(discontinuation.isDone())
+            .as("the other backend's discontinuation waits for the lock the price change holds")
             .isFalse();
 
         execute(holder, "SELECT pg_advisory_unlock(" + HELD_AUDIT_LOCK + ")");
         assertThat(priceChange.get(30, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
-        assertThat(adjustment.get(30, TimeUnit.SECONDS).statusCode())
+        assertThat(discontinuation.get(30, TimeUnit.SECONDS).statusCode())
             .as("it runs once the lock is free")
             .isEqualTo(200);
       } finally {

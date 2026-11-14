@@ -81,8 +81,7 @@ class IntegrationOutboxE2EIT extends AbstractIntegrationTest {
             "Outbox product",
             null,
             "General",
-            new Money(new BigDecimal("9.99"), "USD"),
-            0));
+            new Money(new BigDecimal("9.99"), "USD")));
   }
 
   /** Stocks the product, so that the saga reserves the line and confirms the order. */

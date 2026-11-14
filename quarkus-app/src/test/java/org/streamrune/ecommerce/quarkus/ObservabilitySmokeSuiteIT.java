@@ -393,8 +393,7 @@ class ObservabilitySmokeSuiteIT {
               "name": "Smoke Widget",
               "description": "audit smoke test",
               "category": "Test",
-              "price": 1.00,
-              "initialStock": 1
+              "price": 1.00
             }"""
                 .formatted(System.nanoTime()))
         .post("/api/products");
@@ -461,8 +460,7 @@ class ObservabilitySmokeSuiteIT {
               "name": "Events Widget",
               "description": "event explorer smoke",
               "category": "Test",
-              "price": 5.00,
-              "initialStock": 10
+              "price": 5.00
             }"""
                 .formatted(pid))
         .post("/api/products")

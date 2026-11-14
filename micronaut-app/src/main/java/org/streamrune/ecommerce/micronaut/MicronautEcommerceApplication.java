@@ -28,7 +28,6 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 @SerdeImport(org.streamrune.ecommerce.queries.dto.InventoryView.class)
 @SerdeImport(ProductEvent.ProductCreated.class)
 @SerdeImport(ProductEvent.PriceUpdated.class)
-@SerdeImport(ProductEvent.StockAdjusted.class)
 @SerdeImport(ProductEvent.ProductDiscontinued.class)
 @SerdeImport(OrderEvent.OrderPlaced.class)
 @SerdeImport(OrderEvent.OrderLine.class)
@@ -46,9 +45,11 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 @SerdeImport(PaymentEvent.PaymentFailed.class)
 @SerdeImport(PaymentEvent.PaymentVoided.class)
 @SerdeImport(InventoryEvent.StockReserved.class)
+@SerdeImport(InventoryEvent.StockReservationRefused.class)
 @SerdeImport(InventoryEvent.StockReleased.class)
 @SerdeImport(InventoryEvent.ReservationConfirmed.class)
 @SerdeImport(InventoryEvent.ShipmentReceived.class)
+@SerdeImport(InventoryEvent.InventoryAdjusted.class)
 public class MicronautEcommerceApplication {
   public static void main(String[] args) {
     Micronaut.run(MicronautEcommerceApplication.class, args);

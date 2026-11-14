@@ -2,8 +2,9 @@ import { ApiError, isQueuedForReplay, isRefusal } from "./api";
 import { newIdempotencyKey } from "./ids";
 
 /**
- * The changes of a quantity the page sent and has no final answer for, one per
- * product and kind, each with the `Idempotency-Key` it was sent under.
+ * The changes of an inventory quantity the page sent and has no final answer
+ * for, one per product and kind (a received shipment, an adjustment), each with
+ * the `Idempotency-Key` it was sent under.
  *
  * A key belongs to the change the user intends, not to a dialog: the backend
  * runs a command once per key, and a command that failed on infrastructure is
@@ -24,7 +25,7 @@ import { newIdempotencyKey } from "./ids";
  * storage cannot be read or written (a private window that refuses it), the
  * operations live as long as the page.
  */
-export type OperationKind = "adjust-stock" | "receive-shipment";
+export type OperationKind = "receive-shipment" | "adjust-inventory";
 
 /** An operation the page has no final answer for. */
 export interface PendingOperation {
@@ -32,6 +33,12 @@ export interface PendingOperation {
   key: string;
   /** The amount: a different one is another operation. */
   quantity: number;
+  /**
+   * The reason the first request carried (an adjustment's). It is not part of
+   * the operation's identity: the backend answers every request under the key
+   * with the first one's result, so the reason it records is this one.
+   */
+  reason?: string;
   /** An attempt was answered `QUEUED_FOR_REPLAY`: the backend recorded it for a replay. */
   queued: boolean;
   /** An attempt got no answer or a `5xx` that says nothing: it may have been applied. */
@@ -99,9 +106,15 @@ export function pendingOperation(
 
 /**
  * The key to send `quantity` under: the held operation's when it is the same
- * amount, a new key otherwise. The operation is held from here on.
+ * amount, a new key otherwise. The operation is held from here on, with the
+ * `reason` of its first request; a held operation keeps the reason it has.
  */
-export function keyForOperation(kind: OperationKind, productId: string, quantity: number): string {
+export function keyForOperation(
+  kind: OperationKind,
+  productId: string,
+  quantity: number,
+  reason?: string
+): string {
   const current = held().get(slot(kind, productId));
   if (current && current.quantity === quantity) {
     return current.key;
@@ -110,6 +123,7 @@ export function keyForOperation(kind: OperationKind, productId: string, quantity
   held().set(slot(kind, productId), {
     key,
     quantity,
+    reason,
     queued: false,
     uncertain: false,
     inFlight: false,

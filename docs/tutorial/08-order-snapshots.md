@@ -19,7 +19,7 @@ Each state transition is one-way. An order cannot move backwards from `CONFIRMED
 
 Every time the `CommandBus` processes a command for an existing aggregate, it must reconstruct the current state. It does this by reading the entire event stream from the event store and calling `evolve` once per event.
 
-For most aggregates this is fast: `Product` typically has a handful of events — a `ProductCreated`, a few `PriceUpdated`, maybe a `StockAdjusted`. The replay cost is negligible.
+For most aggregates this is fast: `Product` typically has a handful of events — a `ProductCreated`, a few `PriceUpdated`, maybe a `ProductDiscontinued`. The replay cost is negligible.
 
 Orders are different. A busy order might accumulate dozens of events as it moves through fulfilment, receives partial shipment updates, gets a hold placed on it, and finally delivers. In a high-throughput system, replaying fifty events for every command becomes measurably slow.
 
@@ -731,7 +731,6 @@ public VirtualThreadCommandBus commandBus(
                   switch (cmd) {
                     case ProductCommand.CreateProduct c -> c.productId();
                     case ProductCommand.UpdatePrice c -> c.productId();
-                    case ProductCommand.AdjustStock c -> c.productId();
                     case ProductCommand.DiscontinueProduct c -> c.productId();
                   }),
           new ProductDecider())
@@ -901,7 +900,92 @@ public class OrderCommandController {
 
 Each endpoint maps a simple HTTP request to an `OrderCommand` and delegates entirely to the `CommandBus`. No business logic belongs here. The `@Valid` annotation on `PlaceOrderRequest` and `CancelOrderRequest` has Spring MVC validate the request body (chapter 3's web layer), so a malformed request is rejected with `400` before a command is built; the `BeanValidationInterceptor` of chapter 3 then checks the command itself on the bus. There is no `/confirm` endpoint: the fulfillment saga of Chapter 11 confirms an order, and the decider's guard refuses a `ConfirmOrder` from anybody else.
 
-A line of the request names a product and a quantity, and nothing else: `OrderPricing` builds the `PlaceOrder` with each line's unit price taken from the product catalogue. A client that sends a `unitPrice` is not refused; the field is not part of the request record, so it is ignored. Create `commands/src/main/java/org/streamrune/ecommerce/commands/order/OrderPricing.java`:
+A line of the request names a product and a quantity, and nothing else: `OrderPricing` builds the `PlaceOrder` with each line's unit price taken from the product catalogue. A client that sends a `unitPrice` is not refused; the field is not part of the request record, so it is ignored.
+
+The catalogue is read through `ProductCatalog`, which folds a product's stream with `ProductDecider.evolve`. Create `commands/src/main/java/org/streamrune/ecommerce/commands/product/ProductCatalog.java`:
+
+```java
+package org.streamrune.ecommerce.commands.product;
+
+import java.util.List;
+import java.util.Objects;
+import org.streamrune.core.DomainException;
+import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.EventStore;
+import org.streamrune.core.types.AggregateId;
+import org.streamrune.core.types.StreamId;
+import org.streamrune.core.types.Version;
+import org.streamrune.ecommerce.domain.product.ProductEvent;
+import org.streamrune.ecommerce.domain.product.ProductState;
+
+/**
+ * The catalogue as the product streams hold it. Another aggregate's command that needs to know a
+ * product, the price of an order line or whether an inventory may be touched, asks here before it
+ * is sent: the product is read from the event store, not from the product read model, so a product
+ * created a moment ago is known at once. The read and the command that follows are two steps, not
+ * one transaction: the catalogue has no command that deletes a product, so a product found here
+ * still exists when the command runs.
+ */
+public final class ProductCatalog {
+
+  private static final int PAGE_SIZE = 100;
+
+  private final EventStore eventStore;
+  private final ProductDecider products = new ProductDecider();
+
+  public ProductCatalog(EventStore eventStore) {
+    this.eventStore = Objects.requireNonNull(eventStore, "eventStore is required");
+  }
+
+  /**
+   * The product as its stream holds it, folded from its first event; the decider's initial state,
+   * whose {@code productId} is {@code null}, for a product nobody created. This reads and folds the
+   * whole stream on each call, so its cost grows with the product's history. A product's stream is
+   * small in the demo (its creation, a few price changes, perhaps its discontinuation), so the read
+   * is cheap here; a catalogue whose products have long histories would read a snapshot or a read
+   * model instead, and accept the lag of the read model.
+   */
+  public ProductState current(String productId) {
+    StreamId stream = StreamId.of(ProductState.TYPE, AggregateId.of(productId));
+    ProductState state = products.initialState();
+    Version after = Version.initial();
+    while (true) {
+      List<EventEnvelope> page = eventStore.readStream(stream, after, PAGE_SIZE);
+      for (EventEnvelope envelope : page) {
+        state = products.evolve(state, (ProductEvent) envelope.event());
+        after = envelope.version();
+      }
+      if (page.size() < PAGE_SIZE) {
+        return state;
+      }
+    }
+  }
+
+  /**
+   * The product as its stream holds it, refused when nobody created it ({@code DomainException}
+   * "Product not found: &lt;id&gt;", {@code 400} in the three apps). Order pricing reads the price
+   * and the status of each line's product here.
+   */
+  public ProductState require(String productId) {
+    ProductState product = current(productId);
+    if (product.productId() == null) {
+      throw new DomainException("Product not found: " + productId);
+    }
+    return product;
+  }
+
+  /**
+   * Refuses a product id nobody created, as {@link #require} does. The inventory endpoints ask this
+   * before they send a command, so no inventory stream is opened for a product the catalogue does
+   * not hold.
+   */
+  public void requireExists(String productId) {
+    require(productId);
+  }
+}
+```
+
+Then create `commands/src/main/java/org/streamrune/ecommerce/commands/order/OrderPricing.java`:
 
 ```java
 package org.streamrune.ecommerce.commands.order;
@@ -912,35 +996,27 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import org.streamrune.core.DomainException;
-import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventStore;
-import org.streamrune.core.types.AggregateId;
-import org.streamrune.core.types.StreamId;
-import org.streamrune.core.types.Version;
-import org.streamrune.ecommerce.commands.product.ProductDecider;
+import org.streamrune.ecommerce.commands.product.ProductCatalog;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
-import org.streamrune.ecommerce.domain.product.ProductEvent;
 import org.streamrune.ecommerce.domain.product.ProductState;
 import org.streamrune.ecommerce.domain.product.ProductStatus;
 
 /**
  * Prices an order from the product catalogue. Each line's unit price is the product's price as its
  * event stream holds it when the order is placed; the client names products and quantities only.
- * Read from the event store, not from the product read model, so a product created a moment ago is
- * orderable and a price change applies at once. A product nobody created, or one that is
- * discontinued, is refused ({@code DomainException}, {@code 400}). An order id too long for its
- * saga id, a malformed product id and two lines of one product are refused before the store is
- * read.
+ * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
+ * product created a moment ago is orderable and a price change applies at once. A product nobody
+ * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
+ * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
+ * two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
-  private static final int PAGE_SIZE = 100;
-
-  private final EventStore eventStore;
-  private final ProductDecider products = new ProductDecider();
+  private final ProductCatalog catalog;
 
   public OrderPricing(EventStore eventStore) {
-    this.eventStore = Objects.requireNonNull(eventStore, "eventStore is required");
+    this.catalog = new ProductCatalog(Objects.requireNonNull(eventStore, "eventStore is required"));
   }
 
   /** One line of an order as a client asks for it: a product and a quantity. */
@@ -966,10 +1042,7 @@ public final class OrderPricing {
     }
     List<OrderCommand.OrderLine> priced = new ArrayList<>(lines.size());
     for (RequestedLine line : lines) {
-      ProductState product = current(line.productId());
-      if (product.productId() == null) {
-        throw new DomainException("Product not found");
-      }
+      ProductState product = catalog.require(line.productId());
       if (product.status() == ProductStatus.DISCONTINUED) {
         throw new DomainException("Product is discontinued");
       }
@@ -977,33 +1050,10 @@ public final class OrderPricing {
     }
     return new OrderCommand.PlaceOrder(orderId, customerId, priced);
   }
-
-  /**
-   * The product as its stream holds it, folded from its first event. This reads and folds the whole
-   * stream for each line of each order, so its cost grows with the product's history, not with the
-   * order. A product's stream is small in the demo (its creation, a few price changes and stock
-   * adjustments), so the read is cheap here; a catalogue whose products have long histories would
-   * price from a snapshot or a read model instead, and accept the lag of the read model.
-   */
-  private ProductState current(String productId) {
-    StreamId stream = StreamId.of(ProductState.TYPE, AggregateId.of(productId));
-    ProductState state = products.initialState();
-    Version after = Version.initial();
-    while (true) {
-      List<EventEnvelope> page = eventStore.readStream(stream, after, PAGE_SIZE);
-      for (EventEnvelope envelope : page) {
-        state = products.evolve(state, (ProductEvent) envelope.event());
-        after = envelope.version();
-      }
-      if (page.size() < PAGE_SIZE) {
-        return state;
-      }
-    }
-  }
 }
 ```
 
-`OrderPricing` reads the product's stream from the event store (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It does so for every line of every order, so the cost of an order grows with the history of the products it names; a product's stream is small in the demo (its creation, a few price changes and stock adjustments), which is why the read is cheap here although it starts from the first event and does not use the snapshots the command bus takes. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
+`OrderPricing` reads the product's stream from the event store through `ProductCatalog` (`product:<productId>`, page by page) and folds it with `ProductDecider.evolve`, the same fold the command bus runs before a product command. It does so for every line of every order, so the cost of an order grows with the history of the products it names; a product's stream is small in the demo (its creation, a few price changes, perhaps its discontinuation), which is why the read is cheap here although it starts from the first event and does not use the snapshots the command bus takes. It reads the event store, not the product read model, so a product created a moment ago can be ordered at once and a price change applies to the next order; the read model follows the store by up to its polling interval. A product nobody created answers `400 Product not found: <id>`, a discontinued one `400 Product is discontinued`. A price updated between the read and the commit of `PlaceOrder` gives the order the price read, the price at the moment of ordering. The rules that need no read run first: the order id's length (`PlaceOrder.requireValidOrderId`, the rule the `PlaceOrder` constructor applies), each product id (`requireValidProductId`; `@NotBlank` does not catch a control character) and one line per product. A request they refuse answers `400`, costs no read of the store and writes nothing. The Quarkus and Micronaut order controllers declare their request records without validation annotations; they price their lines with the same `OrderPricing`, so the same requests are refused there.
 
 Register it in `StreamRuneConfig`:
 
@@ -1250,9 +1300,6 @@ public class StreamRuneConfig {
         .registerEvent(
             "PriceUpdated", org.streamrune.ecommerce.domain.product.ProductEvent.PriceUpdated.class)
         .registerEvent(
-            "StockAdjusted",
-            org.streamrune.ecommerce.domain.product.ProductEvent.StockAdjusted.class)
-        .registerEvent(
             "ProductDiscontinued",
             org.streamrune.ecommerce.domain.product.ProductEvent.ProductDiscontinued.class)
         // Order events
@@ -1331,7 +1378,6 @@ public class StreamRuneConfig {
                     switch (cmd) {
                       case ProductCommand.CreateProduct c -> c.productId();
                       case ProductCommand.UpdatePrice c -> c.productId();
-                      case ProductCommand.AdjustStock c -> c.productId();
                       case ProductCommand.DiscontinueProduct c -> c.productId();
                     }),
             new ProductDecider())
@@ -1553,7 +1599,7 @@ Start the application:
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H 'Content-Type: application/json' \
-  -d '{"productId": "p-mug", "name": "Mug", "description": "A mug", "category": "Kitchen", "price": 12.50, "initialStock": 100}'
+  -d '{"productId": "p-mug", "name": "Mug", "description": "A mug", "category": "Kitchen", "price": 12.50}'
 ```
 
 **Place an order:**
@@ -1572,7 +1618,7 @@ curl -X POST http://localhost:8080/api/orders \
 
 `GET /api/orders/order-1` shows the line at `12.50`, the product's price, and a total of `25.00`. The order stays `CREATED` in this chapter: the fulfillment saga of Chapter 11 confirms an order once its payment is captured and its stock reserved, and there is no endpoint that confirms one. `POST /api/orders/order-1/confirm` answers `404 Not Found`.
 
-**Verify that the catalogue is the price list:** an order of a product nobody created answers `400 Bad Request` with the body `Product not found`, and writes nothing:
+**Verify that the catalogue is the price list:** an order of a product nobody created answers `400 Bad Request` with the body `Product not found: p-nobody`, and writes nothing:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/orders \

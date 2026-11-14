@@ -1,0 +1,426 @@
+"use client";
+
+import { useState } from "react";
+import { toast } from "sonner";
+import { Plus, MoreHorizontal, BookOpen } from "lucide-react";
+import { useProducts } from "@/lib/queries";
+import {
+  useCreateProduct,
+  useUpdatePrice,
+  useDiscontinueProduct,
+  useReceiveShipment,
+} from "@/lib/mutations";
+import type { ProductView, ProductStatus } from "@/lib/types";
+import { newId } from "@/lib/ids";
+import { ApiError } from "@/lib/api";
+import { keyForOperation, outcomeOf, pendingOperation } from "@/lib/pending-operations";
+import { PermissionGate } from "@/components/domain/permission-gate";
+import { FieldError } from "@/components/domain/held-operation";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn, formatMoney, wholeNumber } from "@/lib/utils";
+
+const STATUS_STYLES: Record<ProductStatus, string> = {
+  AVAILABLE: "bg-green-500/10 text-green-400 border-green-500/20",
+  DISCONTINUED: "bg-muted text-muted-foreground",
+};
+
+// ─── Create Product Dialog ────────────────────────────────────────────────────
+
+/**
+ * The toast of an opening stock that was not confirmed. The product exists in
+ * every case. What the toast says of the stock follows what the page knows of
+ * the shipment it holds (`pending-operations.ts`): refused for good (`4xx`,
+ * nothing held), refused for now with nothing written, or of unknown outcome —
+ * queued for a replay, or without an answer, so it may have been received. In
+ * the last two cases the way on is the held shipment, which the Receive
+ * Shipment dialog of Admin → Inventory sends again under the same key, so it is
+ * received once; a new shipment beside it could receive the stock twice.
+ */
+function reportOpeningStockFailure(productId: string, units: number, err: unknown) {
+  const answer = err instanceof Error ? err.message : "no answer";
+  const held = pendingOperation("receive-shipment", productId);
+  const resend =
+    "In Admin → Inventory, Receive Shipment opens on it and sends it again under the same key, so it is received once.";
+  if (held === undefined) {
+    toast.error(
+      `Product ${productId} was created, but its opening stock of ${units} was not received (${answer}). Receive it from Admin → Inventory.`
+    );
+    return;
+  }
+  switch (outcomeOf(held)) {
+    case "queued":
+      toast.info(
+        `Product ${productId} was created. Its opening stock of ${units} is queued for a replay, so its outcome is not known yet (${answer}). ${resend}`
+      );
+      return;
+    case "unknown":
+      toast.warning(
+        `Product ${productId} was created. Its opening stock of ${units} got no answer, so its outcome is unknown: it may have been received (${answer}). ${resend}`
+      );
+      return;
+    case "refused":
+      toast.error(
+        `Product ${productId} was created, but its opening stock of ${units} was not received: the backend refused it for now and wrote nothing (${answer}). ${resend}`
+      );
+  }
+}
+
+/** Where the two steps of a create with opening stock stand, as the dialog shows them. */
+type Step = "idle" | "creating" | "receiving";
+
+/**
+ * Add Product. A product holds no stock, so the opening stock is not part of
+ * CreateProduct: when the field holds a number above zero, the dialog sends
+ * ReceiveShipment for it once the product exists, as a second command of its
+ * own. Each step says how it went. The shipment goes out under the key of the
+ * intended change (`pending-operations.ts`), so when it fails the Receive
+ * Shipment dialog of Admin → Inventory opens on it and sends it again under
+ * the same key.
+ *
+ * The product id is picked once per intended product: when CreateProduct gets
+ * no answer (it may have been applied), the next Create sends the same id
+ * again, so it cannot make a second product; the backend's "Product already
+ * exists" for that id then means the first attempt was applied. A refusal
+ * (`4xx`) or a success lets the id go.
+ */
+function CreateProductDialog() {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("");
+  const [price, setPrice] = useState("");
+  const [openingStock, setOpeningStock] = useState("");
+  const [step, setStep] = useState<Step>("idle");
+  const [openingStockError, setOpeningStockError] = useState<string | null>(null);
+  /** The id of a CreateProduct that got no answer: the next Create sends it again. */
+  const [unansweredId, setUnansweredId] = useState<string | null>(null);
+  const { mutateAsync: create } = useCreateProduct();
+  const { mutateAsync: receive } = useReceiveShipment();
+
+  function reset() {
+    setName(""); setDescription(""); setCategory(""); setPrice(""); setOpeningStock("");
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const units = openingStock.trim() === "" ? 0 : wholeNumber(openingStock);
+    if (units === null || units < 0) {
+      setOpeningStockError("Enter a whole number of units, zero or more, or leave it empty.");
+      return;
+    }
+    setOpeningStockError(null);
+    // Step 1: the backend takes the product id from the request and the price as a plain USD
+    // amount.
+    let productId: string;
+    setStep("creating");
+    try {
+      productId = unansweredId ?? newId("prod");
+    } catch (err) {
+      setStep("idle");
+      toast.error(err instanceof Error ? err.message : "Failed to create product");
+      return;
+    }
+    try {
+      await create({ productId, name, description, category, price: parseFloat(price) });
+      toast.success(`Product created: ${productId}`);
+    } catch (err) {
+      const isRefusal = err instanceof ApiError && err.status >= 400 && err.status < 500;
+      if (isRefusal && productId === unansweredId && err.detail.startsWith("Product already exists")) {
+        // The Create that got no answer was applied: the product is there, as first sent.
+        toast.success(`Product created: ${productId} (the earlier Create was applied)`);
+      } else {
+        // A refusal settles a new id; for an id whose first Create got no answer it says nothing
+        // of that first one, so the id is kept.
+        setUnansweredId(isRefusal && productId !== unansweredId ? null : productId);
+        setStep("idle");
+        toast.error(err instanceof Error ? err.message : "Failed to create product");
+        return;
+      }
+    }
+    setUnansweredId(null);
+    // Step 2: the opening stock, received into the inventory like any shipment. The product
+    // exists whatever this step answers, so the dialog closes either way.
+    if (units > 0) {
+      setStep("receiving");
+      try {
+        await receive({
+          productId,
+          body: { quantity: units },
+          idempotencyKey: keyForOperation("receive-shipment", productId, units),
+        });
+        toast.success(
+          `Opening stock received: ${units} ${units === 1 ? "unit" : "units"} of ${productId}`
+        );
+      } catch (err) {
+        reportOpeningStockFailure(productId, units, err);
+      }
+    }
+    setStep("idle");
+    setOpen(false);
+    reset();
+  }
+
+  const busy = step !== "idle";
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
+      <PermissionGate permission="PRODUCT_MANAGE">
+        <DialogTrigger render={<Button />}>
+          <Plus className="size-4" />
+          Add Product
+        </DialogTrigger>
+      </PermissionGate>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Create Product</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor="cp-name">Name</Label>
+            <Input id="cp-name" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="cp-desc">Description</Label>
+            <Input id="cp-desc" value={description} onChange={(e) => setDescription(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="cp-cat">Category</Label>
+            <Input id="cp-cat" value={category} onChange={(e) => setCategory(e.target.value)} required />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="cp-price">Price (USD)</Label>
+              <Input id="cp-price" type="number" step="0.01" min="0.01" value={price} onChange={(e) => setPrice(e.target.value)} required />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="cp-opening">Opening stock (optional)</Label>
+              {/* step="any": the form reads the number itself (wholeNumber) and says what is
+                  wrong, instead of the browser's bubble. */}
+              <Input
+                id="cp-opening"
+                type="number"
+                step="any"
+                placeholder="0"
+                value={openingStock}
+                onChange={(e) => setOpeningStock(e.target.value)}
+                aria-invalid={openingStockError !== null}
+                aria-describedby={openingStockError ? "cp-opening-error" : undefined}
+              />
+              <FieldError id="cp-opening-error" message={openingStockError} />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The catalogue holds no stock. An opening stock is received into the inventory as a
+            shipment, a second command sent once the product exists.
+          </p>
+          {unansweredId && !busy && (
+            <p role="note" className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
+              The last Create of {unansweredId} got no answer: the product may exist. Create sends
+              it again under the same id, so it cannot make a second product.
+            </p>
+          )}
+          {busy && (
+            <ol role="status" className="text-sm space-y-1">
+              <li>
+                Step 1: create the product — {step === "creating" ? "sending…" : "done"}
+              </li>
+              {step === "receiving" && (
+                <li>Step 2: receive the opening stock into the inventory — sending…</li>
+              )}
+            </ol>
+          )}
+          <DialogFooter showCloseButton>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Row Actions ──────────────────────────────────────────────────────────────
+
+function UpdatePriceForm({ product, onClose }: { product: ProductView; onClose: () => void }) {
+  const [amount, setAmount] = useState(product.price.amount.toString());
+  const { mutateAsync, isPending } = useUpdatePrice();
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      // The backend's field is `price`, a plain amount; the currency is USD on the backend.
+      await mutateAsync({ productId: product.productId, body: { price: parseFloat(amount) } });
+      toast.success("Price updated");
+      onClose();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update price");
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <DialogHeader>
+        <DialogTitle>Update Price — {product.name}</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-1">
+        <Label htmlFor="up-amount">New Price ({product.price.currency})</Label>
+        <Input id="up-amount" type="number" step="0.01" min="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+      </div>
+      <DialogFooter showCloseButton>
+        <Button type="submit" disabled={isPending}>{isPending ? "Saving…" : "Update"}</Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+function CatalogRowActions({ product }: { product: ProductView }) {
+  const [priceOpen, setPriceOpen] = useState(false);
+  const { mutateAsync: discontinue, isPending: isDiscontinuing } = useDiscontinueProduct();
+
+  async function handleDiscontinue() {
+    try {
+      await discontinue(product.productId);
+      toast.success("Product discontinued");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to discontinue product");
+    }
+  }
+
+  const isDiscontinued = product.status === "DISCONTINUED";
+
+  return (
+    <Dialog open={priceOpen} onOpenChange={setPriceOpen}>
+      <PermissionGate permission="PRODUCT_MANAGE">
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" />}>
+            <MoreHorizontal className="size-4" />
+            <span className="sr-only">Actions</span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setPriceOpen(true)}>Update Price</DropdownMenuItem>
+            {!isDiscontinued && (
+              <DropdownMenuItem
+                className="text-destructive"
+                onClick={handleDiscontinue}
+                disabled={isDiscontinuing}
+              >
+                Discontinue
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </PermissionGate>
+      {priceOpen && (
+        <DialogContent>
+          <UpdatePriceForm product={product} onClose={() => setPriceOpen(false)} />
+        </DialogContent>
+      )}
+    </Dialog>
+  );
+}
+
+// ─── Main Table ───────────────────────────────────────────────────────────────
+
+/**
+ * Admin → Catalog: what the shop sells and for how much. The catalogue holds
+ * no stock; the units are the inventory's (Admin → Inventory).
+ */
+export function CatalogTable() {
+  const { data: products = [], isLoading } = useProducts();
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted-foreground">
+        <BookOpen className="size-5 mr-2 animate-pulse" />
+        Loading catalog…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Catalog</h1>
+          <p className="text-sm text-muted-foreground">
+            {products.length} products. Their stock is kept in Admin → Inventory.
+          </p>
+        </div>
+        <CreateProductDialog />
+      </div>
+
+      <div className="rounded-xl border border-border overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Category</TableHead>
+              <TableHead>Price</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="w-10" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {products.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                  No products yet. Create one!
+                </TableCell>
+              </TableRow>
+            ) : (
+              products.map((product) => (
+                <TableRow
+                  key={product.productId}
+                  className={cn(product.status === "DISCONTINUED" && "opacity-50")}
+                >
+                  <TableCell>
+                    <span className={cn("font-medium", product.status === "DISCONTINUED" && "line-through")}>
+                      {product.name}
+                    </span>
+                    <p className="font-mono text-xs text-muted-foreground">{product.productId}</p>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{product.category}</TableCell>
+                  <TableCell>{formatMoney(product.price.amount, product.price.currency)}</TableCell>
+                  <TableCell>
+                    <Badge className={cn("text-xs", STATUS_STYLES[product.status])}>
+                      {product.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <CatalogRowActions product={product} />
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}

@@ -33,7 +33,7 @@ class SharedIdStreamsIT extends AbstractIntegrationTest {
         .bodyValue(
             """
             {"productId": "%s", "name": "Shared", "description": "shared id", "category": "Test",
-             "price": 1.00, "initialStock": 1}"""
+             "price": 1.00}"""
                 .formatted(id))
         .exchange()
         .expectStatus()

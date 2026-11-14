@@ -111,7 +111,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
   private void createProduct(String productId, String price) {
     commandBus.execute(
         new ProductCommand.CreateProduct(
-            productId, "Product", null, "General", new Money(new BigDecimal(price), "USD"), 0));
+            productId, "Product", null, "General", new Money(new BigDecimal(price), "USD")));
   }
 
   /** Creates the product in the catalogue at 9.99. */
@@ -616,7 +616,8 @@ class OrderControllerIT extends AbstractIntegrationTest {
             price,
             List.of(new OrderEvent.OrderLine(pid, 1, price)),
             List.of(),
-            OrderFulfillmentStatus.AWAITING_PAYMENT),
+            OrderFulfillmentStatus.AWAITING_PAYMENT,
+            null),
         SagaStatus.STARTED);
     try {
       placeOrder(oid, cid, pid);
@@ -672,7 +673,9 @@ class OrderControllerIT extends AbstractIntegrationTest {
     String oid = "o-noproduct-" + System.nanoTime();
     String cid = "o-noproduct-cust-" + System.nanoTime();
 
-    assertOrderRefused(oid, cid, "prod-nobody-" + System.nanoTime(), "Product not found");
+    String pid = "prod-nobody-" + System.nanoTime();
+
+    assertOrderRefused(oid, cid, pid, "Product not found: " + pid);
   }
 
   @Test

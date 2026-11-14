@@ -1,5 +1,6 @@
 import type {
   ProductView,
+  InventoryView,
   OrderView,
   CustomerView,
   EventEntry,
@@ -45,7 +46,7 @@ function buildHeaders(): HeadersInit {
  * the admin dead-letter list, for a `500` that waits for an operator that an
  * operator decides, for every other status the backend's own words (a `400`
  * carries the decider's or the validation's message, e.g. "Insufficient stock
- * for product: prod-1"). The backend's words follow in every case.
+ * for prod-1: available=2, change=-5"). The backend's words follow in every case.
  */
 export class ApiError extends Error {
   readonly status: number;
@@ -214,7 +215,8 @@ async function apiCommand(
 }
 
 /**
- * The header of a command that changes a quantity by an amount. The backend
+ * The header of a command that changes a quantity by an amount: a received
+ * shipment or an inventory adjustment. The backend
  * runs the command once per key: a request sent again with the same key (the
  * page's own retry after a lost answer, the same change sent from the dialog
  * again) is answered with the first one's result, and a dead-lettered command
@@ -235,33 +237,19 @@ export function fetchProduct(productId: string): Promise<ProductView> {
   return apiFetch(`/api/products/${segment(productId)}`);
 }
 
-/** `POST /api/products`: the id is the client's to pick, the price a plain USD amount. */
+/**
+ * `POST /api/products`: the id is the client's to pick, the price a plain USD
+ * amount. A product holds no stock: its units are received into the inventory
+ * (`receiveShipment`).
+ */
 export function createProduct(body: {
   productId: string;
   name: string;
   description: string;
   category: string;
   price: number;
-  initialStock: number;
 }): Promise<void> {
   return apiCommand("/api/products", "POST", body);
-}
-
-/**
- * `PUT /api/products/{id}/stock`: `quantity` is the change, positive to add,
- * negative to remove, applied once per `idempotencyKey`.
- */
-export function adjustStock(
-  productId: string,
-  body: { quantity: number; reason?: string },
-  idempotencyKey: string
-): Promise<void> {
-  return apiCommand(
-    `/api/products/${segment(productId)}/stock`,
-    "PUT",
-    body,
-    idempotencyKeyHeader(idempotencyKey)
-  );
 }
 
 /** `PUT /api/products/{id}/price`: the new price as a plain USD amount. */
@@ -275,11 +263,16 @@ export function discontinueProduct(productId: string): Promise<void> {
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
+/** `GET /api/inventory`: every product's available, reserved and committed units. ADMIN only. */
+export function fetchInventory(): Promise<InventoryView[]> {
+  return apiFetch("/api/inventory");
+}
+
 /**
- * `POST /api/inventory/{productId}/receive`: adds to the inventory the
- * fulfillment saga reserves from. The inventory is its own aggregate; the
- * stock column of the catalogue is the product's and does not move with it.
- * Applied once per `idempotencyKey`, like a stock adjustment.
+ * `POST /api/inventory/{productId}/receive`: adds `quantity` units to the
+ * inventory, the one place that holds a product's stock and the one every
+ * order reserves from. Refused with `400` for a product the catalogue does not
+ * hold. Applied once per `idempotencyKey`.
  */
 export function receiveShipment(
   productId: string,
@@ -288,6 +281,26 @@ export function receiveShipment(
 ): Promise<void> {
   return apiCommand(
     `/api/inventory/${segment(productId)}/receive`,
+    "POST",
+    body,
+    idempotencyKeyHeader(idempotencyKey)
+  );
+}
+
+/**
+ * `POST /api/inventory/{productId}/adjust`: corrects the available units by a
+ * signed `quantityChange`, a stocktake for example, with the operator's
+ * `reason`. The backend refuses a change of zero, a blank reason and a change
+ * that would leave fewer than no units available, each with `400` and its
+ * reason. Applied once per `idempotencyKey`.
+ */
+export function adjustInventory(
+  productId: string,
+  body: { quantityChange: number; reason: string },
+  idempotencyKey: string
+): Promise<void> {
+  return apiCommand(
+    `/api/inventory/${segment(productId)}/adjust`,
     "POST",
     body,
     idempotencyKeyHeader(idempotencyKey)

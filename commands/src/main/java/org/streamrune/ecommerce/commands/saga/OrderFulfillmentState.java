@@ -11,8 +11,9 @@ import org.streamrune.ecommerce.domain.order.OrderEvent;
 import org.streamrune.ecommerce.domain.saga.OrderFulfillmentStatus;
 
 /**
- * What the fulfillment saga keeps of its order: the ids, the total, the lines, and the products
- * whose stock is reserved so far, once each, in the order of the lines.
+ * What the fulfillment saga keeps of its order: the ids, the total, the lines, the products whose
+ * stock is reserved so far, once each, in the order of the lines, and the reason it cancels the
+ * order with when a product's stock is refused ({@code null} otherwise).
  */
 public record OrderFulfillmentState(
     SagaId sagaId,
@@ -22,7 +23,8 @@ public record OrderFulfillmentState(
     Money orderTotal,
     List<OrderEvent.OrderLine> lines,
     List<String> reservedProductIds,
-    OrderFulfillmentStatus fulfillmentStatus)
+    OrderFulfillmentStatus fulfillmentStatus,
+    String cancellationReason)
     implements SagaState {
 
   @JsonCreator
@@ -34,7 +36,8 @@ public record OrderFulfillmentState(
       @JsonProperty("orderTotal") Money orderTotal,
       @JsonProperty("lines") List<OrderEvent.OrderLine> lines,
       @JsonProperty("reservedProductIds") List<String> reservedProductIds,
-      @JsonProperty("fulfillmentStatus") OrderFulfillmentStatus fulfillmentStatus) {
+      @JsonProperty("fulfillmentStatus") OrderFulfillmentStatus fulfillmentStatus,
+      @JsonProperty("cancellationReason") String cancellationReason) {
     this.sagaId = sagaId;
     this.orderId = orderId;
     this.customerId = customerId;
@@ -44,6 +47,7 @@ public record OrderFulfillmentState(
     this.reservedProductIds =
         reservedProductIds == null ? List.of() : List.copyOf(reservedProductIds);
     this.fulfillmentStatus = fulfillmentStatus;
+    this.cancellationReason = cancellationReason;
   }
 
   @Override
@@ -62,7 +66,29 @@ public record OrderFulfillmentState(
 
   OrderFulfillmentState withStatus(OrderFulfillmentStatus status) {
     return new OrderFulfillmentState(
-        sagaId, orderId, customerId, paymentId, orderTotal, lines, reservedProductIds, status);
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reservedProductIds,
+        status,
+        cancellationReason);
+  }
+
+  /** The saga cancelling its order for {@code reason}. */
+  OrderFulfillmentState cancellingFor(String reason) {
+    return new OrderFulfillmentState(
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reservedProductIds,
+        OrderFulfillmentStatus.CANCELLING,
+        reason);
   }
 
   /** The products reserved so far plus {@code productId}, once each, in the order of the lines. */
@@ -74,7 +100,15 @@ public record OrderFulfillmentState(
             .distinct()
             .toList();
     return new OrderFulfillmentState(
-        sagaId, orderId, customerId, paymentId, orderTotal, lines, reserved, fulfillmentStatus);
+        sagaId,
+        orderId,
+        customerId,
+        paymentId,
+        orderTotal,
+        lines,
+        reserved,
+        fulfillmentStatus,
+        cancellationReason);
   }
 
   boolean hasLineFor(String productId) {

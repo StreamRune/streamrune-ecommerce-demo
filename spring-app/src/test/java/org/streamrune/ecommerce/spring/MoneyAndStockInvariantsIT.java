@@ -48,7 +48,7 @@ class MoneyAndStockInvariantsIT extends AbstractIntegrationTest {
       String productId = prefix + "product-" + p;
       commandBus.execute(
           new ProductCommand.CreateProduct(
-              productId, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD"), 0));
+              productId, "Product", null, "General", new Money(new BigDecimal("9.99"), "USD")));
       commandBus.execute(new InventoryCommand.ReceiveShipment(productId, 100));
       products.add(productId);
     }
