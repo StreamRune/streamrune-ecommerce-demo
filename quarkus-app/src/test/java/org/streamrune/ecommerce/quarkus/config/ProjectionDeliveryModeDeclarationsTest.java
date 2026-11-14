@@ -64,7 +64,8 @@ class ProjectionDeliveryModeDeclarationsTest {
     assertThatThrownBy(
             () ->
                 MultiProjectionRunner.builder()
-                    .eventStore(new InMemoryEventStore())
+                    .eventStore(
+                        new InMemoryEventStore(new StreamRuneProducer().eventTypeRegistry()))
                     .offsetStore(processor)
                     .atomicProcessor(processor)
                     .register(ProjectionName.of("orders"), orders, declared(orders.getClass()))
@@ -124,7 +125,7 @@ class ProjectionDeliveryModeDeclarationsTest {
     return new ProjectionProducer()
         .multiProjectionRunner(
             instance(projections),
-            new InMemoryEventStore(),
+            new InMemoryEventStore(new StreamRuneProducer().eventTypeRegistry()),
             processor,
             instance(List.of()),
             instance(List.<AtomicBatchProcessor>of(processor)),

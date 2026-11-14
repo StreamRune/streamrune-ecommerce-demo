@@ -11,6 +11,7 @@ import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.IdGenerator;
+import org.streamrune.core.SimpleEventTypeRegistry;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.CorrelationId;
 import org.streamrune.core.types.EventType;
@@ -38,7 +39,14 @@ class CustomerProjectionTransactionalTest {
   private static final StreamId STREAM = StreamId.of(CustomerState.TYPE, AggregateId.of("c-1"));
 
   private final InMemoryProjectionRepository processor = new InMemoryProjectionRepository();
-  private final InMemoryEventStore events = new InMemoryEventStore();
+  private final InMemoryEventStore events =
+      new InMemoryEventStore(
+          SimpleEventTypeRegistry.builder()
+              .registerEvent(CustomerEvent.CustomerRegistered.class)
+              .registerEvent(CustomerEvent.ProfileUpdated.class)
+              .registerEvent(CustomerEvent.DataExportRequested.class)
+              .registerEvent(CustomerEvent.CustomerForgotten.class)
+              .build());
 
   private static EventEnvelope envelope(long version, DomainEvent event) {
     return new EventEnvelope(

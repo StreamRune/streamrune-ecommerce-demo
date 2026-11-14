@@ -23,6 +23,7 @@ import org.streamrune.core.DomainEvent;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.IdGenerator;
+import org.streamrune.core.SimpleEventTypeRegistry;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.tracing.StreamRuneTracing;
@@ -141,7 +142,11 @@ class ProjectionDeliveryModeWiringTest {
 
   @Test
   void theDemoShape_buildsOverOneInMemoryProcessor() {
-    assertThat(demoShape(new InMemoryProjectionRepository(), new InMemoryEventStore()).build())
+    assertThat(
+            demoShape(
+                    new InMemoryProjectionRepository(),
+                    new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()))
+                .build())
         .isNotNull();
   }
 
@@ -152,7 +157,7 @@ class ProjectionDeliveryModeWiringTest {
     assertThatThrownBy(
             () ->
                 MultiProjectionRunner.builder()
-                    .eventStore(new InMemoryEventStore())
+                    .eventStore(new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()))
                     .offsetStore(processor)
                     .atomicProcessor(processor)
                     .register(
@@ -183,7 +188,7 @@ class ProjectionDeliveryModeWiringTest {
             () ->
                 new StreamRuneConfig()
                     .projectionRunner(
-                        new InMemoryEventStore(),
+                        new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()),
                         new InMemoryOffsetStore(),
                         processor,
                         defaultProperties(),
@@ -206,7 +211,8 @@ class ProjectionDeliveryModeWiringTest {
       throws Exception {
     var processor = new InMemoryProjectionRepository();
     var memory = new InMemoryProjectionRepository();
-    var events = new InMemoryEventStore();
+    var events =
+        new InMemoryEventStore(SimpleEventTypeRegistry.builder().registerEvent(Ping.class).build());
     events.append(
         StreamId.of(ProductState.TYPE, AggregateId.of("p-1")),
         List.of(
