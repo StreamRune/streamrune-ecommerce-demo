@@ -23,6 +23,7 @@ import org.streamrune.ecommerce.domain.customer.CustomerEvent;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 import org.streamrune.runtime.PollingProjectionRunner;
+import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.InMemoryProjectionRepository;
 
@@ -46,7 +47,8 @@ class CustomerProjectionTransactionalTest {
               .registerEvent(CustomerEvent.ProfileUpdated.class)
               .registerEvent(CustomerEvent.DataExportRequested.class)
               .registerEvent(CustomerEvent.CustomerForgotten.class)
-              .build());
+              .build(),
+          new InMemoryCryptoEngine());
 
   private static EventEnvelope envelope(long version, DomainEvent event) {
     return new EventEnvelope(

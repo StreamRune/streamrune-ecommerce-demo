@@ -23,6 +23,7 @@ import org.streamrune.ecommerce.projections.AuditProjection;
 import org.streamrune.quarkus.ProjectionProducer;
 import org.streamrune.quarkus.StreamRuneQuarkusProperties;
 import org.streamrune.runtime.MultiProjectionRunner;
+import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.InMemoryProjectionRepository;
 
@@ -65,7 +66,9 @@ class ProjectionDeliveryModeDeclarationsTest {
             () ->
                 MultiProjectionRunner.builder()
                     .eventStore(
-                        new InMemoryEventStore(new StreamRuneProducer().eventTypeRegistry()))
+                        new InMemoryEventStore(
+                            new StreamRuneProducer().eventTypeRegistry(),
+                            new InMemoryCryptoEngine()))
                     .offsetStore(processor)
                     .atomicProcessor(processor)
                     .register(ProjectionName.of("orders"), orders, declared(orders.getClass()))
@@ -125,7 +128,8 @@ class ProjectionDeliveryModeDeclarationsTest {
     return new ProjectionProducer()
         .multiProjectionRunner(
             instance(projections),
-            new InMemoryEventStore(new StreamRuneProducer().eventTypeRegistry()),
+            new InMemoryEventStore(
+                new StreamRuneProducer().eventTypeRegistry(), new InMemoryCryptoEngine()),
             processor,
             instance(List.of()),
             instance(List.<AtomicBatchProcessor>of(processor)),
