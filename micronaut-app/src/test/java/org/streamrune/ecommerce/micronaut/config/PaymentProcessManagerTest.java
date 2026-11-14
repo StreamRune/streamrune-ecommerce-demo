@@ -50,6 +50,7 @@ import org.streamrune.runtime.CommandDeadLetteredException;
 import org.streamrune.runtime.LocalStripedLocker;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 import org.streamrune.test.InMemoryCommandInbox;
+import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryDeadLetterQueue;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.SagaEnvelopes;
@@ -582,7 +583,8 @@ class PaymentProcessManagerTest {
     private final InMemoryCommandInbox inbox = new InMemoryCommandInbox();
     private final RefusingStore store =
         new RefusingStore(
-            new InMemoryEventStore(new StreamRuneFactory().eventTypeRegistry())
+            new InMemoryEventStore(
+                    new StreamRuneFactory().eventTypeRegistry(), new InMemoryCryptoEngine())
                 .withCommandInbox(inbox));
     private final InMemoryDeadLetterQueue deadLetters = new InMemoryDeadLetterQueue();
     private final VirtualThreadCommandBus bus =

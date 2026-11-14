@@ -34,6 +34,7 @@ import org.streamrune.core.types.UserId;
 import org.streamrune.core.types.Version;
 import org.streamrune.ecommerce.domain.customer.CustomerEvent;
 import org.streamrune.ecommerce.domain.customer.CustomerState;
+import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryEventStore;
 
 /**
@@ -55,7 +56,8 @@ class LiveFeedTest {
       new InMemoryEventStore(
           SimpleEventTypeRegistry.builder()
               .registerEvent(CustomerEvent.CustomerRegistered.class)
-              .build());
+              .build(),
+          new InMemoryCryptoEngine());
 
   /** The store the feed reads: {@link #store}, with every call counted and one of them held. */
   private final ObservedStore observed = new ObservedStore(store);

@@ -45,6 +45,7 @@ import org.streamrune.runtime.CacheInvalidator;
 import org.streamrune.runtime.MultiProjectionRunner;
 import org.streamrune.runtime.SubscriptionHealthContributor;
 import org.streamrune.spring.StreamRuneProperties;
+import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryEventStore;
 import org.streamrune.test.InMemoryOffsetStore;
 import org.streamrune.test.InMemoryProjectionRepository;
@@ -145,7 +146,8 @@ class ProjectionDeliveryModeWiringTest {
     assertThat(
             demoShape(
                     new InMemoryProjectionRepository(),
-                    new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()))
+                    new InMemoryEventStore(
+                        new StreamRuneConfig().eventTypeRegistry(), new InMemoryCryptoEngine()))
                 .build())
         .isNotNull();
   }
@@ -157,7 +159,9 @@ class ProjectionDeliveryModeWiringTest {
     assertThatThrownBy(
             () ->
                 MultiProjectionRunner.builder()
-                    .eventStore(new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()))
+                    .eventStore(
+                        new InMemoryEventStore(
+                            new StreamRuneConfig().eventTypeRegistry(), new InMemoryCryptoEngine()))
                     .offsetStore(processor)
                     .atomicProcessor(processor)
                     .register(
@@ -188,7 +192,8 @@ class ProjectionDeliveryModeWiringTest {
             () ->
                 new StreamRuneConfig()
                     .projectionRunner(
-                        new InMemoryEventStore(new StreamRuneConfig().eventTypeRegistry()),
+                        new InMemoryEventStore(
+                            new StreamRuneConfig().eventTypeRegistry(), new InMemoryCryptoEngine()),
                         new InMemoryOffsetStore(),
                         processor,
                         defaultProperties(),
