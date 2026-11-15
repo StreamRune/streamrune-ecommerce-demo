@@ -426,7 +426,7 @@ curl -s -H "X-User-Id: cust-walkthrough" -H "X-User-Role: CUSTOMER" \
 
 Expected output: `"status": "CONFIRMED"`, `"paymentStatus": "CAPTURED"` and a total of `39.98`. The Orders page shows the payment status as a second badge beside the order's.
 
-The order is read by the customer it belongs to. Leave the two headers out, or send another customer's id, and the answer is `403`: an order is for its customer or an `ADMIN` (Chapter 9), and so is the list — `GET /api/orders` with these headers returns the walkthrough customer's orders and nobody else's.
+The order is read by the customer it belongs to. Leave the two headers out, or send another customer's id, and the answer is `403`: an order is for its customer or an `ADMIN` (Chapter 9), and so is the list — `GET /api/orders` with these headers returns the walkthrough customer's orders and nobody else's, one page of up to 20 at a time (`?page=` and `?size=`, Chapter 8).
 
 #### Cancel a confirmed order and watch the refund and the release
 

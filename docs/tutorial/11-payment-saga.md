@@ -692,8 +692,10 @@ public record OrderView(
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.Page;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
@@ -701,6 +703,7 @@ import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @org.streamrune.core.ProjectionConfig(
     name = "orders",
@@ -825,11 +828,28 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  public List<OrderView> listAll() {
-    return repository.findAll(projectionName(), OrderView.class);
+  /** One page of every order, in the order of their ids; the database pages the table. */
+  public Page<OrderView> page(ListPage page) {
+    return repository.findAll(projectionName(), OrderView.class, page.byId());
   }
 
+  /** Every order of one customer. */
   public List<OrderView> listByCustomer(String customerId) {
+    return ordersOf(customerId);
+  }
+
+  /**
+   * One page of one customer's orders, in the order of their ids. The repository has no read by a
+   * field of the row, so this reads the order table and keeps the customer's rows in memory, which
+   * a demo's table allows; a read model with real volumes gives its repository a query by {@code
+   * customerId}. The answer holds one page however many orders the customer has.
+   */
+  public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+    return page.slice(
+        ordersOf(customerId).stream().sorted(Comparator.comparing(OrderView::orderId)).toList());
+  }
+
+  private List<OrderView> ordersOf(String customerId) {
     return repository.findAll(projectionName(), OrderView.class).stream()
         .filter(o -> customerId.equals(o.customerId()))
         .toList();
@@ -4937,7 +4957,9 @@ import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
@@ -4954,7 +4976,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       404}).
  *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
  *       rows that are their own, selected by their id before anything is returned; a request
- *       without an identity is refused.
+ *       without an identity is refused. The order list comes one page at a time ({@link ListPage}),
+ *       cut from the rows the caller may see.
  *   <li><b>A fulfillment saga:</b> whoever may read the order it fulfils. The saga of an order has
  *       the id {@code "fulfillment-" + orderId}, the id {@code OrderFulfillmentSaga} derives from
  *       {@code OrderPlaced}, so the order is known from the saga id and its owner is the customer
@@ -5025,25 +5048,28 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
-   * customerId} when the request names one. Any other authenticated caller gets their own orders
-   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
-   * customer.
+   * One page of the orders the caller may see. An {@code ADMIN} gets all of them, or those of
+   * {@code customerId} when the request names one. Any other authenticated caller gets their own
+   * orders and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer. The page is cut from the caller's rows, so no page and no size reaches anybody
+   * else's.
    *
    * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @param page the page the request asks for ({@link ListPage#parse})
    * @throws AccessRefusedException for a request without an identity, and for a caller who is not
    *     an {@code ADMIN} and asks for another customer's orders
    */
-  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
+  public OrderPage orders(
+      StreamRuneContext.RequestContext caller, String customerId, ListPage page) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
     boolean filtered = customerId != null && !customerId.isEmpty();
     if (OwnerOrAdminAccess.isAdmin(caller)) {
-      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+      return OrderPage.of(filtered ? orders.pageByCustomer(customerId, page) : orders.page(page));
     }
     if (filtered) {
       OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
     }
-    return orders.listByCustomer(identity);
+    return OrderPage.of(orders.pageByCustomer(identity, page));
   }
 
   /**

@@ -1064,7 +1064,7 @@ public OrderPricing orderPricing(EventStore eventStore) {
 }
 ```
 
-### Step 5a — Create `OrderView`
+### Step 5a — Create `OrderView` and the page of the order list
 
 Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
 
@@ -1088,6 +1088,141 @@ public record OrderView(
 }
 ```
 
+**The order list comes in pages.** `GET /api/orders` answers one page at a time, so its answer stays the same size however many orders the store holds. Two small types in `queries` carry the paging: `ListPage`, the page a request asks for, and `OrderPage`, the answer. The request's `page` and `size` arrive as text and `ListPage.parse` reads them, so its limits are the only ones: `page` counts from 0, `size` is 20 when the request names none and at most 100, and a value outside them, or one that is not a whole number, is an `IllegalArgumentException`, which the `GlobalExceptionHandler` of Chapter 1 answers with `400`. The rows of a page are in the order of their ids, the read-model table's primary key: the order stays the same from one request to the next, and the database pages the table without sorting it.
+
+Create `queries/src/main/java/org/streamrune/ecommerce/queries/paging/ListPage.java`:
+
+```java
+package org.streamrune.ecommerce.queries.paging;
+
+import java.util.List;
+import org.streamrune.core.Page;
+import org.streamrune.core.PageRequest;
+import org.streamrune.core.Sort;
+
+/**
+ * Which page of a list a request asks for: {@code page}, counted from 0, and {@code size}, the
+ * number of rows on a page. A request that names neither gets the first page of {@value
+ * #DEFAULT_SIZE} rows; {@code size} goes up to {@value #MAX_SIZE}. A page past the last row is
+ * empty, not an error.
+ *
+ * <p>The three applications bind the {@code page} and {@code size} query parameters of {@code GET
+ * /api/orders} as text and hand them to {@link #parse}, so the defaults, the limits and the answer
+ * to a value outside them are the same in every app. A value that is not a whole number, a negative
+ * {@code page} and a {@code size} outside 1 to {@value #MAX_SIZE} are an {@link
+ * IllegalArgumentException}, which each application answers with {@code 400}. The controllers parse
+ * the page before they ask who the caller is, so a malformed request is {@code 400} whoever sends
+ * it.
+ *
+ * <p>The rows of a page are in the order of their ids: the read-model table's primary key, which
+ * keeps the order stable from one request to the next and lets the database page the whole list
+ * without sorting it ({@link #byId}).
+ */
+public record ListPage(int page, int size) {
+
+  /** The rows on a page when the request does not say. */
+  public static final int DEFAULT_SIZE = 20;
+
+  /** The most rows a page may hold. */
+  public static final int MAX_SIZE = 100;
+
+  public ListPage {
+    if (page < 0) {
+      throw new IllegalArgumentException("page must not be negative");
+    }
+    if (size < 1 || size > MAX_SIZE) {
+      throw new IllegalArgumentException("size must be between 1 and " + MAX_SIZE);
+    }
+    if ((long) page * size > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException("page " + page + " of size " + size + " is out of range");
+    }
+  }
+
+  /**
+   * The page the two query parameters name. A parameter that is absent or empty takes its default:
+   * page 0, {@value #DEFAULT_SIZE} rows.
+   *
+   * @throws IllegalArgumentException for a value that is not a whole number, or one outside the
+   *     limits
+   */
+  public static ListPage parse(String page, String size) {
+    return new ListPage(number("page", page, 0), number("size", size, DEFAULT_SIZE));
+  }
+
+  private static int number(String name, String value, int absent) {
+    if (value == null || value.isEmpty()) {
+      return absent;
+    }
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(name + " must be a whole number");
+    }
+  }
+
+  /** The framework's page request for this page, ordered by the rows' ids. */
+  public PageRequest byId() {
+    return PageRequest.of(page, size, Sort.by("id"));
+  }
+
+  /**
+   * This page of a list that is already in order: the rows it holds, and the size of the whole list
+   * as the total.
+   */
+  public <T> Page<T> slice(List<T> rows) {
+    int from = (int) Math.min((long) page * size, rows.size());
+    int to = Math.min(from + size, rows.size());
+    return new Page<>(rows.subList(from, to), rows.size(), page, size);
+  }
+}
+```
+
+`byId()` is the framework's `PageRequest` for the page, sorted by `id`, which `ProjectionRepository.findAll(name, type, pageRequest)` turns into `ORDER BY id LIMIT ? OFFSET ?` with a `COUNT(*)` for the total. `slice` cuts the same page out of a list that is already in order, for a read the repository cannot page itself (Step 5b).
+
+Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderPage.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.util.List;
+import org.streamrune.core.Page;
+
+/**
+ * One page of the order list, the body of {@code GET /api/orders}: the orders on the page ({@code
+ * items}, in the order of their ids), the page asked for ({@code page}, counted from 0, and {@code
+ * size}), how many orders the caller's list holds in all ({@code total}), and whether a page after
+ * this one holds more ({@code hasNext}). A client reads on with {@code page + 1} while {@code
+ * hasNext} is {@code true}.
+ *
+ * <p>{@code items} is written even when the page is empty: Micronaut Serialization leaves an empty
+ * list out unless told otherwise, and every app answers with the same five fields.
+ */
+public record OrderPage(
+    @JsonInclude(JsonInclude.Include.ALWAYS) List<OrderView> items,
+    int page,
+    int size,
+    long total,
+    boolean hasNext) {
+
+  public OrderPage {
+    items = List.copyOf(items);
+  }
+
+  /** The body for a page the read model returned. */
+  public static OrderPage of(Page<OrderView> rows) {
+    return new OrderPage(
+        rows.content(), rows.page(), rows.size(), rows.totalElements(), rows.hasNext());
+  }
+}
+```
+
+A client reads on with `page + 1` while `hasNext` is `true`; `total` is the count the repository's page carries anyway. `OrderPage` uses a Jackson annotation, so the `queries` module needs Jackson: add it to the `dependencies` block of `queries/build.gradle.kts`:
+
+```kotlin
+    implementation(libs.jackson.databind)
+```
+
 ### Step 5b — Create `OrderProjection`
 
 Create `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProjection.java`:
@@ -1096,13 +1231,16 @@ Create `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProj
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.Page;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @org.streamrune.core.ProjectionConfig(
     name = "orders",
@@ -1159,17 +1297,36 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  public List<OrderView> listAll() {
-    return repository.findAll(projectionName(), OrderView.class);
+  /** One page of every order, in the order of their ids; the database pages the table. */
+  public Page<OrderView> page(ListPage page) {
+    return repository.findAll(projectionName(), OrderView.class, page.byId());
   }
 
+  /** Every order of one customer. */
   public List<OrderView> listByCustomer(String customerId) {
+    return ordersOf(customerId);
+  }
+
+  /**
+   * One page of one customer's orders, in the order of their ids. The repository has no read by a
+   * field of the row, so this reads the order table and keeps the customer's rows in memory, which
+   * a demo's table allows; a read model with real volumes gives its repository a query by {@code
+   * customerId}. The answer holds one page however many orders the customer has.
+   */
+  public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+    return page.slice(
+        ordersOf(customerId).stream().sorted(Comparator.comparing(OrderView::orderId)).toList());
+  }
+
+  private List<OrderView> ordersOf(String customerId) {
     return repository.findAll(projectionName(), OrderView.class).stream()
         .filter(o -> customerId.equals(o.customerId()))
         .toList();
   }
 }
 ```
+
+The reads of the list are pages: `page` asks the repository for one, `pageByCustomer` sorts one customer's orders by id and cuts the page out of them. Both hand back the framework's `Page`, which knows its total and whether a page follows it.
 
 The order's row shows its payment too, once there is one: Chapter 11 adds the payment aggregate, and its Step 1a gives `OrderView` a payment status that this projection sets from the payment events.
 
@@ -1554,11 +1711,12 @@ Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/Orde
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
-import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.OrderProjection;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @RestController
 @RequestMapping("/api/orders")
@@ -1577,14 +1735,20 @@ public class OrderQueryController {
   }
 
   @GetMapping
-  public List<OrderView> listOrders(@RequestParam(required = false) String customerId) {
+  public OrderPage listOrders(
+      @RequestParam(required = false) String customerId,
+      @RequestParam(required = false) String page,
+      @RequestParam(required = false) String size) {
+    ListPage requested = ListPage.parse(page, size);
     if (customerId != null) {
-      return orderProjection.listByCustomer(customerId);
+      return OrderPage.of(orderProjection.pageByCustomer(customerId, requested));
     }
-    return orderProjection.listAll();
+    return OrderPage.of(orderProjection.page(requested));
   }
 }
 ```
+
+The controller binds `page` and `size` as text and leaves them to `ListPage.parse`: a request that names neither gets the first page of 20, and `?size=500` or `?page=two` is a `400` with `ListPage`'s message, not Spring's own answer to a parameter it could not convert.
 
 ### Step 6 — Verify orders and snapshots
 
@@ -1643,6 +1807,16 @@ curl -X POST http://localhost:8080/api/orders/order-2/ship
 ```
 
 The second `curl` returns `400 Bad Request` with a message like `Can only ship CONFIRMED orders, current status: CREATED`. The state machine guard fired in `decide` before any event was written.
+
+**Read the order list a page at a time.** Two orders exist now, `order-1` and `order-2` (the order of `p-nobody` was refused):
+
+```bash
+curl "http://localhost:8080/api/orders?size=1"
+curl "http://localhost:8080/api/orders?page=1&size=1"
+curl -i "http://localhost:8080/api/orders?size=500"
+```
+
+The first answer is page 0, with `order-1` in `items`, `"total": 2` and `"hasNext": true`; the second holds `order-2` and `"hasNext": false`, the last page. Without `page` and `size` the answer is page 0 of 20 orders, both of them. The third is `400 Bad Request` with the body `size must be between 1 and 100`.
 
 A shipped order cannot be cancelled: once the saga of Chapter 11 confirms orders, ship one and cancel it, and the answer is `400 Bad Request` with the body `Cannot cancel SHIPPED orders` (`OrderDeciderTest#cancelOrder_shipped_isRefused` pins the rule).
 
