@@ -48,7 +48,8 @@ export default function DashboardPage() {
   const allowed = hasPermission("OWN_DATA_VIEW");
   const ownOnly = allowed && role !== "ADMIN";
   const { data: products = [] } = useProducts();
-  // One page of five orders: the rows of the Recent Orders card, and the total for the Orders card.
+  // One page of five orders, the newest: the rows of the Recent Orders card, and the total for the
+  // Orders card.
   const { data: firstOrders } = useFirstOrders(5, allowed);
   const { data: allowedCustomers = [] } = useCustomers(allowed);
   const recentOrders = allowed ? (firstOrders?.items ?? []) : [];

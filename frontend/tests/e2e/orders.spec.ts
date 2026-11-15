@@ -11,7 +11,7 @@
  * expects the seed order "order-seed-1", placed by cust-alice.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
   actAs,
   mockBackendRoutes,
@@ -202,6 +202,39 @@ test.describe("Orders page — one page at a time (no backend required)", () => 
       "/api/orders?page=1&size=20"
     );
   });
+
+  test("an order a newer one pushed onto the next page is shown once", async ({ page }) => {
+    await mockBackendRoutes(page);
+    const firstPage = Array.from({ length: 20 }, (_, i) =>
+      order(`order-${String(i).padStart(2, "0")}`, "cust-alice")
+    );
+    // Between the two reads an order was placed: the second page starts with the first page's
+    // last order, and the total has grown by one.
+    const secondPage = [order("order-19", "cust-alice"), order("order-20", "cust-alice")];
+    await page.route(isOrderList, (route) => {
+      const number = Number(new URL(route.request().url()).searchParams.get("page"));
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body:
+          number === 0
+            ? orderPage(firstPage, { total: 21 })
+            : orderPage(secondPage, { page: 1, total: 22 }),
+      });
+    });
+    await actAs(page, "ADMIN");
+    const errors = collectConsoleErrors(page);
+
+    await page.goto("/orders");
+    await expect(page.getByText("21 total, 20 shown")).toBeVisible();
+    await page.getByRole("button", { name: "Load more" }).click();
+
+    await expect(page.getByRole("row").filter({ hasText: "order-20" })).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "order-19" })).toHaveCount(1);
+    // The total is the last page's: 22 orders, 21 of them shown.
+    await expect(page.getByText("22 total, 21 shown")).toBeVisible();
+    expect(errors().filter((e) => e.includes("same key"))).toHaveLength(0);
+  });
 });
 
 test.describe("Orders page — the payment of an order (no backend required)", () => {
@@ -232,6 +265,28 @@ test.describe("Orders page — the payment of an order (no backend required)", (
   });
 });
 
+/**
+ * Loads pages of the order table with "Load more" until a row whose id cell holds `idPrefix`
+ * shows, and fails when the last page is loaded without it. Each step waits for the list to
+ * settle: the first page read, and after a click the next page's rows or the end of the list.
+ */
+async function showOrder(page: Page, idPrefix: string): Promise<void> {
+  const row = page.locator("td.font-mono", { hasText: idPrefix }).first();
+  const loadMore = page.getByRole("button", { name: "Load more" });
+  const rows = page.getByRole("row");
+  await expect(page.getByText(/\d+ total/)).toBeVisible();
+  for (let pages = 1; pages <= 50; pages++) {
+    if (await row.isVisible()) return;
+    if (!(await loadMore.isVisible())) break;
+    const before = await rows.count();
+    await loadMore.click();
+    await expect
+      .poll(async () => (await rows.count()) > before || !(await loadMore.isVisible()))
+      .toBe(true);
+  }
+  await expect(row).toBeVisible();
+}
+
 test.describe("Orders page — backend-dependent", () => {
   let backendAvailable = false;
 
@@ -244,7 +299,8 @@ test.describe("Orders page — backend-dependent", () => {
     }
   });
 
-  // The order table shows orderId.slice(0, 8): "order-seed-1" appears as "order-se".
+  // The order table shows orderId.slice(0, 8): "order-seed-1" appears as "order-se". The list is
+  // newest first and the seed order is the oldest, so it is on the last page of a long list.
   test("an ADMIN and the customer who placed it see the seed order (order-seed-1)", async ({
     page,
   }) => {
@@ -255,20 +311,12 @@ test.describe("Orders page — backend-dependent", () => {
     await actAs(page, "ADMIN");
     await page.goto("/orders");
     await expect(page.getByRole("heading", { name: "Orders" })).toBeVisible();
-    // An ADMIN's list holds every order, a page at a time: load pages until the seed order shows.
-    const seed = page.locator("td.font-mono", { hasText: "order-se" }).first();
-    const loadMore = page.getByRole("button", { name: "Load more" });
-    await expect(page.getByText(/\d+ total/)).toBeVisible();
-    while (!(await seed.isVisible()) && (await loadMore.isVisible())) {
-      await loadMore.click();
-      await expect(page.getByRole("button", { name: "Loading…" })).toHaveCount(0);
-    }
-    await expect(seed).toBeVisible();
+    await showOrder(page, "order-se");
 
     await actAs(page, "CUSTOMER", "cust-alice");
     await page.goto("/orders");
     await expect(page.getByText("(your own orders)")).toBeVisible();
-    await expect(page.locator("td.font-mono", { hasText: "order-se" }).first()).toBeVisible();
+    await showOrder(page, "order-se");
   });
 
   test("another customer does not see the seed order", async ({ page }) => {

@@ -426,6 +426,16 @@ function OrderRow({ order }: { order: OrderView }) {
 
 // ─── Main Table ───────────────────────────────────────────────────────────────
 
+/** The orders in the order given, each id once: its first occurrence stays. */
+function uniqueById(orders: OrderView[]): OrderView[] {
+  const seen = new Set<string>();
+  return orders.filter((order) => {
+    if (seen.has(order.orderId)) return false;
+    seen.add(order.orderId);
+    return true;
+  });
+}
+
 interface OrderTableProps {
   customerId?: string;
 }
@@ -445,8 +455,10 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
     fetchNextPage,
     isFetchingNextPage,
   } = useOrders(ownOnly ? undefined : customerId, allowed);
-  const orders = data?.pages.flatMap((page) => page.items) ?? [];
-  const total = data?.pages[0]?.total ?? 0;
+  // Offset pages: an order placed while the list is read shifts the later pages by one, so the
+  // next page can start with an order the last one ended with. Each order is shown once.
+  const orders = uniqueById(data?.pages.flatMap((page) => page.items) ?? []);
+  const total = data?.pages[data.pages.length - 1]?.total ?? 0;
 
   if (!allowed) {
     return <AccessRestricted message="Requires CUSTOMER or ADMIN role to view orders." />;

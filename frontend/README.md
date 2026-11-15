@@ -25,7 +25,7 @@ backend, so you only need the commands above when you work on the frontend itsel
 |------|---------------|
 | Dashboard | Stat cards and the live event feed |
 | Products | The storefront: price and availability badges and an Order button, read-only for every role |
-| Orders | The order lifecycle: every order for ADMIN, a customer's own for CUSTOMER |
+| Orders | The order lifecycle: every order for ADMIN, a customer's own for CUSTOMER, newest first, 20 at a time with Load more |
 | Customers | Registration, data export and the right to be forgotten: every customer for ADMIN, a customer's own record for CUSTOMER |
 | Fulfillment | The order-fulfillment sagas: every saga for ADMIN, the sagas of their own orders for CUSTOMER |
 | Events | The live feed for every role, and the event history (ADMIN only) |
@@ -91,7 +91,8 @@ A write action sends the request the backend's controller reads, field for field
   body once the events are stored; the read models follow by up to the projections' polling
   interval (five seconds and up to one of jitter by default). The page therefore reads a list
   again at once and 2, 7, 15 and 30 seconds after the last change (`src/lib/read-model-sync.ts`),
-  so a placed order appears in the table by itself, a few seconds after its toast, and a read
+  so a placed order appears at the top of the table by itself (the list is newest first, and the
+  re-read reads every page loaded so far), a few seconds after its toast, and a read
   model that is late still shows up. A burst of feed frames is answered by one read per list.
 
 An action is offered to the roles the backend accepts it from (`src/lib/permissions.ts`). A

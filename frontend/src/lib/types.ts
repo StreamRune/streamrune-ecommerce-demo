@@ -69,9 +69,9 @@ export interface OrderView {
 }
 
 /**
- * One page of `GET /api/orders`: the orders on the page, in the order of their
- * ids; the page (from 0) and its size; how many orders the list holds in all;
- * and whether a page after this one holds more.
+ * One page of `GET /api/orders`: the orders on the page, newest first; the page
+ * (from 0) and its size; how many orders the list holds in all; and whether a
+ * page after this one holds more.
  */
 export interface OrderPage {
   items: OrderView[];

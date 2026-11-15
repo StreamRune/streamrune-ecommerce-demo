@@ -68,8 +68,9 @@ export function useOrders(customerId?: string, enabled = true) {
 }
 
 /**
- * The first `size` orders the caller may see, and how many there are in all:
- * one page of `GET /api/orders`, for the dashboard. Same rule and same
+ * The newest `size` orders the caller may see, and how many there are in all:
+ * one page of `GET /api/orders`, which lists the newest first, for the
+ * dashboard. Same rule and same
  * `enabled` flag as `useOrders`.
  */
 export function useFirstOrders(size: number, enabled = true) {
