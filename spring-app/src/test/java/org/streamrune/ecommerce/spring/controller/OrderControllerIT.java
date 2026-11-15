@@ -317,7 +317,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
         .untilAsserted(
             () -> {
               @SuppressWarnings("unchecked")
-              List<Map<String, Object>> orders =
+              Map<String, Object> page =
                   client
                       .get()
                       .uri("/api/orders")
@@ -326,10 +326,12 @@ class OrderControllerIT extends AbstractIntegrationTest {
                       .exchange()
                       .expectStatus()
                       .isOk()
-                      .expectBody(List.class)
+                      .expectBody(Map.class)
                       .returnResult()
                       .getResponseBody();
-              assertThat(orders).isNotNull();
+              assertThat(page).isNotNull();
+              @SuppressWarnings("unchecked")
+              List<Map<String, Object>> orders = (List<Map<String, Object>>) page.get("items");
               List<String> ids = orders.stream().map(o -> (String) o.get("orderId")).toList();
               assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
@@ -349,7 +351,7 @@ class OrderControllerIT extends AbstractIntegrationTest {
         .untilAsserted(
             () -> {
               @SuppressWarnings("unchecked")
-              List<Map<String, Object>> orders =
+              Map<String, Object> page =
                   client
                       .get()
                       .uri("/api/orders?customerId=" + cid)
@@ -358,10 +360,12 @@ class OrderControllerIT extends AbstractIntegrationTest {
                       .exchange()
                       .expectStatus()
                       .isOk()
-                      .expectBody(List.class)
+                      .expectBody(Map.class)
                       .returnResult()
                       .getResponseBody();
-              assertThat(orders).isNotNull();
+              assertThat(page).isNotNull();
+              @SuppressWarnings("unchecked")
+              List<Map<String, Object>> orders = (List<Map<String, Object>>) page.get("items");
               assertThat(orders.stream().map(o -> (String) o.get("orderId")).toList())
                   .containsExactly(oid);
             });

@@ -68,6 +68,7 @@
   {"name": "org.streamrune.ecommerce.queries.dto.Availability", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.OrderView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.OrderView$OrderLineView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.streamrune.ecommerce.queries.dto.OrderPage", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.CustomerView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
   {"name": "org.streamrune.ecommerce.queries.dto.InventoryView", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
 

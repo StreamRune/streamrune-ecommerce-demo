@@ -4,9 +4,10 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import java.util.List;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 import org.streamrune.quarkus.StreamRuneRequestContextHolder;
 
 /**
@@ -34,11 +35,17 @@ public class OrderQueryController {
   }
 
   /**
-   * Every order for an {@code ADMIN}, narrowed to one customer by {@code customerId}; the caller's
-   * own orders for anyone else, who may not name another customer.
+   * One page of every order for an {@code ADMIN}, narrowed to one customer by {@code customerId};
+   * of the caller's own orders for anyone else, who may not name another customer. {@code page}
+   * (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link ListPage}); a value
+   * outside them is {@code 400}, whoever asks.
    */
   @GET
-  public List<OrderView> listOrders(@QueryParam("customerId") String customerId) {
-    return queries.orders(RequestCaller.of(requestContext), customerId);
+  public OrderPage listOrders(
+      @QueryParam("customerId") String customerId,
+      @QueryParam("page") String page,
+      @QueryParam("size") String size) {
+    ListPage requested = ListPage.parse(page, size);
+    return queries.orders(RequestCaller.of(requestContext), customerId, requested);
   }
 }

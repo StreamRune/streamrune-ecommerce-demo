@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import io.micronaut.core.type.Argument;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.MediaType;
 import io.micronaut.http.client.HttpClient;
@@ -40,6 +39,7 @@ import org.streamrune.ecommerce.domain.payment.PaymentIds;
 import org.streamrune.ecommerce.domain.payment.PaymentState;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.domain.product.ProductCommand;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
@@ -299,15 +299,15 @@ class OrderCommandQueryE2EIT extends AbstractIntegrationTest {
         .pollInterval(Duration.ofMillis(200))
         .untilAsserted(
             () -> {
-              List<OrderView> orders =
+              OrderPage page =
                   client
                       .toBlocking()
                       .retrieve(
                           HttpRequest.GET("/api/orders")
                               .header("X-User-Role", "CUSTOMER")
                               .header("X-User-Id", cid),
-                          Argument.listOf(OrderView.class));
-              List<String> ids = orders.stream().map(OrderView::orderId).toList();
+                          OrderPage.class);
+              List<String> ids = page.items().stream().map(OrderView::orderId).toList();
               assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
   }

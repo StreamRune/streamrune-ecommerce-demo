@@ -26,6 +26,7 @@ import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
@@ -138,7 +139,7 @@ class OrderProjectionPaymentStatusTest {
         new PaymentEvent.PaymentCaptured("pay-o-9", "o-9"));
 
     assertThat(projection.get("o-9")).isNull();
-    assertThat(projection.listAll()).isEmpty();
+    assertThat(projection.page(new ListPage(0, 100)).content()).isEmpty();
   }
 
   private static OrderEvent.OrderPlaced placed(String orderId) {

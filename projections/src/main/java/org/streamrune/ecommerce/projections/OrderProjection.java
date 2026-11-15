@@ -1,8 +1,10 @@
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.Page;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
@@ -10,6 +12,7 @@ import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @org.streamrune.core.ProjectionConfig(
     name = "orders",
@@ -134,11 +137,28 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  public List<OrderView> listAll() {
-    return repository.findAll(projectionName(), OrderView.class);
+  /** One page of every order, in the order of their ids; the database pages the table. */
+  public Page<OrderView> page(ListPage page) {
+    return repository.findAll(projectionName(), OrderView.class, page.byId());
   }
 
+  /** Every order of one customer. */
   public List<OrderView> listByCustomer(String customerId) {
+    return ordersOf(customerId);
+  }
+
+  /**
+   * One page of one customer's orders, in the order of their ids. The repository has no read by a
+   * field of the row, so this reads the order table and keeps the customer's rows in memory, which
+   * a demo's table allows; a read model with real volumes gives its repository a query by {@code
+   * customerId}. The answer holds one page however many orders the customer has.
+   */
+  public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+    return page.slice(
+        ordersOf(customerId).stream().sorted(Comparator.comparing(OrderView::orderId)).toList());
+  }
+
+  private List<OrderView> ordersOf(String customerId) {
     return repository.findAll(projectionName(), OrderView.class).stream()
         .filter(o -> customerId.equals(o.customerId()))
         .toList();

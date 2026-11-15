@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.Page;
 import org.streamrune.core.StreamRuneContext;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.types.CorrelationId;
@@ -21,7 +22,9 @@ import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
@@ -39,6 +42,8 @@ class OwnerOrAdminQueriesTest {
   private static final StreamRuneContext.RequestContext BOB = caller("bob", "CUSTOMER");
   private static final StreamRuneContext.RequestContext CAROL = caller("carol", "CUSTOMER");
   private static final StreamRuneContext.RequestContext OPERATOR = caller("ops-1", "ADMIN");
+
+  private static final ListPage FIRST_PAGE = ListPage.parse(null, null);
 
   private final InMemoryProjectionRepository repository = new InMemoryProjectionRepository();
 
@@ -163,60 +168,109 @@ class OwnerOrAdminQueriesTest {
 
   @Test
   void anAdminListsEveryOrderOrOneCustomers() {
-    assertThat(queries.orders(OPERATOR, null))
+    assertThat(queries.orders(OPERATOR, null, FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2", "o-b1");
-    assertThat(queries.orders(OPERATOR, ""))
+    assertThat(queries.orders(OPERATOR, "", FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2", "o-b1");
-    assertThat(queries.orders(OPERATOR, "alice"))
+    assertThat(queries.orders(OPERATOR, "alice", FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2");
-    assertThat(queries.orders(OPERATOR, "carol")).isEmpty();
+    assertThat(queries.orders(OPERATOR, "carol", FIRST_PAGE).items()).isEmpty();
   }
 
   @Test
   void aCustomerListsTheirOwnOrdersWithOrWithoutTheFilter() {
-    assertThat(queries.orders(ALICE, null))
+    assertThat(queries.orders(ALICE, null, FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2");
-    assertThat(queries.orders(ALICE, ""))
+    assertThat(queries.orders(ALICE, "", FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2");
-    assertThat(queries.orders(ALICE, "alice"))
+    assertThat(queries.orders(ALICE, "alice", FIRST_PAGE).items())
         .extracting(OrderView::orderId)
         .containsExactlyInAnyOrder("o-a1", "o-a2");
-    assertThat(queries.orders(BOB, null)).extracting(OrderView::orderId).containsExactly("o-b1");
-    assertThat(queries.orders(CAROL, null)).isEmpty();
+    assertThat(queries.orders(BOB, null, FIRST_PAGE).items())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-b1");
+    assertThat(queries.orders(CAROL, null, FIRST_PAGE).items()).isEmpty();
 
     assertThat(reads)
         .as("a customer's list is always the read by their own id, never the whole list")
         .containsExactly(
-            "orders.listByCustomer(alice)",
-            "orders.listByCustomer(alice)",
-            "orders.listByCustomer(alice)",
-            "orders.listByCustomer(bob)",
-            "orders.listByCustomer(carol)");
+            "orders.pageByCustomer(alice)",
+            "orders.pageByCustomer(alice)",
+            "orders.pageByCustomer(alice)",
+            "orders.pageByCustomer(bob)",
+            "orders.pageByCustomer(carol)");
   }
 
   @Test
   void theFilterCannotNameAnotherCustomer() {
-    assertRefused(() -> queries.orders(BOB, "alice"));
-    assertRefused(() -> queries.orders(CAROL, "alice"));
+    assertRefused(() -> queries.orders(BOB, "alice", FIRST_PAGE));
+    assertRefused(() -> queries.orders(CAROL, "alice", FIRST_PAGE));
     // Not a way around it either: a filter that matches no customer.
-    assertRefused(() -> queries.orders(BOB, "nobody"));
+    assertRefused(() -> queries.orders(BOB, "nobody", FIRST_PAGE));
 
     assertThat(reads).isEmpty();
   }
 
   @Test
   void anOrderListWithoutAnIdentityIsRefused() {
-    assertRefused(() -> queries.orders(ANONYMOUS, null));
-    assertRefused(() -> queries.orders(ANONYMOUS, "alice"));
-    assertRefused(() -> queries.orders(ROLE_WITHOUT_IDENTITY, null));
-    assertRefused(() -> queries.orders(NO_CONTEXT, null));
+    assertRefused(() -> queries.orders(ANONYMOUS, null, FIRST_PAGE));
+    assertRefused(() -> queries.orders(ANONYMOUS, "alice", FIRST_PAGE));
+    assertRefused(() -> queries.orders(ROLE_WITHOUT_IDENTITY, null, FIRST_PAGE));
+    assertRefused(() -> queries.orders(NO_CONTEXT, null, FIRST_PAGE));
 
     assertThat(reads).isEmpty();
+  }
+
+  @Test
+  void anAdminsListComesInPagesInTheOrderOfTheIds() {
+    OrderPage first = queries.orders(OPERATOR, null, new ListPage(0, 2));
+    assertThat(first.items()).extracting(OrderView::orderId).containsExactly("o-a1", "o-a2");
+    assertThat(first.page()).isZero();
+    assertThat(first.size()).isEqualTo(2);
+    assertThat(first.total()).isEqualTo(3);
+    assertThat(first.hasNext()).isTrue();
+
+    OrderPage last = queries.orders(OPERATOR, null, new ListPage(1, 2));
+    assertThat(last.items()).extracting(OrderView::orderId).containsExactly("o-b1");
+    assertThat(last.total()).isEqualTo(3);
+    assertThat(last.hasNext()).isFalse();
+
+    OrderPage pastTheEnd = queries.orders(OPERATOR, null, new ListPage(5, 2));
+    assertThat(pastTheEnd.items()).isEmpty();
+    assertThat(pastTheEnd.total()).isEqualTo(3);
+    assertThat(pastTheEnd.hasNext()).isFalse();
+
+    assertThat(reads)
+        .as("an ADMIN's unfiltered list is paged by the repository")
+        .containsOnly("orders.page()");
+  }
+
+  @Test
+  void aCustomersPagesHoldTheirOwnOrdersAndNoOtherWhateverThePage() {
+    repository.save(ProjectionName.of("orders"), "o-a0", order("o-a0", "alice"));
+
+    OrderPage first = queries.orders(ALICE, null, new ListPage(0, 2));
+    assertThat(first.items()).extracting(OrderView::orderId).containsExactly("o-a0", "o-a1");
+    assertThat(first.total()).isEqualTo(3);
+    assertThat(first.hasNext()).isTrue();
+
+    OrderPage last = queries.orders(ALICE, "alice", new ListPage(1, 2));
+    assertThat(last.items()).extracting(OrderView::orderId).containsExactly("o-a2");
+    assertThat(last.hasNext()).isFalse();
+
+    // A page of an ADMIN's filtered list: the same rows, cut the same way.
+    assertThat(queries.orders(OPERATOR, "alice", new ListPage(0, 2)).items())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-a0", "o-a1");
+    // No page reaches another customer's rows.
+    assertThat(queries.orders(BOB, null, new ListPage(0, 100)).items())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-b1");
   }
 
   // --- fulfillment sagas ---
@@ -298,7 +352,7 @@ class OwnerOrAdminQueriesTest {
 
     assertThat(reads)
         .as("a customer's list comes from the read of their own orders, never from all orders")
-        .doesNotContain("orders.listAll()")
+        .doesNotContain("orders.page()")
         .contains("orders.listByCustomer(alice)", "orders.listByCustomer(bob)");
   }
 
@@ -406,9 +460,15 @@ class OwnerOrAdminQueriesTest {
     }
 
     @Override
-    public List<OrderView> listAll() {
-      reads.add("orders.listAll()");
-      return super.listAll();
+    public Page<OrderView> page(ListPage page) {
+      reads.add("orders.page()");
+      return super.page(page);
+    }
+
+    @Override
+    public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+      reads.add("orders.pageByCustomer(" + customerId + ")");
+      return super.pageByCustomer(customerId, page);
     }
 
     @Override

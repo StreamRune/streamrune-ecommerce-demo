@@ -28,6 +28,7 @@ import org.streamrune.ecommerce.projections.AuditEntry;
 import org.streamrune.ecommerce.queries.dto.Availability;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
 import org.streamrune.ecommerce.queries.dto.InventoryView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
 import org.streamrune.ecommerce.queries.dto.ProductView;
 import org.streamrune.ecommerce.queries.query.ComplianceReportQuery;
@@ -142,6 +143,7 @@ import org.streamrune.ecommerce.queries.query.ListProducts;
       Availability.class,
       OrderView.class,
       OrderView.OrderLineView.class,
+      OrderPage.class,
       CustomerView.class,
       InventoryView.class,
 

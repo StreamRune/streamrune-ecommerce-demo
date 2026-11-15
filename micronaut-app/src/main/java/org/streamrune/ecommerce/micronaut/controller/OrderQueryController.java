@@ -2,9 +2,10 @@ package org.streamrune.ecommerce.micronaut.controller;
 
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.*;
-import java.util.List;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The order read model, for an authenticated {@code ADMIN} or the customer an order names ({@link
@@ -30,12 +31,17 @@ public class OrderQueryController {
   }
 
   /**
-   * Every order for an {@code ADMIN}, narrowed to one customer by {@code customerId}; the caller's
-   * own orders for anyone else, who may not name another customer.
+   * One page of every order for an {@code ADMIN}, narrowed to one customer by {@code customerId};
+   * of the caller's own orders for anyone else, who may not name another customer. {@code page}
+   * (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link ListPage}); a value
+   * outside them is {@code 400}, whoever asks.
    */
   @Get
-  public List<OrderView> listOrders(
-      @QueryValue(value = "customerId", defaultValue = "") String customerId) {
-    return queries.orders(RequestCaller.current(), customerId);
+  public OrderPage listOrders(
+      @QueryValue(value = "customerId", defaultValue = "") String customerId,
+      @QueryValue(value = "page", defaultValue = "") String page,
+      @QueryValue(value = "size", defaultValue = "") String size) {
+    ListPage requested = ListPage.parse(page, size);
+    return queries.orders(RequestCaller.current(), customerId, requested);
   }
 }

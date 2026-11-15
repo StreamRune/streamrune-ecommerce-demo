@@ -279,7 +279,7 @@ class OrderCommandQueryE2EIT {
                       .statusCode(200)
                       .extract()
                       .jsonPath()
-                      .getList("orderId", String.class);
+                      .getList("items.orderId", String.class);
               assertThat(ids).containsExactlyInAnyOrder(oid1, oid2);
             });
   }

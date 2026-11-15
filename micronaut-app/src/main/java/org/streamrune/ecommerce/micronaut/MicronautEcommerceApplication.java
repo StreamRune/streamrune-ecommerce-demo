@@ -24,6 +24,7 @@ import org.streamrune.ecommerce.domain.product.ProductEvent;
 @SerdeImport(org.streamrune.ecommerce.queries.dto.OrderView.OrderLineView.class)
 @SerdeImport(org.streamrune.ecommerce.queries.dto.ProductView.class)
 @SerdeImport(org.streamrune.ecommerce.queries.dto.OrderView.class)
+@SerdeImport(org.streamrune.ecommerce.queries.dto.OrderPage.class)
 @SerdeImport(org.streamrune.ecommerce.queries.dto.CustomerView.class)
 @SerdeImport(org.streamrune.ecommerce.queries.dto.InventoryView.class)
 @SerdeImport(ProductEvent.ProductCreated.class)
