@@ -91,6 +91,12 @@ public sealed interface OrderCommand extends Command {
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
    *
+   * <p>The customer id is at most 255 characters, the longest id a registered customer can have.
+   * The order read model indexes it (the customer's order list), and a database index entry holds a
+   * bounded number of bytes: a longer customer id would be stored in {@code OrderPlaced} and then
+   * fail every save of the order's row, which halts the order projection. Refused here, nothing is
+   * written. The message never echoes the id.
+   *
    * <p>The lines are not empty and name each product once: stock is reserved per order and product,
    * so two lines of one product would be reserved once. The message never echoes a product id.
    */
@@ -106,6 +112,7 @@ public sealed interface OrderCommand extends Command {
 
     public PlaceOrder {
       requireValidOrderId(orderId);
+      requireValidCustomerId(customerId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -133,6 +140,21 @@ public sealed interface OrderCommand extends Command {
                 + MAX_ORDER_ID_LENGTH
                 + " characters, got "
                 + orderId.length());
+      }
+    }
+
+    /**
+     * The length rule of a customer id: at most {@value IdConstraints#MAX_LENGTH} characters, the
+     * longest id a registered customer can have, so that the order read model can index it. The
+     * message never echoes the id.
+     */
+    public static void requireValidCustomerId(String customerId) {
+      if (customerId != null && customerId.length() > IdConstraints.MAX_LENGTH) {
+        throw new IllegalArgumentException(
+            "customerId must be at most "
+                + IdConstraints.MAX_LENGTH
+                + " characters, got "
+                + customerId.length());
       }
     }
   }
@@ -211,7 +233,7 @@ The two types differ in one rule. The constructor of `OrderCommand.OrderLine` ch
 
 The product id gets this check because it later becomes the id of another aggregate. In chapter 11 the payment saga reserves stock for each line, and the inventory extractor of the same chapter routes that reservation to the `inventory` aggregate whose id is the product id. The extractor builds that id with `AggregateId.of`, which refuses a control character or an id longer than 255 characters (chapter 2), so the product id is bound by the same rule. Without the check here, such an id would be refused only when the saga reserves stock. By then the saga has already captured the payment, so it would refund it and cancel the order. `IdConstraints` is the framework class that `AggregateId.of` uses for its charset rule. `OrderEvent.OrderLine` has no such rule, because it is rebuilt from the event log, and a rule there would make a stored order unreadable instead of stopping a write.
 
-`PlaceOrder` has a rule of its own, on the order id. The order stream takes any id that `AggregateId.of` accepts, up to 255 characters, but `OrderPlaced` starts the fulfillment saga of chapter 11, and that saga is identified by `"fulfillment-" + orderId`. A `SagaId` holds 255 characters at most, and the twelve-character prefix leaves 243 for the order id. The constructor of `PlaceOrder` throws an `IllegalArgumentException` for a longer order id (`MAX_ORDER_ID_LENGTH`), and the message names the rule without echoing the id. The order endpoints build the command with this constructor too, so they answer `400 Bad Request` and write nothing. Without the check, an order id of 244 to 255 characters would be placed and its saga could never start: the saga runner would quarantine `OrderPlaced` as a poison event, and the order would stay `CREATED` with no payment and no confirmation. The constructor leaves a blank order id and one with a control character to the command bus, where the order id extractor refuses both with `AggregateId.of` before anything is written (chapter 2). `SAGA_ID_PREFIX` is the prefix the saga builds and matches its ids with, so the bound and the saga cannot drift apart. The payment id `"pay-" + orderId` is eight characters shorter than the saga id, so it fits whenever the saga id does.
+`PlaceOrder` has a rule of its own, on the order id. The order stream takes any id that `AggregateId.of` accepts, up to 255 characters, but `OrderPlaced` starts the fulfillment saga of chapter 11, and that saga is identified by `"fulfillment-" + orderId`. A `SagaId` holds 255 characters at most, and the twelve-character prefix leaves 243 for the order id. The constructor of `PlaceOrder` throws an `IllegalArgumentException` for a longer order id (`MAX_ORDER_ID_LENGTH`), and the message names the rule without echoing the id. The order endpoints build the command with this constructor too, so they answer `400 Bad Request` and write nothing. Without the check, an order id of 244 to 255 characters would be placed and its saga could never start: the saga runner would quarantine `OrderPlaced` as a poison event, and the order would stay `CREATED` with no payment and no confirmation. The constructor leaves a blank order id and one with a control character to the command bus, where the order id extractor refuses both with `AggregateId.of` before anything is written (chapter 2). The customer id has a length rule too: at most 255 characters (`requireValidCustomerId`), the longest id a registered customer can have. The order read model of Step 5b indexes it for the customer's order list, and a database index entry holds a bounded number of bytes, so a longer customer id would be stored in `OrderPlaced` and then fail every save of the order's row, which halts the projection; refused here, the endpoint answers `400` and nothing is written. `SAGA_ID_PREFIX` is the prefix the saga builds and matches its ids with, so the bound and the saga cannot drift apart. The payment id `"pay-" + orderId` is eight characters shorter than the saga id, so it fits whenever the saga id does.
 
 ### OrderEvent
 
@@ -1008,8 +1030,8 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
  * product created a moment ago is orderable and a price change applies at once. A product nobody
  * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
- * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
- * two lines of one product are refused before the store is read.
+ * DomainException}, {@code 400}). An order id too long for its saga id, a customer id too long to
+ * index, a malformed product id and two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
@@ -1027,6 +1049,7 @@ public final class OrderPricing {
       String orderId, String customerId, List<RequestedLine> lines) {
     // The rules that need no read come first, so a request they refuse costs no read of the store.
     OrderCommand.PlaceOrder.requireValidOrderId(orderId);
+    OrderCommand.PlaceOrder.requireValidCustomerId(customerId);
     if (lines == null || lines.isEmpty()) {
       throw new IllegalArgumentException("lines must not be empty");
     }
@@ -1153,12 +1176,6 @@ public record ListPage(int page, int size) {
    */
   public static ListPage parse(List<String> page, List<String> size) {
     return new ListPage(number("page", page, 0), number("size", size, DEFAULT_SIZE));
-  }
-
-  /** {@link #parse(List, List)} for a request that gives each parameter once at most. */
-  public static ListPage parse(String page, String size) {
-    return parse(
-        page == null ? List.of() : List.of(page), size == null ? List.of() : List.of(size));
   }
 
   private static int number(String name, List<String> values, int absent) {
@@ -1380,7 +1397,7 @@ public OrderProjection orderProjection(ProjectionRepository repo) {
 }
 ```
 
-**Declare the indexes the two reads need.** Without an index the database reads the whole `orders_view` table for every page: to find one customer's rows, to sort them, and to count them. `OrderProjection` describes the two indexes its reads use, `CUSTOMER_NEWEST_FIRST_INDEX` (`ProjectionIndex.forFilter`: the customer id, then `createdAt` descending, then the id) and `NEWEST_FIRST_INDEX` (`ProjectionIndex.forSort`: `createdAt` descending, then the id). An index is a bean of type `ProjectionIndex`: at startup, before the projection runners start, the framework declares every such bean on the application's `ProjectionRepository`, which creates the index with its table when it does not exist. An index the repository refuses, or one it cannot create, fails the start. Add the two beans to `StreamRuneConfig` (import `org.streamrune.core.projection.ProjectionIndex`):
+**Declare the indexes the two reads need.** Without an index the database reads the whole `orders_view` table for every page: to find one customer's rows, to sort them, and to count them. `OrderProjection` describes the two indexes its reads use, `CUSTOMER_NEWEST_FIRST_INDEX` (`ProjectionIndex.forFilter`: the customer id, then `createdAt` descending, then the id) and `NEWEST_FIRST_INDEX` (`ProjectionIndex.forSort`: `createdAt` descending, then the id). An index is a bean of type `ProjectionIndex`: at startup, before the application answers a request, the framework declares every such bean on the application's `ProjectionRepository`, which creates the index with its table when it does not exist. An index the repository refuses, or one it cannot create, fails the start. Add the two beans to `StreamRuneConfig` (import `org.streamrune.core.projection.ProjectionIndex`):
 
 ```java
 @Bean
@@ -1394,7 +1411,7 @@ public ProjectionIndex ordersIndex() {
 }
 ```
 
-The repository builds every index on the same expressions its reads compare, the field's text and the id in code-point order (`COLLATE "C"`), so the database uses the index for the filter, the order and the count. Every index costs a little on every save of the projection. A database volume from an earlier framework version keeps the tables it created then, with their old collation: start from an empty database with `docker compose down -v` (Chapter 1) before you run this chapter.
+The repository builds every index on the same expressions its reads compare, the field's text and the id in code-point order (`COLLATE "C"`). A customer's list is index-backed for the filter, the order and the count. An `ADMIN`'s whole list takes its page from the `createdAt` index but counts every order on each page, a cost that grows with the table. Every index costs a little on every save of the projection, and an index entry holds a bounded number of bytes: an indexed text must stay short, which is why `PlaceOrder` refuses a customer id longer than an id (see `OrderCommand` at the start of this chapter).
 
 And add `"orders"` to the `MultiProjectionRunner`:
 
@@ -1784,6 +1801,7 @@ Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/Orde
 package org.streamrune.ecommerce.spring.controller;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.dto.OrderPage;
@@ -1809,9 +1827,8 @@ public class OrderQueryController {
   @GetMapping
   public OrderPage listOrders(
       @RequestParam(required = false) String customerId,
-      @RequestParam(required = false) String page,
-      @RequestParam(required = false) String size) {
-    ListPage requested = ListPage.parse(page, size);
+      @RequestParam MultiValueMap<String, String> query) {
+    ListPage requested = ListPage.parse(query.get("page"), query.get("size"));
     if (customerId != null) {
       return OrderPage.of(orderProjection.pageByCustomer(customerId, requested));
     }
