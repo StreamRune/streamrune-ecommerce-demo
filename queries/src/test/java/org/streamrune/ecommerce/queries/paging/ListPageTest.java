@@ -78,29 +78,6 @@ class ListPageTest {
   }
 
   @Test
-  void aSliceHoldsThePagesRowsAndTheWholeListsSize() {
-    List<String> rows = List.of("a", "b", "c", "d", "e");
-
-    Page<String> first = new ListPage(0, 2).slice(rows);
-    assertEquals(List.of("a", "b"), first.content());
-    assertEquals(5, first.totalElements());
-    assertTrue(first.hasNext());
-
-    Page<String> last = new ListPage(2, 2).slice(rows);
-    assertEquals(List.of("e"), last.content());
-    assertFalse(last.hasNext());
-
-    Page<String> past = new ListPage(7, 2).slice(rows);
-    assertTrue(past.content().isEmpty());
-    assertEquals(5, past.totalElements());
-    assertFalse(past.hasNext());
-
-    Page<String> exact = new ListPage(1, 5).slice(rows);
-    assertTrue(exact.content().isEmpty());
-    assertFalse(new ListPage(0, 5).slice(rows).hasNext());
-  }
-
-  @Test
   void anOrderPageCarriesThePageAndWhetherAnotherFollows() {
     OrderPage page = OrderPage.of(new Page<>(List.of(), 41, 1, 20));
     assertEquals(1, page.page());
@@ -108,7 +85,7 @@ class ListPageTest {
     assertEquals(41, page.total());
     assertTrue(page.hasNext());
     assertFalse(OrderPage.of(new Page<>(List.of(), 41, 2, 20)).hasNext());
-    // At the largest page number the framework's int arithmetic would overflow; this does not.
+    // At the largest page number page + 1 overflows an int; the answer is still right.
     assertFalse(OrderPage.of(new Page<>(List.of(), 3, Integer.MAX_VALUE, 1)).hasNext());
   }
 

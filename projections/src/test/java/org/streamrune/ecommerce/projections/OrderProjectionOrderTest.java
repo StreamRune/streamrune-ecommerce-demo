@@ -8,59 +8,88 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
+import org.streamrune.core.projection.ProjectionIndex;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
+import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
- * The order every list of orders comes in: newest first, then by id. The repository sorts the whole
- * list on the row's JSON, a customer's list is sorted in memory; the two orders are written next to
- * each other in {@link OrderProjection} and must agree.
+ * The order and the selection of the order lists, on the framework's in-memory repository, which
+ * sorts and filters as the PostgreSQL one does: newest first, the id breaking a tie, and a
+ * customer's list holding that customer's orders only.
  */
 class OrderProjectionOrderTest {
 
-  @Test
-  void theRepositorySortsByCreatedAtDescendingThenByIdAscending() {
-    assertThat(OrderProjection.NEWEST_FIRST_ROWS)
-        .isEqualTo(
-            new Sort(
-                List.of(
-                    new Sort.Order("createdAt", SortDirection.DESC),
-                    new Sort.Order("id", SortDirection.ASC))));
+  private static final Instant NOON = Instant.parse("2026-11-15T12:00:00Z");
+
+  private final InMemoryProjectionRepository repository = new InMemoryProjectionRepository();
+  private final OrderProjection projection = new OrderProjection(repository);
+
+  OrderProjectionOrderTest() {
+    // Ids that do not follow the order of placing; o-1 and o-2 were placed at the same instant.
+    save(order("o-1", "alice", NOON));
+    save(order("o-3", "alice", NOON.plusSeconds(60)));
+    save(order("o-2", "alice", NOON));
+    save(order("o-0", "alice", NOON.minusSeconds(60)));
+    save(order("o-9", "bob", NOON.plusSeconds(30)));
   }
 
   @Test
-  void inMemoryTheNewestComesFirstAndTheIdBreaksATie() {
-    Instant noon = Instant.parse("2026-11-15T12:00:00Z");
-    List<OrderView> orders =
-        List.of(
-            order("o-1", noon),
-            order("o-3", noon.plusSeconds(60)),
-            order("o-2", noon),
-            order("o-0", noon.minusSeconds(60)));
+  void theWholeListIsNewestFirstAndTheIdBreaksATie() {
+    assertThat(projection.page(new ListPage(0, 10)).content())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-3", "o-9", "o-1", "o-2", "o-0");
+  }
 
-    assertThat(orders.stream().sorted(OrderProjection.NEWEST_FIRST).map(OrderView::orderId))
+  @Test
+  void aCustomersPagesHoldTheirOwnOrdersNewestFirst() {
+    var first = projection.pageByCustomer("alice", new ListPage(0, 3));
+    assertThat(first.content()).extracting(OrderView::orderId).containsExactly("o-3", "o-1", "o-2");
+    assertThat(first.totalElements()).isEqualTo(4);
+    assertThat(first.hasNext()).isTrue();
+    assertThat(projection.pageByCustomer("alice", new ListPage(1, 3)).content())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-0");
+    assertThat(projection.pageByCustomer("bob", new ListPage(0, 3)).content())
+        .extracting(OrderView::orderId)
+        .containsExactly("o-9");
+    assertThat(projection.pageByCustomer("carol", new ListPage(0, 3)).totalElements()).isZero();
+  }
+
+  @Test
+  void aCustomersWholeListIsReadThroughTheFilter() {
+    assertThat(projection.listByCustomer("alice"))
+        .extracting(OrderView::orderId)
         .containsExactly("o-3", "o-1", "o-2", "o-0");
+    assertThat(projection.listByCustomer("carol")).isEmpty();
   }
 
   @Test
-  void inMemoryTheInstantsAreComparedAsTheTextTheRowHolds() {
-    // PostgreSQL orders the ISO-8601 text of the row: within one second, "…00.500Z" sorts before
-    // "…00Z" although it is later. The in-memory order compares the same text.
-    Instant whole = Instant.parse("2026-11-15T12:00:00Z");
-    Instant half = Instant.parse("2026-11-15T12:00:00.500Z");
+  void theIndexesServeTheTwoReads() {
+    ProjectionName orders = ProjectionName.of("orders");
+    Sort newestFirst = new Sort(List.of(new Sort.Order("createdAt", SortDirection.DESC)));
 
-    assertThat(
-            List.of(order("o-half", half), order("o-whole", whole)).stream()
-                .sorted(OrderProjection.NEWEST_FIRST)
-                .map(OrderView::orderId))
-        .containsExactly("o-whole", "o-half");
+    assertThat(OrderProjection.NEWEST_FIRST).isEqualTo(newestFirst);
+    assertThat(OrderProjection.NEWEST_FIRST_INDEX)
+        .isEqualTo(ProjectionIndex.forSort(orders, newestFirst));
+    assertThat(OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX)
+        .isEqualTo(ProjectionIndex.forFilter(orders, "customerId", newestFirst));
+    // The repository accepts both declarations.
+    repository.declareIndex(OrderProjection.NEWEST_FIRST_INDEX);
+    repository.declareIndex(OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX);
   }
 
-  private static OrderView order(String id, Instant placedAt) {
+  private void save(OrderView order) {
+    repository.save(ProjectionName.of("orders"), order.orderId(), order);
+  }
+
+  private static OrderView order(String id, String customerId, Instant placedAt) {
     return new OrderView(
         id,
-        "c-1",
+        customerId,
         List.of(),
         Money.usd(new BigDecimal("10.00")),
         OrderStatus.CREATED,

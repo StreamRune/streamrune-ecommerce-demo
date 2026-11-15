@@ -2,7 +2,6 @@ package org.streamrune.ecommerce.queries.paging;
 
 import java.util.List;
 import java.util.regex.Pattern;
-import org.streamrune.core.Page;
 import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 
@@ -92,15 +91,5 @@ public record ListPage(int page, int size) {
   /** The framework's page request for this page, in the given order. */
   public PageRequest in(Sort order) {
     return PageRequest.of(page, size, order);
-  }
-
-  /**
-   * This page of a list that is already in order: the rows it holds, and the size of the whole list
-   * as the total.
-   */
-  public <T> Page<T> slice(List<T> rows) {
-    int from = (int) Math.min((long) page * size, rows.size());
-    int to = Math.min(from + size, rows.size());
-    return new Page<>(rows.subList(from, to), rows.size(), page, size);
   }
 }

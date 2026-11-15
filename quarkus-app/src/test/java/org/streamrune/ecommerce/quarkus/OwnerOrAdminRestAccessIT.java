@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -15,6 +16,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -38,6 +40,8 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
 class OwnerOrAdminRestAccessIT {
+
+  @Inject DataSource dataSource;
 
   private static final String ADMIN = "ADMIN";
   private static final String CUSTOMER = "CUSTOMER";
@@ -377,6 +381,79 @@ class OwnerOrAdminRestAccessIT {
         .isEqualTo("page must be given once");
     assertThat(get("/api/orders?page=99999999999", dana, CUSTOMER).body())
         .isEqualTo("page must be at most 107374181 for size 20");
+  }
+
+  @Test
+  void aCustomersPagesHoldOnlyTheirOwnOrdersAmongManyOthers() throws Exception {
+    String erin = uniqueId("erin");
+    String fay = uniqueId("fay");
+    // Many orders of another customer, placed without waiting for each, around two of fay's.
+    List<String> erins = new ArrayList<>();
+    for (int i = 0; i < 25; i++) {
+      String order = uniqueId("o-erin-" + i);
+      assertThat(
+              send("POST", "/api/orders", OPERATOR, ADMIN, orderBody(order, erin, stockedProduct()))
+                  .statusCode())
+          .isBetween(200, 299);
+      erins.add(order);
+      if (i == 10) {
+        placedOrder(fay);
+      }
+    }
+    String fayLast = placedOrder(fay);
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .pollInterval(Duration.ofMillis(500))
+        .untilAsserted(
+            () ->
+                assertThat(
+                        orderPage(get("/api/orders?customerId=" + erin, OPERATOR, ADMIN))
+                            .get("total")
+                            .asLong())
+                    .isEqualTo(25));
+
+    // fay's list: her two orders, the newest first, on every page and size, and nobody else's.
+    JsonNode fays = orderPage(get("/api/orders", fay, CUSTOMER));
+    assertThat(fays.get("total").asLong()).isEqualTo(2);
+    assertThat(itemIds(fays)).hasSize(2).startsWith(fayLast).doesNotContainAnyElementsOf(erins);
+    for (JsonNode row : fays.get("items")) {
+      assertThat(row.get("customerId").asText()).isEqualTo(fay);
+    }
+    assertThat(itemIds(orderPage(get("/api/orders?page=1&size=1", fay, CUSTOMER))))
+        .hasSize(1)
+        .doesNotContainAnyElementsOf(erins);
+
+    // erin's 25 orders in pages of ten: each once, all hers, and the count is hers alone.
+    List<String> walked = new ArrayList<>();
+    for (int page = 0; page < 3; page++) {
+      JsonNode rows = orderPage(get("/api/orders?size=10&page=" + page, erin, CUSTOMER));
+      assertThat(rows.get("total").asLong()).isEqualTo(25);
+      assertThat(rows.get("hasNext").asBoolean()).isEqualTo(page < 2);
+      for (JsonNode row : rows.get("items")) {
+        assertThat(row.get("customerId").asText()).isEqualTo(erin);
+      }
+      walked.addAll(itemIds(rows));
+    }
+    assertThat(walked).doesNotHaveDuplicates().containsExactlyInAnyOrderElementsOf(erins);
+  }
+
+  @Test
+  void theIndexesOfTheOrderListAreDeclaredAtStartup() throws Exception {
+    List<String> definitions = new ArrayList<>();
+    try (var connection = dataSource.getConnection();
+        var query =
+            connection.prepareStatement(
+                "SELECT indexdef FROM pg_indexes WHERE tablename = 'orders_view'");
+        var rows = query.executeQuery()) {
+      while (rows.next()) {
+        definitions.add(rows.getString(1));
+      }
+    }
+    assertThat(definitions)
+        .anySatisfy(index -> assertThat(index).contains("'customerId'", "'createdAt'", "DESC"))
+        .anySatisfy(
+            index ->
+                assertThat(index).contains("'createdAt'", "DESC").doesNotContain("customerId"));
   }
 
   // --- POST /api/orders, /api/orders/{id}/cancel ---

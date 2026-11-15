@@ -12,6 +12,7 @@ import jakarta.enterprise.inject.Alternative;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Named;
 import jakarta.inject.Singleton;
 import java.time.Duration;
 import java.util.HashSet;
@@ -32,6 +33,7 @@ import org.streamrune.core.crypto.CryptoEngine;
 import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
@@ -533,6 +535,25 @@ public class StreamRuneProducer {
     public DiscoverableOrderProjection(ProjectionRepository repository) {
       super(repository);
     }
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup by the
+   * framework's {@code ProjectionIndexDeclarer}: one customer's orders newest first, and every
+   * order newest first (see {@link OrderProjection}).
+   */
+  @Produces
+  @Singleton
+  @Named("customerOrdersIndex")
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Produces
+  @Singleton
+  @Named("ordersIndex")
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   /**

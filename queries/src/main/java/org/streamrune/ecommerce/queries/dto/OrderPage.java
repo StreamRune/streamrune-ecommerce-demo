@@ -18,7 +18,7 @@ public record OrderPage(List<OrderView> items, int page, int size, long total, b
 
   /** The body for a page the read model returned. */
   public static OrderPage of(Page<OrderView> rows) {
-    boolean hasNext = ((long) rows.page() + 1) * rows.size() < rows.totalElements();
-    return new OrderPage(rows.content(), rows.page(), rows.size(), rows.totalElements(), hasNext);
+    return new OrderPage(
+        rows.content(), rows.page(), rows.size(), rows.totalElements(), rows.hasNext());
   }
 }
