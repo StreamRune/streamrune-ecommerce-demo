@@ -83,7 +83,7 @@ export async function actAs(
 
 /** One request the page sent to the backend API. */
 export interface ApiRequest {
-  /** Path and query, e.g. "/api/orders?customerId=cust-bob". */
+  /** Path and query, e.g. "/api/orders?customerId=cust-bob&page=0&size=20". */
   target: string;
   role: string | undefined;
   userId: string | undefined;
@@ -118,6 +118,29 @@ export function requestsTo(seen: ApiRequest[], path: string): ApiRequest[] {
 }
 
 /**
+ * Matches a request of the order list, `/api/orders` with any query: the page
+ * asks for it one page at a time (`?page=0&size=20`, and `customerId` for an
+ * ADMIN's filter). Use it as the URL of `page.route`.
+ */
+export function isOrderList(url: URL): boolean {
+  return url.origin === new URL(BACKEND_URL).origin && url.pathname === "/api/orders";
+}
+
+/**
+ * The body of one page of `GET /api/orders`, as the backend sends it: the rows
+ * of the page, its number and size, the total, and whether a page follows.
+ */
+export function orderPage(
+  items: unknown[],
+  options: { page?: number; size?: number; total?: number } = {}
+): string {
+  const page = options.page ?? 0;
+  const size = options.size ?? 20;
+  const total = options.total ?? items.length;
+  return JSON.stringify({ items, page, size, total, hasNext: (page + 1) * size < total });
+}
+
+/**
  * Mock all backend API calls so the page renders without port 8080.
  * Intercepts /api/** with minimal responses in the shapes the backend sends.
  */
@@ -126,8 +149,8 @@ export async function mockBackendRoutes(page: Page): Promise<void> {
   await page.route(`${BACKEND_URL}/api/products`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
-  await page.route(`${BACKEND_URL}/api/orders`, (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  await page.route(isOrderList, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: orderPage([]) })
   );
   await page.route(`${BACKEND_URL}/api/inventory`, (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })

@@ -19,7 +19,8 @@ import {
   collectConsoleErrors,
   recordApiRequests,
   requestsTo,
-  BACKEND_URL,
+  isOrderList,
+  orderPage,
 } from "./helpers";
 
 function order(orderId: string, customerId: string, paymentStatus: string | null = "CAPTURED") {
@@ -41,11 +42,11 @@ test.describe("Orders page — surface (no backend required)", () => {
   test("a cancelled order shows why it was cancelled", async ({ page }) => {
     await mockBackendRoutes(page);
     const reason = "Insufficient stock for prod-widget: requested 3";
-    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+    await page.route(isOrderList, (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([
+        body: orderPage([
           { ...order("order-a1", "cust-alice", "REFUNDED"), status: "CANCELLED", reason },
           { ...order("order-a2", "cust-alice"), reason: null },
         ]),
@@ -91,18 +92,20 @@ test.describe("Orders page — surface (no backend required)", () => {
 
   test("an ADMIN lists every order and may narrow the list to one customer", async ({ page }) => {
     await mockBackendRoutes(page);
-    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+    await page.route(isOrderList, (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([order("order-a1", "cust-alice"), order("order-b1", "cust-bob")]),
+        body: orderPage([order("order-a1", "cust-alice"), order("order-b1", "cust-bob")]),
       })
     );
-    await page.route(`${BACKEND_URL}/api/orders?customerId=cust-bob`, (route) =>
+    await page.route(
+      (url) => isOrderList(url) && url.searchParams.get("customerId") === "cust-bob",
+      (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([order("order-b1", "cust-bob")]),
+        body: orderPage([order("order-b1", "cust-bob")]),
       })
     );
     await actAs(page, "ADMIN");
@@ -117,7 +120,7 @@ test.describe("Orders page — surface (no backend required)", () => {
 
     await expect(page.getByText("1 total for cust-bob")).toBeVisible();
     const sent = requestsTo(requests, "/api/orders");
-    expect(sent.map((r) => r.target)).toContain("/api/orders?customerId=cust-bob");
+    expect(sent.map((r) => r.target)).toContain("/api/orders?customerId=cust-bob&page=0&size=20");
     for (const request of sent) {
       expect(request.role).toBe("ADMIN");
       expect(request.userId).toBe("admin-1");
@@ -129,11 +132,11 @@ test.describe("Orders page — surface (no backend required)", () => {
   }) => {
     await mockBackendRoutes(page);
     // What the backend answers a CUSTOMER: the caller's own orders and nothing else.
-    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+    await page.route(isOrderList, (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([order("order-a1", "cust-alice")]),
+        body: orderPage([order("order-a1", "cust-alice")]),
       })
     );
     await actAs(page, "CUSTOMER");
@@ -148,21 +151,67 @@ test.describe("Orders page — surface (no backend required)", () => {
     const sent = requestsTo(requests, "/api/orders");
     expect(sent.length).toBeGreaterThan(0);
     for (const request of sent) {
-      expect(request.target).toBe("/api/orders");
+      expect(request.target).toBe("/api/orders?page=0&size=20");
       expect(request.role).toBe("CUSTOMER");
       expect(request.userId).toBe("cust-alice");
     }
   });
 });
 
+test.describe("Orders page — one page at a time (no backend required)", () => {
+  test("the page reads the first page and loads the next one on Load more", async ({ page }) => {
+    await mockBackendRoutes(page);
+    // 25 orders: a first page of 20 and a second of 5.
+    const all = Array.from({ length: 25 }, (_, i) =>
+      order(`order-${String(i).padStart(2, "0")}`, "cust-alice")
+    );
+    await page.route(isOrderList, (route) => {
+      const url = new URL(route.request().url());
+      const number = Number(url.searchParams.get("page"));
+      const size = Number(url.searchParams.get("size"));
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: orderPage(all.slice(number * size, (number + 1) * size), {
+          page: number,
+          size,
+          total: all.length,
+        }),
+      });
+    });
+    await actAs(page, "ADMIN");
+    const requests = recordApiRequests(page);
+
+    await page.goto("/orders");
+
+    await expect(page.getByText("25 total, 20 shown")).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "order-19" })).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "order-20" })).toHaveCount(0);
+    // Only the first page is asked for (perhaps more than once, as the page settles).
+    expect(new Set(requestsTo(requests, "/api/orders").map((r) => r.target))).toEqual(
+      new Set(["/api/orders?page=0&size=20"])
+    );
+
+    await page.getByRole("button", { name: "Load more" }).click();
+
+    await expect(page.getByRole("row").filter({ hasText: "order-24" })).toBeVisible();
+    await expect(page.getByText("25 total", { exact: true })).toBeVisible();
+    // The last page says no page follows it: the button is gone.
+    await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+    expect(requestsTo(requests, "/api/orders").map((r) => r.target)).toContain(
+      "/api/orders?page=1&size=20"
+    );
+  });
+});
+
 test.describe("Orders page — the payment of an order (no backend required)", () => {
   test("an order row shows its payment status", async ({ page }) => {
     await mockBackendRoutes(page);
-    await page.route(`${BACKEND_URL}/api/orders`, (route) =>
+    await page.route(isOrderList, (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([
+        body: orderPage([
           { ...order("order-a1", "cust-alice", "REFUNDED"), status: "CANCELLED" },
           order("order-a2", "cust-alice", null),
         ]),
@@ -206,7 +255,15 @@ test.describe("Orders page — backend-dependent", () => {
     await actAs(page, "ADMIN");
     await page.goto("/orders");
     await expect(page.getByRole("heading", { name: "Orders" })).toBeVisible();
-    await expect(page.locator("td.font-mono", { hasText: "order-se" }).first()).toBeVisible();
+    // An ADMIN's list holds every order, a page at a time: load pages until the seed order shows.
+    const seed = page.locator("td.font-mono", { hasText: "order-se" }).first();
+    const loadMore = page.getByRole("button", { name: "Load more" });
+    await expect(page.getByText(/\d+ total/)).toBeVisible();
+    while (!(await seed.isVisible()) && (await loadMore.isVisible())) {
+      await loadMore.click();
+      await expect(page.getByRole("button", { name: "Loading…" })).toHaveCount(0);
+    }
+    await expect(seed).toBeVisible();
 
     await actAs(page, "CUSTOMER", "cust-alice");
     await page.goto("/orders");

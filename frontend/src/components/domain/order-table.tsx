@@ -438,7 +438,15 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
   const allowed = hasPermission("OWN_DATA_VIEW");
   const ownOnly = allowed && role !== "ADMIN";
   const customerId = ownOnly ? (userId ?? undefined) : requestedCustomerId;
-  const { data: orders = [], isLoading } = useOrders(ownOnly ? undefined : customerId, allowed);
+  const {
+    data,
+    isLoading,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+  } = useOrders(ownOnly ? undefined : customerId, allowed);
+  const orders = data?.pages.flatMap((page) => page.items) ?? [];
+  const total = data?.pages[0]?.total ?? 0;
 
   if (!allowed) {
     return <AccessRestricted message="Requires CUSTOMER or ADMIN role to view orders." />;
@@ -459,8 +467,9 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
         <div>
           <h1 className="text-2xl font-bold">Orders</h1>
           <p className="text-sm text-muted-foreground">
-            {orders.length} total{customerId ? ` for ${customerId}` : ""}
+            {total} total{customerId ? ` for ${customerId}` : ""}
             {ownOnly ? " (your own orders)" : ""}
+            {orders.length < total ? `, ${orders.length} shown` : ""}
           </p>
         </div>
         <PlaceOrderDialog key={customerId ?? "any"} initialCustomerId={customerId} />
@@ -491,6 +500,18 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
           </TableBody>
         </Table>
       </div>
+
+      {hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            variant="outline"
+            onClick={() => void fetchNextPage()}
+            disabled={isFetchingNextPage}
+          >
+            {isFetchingNextPage ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

@@ -15,7 +15,14 @@
  */
 
 import { test, expect, type Page, type Route } from "@playwright/test";
-import { actAs, answerCommands, mockBackendRoutes, BACKEND_URL } from "./helpers";
+import {
+  actAs,
+  answerCommands,
+  isOrderList,
+  mockBackendRoutes,
+  orderPage,
+  BACKEND_URL,
+} from "./helpers";
 
 const WIDGET = {
   productId: "prod-widget",
@@ -68,6 +75,15 @@ async function mockList(page: Page, path: string, rows: unknown[]): Promise<void
   await page.route(`${BACKEND_URL}${path}`, (route) =>
     route.request().method() === "GET"
       ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rows) })
+      : route.fallback()
+  );
+}
+
+/** Answers the reads of the order list with one page that holds the given orders. */
+async function mockOrderList(page: Page, rows: unknown[]): Promise<void> {
+  await page.route(isOrderList, (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ status: 200, contentType: "application/json", body: orderPage(rows) })
       : route.fallback()
   );
 }
@@ -181,7 +197,7 @@ test.describe("Orders — the commands the page sends", () => {
 
   test("Cancel sends a body with the reason, for a confirmed order too", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [order("order-a1", "CONFIRMED")]);
+    await mockOrderList(page, [order("order-a1", "CONFIRMED")]);
     const sent = await answerCommands(page, "/api/orders/*/cancel");
     await actAs(page, "CUSTOMER");
 
@@ -202,7 +218,7 @@ test.describe("Orders — the commands the page sends", () => {
 
   test("Cancel without a typed reason still sends one", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [order("order-a1", "CREATED")]);
+    await mockOrderList(page, [order("order-a1", "CREATED")]);
     const sent = await answerCommands(page, "/api/orders/*/cancel");
     await actAs(page, "CUSTOMER");
 
@@ -219,7 +235,7 @@ test.describe("Orders — the commands the page sends", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [
+    await mockOrderList(page, [
       order("order-a0", "CREATED"),
       order("order-a1", "CONFIRMED"),
     ]);
@@ -244,7 +260,7 @@ test.describe("Orders — the commands the page sends", () => {
 
   test("an id is sent as one path segment, whatever characters it holds", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [order("order a/1?x", "CONFIRMED")]);
+    await mockOrderList(page, [order("order a/1?x", "CONFIRMED")]);
     const paths: string[] = [];
     await page.route(`${BACKEND_URL}/api/orders/**`, (route) => {
       paths.push(new URL(route.request().url()).pathname);
@@ -264,7 +280,7 @@ test.describe("Orders — the commands the page sends", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [
+    await mockOrderList(page, [
       order("order-a0", "CREATED"),
       order("order-a1", "CONFIRMED"),
       order("order-a2", "SHIPPED"),
@@ -304,7 +320,7 @@ test.describe("A command's result reaches the page", () => {
     let placedAt = 0;
     let placedId = "";
     let listReads = 0;
-    await page.route(`${BACKEND_URL}/api/orders`, (route) => {
+    await page.route(isOrderList, (route) => {
       const req = route.request();
       if (req.method() === "POST") {
         placedAt = Date.now();
@@ -316,7 +332,7 @@ test.describe("A command's result reaches the page", () => {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(settled ? [order(placedId, "CONFIRMED")] : []),
+        body: orderPage(settled ? [order(placedId, "CONFIRMED")] : []),
       });
     });
     await actAs(page, "CUSTOMER");
@@ -348,7 +364,7 @@ test.describe("Orders — what each role is offered", () => {
     page,
   }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [order("order-a1", "CONFIRMED")]);
+    await mockOrderList(page, [order("order-a1", "CONFIRMED")]);
     const shipped = await answerCommands(page, "/api/orders/*/ship");
     await actAs(page, "CUSTOMER");
 
@@ -1419,7 +1435,7 @@ test.describe("A refused command is shown", () => {
 
   test("a 403 says the role may not do it, with the backend's words", async ({ page }) => {
     await mockBackendRoutes(page);
-    await mockList(page, "/api/orders", [order("order-a1", "CONFIRMED")]);
+    await mockOrderList(page, [order("order-a1", "CONFIRMED")]);
     await answerCommands(page, "/api/orders/*/cancel", (route) =>
       route.fulfill({
         status: 403,

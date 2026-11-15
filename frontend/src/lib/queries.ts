@@ -1,10 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   fetchProducts,
   fetchProduct,
   fetchInventory,
   fetchOrders,
   fetchOrder,
+  ORDER_PAGE_SIZE,
   fetchCustomers,
   fetchCustomer,
   fetchEvents,
@@ -51,11 +52,30 @@ export function useInventory(enabled = true) {
  * a CUSTOMER's own orders to that customer (who may not name another customer
  * in `customerId`). The caller passes `enabled: false` for a GUEST and no
  * request is sent.
+ *
+ * The list comes one page at a time: the first page at once, the next one on
+ * `fetchNextPage()` while the last page says `hasNext`. A read again (an event
+ * of the feed, a command of the page) reads every page loaded so far.
  */
 export function useOrders(customerId?: string, enabled = true) {
+  return useInfiniteQuery({
+    queryKey: ["orders", "pages", customerId ?? null],
+    queryFn: ({ pageParam }) => fetchOrders(customerId, pageParam, ORDER_PAGE_SIZE),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.hasNext ? last.page + 1 : undefined),
+    enabled,
+  });
+}
+
+/**
+ * The first `size` orders the caller may see, and how many there are in all:
+ * one page of `GET /api/orders`, for the dashboard. Same rule and same
+ * `enabled` flag as `useOrders`.
+ */
+export function useFirstOrders(size: number, enabled = true) {
   return useQuery({
-    queryKey: customerId ? ["orders", customerId] : ["orders"],
-    queryFn: () => fetchOrders(customerId),
+    queryKey: ["orders", "first", size],
+    queryFn: () => fetchOrders(undefined, 0, size),
     enabled,
   });
 }

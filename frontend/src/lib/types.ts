@@ -68,6 +68,19 @@ export interface OrderView {
   updatedAt: string;
 }
 
+/**
+ * One page of `GET /api/orders`: the orders on the page, in the order of their
+ * ids; the page (from 0) and its size; how many orders the list holds in all;
+ * and whether a page after this one holds more.
+ */
+export interface OrderPage {
+  items: OrderView[];
+  page: number;
+  size: number;
+  total: number;
+  hasNext: boolean;
+}
+
 export type CustomerStatus = "ACTIVE" | "FORGOTTEN";
 
 export interface CustomerView {

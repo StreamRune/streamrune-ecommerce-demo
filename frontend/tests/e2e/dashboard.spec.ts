@@ -14,6 +14,8 @@ import {
   collectConsoleErrors,
   recordApiRequests,
   requestsTo,
+  isOrderList,
+  orderPage,
   BACKEND_URL,
 } from "./helpers";
 
@@ -110,6 +112,44 @@ test.describe("Dashboard page", () => {
     expect(unexpectedErrors, `Unexpected console errors: ${unexpectedErrors.join("\n")}`).toHaveLength(0);
   });
 
+  test("the Orders card counts every order from one page of five, which the Recent Orders card lists", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    const order = (orderId: string) => ({
+      orderId,
+      customerId: "cust-alice",
+      lines: [],
+      total: { amount: 1, currency: "USD" },
+      status: "CONFIRMED",
+      paymentStatus: "CAPTURED",
+      createdAt: "2026-10-04T00:00:00Z",
+      updatedAt: "2026-10-04T00:00:00Z",
+    });
+    await page.route(isOrderList, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: orderPage(["order-a1", "order-a2", "order-a3", "order-a4", "order-a5"].map(order), {
+          size: 5,
+          total: 42,
+        }),
+      })
+    );
+    await actAs(page, "ADMIN");
+    const requests = recordApiRequests(page);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Every customer's orders")).toBeVisible();
+    await expect(page.getByRole("link", { name: /Orders/ }).filter({ hasText: "42" })).toBeVisible();
+    // The card shows the first eight characters of each id.
+    await expect(page.getByText(/^order-a\d…$/)).toHaveCount(5);
+    expect(requestsTo(requests, "/api/orders").map((r) => r.target)).toContain(
+      "/api/orders?page=0&size=5"
+    );
+  });
+
   test("a GUEST sends no order or customer request and sees what the cards require", async ({
     page,
   }) => {
@@ -135,7 +175,7 @@ test.describe("Dashboard page", () => {
     await page.goto("/");
 
     await expect(page.getByText("Your own record")).toBeVisible();
-    await expect(page.getByText("0 pending, your own")).toBeVisible();
+    await expect(page.getByText("Your own orders")).toBeVisible();
     const sent = [
       ...requestsTo(requests, "/api/orders"),
       ...requestsTo(requests, "/api/customers"),
