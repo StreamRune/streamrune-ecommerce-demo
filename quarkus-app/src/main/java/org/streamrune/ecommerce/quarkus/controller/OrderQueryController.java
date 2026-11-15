@@ -4,6 +4,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.util.List;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
@@ -36,15 +37,16 @@ public class OrderQueryController {
 
   /**
    * One page of every order for an {@code ADMIN}, narrowed to one customer by {@code customerId};
-   * of the caller's own orders for anyone else, who may not name another customer. {@code page}
-   * (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link ListPage}); a value
-   * outside them is {@code 400}, whoever asks.
+   * of the caller's own orders for anyone else, who may not name another customer. Newest first.
+   * {@code page} (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link
+   * ListPage}); every value of the two is handed over, so a parameter given twice is {@code 400}
+   * like a value outside the limits, whoever asks.
    */
   @GET
   public OrderPage listOrders(
       @QueryParam("customerId") String customerId,
-      @QueryParam("page") String page,
-      @QueryParam("size") String size) {
+      @QueryParam("page") List<String> page,
+      @QueryParam("size") List<String> size) {
     ListPage requested = ListPage.parse(page, size);
     return queries.orders(RequestCaller.of(requestContext), customerId, requested);
   }

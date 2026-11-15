@@ -1,6 +1,13 @@
 micronaut:
   application:
     name: micronaut-ecommerce
+  serde:
+    serialization:
+      # Every field of a body is written, a null and an empty list included, as Jackson writes it
+      # in the Spring and Quarkus apps: an order not yet paid has "paymentStatus": null, and an empty
+      # page of GET /api/orders has "items": []. Micronaut Serialization leaves both out by default
+      # (NON_EMPTY).
+      inclusion: always
   server:
     port: 8081
     netty:

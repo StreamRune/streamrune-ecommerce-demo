@@ -43,7 +43,7 @@ class OwnerOrAdminQueriesTest {
   private static final StreamRuneContext.RequestContext CAROL = caller("carol", "CUSTOMER");
   private static final StreamRuneContext.RequestContext OPERATOR = caller("ops-1", "ADMIN");
 
-  private static final ListPage FIRST_PAGE = ListPage.parse(null, null);
+  private static final ListPage FIRST_PAGE = ListPage.parse(List.of(), List.of());
 
   private final InMemoryProjectionRepository repository = new InMemoryProjectionRepository();
 
@@ -227,7 +227,7 @@ class OwnerOrAdminQueriesTest {
   }
 
   @Test
-  void anAdminsListComesInPagesInTheOrderOfTheIds() {
+  void anAdminsListComesInPagesThatTheRepositoryCuts() {
     OrderPage first = queries.orders(OPERATOR, null, new ListPage(0, 2));
     assertThat(first.items()).extracting(OrderView::orderId).containsExactly("o-a1", "o-a2");
     assertThat(first.page()).isZero();
@@ -251,11 +251,13 @@ class OwnerOrAdminQueriesTest {
   }
 
   @Test
-  void aCustomersPagesHoldTheirOwnOrdersAndNoOtherWhateverThePage() {
-    repository.save(ProjectionName.of("orders"), "o-a0", order("o-a0", "alice"));
+  void aCustomersPagesHoldTheirOwnOrdersNewestFirstAndNoOtherWhateverThePage() {
+    // The newest order has the highest id; o-a1 and o-a2 were placed at the same instant.
+    repository.save(
+        ProjectionName.of("orders"), "o-a9", order("o-a9", "alice", Instant.EPOCH.plusSeconds(10)));
 
     OrderPage first = queries.orders(ALICE, null, new ListPage(0, 2));
-    assertThat(first.items()).extracting(OrderView::orderId).containsExactly("o-a0", "o-a1");
+    assertThat(first.items()).extracting(OrderView::orderId).containsExactly("o-a9", "o-a1");
     assertThat(first.total()).isEqualTo(3);
     assertThat(first.hasNext()).isTrue();
 
@@ -266,7 +268,7 @@ class OwnerOrAdminQueriesTest {
     // A page of an ADMIN's filtered list: the same rows, cut the same way.
     assertThat(queries.orders(OPERATOR, "alice", new ListPage(0, 2)).items())
         .extracting(OrderView::orderId)
-        .containsExactly("o-a0", "o-a1");
+        .containsExactly("o-a9", "o-a1");
     // No page reaches another customer's rows.
     assertThat(queries.orders(BOB, null, new ListPage(0, 100)).items())
         .extracting(OrderView::orderId)
@@ -412,6 +414,10 @@ class OwnerOrAdminQueriesTest {
   }
 
   private static OrderView order(String id, String customerId) {
+    return order(id, customerId, Instant.EPOCH);
+  }
+
+  private static OrderView order(String id, String customerId, Instant placedAt) {
     return new OrderView(
         id,
         customerId,
@@ -420,8 +426,8 @@ class OwnerOrAdminQueriesTest {
         OrderStatus.CREATED,
         null,
         null,
-        Instant.EPOCH,
-        Instant.EPOCH);
+        placedAt,
+        placedAt);
   }
 
   private static final class RecordingCustomerProjection extends CustomerProjection {

@@ -1,5 +1,6 @@
 package org.streamrune.ecommerce.micronaut.controller;
 
+import io.micronaut.http.HttpRequest;
 import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.*;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
@@ -32,16 +33,18 @@ public class OrderQueryController {
 
   /**
    * One page of every order for an {@code ADMIN}, narrowed to one customer by {@code customerId};
-   * of the caller's own orders for anyone else, who may not name another customer. {@code page}
-   * (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link ListPage}); a value
-   * outside them is {@code 400}, whoever asks.
+   * of the caller's own orders for anyone else, who may not name another customer. Newest first.
+   * {@code page} (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link
+   * ListPage}); every value of the two is handed over, so a parameter given twice is {@code 400}
+   * like a value outside the limits, whoever asks.
    */
   @Get
   public OrderPage listOrders(
       @QueryValue(value = "customerId", defaultValue = "") String customerId,
-      @QueryValue(value = "page", defaultValue = "") String page,
-      @QueryValue(value = "size", defaultValue = "") String size) {
-    ListPage requested = ListPage.parse(page, size);
+      HttpRequest<?> request) {
+    ListPage requested =
+        ListPage.parse(
+            request.getParameters().getAll("page"), request.getParameters().getAll("size"));
     return queries.orders(RequestCaller.current(), customerId, requested);
   }
 }
