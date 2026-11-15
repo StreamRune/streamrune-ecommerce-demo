@@ -11,7 +11,7 @@
  * expects the seed order "order-seed-1", placed by cust-alice.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import {
   actAs,
   mockBackendRoutes,
@@ -301,13 +301,12 @@ test.describe("Orders page — the payment of an order (no backend required)", (
 });
 
 /**
- * Loads pages of the order table with "Load more" until a row whose id cell holds `idPrefix`
- * shows, and fails when the last page is loaded without it, or after 100 pages. While a page is
- * fetched the button reads "Loading…"; only a list with neither button is at its end. Each step
- * waits for the fetch it started to end: the next page's rows shown, or the button gone.
+ * Loads pages of the order table with "Load more" until `until` shows, or, without `until`, until
+ * the last page is loaded; at most 100 pages. While a page is fetched the button reads
+ * "Loading…"; only a list with neither button is at its end. Each step waits for the fetch it
+ * started to end: the next page's rows shown, or the button gone.
  */
-async function showOrder(page: Page, idPrefix: string): Promise<void> {
-  const row = page.locator("td.font-mono", { hasText: idPrefix }).first();
+async function loadOrderPages(page: Page, until?: Locator): Promise<void> {
   const loadMore = page.getByRole("button", { name: "Load more", exact: true });
   const loading = page.getByRole("button", { name: "Loading…", exact: true });
   const anyButton = page.getByRole("button", { name: /^(Load more|Loading…)$/ });
@@ -315,14 +314,21 @@ async function showOrder(page: Page, idPrefix: string): Promise<void> {
   await expect(page.getByText(/\d+ total/)).toBeVisible();
   for (let pages = 1; pages <= 100; pages++) {
     await expect(loading).toHaveCount(0);
-    if (await row.isVisible()) return;
-    if ((await anyButton.count()) === 0) break;
+    if (until && (await until.isVisible())) return;
+    if ((await anyButton.count()) === 0) return;
     const before = await rows.count();
     await loadMore.click();
     await expect
       .poll(async () => (await rows.count()) > before || (await anyButton.count()) === 0)
       .toBe(true);
   }
+  if (!until) await expect(anyButton).toHaveCount(0);
+}
+
+/** Loads pages of the order table until a row whose id cell holds `idPrefix` shows. */
+async function showOrder(page: Page, idPrefix: string): Promise<void> {
+  const row = page.locator("td.font-mono", { hasText: idPrefix }).first();
+  await loadOrderPages(page, row);
   await expect(row).toBeVisible();
 }
 
@@ -368,7 +374,8 @@ test.describe("Orders page — backend-dependent", () => {
     await page.goto("/orders");
 
     await expect(page.getByText("(your own orders)")).toBeVisible();
-    await showOrder(page, "order-none");
+    // Every page of Bob's list, which may be empty: the seed order is on none of them.
+    await loadOrderPages(page);
     await expect(page.locator("td.font-mono", { hasText: "order-se" })).toHaveCount(0);
     // Asked for by its id, the seed order is refused to Bob.
     const answer = await page.request.get(`${BACKEND_URL}/api/orders/order-seed-1`, {
