@@ -18,8 +18,8 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
  * product created a moment ago is orderable and a price change applies at once. A product nobody
  * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
- * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
- * two lines of one product are refused before the store is read.
+ * DomainException}, {@code 400}). An order id too long for its saga id, a customer id too long to
+ * index, a malformed product id and two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
@@ -37,6 +37,7 @@ public final class OrderPricing {
       String orderId, String customerId, List<RequestedLine> lines) {
     // The rules that need no read come first, so a request they refuse costs no read of the store.
     OrderCommand.PlaceOrder.requireValidOrderId(orderId);
+    OrderCommand.PlaceOrder.requireValidCustomerId(customerId);
     if (lines == null || lines.isEmpty()) {
       throw new IllegalArgumentException("lines must not be empty");
     }

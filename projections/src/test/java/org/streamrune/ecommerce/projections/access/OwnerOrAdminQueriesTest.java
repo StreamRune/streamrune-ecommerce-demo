@@ -217,6 +217,23 @@ class OwnerOrAdminQueriesTest {
   }
 
   @Test
+  void aFilterNoCustomerIdCanBeIsRefusedForEveryCallerBeforeAnyRead() {
+    for (var caller : List.of(OPERATOR, ALICE, ANONYMOUS)) {
+      assertThatThrownBy(() -> queries.orders(caller, "alice\u0000", FIRST_PAGE))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage(
+              "customerId must not contain control characters (U+0000-U+001F, U+007F,"
+                  + " U+0080-U+009F)");
+      assertThatThrownBy(() -> queries.orders(caller, "c".repeat(256), FIRST_PAGE))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("customerId must be at most 255 characters, got 256");
+    }
+    assertThat(queries.orders(OPERATOR, "c".repeat(255), FIRST_PAGE).items()).isEmpty();
+
+    assertThat(reads).containsExactly("orders.pageByCustomer(" + "c".repeat(255) + ")");
+  }
+
+  @Test
   void anOrderListWithoutAnIdentityIsRefused() {
     assertRefused(() -> queries.orders(ANONYMOUS, null, FIRST_PAGE));
     assertRefused(() -> queries.orders(ANONYMOUS, "alice", FIRST_PAGE));

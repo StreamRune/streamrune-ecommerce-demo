@@ -462,6 +462,47 @@ class OrderControllerIT extends AbstractIntegrationTest {
    * saga could never start. The {@code OrderCommand.PlaceOrder} the controller builds refuses it
    * first: 400 with the rule, without echoing the id, and nothing is written to the order's stream.
    */
+  /**
+   * The order read model indexes the customer id of every order, and an index entry holds a bounded
+   * number of bytes. A customer id longer than an id (255 characters) would be stored in {@code
+   * OrderPlaced} and then fail every save of the order's row. The {@code OrderCommand.PlaceOrder}
+   * the controller builds refuses it first: 400 with the rule, without echoing the id, and nothing
+   * is written.
+   */
+  @Test
+  void placeOrderWithACustomerIdLongerThanAnIdReturns400AndWritesNothing() {
+    String pid = "p-cust-long-" + System.nanoTime();
+    createProduct(pid);
+    String orderId = "o-cust-long-" + System.nanoTime();
+    String customerId = "c-SECRET-" + "x".repeat(3000 - 9);
+    client
+        .post()
+        .uri("/api/orders")
+        .header("X-User-Role", "ADMIN")
+        .header("X-User-Id", "test-admin")
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(
+            """
+            {"orderId": "%s", "customerId": "%s", "lines": [{"productId": "%s", "quantity": 1}]}"""
+                .formatted(orderId, customerId, pid))
+        .exchange()
+        .expectStatus()
+        .isBadRequest()
+        .expectBody(String.class)
+        .value(
+            body ->
+                assertThat(body)
+                    .contains("customerId must be at most 255 characters, got 3000")
+                    .doesNotContain("SECRET"));
+
+    assertThat(
+            eventStore.readStream(
+                StreamId.of(OrderState.TYPE, AggregateId.of(orderId)),
+                Version.initial(),
+                Integer.MAX_VALUE))
+        .isEmpty();
+  }
+
   @Test
   void placeOrderWithAnOrderIdTooLongForTheSagaIdReturns400AndWritesNothing() {
     String pid = "p-saga-long-" + System.nanoTime();

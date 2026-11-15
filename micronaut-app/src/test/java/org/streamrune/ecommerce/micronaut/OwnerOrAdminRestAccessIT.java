@@ -378,6 +378,15 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .isEqualTo("page must be given once");
     assertThat(get("/api/orders?page=99999999999", dana, CUSTOMER).body())
         .isEqualTo("page must be at most 107374181 for size 20");
+    // A customerId filter no customer id can be: 400 for an ADMIN too, with the id rule's message.
+    HttpResponse<String> nul = get("/api/orders?customerId=c%00x", OPERATOR, ADMIN);
+    assertThat(nul.statusCode()).isEqualTo(400);
+    assertThat(nul.body())
+        .isEqualTo(
+            "customerId must not contain control characters (U+0000-U+001F, U+007F,"
+                + " U+0080-U+009F)");
+    assertThat(get("/api/orders?customerId=" + "c".repeat(256), OPERATOR, ADMIN).body())
+        .isEqualTo("customerId must be at most 255 characters, got 256");
   }
 
   @Test

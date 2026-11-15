@@ -19,16 +19,16 @@ class ListPageTest {
 
   @Test
   void aRequestThatNamesNoPageGetsTheFirstPageOfTheDefaultSize() {
-    assertEquals(new ListPage(0, 20), ListPage.parse((String) null, null));
-    assertEquals(new ListPage(0, 20), ListPage.parse("", ""));
-    assertEquals(new ListPage(3, 20), ListPage.parse("3", null));
-    assertEquals(new ListPage(0, 5), ListPage.parse(null, "5"));
+    assertEquals(new ListPage(0, 20), parse(null, null));
+    assertEquals(new ListPage(0, 20), parse("", ""));
+    assertEquals(new ListPage(3, 20), parse("3", null));
+    assertEquals(new ListPage(0, 5), parse(null, "5"));
   }
 
   @Test
   void theSizeGoesFromOneToOneHundred() {
-    assertEquals(1, ListPage.parse("0", "1").size());
-    assertEquals(100, ListPage.parse("0", "100").size());
+    assertEquals(1, parse("0", "1").size());
+    assertEquals(100, parse("0", "100").size());
     assertRefused("0", "0", "size must be between 1 and 100");
     assertRefused("0", "101", "size must be between 1 and 100");
     assertRefused("0", "-1", "size must be between 1 and 100");
@@ -54,11 +54,10 @@ class ListPageTest {
   @Test
   void aPageThatEndsPastTheLargestOffsetIsRefused() {
     // The last page of size 1 is the one whose only row has the offset Integer.MAX_VALUE - 1.
-    assertEquals(
-        Integer.MAX_VALUE - 1, ListPage.parse(String.valueOf(Integer.MAX_VALUE - 1), "1").page());
+    assertEquals(Integer.MAX_VALUE - 1, parse(String.valueOf(Integer.MAX_VALUE - 1), "1").page());
     assertRefused(
         String.valueOf(Integer.MAX_VALUE), "1", "page must be at most 2147483646 for size 1");
-    assertEquals(21474835, ListPage.parse("21474835", "100").page());
+    assertEquals(21474835, parse("21474835", "100").page());
     assertRefused("21474836", "100", "page must be at most 21474835 for size 100");
   }
 
@@ -68,7 +67,7 @@ class ListPageTest {
     assertThrowsWith(() -> ListPage.parse(List.of(), List.of("5", "5")), "size must be given once");
     assertEquals(new ListPage(1, 5), ListPage.parse(List.of("1"), List.of("5")));
     assertEquals(new ListPage(0, 20), ListPage.parse(List.of(), List.of()));
-    assertEquals(new ListPage(0, 20), ListPage.parse(null, (List<String>) null));
+    assertEquals(new ListPage(0, 20), ListPage.parse(null, null));
   }
 
   @Test
@@ -89,8 +88,14 @@ class ListPageTest {
     assertFalse(OrderPage.of(new Page<>(List.of(), 3, Integer.MAX_VALUE, 1)).hasNext());
   }
 
+  /** The page a request names when it gives each parameter once at most. */
+  private static ListPage parse(String page, String size) {
+    return ListPage.parse(
+        page == null ? List.of() : List.of(page), size == null ? List.of() : List.of(size));
+  }
+
   private static void assertRefused(String page, String size, String message) {
-    assertThrowsWith(() -> ListPage.parse(page, size), message);
+    assertThrowsWith(() -> parse(page, size), message);
   }
 
   private static void assertThrowsWith(Executable parse, String message) {

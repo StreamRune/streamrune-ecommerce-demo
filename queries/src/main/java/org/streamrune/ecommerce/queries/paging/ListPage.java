@@ -60,12 +60,6 @@ public record ListPage(int page, int size) {
     return new ListPage(number("page", page, 0), number("size", size, DEFAULT_SIZE));
   }
 
-  /** {@link #parse(List, List)} for a request that gives each parameter once at most. */
-  public static ListPage parse(String page, String size) {
-    return parse(
-        page == null ? List.of() : List.of(page), size == null ? List.of() : List.of(size));
-  }
-
   private static int number(String name, List<String> values, int absent) {
     if (values == null || values.isEmpty()) {
       return absent;
