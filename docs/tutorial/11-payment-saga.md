@@ -692,15 +692,19 @@ public record OrderView(
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
-import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.Page;
+import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.FieldEquals;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
@@ -831,51 +835,65 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * The order of every list of orders: newest first, by {@code createdAt} descending, then by order
-   * id ascending for orders placed at the same instant. The repository sorts on the row's JSON, so
-   * {@code createdAt} is compared as the ISO-8601 text the row holds ({@link #NEWEST_FIRST_ROWS}).
-   * That is time order, except between two instants of the same second whose fractions print with
-   * different lengths, which it orders by their text. The in-memory read compares the same text
-   * ({@link #NEWEST_FIRST}), so both reads agree on it. The id is compared by the database in its
-   * collation and in memory by {@link String#compareTo}; the two differ only for ids that differ in
-   * letter case or punctuation, and only between orders placed at the same instant.
+   * The order of every list of orders: newest first, by {@code createdAt} descending. The
+   * repository breaks a tie by the order id, ascending, so the order is total and a page never
+   * overlaps the next on a list that does not change. It compares {@code createdAt} as the ISO-8601
+   * text the row holds, by code point: time order, except between two instants of the same second
+   * whose fractions print with different lengths.
    */
-  public static final Sort NEWEST_FIRST_ROWS =
-      new Sort(
-          List.of(
-              new Sort.Order("createdAt", SortDirection.DESC),
-              new Sort.Order("id", SortDirection.ASC)));
+  public static final Sort NEWEST_FIRST =
+      new Sort(List.of(new Sort.Order("createdAt", SortDirection.DESC)));
 
-  /** {@link #NEWEST_FIRST_ROWS} for orders in memory. */
-  public static final Comparator<OrderView> NEWEST_FIRST =
-      Comparator.comparing((OrderView order) -> order.createdAt().toString())
-          .reversed()
-          .thenComparing(OrderView::orderId);
+  /** The index that serves an {@code ADMIN}'s whole list, newest first ({@link #page}). */
+  public static final ProjectionIndex NEWEST_FIRST_INDEX =
+      ProjectionIndex.forSort(ProjectionName.of("orders"), NEWEST_FIRST);
 
-  /** One page of every order, newest first; the repository pages and sorts the table. */
+  /**
+   * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
+   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   */
+  public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
+      ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
+
+  /** The most rows {@link #listByCustomer} reads in one statement. */
+  private static final int LIST_PAGE_SIZE = 1000;
+
+  /** One page of every order, newest first; the repository sorts and pages the table. */
   public Page<OrderView> page(ListPage page) {
-    return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST_ROWS));
-  }
-
-  /** Every order of one customer. */
-  public List<OrderView> listByCustomer(String customerId) {
-    return ordersOf(customerId);
+    return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST));
   }
 
   /**
-   * One page of one customer's orders, newest first. The repository has no read by a field of the
-   * row, so this reads the whole order table, keeps the customer's rows in memory, sorts them and
-   * cuts the page out of them: only the answer is bounded, not the read. A read model with real
-   * volumes gives its repository a query by {@code customerId}.
+   * One page of one customer's orders, newest first. The repository selects the customer's rows,
+   * sorts and pages them in one statement, served by {@link #CUSTOMER_NEWEST_FIRST_INDEX}.
    */
   public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
-    return page.slice(ordersOf(customerId).stream().sorted(NEWEST_FIRST).toList());
+    return repository.findAllBy(
+        projectionName(), OrderView.class, ofCustomer(customerId), page.in(NEWEST_FIRST));
   }
 
-  private List<OrderView> ordersOf(String customerId) {
-    return repository.findAll(projectionName(), OrderView.class).stream()
-        .filter(o -> customerId.equals(o.customerId()))
-        .toList();
+  /**
+   * Every order of one customer, newest first, read through the same filtered read a thousand rows
+   * at a time.
+   */
+  public List<OrderView> listByCustomer(String customerId) {
+    List<OrderView> orders = new ArrayList<>();
+    for (int page = 0; ; page++) {
+      Page<OrderView> rows =
+          repository.findAllBy(
+              projectionName(),
+              OrderView.class,
+              ofCustomer(customerId),
+              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
+      orders.addAll(rows.content());
+      if (!rows.hasNext()) {
+        return orders;
+      }
+    }
+  }
+
+  private static FieldEquals ofCustomer(String customerId) {
+    return FieldEquals.of("customerId", customerId);
   }
 }
 ```
@@ -4130,6 +4148,7 @@ import org.springframework.context.annotation.DependsOn;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
@@ -4453,6 +4472,20 @@ public class StreamRuneConfig {
   @Bean
   public OrderProjection orderProjection(ProjectionRepository repo) {
     return new OrderProjection(repo);
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   @Bean

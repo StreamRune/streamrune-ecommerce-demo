@@ -957,6 +957,7 @@ import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
@@ -1150,6 +1151,20 @@ public class StreamRuneConfig {
   @Bean
   public OrderProjection orderProjection(ProjectionRepository repo) {
     return new OrderProjection(repo);
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   @Bean
@@ -1731,7 +1746,7 @@ Five decisions are worth a second look:
 
 - **A request is read before the caller is asked.** `@Valid @RequestBody` runs before the handler, so a request without a body, or without a field its request record requires, is a `400` for anyone, also for a caller the rule would refuse. The handler's first line then decides on a request it can read: a well-formed request from a refused caller is a `403`. Inside the command bus the order is the other one (Step 5): authorization runs before Bean Validation of the command, so the command's own constraints and the decider's business rules stay out of a refused caller's reach.
 - **A refusal is `403`, never `404`, and the refusal says nothing about existence.** For a customer the rule compares two ids and never asks the read model, so another customer's record and a record that does not exist are refused alike. For an order a caller who is not an `ADMIN` gets the same `403` for another customer's order and for an id without a row: an order without a row has no known owner. `404` is kept for the two callers who may know — the customer for their own record (a forgotten customer has no row, Chapter 7), and an `ADMIN`. A request without an identity is refused with `403` as well; the demo has no login to send a `401` to. One consequence to know: the read model follows the event store by up to the projection's polling interval (five seconds by default), so right after `POST /api/orders` the order has no row yet and its own customer is answered `403` too, until the row is there. The customer's list never refuses them: it simply does not hold the new order for that moment.
-- **A list is scoped where it is read.** A customer's `GET /api/customers` is one read by their own id, and their `GET /api/orders` is `OrderProjection.pageByCustomer` with their own id (Chapter 8), never `page`, the read of everybody's orders: the rows are chosen inside the read model's class, before the controller sees one, not picked out of everybody's in the controller. (`pageByCustomer` itself reads the whole order table and keeps that customer's rows in memory: the page bounds the answer, not the read. A read model with real volumes gives its repository a query by `customerId`.) No query parameter widens the result: `customerId` may repeat the caller's id, and naming anybody else is a `403`; `page` and `size` choose a page of the caller's own rows, and a value outside their limits is a `400` for every caller, since the controller reads the page before it asks the rule.
+- **A list is scoped where it is read.** A customer's `GET /api/customers` is one read by their own id, and their `GET /api/orders` is `OrderProjection.pageByCustomer` with their own id (Chapter 8), never `page`, the read of everybody's orders: the rows are chosen inside the read model's class, before the controller sees one, not picked out of everybody's in the controller. (`pageByCustomer` is the repository's filtered read, `findAllBy` with `FieldEquals.of("customerId", …)`: the database selects the caller's rows through the index Chapter 8 declares, and no other customer's row leaves it.) No query parameter widens the result: `customerId` may repeat the caller's id, and naming anybody else is a `403`; `page` and `size` choose a page of the caller's own rows, and a value outside their limits is a `400` for every caller, since the controller reads the page before it asks the rule.
 - **An order belongs to the customer it names, and only that customer or an `ADMIN` may place it.** `POST /api/orders` takes `customerId` from the request body, so the check ties it to the caller.
 - **What is open names nobody.** A caller without headers reaches the public catalogue (`GET /api/products`), the health and metrics answers of the apps (Chapter 15), the health answer of the notifications service (Chapter 13), and the live event feed of Chapter 15 (`GET /api/events/sse`). The feed is open to everyone, because a browser's `EventSource` cannot send the two headers. It therefore says only what a caller without an identity may know: that an event of a type happened to an aggregate of a type, and when. A frame carries no stream id, no aggregate id and no payload, so nobody reads `customer:c-carol` or `order:order-acl-1` off it, and a connection is sent the events stored while it is open, never the store's history. What an anonymous caller can make the app do is bounded too: one reader serves all the connections, and the feed takes 100 of them at once. The notifications service of Chapter 13 holds the bodies of the published integration events, which name orders; its `GET /received` answers an `ADMIN` and its open endpoint, `GET /health`, carries no body. One answer does tell a caller that an id is taken: `POST /api/orders` answers `400 Order already exists` to a customer who places an order of their own under an id in use. What `403` keeps from a refused caller is the record, the order and the events' payloads.
 
