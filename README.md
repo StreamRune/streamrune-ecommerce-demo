@@ -180,7 +180,7 @@ The inventory is the one source of a product's stock: `available` (units that ca
 | `POST` | `/api/orders/{id}/ship` | Ship order | `ADMIN` (`@RequireRole`) |
 | `POST` | `/api/orders/{id}/deliver` | Deliver order | `ADMIN` (`@RequireRole`) |
 | `GET` | `/api/orders/{id}` | Get order, with its payment status (`paymentStatus`: `PENDING`, `CAPTURED`, `REFUNDED`, `VOIDED` or `FAILED`; `null` until the payment is initiated) and, once the order is cancelled, its `reason` | `ADMIN` or the order's customer; `403` otherwise, also for an id without a row |
-| `GET` | `/api/orders` | List orders, one page at a time: `?page=` (from 0) and `?size=` (1 to 100, 20 by default) choose the page, `?customerId=` narrows the list. The answer is `{"items": [...], "page": 0, "size": 20, "total": 42, "hasNext": true}`, the orders in the order of their ids; a page past the last is empty, and a `page` or `size` outside its limits, or one that is not a whole number, is `400` for every caller | `ADMIN`: every order. Any other authenticated caller: their own orders. `403` without an identity |
+| `GET` | `/api/orders` | List orders, one page at a time: `?page=` (from 0) and `?size=` (1 to 100, 20 by default) choose the page, `?customerId=` narrows the list. The answer is `{"items": [...], "page": 0, "size": 20, "total": 42, "hasNext": true}`, the orders newest first (`createdAt` descending, then the order id); a page past the last is empty, and a `page` or `size` outside its limits, one that is not a whole number or one given twice is `400` for every caller. Offset pages: a list read while orders are placed can show an order again on the next page, and a deep page costs the database more than the first. An `ADMIN`'s whole list is paged and sorted by the database; a customer's list, and an `ADMIN`'s list for one `customerId`, is read from the whole order table and paged in memory | `ADMIN`: every order. Any other authenticated caller: their own orders. `403` without an identity |
 | `GET` | `/api/saga/fulfillments/{id}` | The fulfillment saga of an order, id `fulfillment-<orderId>`: order, customer, payment id, lines, the products reserved so far, total, fulfillment status and `cancellationReason`, the reason the saga cancels the order with when a line is refused (`null` otherwise) | `ADMIN` or the order's customer; `403` otherwise, also for an order without a row |
 | `GET` | `/api/saga/fulfillments?limit=50` | List the fulfillment sagas with the framework's saga status | `ADMIN`: every fulfillment saga. Any other authenticated caller: the sagas of their own orders. `403` without an identity |
 
@@ -308,8 +308,9 @@ It starts PostgreSQL (port 5433, an empty database) and RabbitMQ (port 5672) in 
 binary, and checks health, that the binary created the schema at startup (the framework registers
 its migration scripts as native-image resources), a command-to-read-model round trip, the replay of a
 dead-lettered `InventoryCommand$ReceiveShipment` through `POST /api/admin/dead-letters/{id}/retry`,
-a product with a 1.5 MiB description written and read back, and an order its fulfillment saga takes
-to `COMPLETED`. The replay check proves that the
+a product with a 1.5 MiB description written and read back, an order its fulfillment saga takes
+to `COMPLETED`, and the customer's order list read as one page (`GET /api/orders?page=0&size=1`,
+which the binary writes as an `OrderPage`). The replay check proves that the
 dead-letter runner's `registerCommand(InventoryCommand.class)` expanded the sealed root in the
 native image: GraalVM lists a sealed type's permitted subclasses only when the sealed type itself
 is registered for reflection, which `EcommerceNativeHints` does through

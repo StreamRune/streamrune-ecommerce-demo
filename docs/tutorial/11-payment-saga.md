@@ -696,6 +696,8 @@ import java.util.Comparator;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.Page;
+import org.streamrune.core.Sort;
+import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
 import org.streamrune.core.projection.ProjectionRepository;
@@ -828,9 +830,31 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  /** One page of every order, in the order of their ids; the database pages the table. */
+  /**
+   * The order of every list of orders: newest first, by {@code createdAt} descending, then by order
+   * id ascending for orders placed at the same instant. The repository sorts on the row's JSON, so
+   * {@code createdAt} is compared as the ISO-8601 text the row holds ({@link #NEWEST_FIRST_ROWS}).
+   * That is time order, except between two instants of the same second whose fractions print with
+   * different lengths, which it orders by their text. The in-memory read compares the same text
+   * ({@link #NEWEST_FIRST}), so both reads agree on it. The id is compared by the database in its
+   * collation and in memory by {@link String#compareTo}; the two differ only for ids that differ in
+   * letter case or punctuation, and only between orders placed at the same instant.
+   */
+  public static final Sort NEWEST_FIRST_ROWS =
+      new Sort(
+          List.of(
+              new Sort.Order("createdAt", SortDirection.DESC),
+              new Sort.Order("id", SortDirection.ASC)));
+
+  /** {@link #NEWEST_FIRST_ROWS} for orders in memory. */
+  public static final Comparator<OrderView> NEWEST_FIRST =
+      Comparator.comparing((OrderView order) -> order.createdAt().toString())
+          .reversed()
+          .thenComparing(OrderView::orderId);
+
+  /** One page of every order, newest first; the repository pages and sorts the table. */
   public Page<OrderView> page(ListPage page) {
-    return repository.findAll(projectionName(), OrderView.class, page.byId());
+    return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST_ROWS));
   }
 
   /** Every order of one customer. */
@@ -839,14 +863,13 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * One page of one customer's orders, in the order of their ids. The repository has no read by a
-   * field of the row, so this reads the order table and keeps the customer's rows in memory, which
-   * a demo's table allows; a read model with real volumes gives its repository a query by {@code
-   * customerId}. The answer holds one page however many orders the customer has.
+   * One page of one customer's orders, newest first. The repository has no read by a field of the
+   * row, so this reads the whole order table, keeps the customer's rows in memory, sorts them and
+   * cuts the page out of them: only the answer is bounded, not the read. A read model with real
+   * volumes gives its repository a query by {@code customerId}.
    */
   public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
-    return page.slice(
-        ordersOf(customerId).stream().sorted(Comparator.comparing(OrderView::orderId)).toList());
+    return page.slice(ordersOf(customerId).stream().sorted(NEWEST_FIRST).toList());
   }
 
   private List<OrderView> ordersOf(String customerId) {
