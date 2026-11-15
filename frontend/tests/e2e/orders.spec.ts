@@ -21,6 +21,7 @@ import {
   requestsTo,
   isOrderList,
   orderPage,
+  BACKEND_URL,
 } from "./helpers";
 
 function order(orderId: string, customerId: string, paymentStatus: string | null = "CAPTURED") {
@@ -235,6 +236,40 @@ test.describe("Orders page — one page at a time (no backend required)", () => 
     await expect(page.getByText("22 total, 21 shown")).toBeVisible();
     expect(errors().filter((e) => e.includes("same key"))).toHaveLength(0);
   });
+
+  test("the helper of the live specs loads page after page until a row many pages deep shows", async ({
+    page,
+  }) => {
+    await mockBackendRoutes(page);
+    // 130 orders, seven pages; every page takes a moment to answer, as a real backend does.
+    const all = Array.from({ length: 130 }, (_, i) =>
+      order(`order-${String(i).padStart(3, "0")}`, "cust-alice")
+    );
+    const asked: number[] = [];
+    await page.route(isOrderList, async (route) => {
+      const url = new URL(route.request().url());
+      const number = Number(url.searchParams.get("page"));
+      const size = Number(url.searchParams.get("size"));
+      asked.push(number);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: orderPage(all.slice(number * size, (number + 1) * size), {
+          page: number,
+          size,
+          total: all.length,
+        }),
+      });
+    });
+    await actAs(page, "ADMIN");
+
+    await page.goto("/orders");
+    await showOrder(page, "order-129");
+
+    expect(Math.max(...asked)).toBe(6);
+    await expect(page.getByText("130 total", { exact: true })).toBeVisible();
+  });
 });
 
 test.describe("Orders page — the payment of an order (no backend required)", () => {
@@ -267,21 +302,25 @@ test.describe("Orders page — the payment of an order (no backend required)", (
 
 /**
  * Loads pages of the order table with "Load more" until a row whose id cell holds `idPrefix`
- * shows, and fails when the last page is loaded without it. Each step waits for the list to
- * settle: the first page read, and after a click the next page's rows or the end of the list.
+ * shows, and fails when the last page is loaded without it, or after 100 pages. While a page is
+ * fetched the button reads "Loading…"; only a list with neither button is at its end. Each step
+ * waits for the fetch it started to end: the next page's rows shown, or the button gone.
  */
 async function showOrder(page: Page, idPrefix: string): Promise<void> {
   const row = page.locator("td.font-mono", { hasText: idPrefix }).first();
-  const loadMore = page.getByRole("button", { name: "Load more" });
+  const loadMore = page.getByRole("button", { name: "Load more", exact: true });
+  const loading = page.getByRole("button", { name: "Loading…", exact: true });
+  const anyButton = page.getByRole("button", { name: /^(Load more|Loading…)$/ });
   const rows = page.getByRole("row");
   await expect(page.getByText(/\d+ total/)).toBeVisible();
-  for (let pages = 1; pages <= 50; pages++) {
+  for (let pages = 1; pages <= 100; pages++) {
+    await expect(loading).toHaveCount(0);
     if (await row.isVisible()) return;
-    if (!(await loadMore.isVisible())) break;
+    if ((await anyButton.count()) === 0) break;
     const before = await rows.count();
     await loadMore.click();
     await expect
-      .poll(async () => (await rows.count()) > before || !(await loadMore.isVisible()))
+      .poll(async () => (await rows.count()) > before || (await anyButton.count()) === 0)
       .toBe(true);
   }
   await expect(row).toBeVisible();
@@ -329,7 +368,13 @@ test.describe("Orders page — backend-dependent", () => {
     await page.goto("/orders");
 
     await expect(page.getByText("(your own orders)")).toBeVisible();
+    await showOrder(page, "order-none");
     await expect(page.locator("td.font-mono", { hasText: "order-se" })).toHaveCount(0);
+    // Asked for by its id, the seed order is refused to Bob.
+    const answer = await page.request.get(`${BACKEND_URL}/api/orders/order-seed-1`, {
+      headers: { "X-User-Id": "cust-bob", "X-User-Role": "CUSTOMER" },
+    });
+    expect(answer.status()).toBe(403);
   });
 
   test("a GUEST sends no order request", async ({ page }) => {
