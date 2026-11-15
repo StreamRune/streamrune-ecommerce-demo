@@ -2,6 +2,7 @@ import type {
   ProductView,
   InventoryView,
   OrderView,
+  OrderPage,
   CustomerView,
   EventEntry,
   AuditEntry,
@@ -309,9 +310,24 @@ export function adjustInventory(
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
-export function fetchOrders(customerId?: string): Promise<OrderView[]> {
-  const qs = customerId ? `?customerId=${encodeURIComponent(customerId)}` : "";
-  return apiFetch(`/api/orders${qs}`);
+/** The rows of a page of the order list the Orders page asks for. */
+export const ORDER_PAGE_SIZE = 20;
+
+/**
+ * `GET /api/orders`: one page of the orders the caller may see, `page` counted
+ * from 0 and `size` from 1 to 100. The backend answers a value outside them
+ * with `400`.
+ */
+export function fetchOrders(
+  customerId?: string,
+  page = 0,
+  size = ORDER_PAGE_SIZE
+): Promise<OrderPage> {
+  const query = new URLSearchParams();
+  if (customerId) query.set("customerId", customerId);
+  query.set("page", String(page));
+  query.set("size", String(size));
+  return apiFetch(`/api/orders?${query}`);
 }
 
 export function fetchOrder(orderId: string): Promise<OrderView> {

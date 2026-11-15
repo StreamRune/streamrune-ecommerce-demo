@@ -91,6 +91,12 @@ public sealed interface OrderCommand extends Command {
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
    *
+   * <p>The customer id is at most 255 characters, the longest id a registered customer can have.
+   * The order read model indexes it (the customer's order list), and a database index entry holds a
+   * bounded number of bytes: a longer customer id would be stored in {@code OrderPlaced} and then
+   * fail every save of the order's row, which halts the order projection. Refused here, nothing is
+   * written. The message never echoes the id.
+   *
    * <p>The lines are not empty and name each product once: stock is reserved per order and product,
    * so two lines of one product would be reserved once. The message never echoes a product id.
    */
@@ -106,6 +112,7 @@ public sealed interface OrderCommand extends Command {
 
     public PlaceOrder {
       requireValidOrderId(orderId);
+      requireValidCustomerId(customerId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -133,6 +140,21 @@ public sealed interface OrderCommand extends Command {
                 + MAX_ORDER_ID_LENGTH
                 + " characters, got "
                 + orderId.length());
+      }
+    }
+
+    /**
+     * The length rule of a customer id: at most {@value IdConstraints#MAX_LENGTH} characters, the
+     * longest id a registered customer can have, so that the order read model can index it. The
+     * message never echoes the id.
+     */
+    public static void requireValidCustomerId(String customerId) {
+      if (customerId != null && customerId.length() > IdConstraints.MAX_LENGTH) {
+        throw new IllegalArgumentException(
+            "customerId must be at most "
+                + IdConstraints.MAX_LENGTH
+                + " characters, got "
+                + customerId.length());
       }
     }
   }
@@ -211,7 +233,7 @@ The two types differ in one rule. The constructor of `OrderCommand.OrderLine` ch
 
 The product id gets this check because it later becomes the id of another aggregate. In chapter 11 the payment saga reserves stock for each line, and the inventory extractor of the same chapter routes that reservation to the `inventory` aggregate whose id is the product id. The extractor builds that id with `AggregateId.of`, which refuses a control character or an id longer than 255 characters (chapter 2), so the product id is bound by the same rule. Without the check here, such an id would be refused only when the saga reserves stock. By then the saga has already captured the payment, so it would refund it and cancel the order. `IdConstraints` is the framework class that `AggregateId.of` uses for its charset rule. `OrderEvent.OrderLine` has no such rule, because it is rebuilt from the event log, and a rule there would make a stored order unreadable instead of stopping a write.
 
-`PlaceOrder` has a rule of its own, on the order id. The order stream takes any id that `AggregateId.of` accepts, up to 255 characters, but `OrderPlaced` starts the fulfillment saga of chapter 11, and that saga is identified by `"fulfillment-" + orderId`. A `SagaId` holds 255 characters at most, and the twelve-character prefix leaves 243 for the order id. The constructor of `PlaceOrder` throws an `IllegalArgumentException` for a longer order id (`MAX_ORDER_ID_LENGTH`), and the message names the rule without echoing the id. The order endpoints build the command with this constructor too, so they answer `400 Bad Request` and write nothing. Without the check, an order id of 244 to 255 characters would be placed and its saga could never start: the saga runner would quarantine `OrderPlaced` as a poison event, and the order would stay `CREATED` with no payment and no confirmation. The constructor leaves a blank order id and one with a control character to the command bus, where the order id extractor refuses both with `AggregateId.of` before anything is written (chapter 2). `SAGA_ID_PREFIX` is the prefix the saga builds and matches its ids with, so the bound and the saga cannot drift apart. The payment id `"pay-" + orderId` is eight characters shorter than the saga id, so it fits whenever the saga id does.
+`PlaceOrder` has a rule of its own, on the order id. The order stream takes any id that `AggregateId.of` accepts, up to 255 characters, but `OrderPlaced` starts the fulfillment saga of chapter 11, and that saga is identified by `"fulfillment-" + orderId`. A `SagaId` holds 255 characters at most, and the twelve-character prefix leaves 243 for the order id. The constructor of `PlaceOrder` throws an `IllegalArgumentException` for a longer order id (`MAX_ORDER_ID_LENGTH`), and the message names the rule without echoing the id. The order endpoints build the command with this constructor too, so they answer `400 Bad Request` and write nothing. Without the check, an order id of 244 to 255 characters would be placed and its saga could never start: the saga runner would quarantine `OrderPlaced` as a poison event, and the order would stay `CREATED` with no payment and no confirmation. The constructor leaves a blank order id and one with a control character to the command bus, where the order id extractor refuses both with `AggregateId.of` before anything is written (chapter 2). The customer id has a length rule too: at most 255 characters (`requireValidCustomerId`), the longest id a registered customer can have. The order read model of Step 5b indexes it for the customer's order list, and a database index entry holds a bounded number of bytes, so a longer customer id would be stored in `OrderPlaced` and then fail every save of the order's row, which halts the projection; refused here, the endpoint answers `400` and nothing is written. `SAGA_ID_PREFIX` is the prefix the saga builds and matches its ids with, so the bound and the saga cannot drift apart. The payment id `"pay-" + orderId` is eight characters shorter than the saga id, so it fits whenever the saga id does.
 
 ### OrderEvent
 
@@ -1008,8 +1030,8 @@ import org.streamrune.ecommerce.domain.product.ProductStatus;
  * Read from the event store through {@link ProductCatalog}, not from the product read model, so a
  * product created a moment ago is orderable and a price change applies at once. A product nobody
  * created ("Product not found: &lt;id&gt;"), or one that is discontinued, is refused ({@code
- * DomainException}, {@code 400}). An order id too long for its saga id, a malformed product id and
- * two lines of one product are refused before the store is read.
+ * DomainException}, {@code 400}). An order id too long for its saga id, a customer id too long to
+ * index, a malformed product id and two lines of one product are refused before the store is read.
  */
 public final class OrderPricing {
 
@@ -1027,6 +1049,7 @@ public final class OrderPricing {
       String orderId, String customerId, List<RequestedLine> lines) {
     // The rules that need no read come first, so a request they refuse costs no read of the store.
     OrderCommand.PlaceOrder.requireValidOrderId(orderId);
+    OrderCommand.PlaceOrder.requireValidCustomerId(customerId);
     if (lines == null || lines.isEmpty()) {
       throw new IllegalArgumentException("lines must not be empty");
     }
@@ -1064,7 +1087,7 @@ public OrderPricing orderPricing(EventStore eventStore) {
 }
 ```
 
-### Step 5a — Create `OrderView`
+### Step 5a — Create `OrderView` and the page of the order list
 
 Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderView.java`:
 
@@ -1088,6 +1111,135 @@ public record OrderView(
 }
 ```
 
+**The order list comes in pages.** `GET /api/orders` answers one page at a time, so its answer stays the same size however many orders the store holds. Two small types in `queries` carry the paging: `ListPage`, the page a request asks for, and `OrderPage`, the answer. The request's `page` and `size` arrive as text and `ListPage.parse` reads them, so its limits are the only ones: `page` counts from 0, `size` is 20 when the request names none and at most 100, and a value outside them, one that is not a whole number or a parameter given twice is an `IllegalArgumentException`, which the `GlobalExceptionHandler` of Chapter 1 answers with `400`. The orders come newest first (Step 5b).
+
+Create `queries/src/main/java/org/streamrune/ecommerce/queries/paging/ListPage.java`:
+
+```java
+package org.streamrune.ecommerce.queries.paging;
+
+import java.util.List;
+import java.util.regex.Pattern;
+import org.streamrune.core.PageRequest;
+import org.streamrune.core.Sort;
+
+/**
+ * Which page of a list a request asks for: {@code page}, counted from 0, and {@code size}, the
+ * number of rows on a page. A request that names neither gets the first page of {@value
+ * #DEFAULT_SIZE} rows; {@code size} goes up to {@value #MAX_SIZE}. A page past the last row is
+ * empty, not an error.
+ *
+ * <p>The three applications bind every value of the {@code page} and {@code size} query parameters
+ * of {@code GET /api/orders} as text and hand them to {@link #parse}, so the defaults, the limits
+ * and the answer to a value outside them are the same in every app. A parameter given twice, a
+ * value that is not a whole number, a negative {@code page}, a {@code size} outside 1 to {@value
+ * #MAX_SIZE} and a page that ends past the largest row offset ({@link Integer#MAX_VALUE}) are an
+ * {@link IllegalArgumentException}, which each application answers with {@code 400}. The
+ * controllers parse the page before they ask who the caller is, so a malformed request is {@code
+ * 400} whoever sends it.
+ */
+public record ListPage(int page, int size) {
+
+  /** The rows on a page when the request does not say. */
+  public static final int DEFAULT_SIZE = 20;
+
+  /** The most rows a page may hold. */
+  public static final int MAX_SIZE = 100;
+
+  private static final Pattern WHOLE_NUMBER = Pattern.compile("[+-]?\\d+");
+
+  public ListPage {
+    if (page < 0) {
+      throw new IllegalArgumentException("page must not be negative");
+    }
+    if (size < 1 || size > MAX_SIZE) {
+      throw new IllegalArgumentException("size must be between 1 and " + MAX_SIZE);
+    }
+    if (page > lastPage(size)) {
+      throw new IllegalArgumentException(
+          "page must be at most " + lastPage(size) + " for size " + size);
+    }
+  }
+
+  /** The largest page of the given size whose rows all lie within the largest row offset. */
+  private static int lastPage(int size) {
+    return Integer.MAX_VALUE / size - 1;
+  }
+
+  /**
+   * The page the two query parameters name, each given as the list of its values in the request. A
+   * parameter that is absent, or given once and empty, takes its default: page 0, {@value
+   * #DEFAULT_SIZE} rows.
+   *
+   * @throws IllegalArgumentException for a parameter given more than once, a value that is not a
+   *     whole number, or one outside the limits
+   */
+  public static ListPage parse(List<String> page, List<String> size) {
+    return new ListPage(number("page", page, 0), number("size", size, DEFAULT_SIZE));
+  }
+
+  private static int number(String name, List<String> values, int absent) {
+    if (values == null || values.isEmpty()) {
+      return absent;
+    }
+    if (values.size() > 1) {
+      throw new IllegalArgumentException(name + " must be given once");
+    }
+    String value = values.getFirst();
+    if (value == null || value.isEmpty()) {
+      return absent;
+    }
+    if (!WHOLE_NUMBER.matcher(value).matches()) {
+      throw new IllegalArgumentException(name + " must be a whole number");
+    }
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException e) {
+      // A whole number beyond an int: the range check names the limit it is past.
+      return value.startsWith("-") ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+    }
+  }
+
+  /** The framework's page request for this page, in the given order. */
+  public PageRequest in(Sort order) {
+    return PageRequest.of(page, size, order);
+  }
+}
+```
+
+`in(order)` is the framework's `PageRequest` for the page in a given order. The repository's paged reads (Step 5b) turn it into `ORDER BY … LIMIT ? OFFSET ?` and count the rows for the total in the same statement.
+
+Create `queries/src/main/java/org/streamrune/ecommerce/queries/dto/OrderPage.java`:
+
+```java
+package org.streamrune.ecommerce.queries.dto;
+
+import java.util.List;
+import org.streamrune.core.Page;
+
+/**
+ * One page of the order list, the body of {@code GET /api/orders}: the orders on the page ({@code
+ * items}, newest first), the page asked for ({@code page}, counted from 0, and {@code size}), how
+ * many orders the caller's list holds in all ({@code total}), and whether a page after this one
+ * holds more ({@code hasNext}). A client reads on with {@code page + 1} while {@code hasNext} is
+ * {@code true}.
+ */
+public record OrderPage(List<OrderView> items, int page, int size, long total, boolean hasNext) {
+
+  public OrderPage {
+    items = List.copyOf(items);
+  }
+
+  /** The body for a page the read model returned. */
+  public static OrderPage of(Page<OrderView> rows) {
+    return new OrderPage(
+        rows.content(), rows.page(), rows.size(), rows.totalElements(), rows.hasNext());
+  }
+}
+```
+
+A client reads on with `page + 1` while `hasNext` is `true`; `total` is the count the repository's page carries anyway. Offset pages are simple and have two properties to know. A list read while orders are placed can show an order again at the top of the next page, because every new order moves the later ones down by one (no order is skipped, since none is deleted). And a deep page costs more than the first: the database still walks the rows before the offset.
+
 ### Step 5b — Create `OrderProjection`
 
 Create `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProjection.java`:
@@ -1096,13 +1248,22 @@ Create `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProj
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.Page;
+import org.streamrune.core.PageRequest;
+import org.streamrune.core.Sort;
+import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.FieldEquals;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @org.streamrune.core.ProjectionConfig(
     name = "orders",
@@ -1159,17 +1320,71 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  public List<OrderView> listAll() {
-    return repository.findAll(projectionName(), OrderView.class);
+  /**
+   * The order of every list of orders: newest first, by {@code createdAt} descending. The
+   * repository breaks a tie by the order id, ascending, so the order is total and a page never
+   * overlaps the next on a list that does not change. It compares {@code createdAt} as the ISO-8601
+   * text the row holds, by code point: time order, except between two instants of the same second
+   * whose fractions print with different lengths.
+   */
+  public static final Sort NEWEST_FIRST =
+      new Sort(List.of(new Sort.Order("createdAt", SortDirection.DESC)));
+
+  /** The index that serves an {@code ADMIN}'s whole list, newest first ({@link #page}). */
+  public static final ProjectionIndex NEWEST_FIRST_INDEX =
+      ProjectionIndex.forSort(ProjectionName.of("orders"), NEWEST_FIRST);
+
+  /**
+   * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
+   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   */
+  public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
+      ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
+
+  /** The most rows {@link #listByCustomer} reads in one statement. */
+  private static final int LIST_PAGE_SIZE = 1000;
+
+  /** One page of every order, newest first; the repository sorts and pages the table. */
+  public Page<OrderView> page(ListPage page) {
+    return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST));
   }
 
+  /**
+   * One page of one customer's orders, newest first. The repository selects the customer's rows,
+   * sorts and pages them in one statement, served by {@link #CUSTOMER_NEWEST_FIRST_INDEX}.
+   */
+  public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+    return repository.findAllBy(
+        projectionName(), OrderView.class, ofCustomer(customerId), page.in(NEWEST_FIRST));
+  }
+
+  /**
+   * Every order of one customer, newest first, read through the same filtered read a thousand rows
+   * at a time.
+   */
   public List<OrderView> listByCustomer(String customerId) {
-    return repository.findAll(projectionName(), OrderView.class).stream()
-        .filter(o -> customerId.equals(o.customerId()))
-        .toList();
+    List<OrderView> orders = new ArrayList<>();
+    for (int page = 0; ; page++) {
+      Page<OrderView> rows =
+          repository.findAllBy(
+              projectionName(),
+              OrderView.class,
+              ofCustomer(customerId),
+              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
+      orders.addAll(rows.content());
+      if (!rows.hasNext()) {
+        return orders;
+      }
+    }
+  }
+
+  private static FieldEquals ofCustomer(String customerId) {
+    return FieldEquals.of("customerId", customerId);
   }
 }
 ```
+
+The reads of the list are pages, newest first: `NEWEST_FIRST` sorts by `createdAt` descending, and the repository breaks a tie by the id, so the order is total. `page` asks the repository for one page of every order (`findAll` with a `PageRequest`). `pageByCustomer` asks it for one page of one customer's orders: `findAllBy` takes a `FieldEquals`, an equality on one top-level field of the row, and selects, sorts, pages and counts in one statement, so no other customer's row leaves the database. `listByCustomer` reads a customer's every order through the same filter, a thousand at a time; the fulfillment list of Chapter 11 uses it. Both paged reads hand back the framework's `Page`, which knows its total and whether a page follows it. The repository compares a field as the text the row holds, by code point: `createdAt` is ISO-8601 text, which is time order except between two instants of the same second whose fractions print with different lengths.
 
 The order's row shows its payment too, once there is one: Chapter 11 adds the payment aggregate, and its Step 1a gives `OrderView` a payment status that this projection sets from the payment events.
 
@@ -1181,6 +1396,22 @@ public OrderProjection orderProjection(ProjectionRepository repo) {
   return new OrderProjection(repo);
 }
 ```
+
+**Declare the indexes the two reads need.** Without an index the database reads the whole `orders_view` table for every page: to find one customer's rows, to sort them, and to count them. `OrderProjection` describes the two indexes its reads use, `CUSTOMER_NEWEST_FIRST_INDEX` (`ProjectionIndex.forFilter`: the customer id, then `createdAt` descending, then the id) and `NEWEST_FIRST_INDEX` (`ProjectionIndex.forSort`: `createdAt` descending, then the id). An index is a bean of type `ProjectionIndex`: at startup, before the application answers a request, the framework declares every such bean on the application's `ProjectionRepository`, which creates the index with its table when it does not exist. An index the repository refuses, or one it cannot create, fails the start. Add the two beans to `StreamRuneConfig` (import `org.streamrune.core.projection.ProjectionIndex`):
+
+```java
+@Bean
+public ProjectionIndex customerOrdersIndex() {
+  return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+}
+
+@Bean
+public ProjectionIndex ordersIndex() {
+  return OrderProjection.NEWEST_FIRST_INDEX;
+}
+```
+
+The repository builds every index on the same expressions its reads compare, the field's text and the id in code-point order (`COLLATE "C"`). A customer's list is index-backed for the filter, the order and the count. An `ADMIN`'s whole list takes its page from the `createdAt` index but counts every order on each page, a cost that grows with the table. Every index costs a little on every save of the projection, and an index entry holds a bounded number of bytes: an indexed text must stay short, which is why `PlaceOrder` refuses a customer id longer than an id (see `OrderCommand` at the start of this chapter).
 
 And add `"orders"` to the `MultiProjectionRunner`:
 
@@ -1238,6 +1469,7 @@ import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
@@ -1420,6 +1652,20 @@ public class StreamRuneConfig {
     return new OrderProjection(repo);
   }
 
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
+  }
+
   @Bean
   public CustomerProjection customerProjection(ProjectionRepository repo) {
     return new CustomerProjection(repo);
@@ -1554,11 +1800,13 @@ Create `spring-app/src/main/java/org/streamrune/ecommerce/spring/controller/Orde
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
-import java.util.List;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.OrderProjection;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @RestController
 @RequestMapping("/api/orders")
@@ -1577,14 +1825,19 @@ public class OrderQueryController {
   }
 
   @GetMapping
-  public List<OrderView> listOrders(@RequestParam(required = false) String customerId) {
+  public OrderPage listOrders(
+      @RequestParam(required = false) String customerId,
+      @RequestParam MultiValueMap<String, String> query) {
+    ListPage requested = ListPage.parse(query.get("page"), query.get("size"));
     if (customerId != null) {
-      return orderProjection.listByCustomer(customerId);
+      return OrderPage.of(orderProjection.pageByCustomer(customerId, requested));
     }
-    return orderProjection.listAll();
+    return OrderPage.of(orderProjection.page(requested));
   }
 }
 ```
+
+The controller hands every value of `page` and `size` to `ListPage.parse`, as text: a request that names neither gets the first page of 20, and `?size=500`, `?page=two` or `?page=0&page=1` is a `400` with `ListPage`'s message, not Spring's own answer to a parameter it could not convert. The query map binds the values as the request sent them, so a repeated parameter reaches `ListPage` as two values.
 
 ### Step 6 — Verify orders and snapshots
 
@@ -1643,6 +1896,16 @@ curl -X POST http://localhost:8080/api/orders/order-2/ship
 ```
 
 The second `curl` returns `400 Bad Request` with a message like `Can only ship CONFIRMED orders, current status: CREATED`. The state machine guard fired in `decide` before any event was written.
+
+**Read the order list a page at a time.** Two orders exist now, `order-1` and `order-2` (the order of `p-nobody` was refused). The read model follows the event store by a poll of the projection, so wait a few seconds, until `GET /api/orders` holds both:
+
+```bash
+curl "http://localhost:8080/api/orders?size=1"
+curl "http://localhost:8080/api/orders?page=1&size=1"
+curl -i "http://localhost:8080/api/orders?size=500"
+```
+
+The first answer is page 0, with `order-2`, the newer, in `items`, `"total": 2` and `"hasNext": true`; the second holds `order-1` and `"hasNext": false`, the last page. Without `page` and `size` the answer is page 0 of 20 orders, both of them, newest first. The third is `400 Bad Request` with the body `size must be between 1 and 100`.
 
 A shipped order cannot be cancelled: once the saga of Chapter 11 confirms orders, ship one and cancel it, and the answer is `400 Bad Request` with the body `Cannot cancel SHIPPED orders` (`OrderDeciderTest#cancelOrder_shipped_isRefused` pins the rule).
 

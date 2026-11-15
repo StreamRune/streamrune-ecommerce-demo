@@ -32,7 +32,8 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * customers and places orders of its own, so a list read as a customer holds those rows and no
  * others; a list read as an {@code ADMIN} holds every row of the shared database, so the test
  * asserts the rows it knows to be there and, with the {@code customerId} filter, exactly one
- * customer's.
+ * customer's. The order list comes in pages: the test reads every page of an {@code ADMIN}'s list,
+ * and walks the pages of one customer's list in {@link #theOrderListComesInPagesNewestFirst}.
  */
 class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
 
@@ -200,7 +201,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     // Her order outlives the customer record, and the same rule guards it: the former owner
     // and an ADMIN read it, nobody else does.
     assertThat(get("/api/orders/" + order, alice, CUSTOMER).statusCode()).isEqualTo(200);
-    assertThat(ids(get("/api/orders", alice, CUSTOMER), "orderId")).containsExactly(order);
+    assertThat(orderIds(get("/api/orders", alice, CUSTOMER))).containsExactly(order);
     assertThat(get("/api/orders/" + order, OPERATOR, ADMIN).statusCode()).isEqualTo(200);
     assertThat(get("/api/orders/" + order, bob, CUSTOMER).statusCode()).isEqualTo(403);
     assertThat(get("/api/orders/" + order, null, ADMIN).statusCode()).isEqualTo(403);
@@ -250,37 +251,211 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get("/api/orders", null, ADMIN).statusCode()).isEqualTo(403);
     assertThat(get("/api/orders?customerId=" + alice, null, null).statusCode()).isEqualTo(403);
 
-    assertThat(ids(get("/api/orders", alice, CUSTOMER), "orderId"))
-        .containsExactlyInAnyOrder(a1, a2);
-    assertThat(ids(get("/api/orders", bob, CUSTOMER), "orderId")).containsExactly(b1);
-    assertThat(ids(get("/api/orders", alice, null), "orderId")).containsExactlyInAnyOrder(a1, a2);
-    assertThat(ids(get("/api/orders", uniqueId("carol"), CUSTOMER), "orderId")).isEmpty();
+    assertThat(orderIds(get("/api/orders", alice, CUSTOMER))).containsExactlyInAnyOrder(a1, a2);
+    assertThat(orderIds(get("/api/orders", bob, CUSTOMER))).containsExactly(b1);
+    assertThat(orderIds(get("/api/orders", alice, null))).containsExactlyInAnyOrder(a1, a2);
+    assertThat(orderIds(get("/api/orders", uniqueId("carol"), CUSTOMER))).isEmpty();
 
     // The filter: a customer may repeat their own id and may not name anybody else.
-    assertThat(ids(get("/api/orders?customerId=" + alice, alice, CUSTOMER), "orderId"))
+    assertThat(orderIds(get("/api/orders?customerId=" + alice, alice, CUSTOMER)))
         .containsExactlyInAnyOrder(a1, a2);
-    assertThat(ids(get("/api/orders?customerId=", alice, CUSTOMER), "orderId"))
+    assertThat(orderIds(get("/api/orders?customerId=", alice, CUSTOMER)))
         .containsExactlyInAnyOrder(a1, a2);
     assertThat(get("/api/orders?customerId=" + bob, alice, CUSTOMER).statusCode()).isEqualTo(403);
     assertThat(get("/api/orders?customerId=" + uniqueId("nobody"), alice, CUSTOMER).statusCode())
         .isEqualTo(403);
     // No other parameter widens the list, and neither does naming two customers.
-    assertThat(ids(get("/api/orders?limit=1000&offset=0&all=true", alice, CUSTOMER), "orderId"))
+    assertThat(orderIds(get("/api/orders?limit=1000&offset=0&all=true", alice, CUSTOMER)))
         .containsExactlyInAnyOrder(a1, a2);
     HttpResponse<String> twoFilters =
         get("/api/orders?customerId=" + alice + "&customerId=" + bob, alice, CUSTOMER);
     assertThat(twoFilters.statusCode()).isIn(200, 403);
     if (twoFilters.statusCode() == 200) {
-      assertThat(ids(twoFilters, "orderId")).containsExactlyInAnyOrder(a1, a2);
+      assertThat(orderIds(twoFilters)).containsExactlyInAnyOrder(a1, a2);
     }
 
-    assertThat(ids(get("/api/orders", OPERATOR, ADMIN), "orderId")).contains(a1, a2, b1);
-    assertThat(ids(get("/api/orders?customerId=" + alice, OPERATOR, ADMIN), "orderId"))
+    assertThat(everyOrderId(OPERATOR, ADMIN)).contains(a1, a2, b1);
+    assertThat(orderIds(get("/api/orders?customerId=" + alice, OPERATOR, ADMIN)))
         .containsExactlyInAnyOrder(a1, a2);
-    assertThat(ids(get("/api/orders?customerId=" + bob, OPERATOR, ADMIN), "orderId"))
-        .containsExactly(b1);
-    assertThat(ids(get("/api/orders?customerId=" + uniqueId("nobody"), OPERATOR, ADMIN), "orderId"))
+    assertThat(orderIds(get("/api/orders?customerId=" + bob, OPERATOR, ADMIN))).containsExactly(b1);
+    assertThat(orderIds(get("/api/orders?customerId=" + uniqueId("nobody"), OPERATOR, ADMIN)))
         .isEmpty();
+  }
+
+  // --- GET /api/orders, page by page ---
+
+  @Test
+  void theOrderListComesInPagesNewestFirst() throws Exception {
+    String dana = uniqueId("dana");
+    // Ids that do not follow the order the orders are placed in: newest first is a, c, b, an order
+    // that neither the ids nor the order of placing gives.
+    String base = uniqueId("o");
+    String b = placedOrder(dana, base + "-b");
+    String c = placedOrder(dana, base + "-c");
+    String a = placedOrder(dana, base + "-a");
+    List<String> newestFirst = List.of(a, c, b);
+
+    // No page named: page 0 of 20 orders, newest first, and no page after it.
+    JsonNode first = orderPage(get("/api/orders", dana, CUSTOMER));
+    assertThat(itemIds(first)).containsExactlyElementsOf(newestFirst);
+    assertThat(first.get("page").asInt()).isZero();
+    assertThat(first.get("size").asInt()).isEqualTo(20);
+    assertThat(first.get("total").asLong()).isEqualTo(3);
+    assertThat(first.get("hasNext").asBoolean()).isFalse();
+    // Every field of an order is written, a null one too: the order is not cancelled.
+    assertThat(first.get("items").get(0).has("reason")).isTrue();
+    assertThat(first.get("items").get(0).get("reason").isNull()).isTrue();
+
+    // One order a page, as the customer and as an ADMIN who names the customer: the same sequence.
+    for (String[] caller :
+        new String[][] {{dana, CUSTOMER, ""}, {OPERATOR, ADMIN, "customerId=" + dana + "&"}}) {
+      List<String> walked = new ArrayList<>();
+      for (int page = 0; page < 3; page++) {
+        JsonNode one =
+            orderPage(
+                get("/api/orders?" + caller[2] + "page=" + page + "&size=1", caller[0], caller[1]));
+        walked.addAll(itemIds(one));
+        assertThat(one.get("total").asLong()).isEqualTo(3);
+        assertThat(one.get("hasNext").asBoolean()).as("page %d", page).isEqualTo(page < 2);
+      }
+      assertThat(walked).as("pages read as %s", caller[0]).containsExactlyElementsOf(newestFirst);
+    }
+
+    // An explicit page and size: two orders and a page after them, then the last order.
+    JsonNode two = orderPage(get("/api/orders?page=0&size=2", dana, CUSTOMER));
+    assertThat(itemIds(two)).containsExactly(a, c);
+    assertThat(two.get("size").asInt()).isEqualTo(2);
+    assertThat(two.get("hasNext").asBoolean()).isTrue();
+    JsonNode last = orderPage(get("/api/orders?page=1&size=2", dana, CUSTOMER));
+    assertThat(itemIds(last)).containsExactly(b);
+    assertThat(last.get("page").asInt()).isEqualTo(1);
+    assertThat(last.get("hasNext").asBoolean()).isFalse();
+    // Past the last page: no orders, and no page after it.
+    JsonNode past = orderPage(get("/api/orders?page=7&size=2", dana, CUSTOMER));
+    assertThat(itemIds(past)).isEmpty();
+    assertThat(past.get("total").asLong()).isEqualTo(3);
+    assertThat(past.get("hasNext").asBoolean()).isFalse();
+
+    // An ADMIN's whole list, sorted by the database: newest first too, and no order on two pages.
+    List<String> everyone = everyOrderId(OPERATOR, ADMIN);
+    assertThat(everyone).doesNotHaveDuplicates();
+    assertThat(everyone.stream().filter(newestFirst::contains).toList())
+        .containsExactlyElementsOf(newestFirst);
+    JsonNode everyoneFirst = orderPage(get("/api/orders", OPERATOR, ADMIN));
+    long total = everyoneFirst.get("total").asLong();
+    assertThat(everyoneFirst.get("items").size()).isEqualTo((int) Math.min(total, 20));
+    assertThat(everyoneFirst.get("hasNext").asBoolean()).isEqualTo(total > 20);
+    assertThat(itemIds(everyoneFirst)).startsWith(a);
+
+    // A page or a size out of range, or given twice, is 400 whoever asks: the page is read before
+    // the caller.
+    for (String query :
+        List.of(
+            "size=0",
+            "size=101",
+            "size=ten",
+            "size=1,2",
+            "page=-1",
+            "page=one",
+            "page=99999999999",
+            "page=0&page=1",
+            "size=5&size=5")) {
+      for (String[] caller : new String[][] {{dana, CUSTOMER}, {OPERATOR, ADMIN}, {null, null}}) {
+        assertThat(get("/api/orders?" + query, caller[0], caller[1]).statusCode())
+            .as("GET /api/orders?%s as %s", query, caller[0])
+            .isEqualTo(400);
+      }
+    }
+    assertThat(get("/api/orders?size=101", dana, CUSTOMER).body())
+        .isEqualTo("size must be between 1 and 100");
+    assertThat(get("/api/orders?size=1,2", dana, CUSTOMER).body())
+        .isEqualTo("size must be a whole number");
+    assertThat(get("/api/orders?page=0&page=1", dana, CUSTOMER).body())
+        .isEqualTo("page must be given once");
+    assertThat(get("/api/orders?page=99999999999", dana, CUSTOMER).body())
+        .isEqualTo("page must be at most 107374181 for size 20");
+    // A customerId filter no customer id can be: 400 for an ADMIN too, with the id rule's message.
+    HttpResponse<String> nul = get("/api/orders?customerId=c%00x", OPERATOR, ADMIN);
+    assertThat(nul.statusCode()).isEqualTo(400);
+    assertThat(nul.body())
+        .isEqualTo(
+            "customerId must not contain control characters (U+0000-U+001F, U+007F,"
+                + " U+0080-U+009F)");
+    assertThat(get("/api/orders?customerId=" + "c".repeat(256), OPERATOR, ADMIN).body())
+        .isEqualTo("customerId must be at most 255 characters, got 256");
+  }
+
+  @Test
+  void aCustomersPagesHoldOnlyTheirOwnOrdersAmongManyOthers() throws Exception {
+    String erin = uniqueId("erin");
+    String fay = uniqueId("fay");
+    // Many orders of another customer, placed without waiting for each, around two of fay's.
+    List<String> erins = new ArrayList<>();
+    for (int i = 0; i < 25; i++) {
+      String order = uniqueId("o-erin-" + i);
+      assertThat(
+              send("POST", "/api/orders", OPERATOR, ADMIN, orderBody(order, erin, stockedProduct()))
+                  .statusCode())
+          .isBetween(200, 299);
+      erins.add(order);
+      if (i == 10) {
+        placedOrder(fay);
+      }
+    }
+    String fayLast = placedOrder(fay);
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .pollInterval(Duration.ofMillis(500))
+        .untilAsserted(
+            () ->
+                assertThat(
+                        orderPage(get("/api/orders?customerId=" + erin, OPERATOR, ADMIN))
+                            .get("total")
+                            .asLong())
+                    .isEqualTo(25));
+
+    // fay's list: her two orders, the newest first, on every page and size, and nobody else's.
+    JsonNode fays = orderPage(get("/api/orders", fay, CUSTOMER));
+    assertThat(fays.get("total").asLong()).isEqualTo(2);
+    assertThat(itemIds(fays)).hasSize(2).startsWith(fayLast).doesNotContainAnyElementsOf(erins);
+    for (JsonNode row : fays.get("items")) {
+      assertThat(row.get("customerId").asText()).isEqualTo(fay);
+    }
+    assertThat(itemIds(orderPage(get("/api/orders?page=1&size=1", fay, CUSTOMER))))
+        .hasSize(1)
+        .doesNotContainAnyElementsOf(erins);
+
+    // erin's 25 orders in pages of ten: each once, all hers, and the count is hers alone.
+    List<String> walked = new ArrayList<>();
+    for (int page = 0; page < 3; page++) {
+      JsonNode rows = orderPage(get("/api/orders?size=10&page=" + page, erin, CUSTOMER));
+      assertThat(rows.get("total").asLong()).isEqualTo(25);
+      assertThat(rows.get("hasNext").asBoolean()).isEqualTo(page < 2);
+      for (JsonNode row : rows.get("items")) {
+        assertThat(row.get("customerId").asText()).isEqualTo(erin);
+      }
+      walked.addAll(itemIds(rows));
+    }
+    assertThat(walked).doesNotHaveDuplicates().containsExactlyInAnyOrderElementsOf(erins);
+  }
+
+  @Test
+  void theIndexesOfTheOrderListAreDeclaredAtStartup() throws Exception {
+    List<String> definitions = new ArrayList<>();
+    try (var connection = dataSource.getConnection();
+        var query =
+            connection.prepareStatement(
+                "SELECT indexdef FROM pg_indexes WHERE tablename = 'orders_view'");
+        var rows = query.executeQuery()) {
+      while (rows.next()) {
+        definitions.add(rows.getString(1));
+      }
+    }
+    assertThat(definitions)
+        .anySatisfy(index -> assertThat(index).contains("'customerId'", "'createdAt'", "DESC"))
+        .anySatisfy(
+            index ->
+                assertThat(index).contains("'createdAt'", "DESC").doesNotContain("customerId"));
   }
 
   // --- POST /api/orders, /api/orders/{id}/cancel ---
@@ -310,7 +485,7 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
                 .statusCode())
         .isBetween(200, 299);
     awaitOrderStatus(byAdmin, "CONFIRMED");
-    assertThat(ids(get("/api/orders", alice, CUSTOMER), "orderId")).containsExactly(byAdmin);
+    assertThat(orderIds(get("/api/orders", alice, CUSTOMER))).containsExactly(byAdmin);
 
     // Cancelling an order that exists.
     String order = placedOrder(alice);
@@ -773,6 +948,40 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     return ids;
   }
 
+  /** The body of a {@code 200} answer of {@code GET /api/orders}: one page of the list. */
+  private static JsonNode orderPage(HttpResponse<String> response) throws Exception {
+    assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+    JsonNode page = JSON.readTree(response.body());
+    assertThat(page.isObject() && page.has("items")).as(response.body()).isTrue();
+    return page;
+  }
+
+  /** The ids of the orders on the page a {@code 200} answer of {@code GET /api/orders} holds. */
+  private static List<String> orderIds(HttpResponse<String> response) throws Exception {
+    return itemIds(orderPage(response));
+  }
+
+  /** The ids of the orders on one page of the order list. */
+  private static List<String> itemIds(JsonNode page) {
+    List<String> ids = new ArrayList<>();
+    for (JsonNode row : page.get("items")) {
+      ids.add(row.get("orderId").asText());
+    }
+    return ids;
+  }
+
+  /** The ids of the orders on every page of the order list the caller reads. */
+  private List<String> everyOrderId(String userId, String role) throws Exception {
+    List<String> ids = new ArrayList<>();
+    for (int page = 0; ; page++) {
+      JsonNode body = orderPage(get("/api/orders?size=100&page=" + page, userId, role));
+      ids.addAll(itemIds(body));
+      if (!body.get("hasNext").asBoolean()) {
+        return ids;
+      }
+    }
+  }
+
   /**
    * The four callers an ADMIN-only endpoint refuses, each with {@code 403}: no header at all, the
    * {@code ADMIN} role without an identity, a customer, and an identity without a role.
@@ -882,7 +1091,11 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
    * the order's stream, so a later command does not race it.
    */
   private String placedOrder(String customer) throws Exception {
-    String order = uniqueId("o");
+    return placedOrder(customer, uniqueId("o"));
+  }
+
+  /** {@link #placedOrder(String)} under the given order id. */
+  private String placedOrder(String customer, String order) throws Exception {
     assertThat(
             send(
                     "POST",

@@ -2,13 +2,16 @@ package org.streamrune.ecommerce.projections.access;
 
 import java.util.List;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.core.types.IdConstraints;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
@@ -25,7 +28,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       404}).
  *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
  *       rows that are their own, selected by their id before anything is returned; a request
- *       without an identity is refused.
+ *       without an identity is refused. The order list comes one page at a time ({@link ListPage}),
+ *       cut from the rows the caller may see.
  *   <li><b>A fulfillment saga:</b> whoever may read the order it fulfils. The saga of an order has
  *       the id {@code "fulfillment-" + orderId}, the id {@code OrderFulfillmentSaga} derives from
  *       {@code OrderPlaced}, so the order is known from the saga id and its owner is the customer
@@ -96,25 +100,34 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
-   * customerId} when the request names one. Any other authenticated caller gets their own orders
-   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
-   * customer.
+   * One page of the orders the caller may see. An {@code ADMIN} gets all of them, or those of
+   * {@code customerId} when the request names one. Any other authenticated caller gets their own
+   * orders and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer. The page is cut from the caller's rows, so no page and no size reaches anybody
+   * else's.
    *
    * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @param page the page the request asks for ({@link ListPage#parse})
+   * @throws IllegalArgumentException for a filter no customer id can be: longer than 255 characters
+   *     or holding a control character, before the caller is decided; the message does not echo it
    * @throws AccessRefusedException for a request without an identity, and for a caller who is not
    *     an {@code ADMIN} and asks for another customer's orders
    */
-  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
-    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+  public OrderPage orders(
+      StreamRuneContext.RequestContext caller, String customerId, ListPage page) {
     boolean filtered = customerId != null && !customerId.isEmpty();
+    if (filtered) {
+      // A filter that no customer id can be is malformed, whoever sends it.
+      IdConstraints.requireBoundedAndPrintable(customerId, "customerId");
+    }
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
     if (OwnerOrAdminAccess.isAdmin(caller)) {
-      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+      return OrderPage.of(filtered ? orders.pageByCustomer(customerId, page) : orders.page(page));
     }
     if (filtered) {
       OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
     }
-    return orders.listByCustomer(identity);
+    return OrderPage.of(orders.pageByCustomer(identity, page));
   }
 
   /**

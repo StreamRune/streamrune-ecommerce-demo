@@ -141,6 +141,32 @@ class OrderPricingTest {
   }
 
   @Test
+  void aCustomerIdLongerThanAnIdIsRefusedBeforeAnyRead() {
+    AtomicInteger reads = new AtomicInteger();
+    OrderPricing counted = new OrderPricing(counting(eventStore, reads));
+    String customerId = "c-SECRET-" + "x".repeat(256 - 9);
+
+    assertThatThrownBy(
+            () ->
+                counted.price("o-1", customerId, List.of(new OrderPricing.RequestedLine("p-1", 1))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("customerId must be at most 255 characters, got 256");
+    assertThat(reads).as("the event store is not read").hasValue(0);
+  }
+
+  @Test
+  void aCustomerIdOfTwoHundredFiftyFiveCharactersIsAccepted() {
+    createProduct("p-widget", "9.99");
+
+    assertThat(
+            pricing
+                .price(
+                    "o-1", "c".repeat(255), List.of(new OrderPricing.RequestedLine("p-widget", 1)))
+                .customerId())
+        .hasSize(255);
+  }
+
+  @Test
   void twoLinesOfOneProductAreRefused() {
     createProduct("p-widget", "9.99");
     AtomicInteger reads = new AtomicInteger();

@@ -54,6 +54,12 @@ public sealed interface OrderCommand extends Command {
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
    *
+   * <p>The customer id is at most 255 characters, the longest id a registered customer can have.
+   * The order read model indexes it (the customer's order list), and a database index entry holds a
+   * bounded number of bytes: a longer customer id would be stored in {@code OrderPlaced} and then
+   * fail every save of the order's row, which halts the order projection. Refused here, nothing is
+   * written. The message never echoes the id.
+   *
    * <p>The lines are not empty and name each product once: stock is reserved per order and product,
    * so two lines of one product would be reserved once. The message never echoes a product id.
    */
@@ -69,6 +75,7 @@ public sealed interface OrderCommand extends Command {
 
     public PlaceOrder {
       requireValidOrderId(orderId);
+      requireValidCustomerId(customerId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -96,6 +103,21 @@ public sealed interface OrderCommand extends Command {
                 + MAX_ORDER_ID_LENGTH
                 + " characters, got "
                 + orderId.length());
+      }
+    }
+
+    /**
+     * The length rule of a customer id: at most {@value IdConstraints#MAX_LENGTH} characters, the
+     * longest id a registered customer can have, so that the order read model can index it. The
+     * message never echoes the id.
+     */
+    public static void requireValidCustomerId(String customerId) {
+      if (customerId != null && customerId.length() > IdConstraints.MAX_LENGTH) {
+        throw new IllegalArgumentException(
+            "customerId must be at most "
+                + IdConstraints.MAX_LENGTH
+                + " characters, got "
+                + customerId.length());
       }
     }
   }
@@ -712,12 +734,15 @@ package org.streamrune.ecommerce.projections.access;
 
 import java.util.List;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.core.types.IdConstraints;
 import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
@@ -732,7 +757,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       404}).
  *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
  *       rows that are their own, selected by their id before anything is returned; a request
- *       without an identity is refused.
+ *       without an identity is refused. The order list comes one page at a time ({@link ListPage}),
+ *       cut from the rows the caller may see.
  * </ul>
  *
  * <p>A forgotten customer has no row: {@code CustomerProjection} deletes it. The customer and an
@@ -799,25 +825,34 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
-   * customerId} when the request names one. Any other authenticated caller gets their own orders
-   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
-   * customer.
+   * One page of the orders the caller may see. An {@code ADMIN} gets all of them, or those of
+   * {@code customerId} when the request names one. Any other authenticated caller gets their own
+   * orders and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer. The page is cut from the caller's rows, so no page and no size reaches anybody
+   * else's.
    *
    * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @param page the page the request asks for ({@link ListPage#parse})
+   * @throws IllegalArgumentException for a filter no customer id can be: longer than 255 characters
+   *     or holding a control character, before the caller is decided; the message does not echo it
    * @throws AccessRefusedException for a request without an identity, and for a caller who is not
    *     an {@code ADMIN} and asks for another customer's orders
    */
-  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
-    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+  public OrderPage orders(
+      StreamRuneContext.RequestContext caller, String customerId, ListPage page) {
     boolean filtered = customerId != null && !customerId.isEmpty();
+    if (filtered) {
+      // A filter that no customer id can be is malformed, whoever sends it.
+      IdConstraints.requireBoundedAndPrintable(customerId, "customerId");
+    }
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
     if (OwnerOrAdminAccess.isAdmin(caller)) {
-      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+      return OrderPage.of(filtered ? orders.pageByCustomer(customerId, page) : orders.page(page));
     }
     if (filtered) {
       OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
     }
-    return orders.listByCustomer(identity);
+    return OrderPage.of(orders.pageByCustomer(identity, page));
   }
 
   /**
@@ -951,6 +986,7 @@ import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
@@ -1146,6 +1182,20 @@ public class StreamRuneConfig {
     return new OrderProjection(repo);
   }
 
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
+  }
+
   @Bean
   public CustomerProjection customerProjection(ProjectionRepository repo) {
     return new CustomerProjection(repo);
@@ -1329,11 +1379,13 @@ and `OrderQueryController` from Chapter 8:
 ```java
 package org.streamrune.ecommerce.spring.controller;
 
-import java.util.List;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.*;
 import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The order read model, for an authenticated {@code ADMIN} or the customer an order names ({@link
@@ -1360,12 +1412,18 @@ public class OrderQueryController {
   }
 
   /**
-   * Every order for an {@code ADMIN}, narrowed to one customer by {@code customerId}; the caller's
-   * own orders for anyone else, who may not name another customer.
+   * One page of every order for an {@code ADMIN}, narrowed to one customer by {@code customerId};
+   * of the caller's own orders for anyone else, who may not name another customer. Newest first.
+   * {@code page} (from 0) and {@code size} (1 to 100, 20 by default) choose the page ({@link
+   * ListPage}); every value of the two is handed over, so a parameter given twice is {@code 400}
+   * like a value outside the limits, whoever asks.
    */
   @GetMapping
-  public List<OrderView> listOrders(@RequestParam(required = false) String customerId) {
-    return queries.orders(RequestCaller.current(), customerId);
+  public OrderPage listOrders(
+      @RequestParam(required = false) String customerId,
+      @RequestParam MultiValueMap<String, String> query) {
+    ListPage requested = ListPage.parse(query.get("page"), query.get("size"));
+    return queries.orders(RequestCaller.current(), customerId, requested);
   }
 }
 ```
@@ -1717,7 +1775,7 @@ Five decisions are worth a second look:
 
 - **A request is read before the caller is asked.** `@Valid @RequestBody` runs before the handler, so a request without a body, or without a field its request record requires, is a `400` for anyone, also for a caller the rule would refuse. The handler's first line then decides on a request it can read: a well-formed request from a refused caller is a `403`. Inside the command bus the order is the other one (Step 5): authorization runs before Bean Validation of the command, so the command's own constraints and the decider's business rules stay out of a refused caller's reach.
 - **A refusal is `403`, never `404`, and the refusal says nothing about existence.** For a customer the rule compares two ids and never asks the read model, so another customer's record and a record that does not exist are refused alike. For an order a caller who is not an `ADMIN` gets the same `403` for another customer's order and for an id without a row: an order without a row has no known owner. `404` is kept for the two callers who may know — the customer for their own record (a forgotten customer has no row, Chapter 7), and an `ADMIN`. A request without an identity is refused with `403` as well; the demo has no login to send a `401` to. One consequence to know: the read model follows the event store by up to the projection's polling interval (five seconds by default), so right after `POST /api/orders` the order has no row yet and its own customer is answered `403` too, until the row is there. The customer's list never refuses them: it simply does not hold the new order for that moment.
-- **A list is scoped where it is read.** A customer's `GET /api/customers` is one read by their own id, and their `GET /api/orders` is `OrderProjection.listByCustomer` with their own id (Chapter 8), never `listAll()`: the rows are chosen inside the read model's class, before the controller sees one, not picked out of everybody's in the controller. (`listByCustomer` itself reads the order table and keeps that customer's rows in memory, which a demo's table allows; a read model with real volumes gives its repository a query by `customerId`.) No query parameter widens the result: `customerId` may repeat the caller's id, and naming anybody else is a `403`.
+- **A list is scoped where it is read.** A customer's `GET /api/customers` is one read by their own id, and their `GET /api/orders` is `OrderProjection.pageByCustomer` with their own id (Chapter 8), never `page`, the read of everybody's orders: the rows are chosen inside the read model's class, before the controller sees one, not picked out of everybody's in the controller. (`pageByCustomer` is the repository's filtered read, `findAllBy` with `FieldEquals.of("customerId", …)`: the database selects the caller's rows through the index Chapter 8 declares, and no other customer's row leaves it.) No query parameter widens the result: `customerId` may repeat the caller's id, and naming anybody else is a `403`; `page` and `size` choose a page of the caller's own rows, and a value outside their limits is a `400` for every caller, since the controller reads the page before it asks the rule.
 - **An order belongs to the customer it names, and only that customer or an `ADMIN` may place it.** `POST /api/orders` takes `customerId` from the request body, so the check ties it to the caller.
 - **What is open names nobody.** A caller without headers reaches the public catalogue (`GET /api/products`), the health and metrics answers of the apps (Chapter 15), the health answer of the notifications service (Chapter 13), and the live event feed of Chapter 15 (`GET /api/events/sse`). The feed is open to everyone, because a browser's `EventSource` cannot send the two headers. It therefore says only what a caller without an identity may know: that an event of a type happened to an aggregate of a type, and when. A frame carries no stream id, no aggregate id and no payload, so nobody reads `customer:c-carol` or `order:order-acl-1` off it, and a connection is sent the events stored while it is open, never the store's history. What an anonymous caller can make the app do is bounded too: one reader serves all the connections, and the feed takes 100 of them at once. The notifications service of Chapter 13 holds the bodies of the published integration events, which name orders; its `GET /received` answers an `ADMIN` and its open endpoint, `GET /health`, carries no body. One answer does tell a caller that an id is taken: `POST /api/orders` answers `400 Order already exists` to a customer who places an order of their own under an id in use. What `403` keeps from a refused caller is the record, the order and the events' payloads.
 
@@ -1787,7 +1845,7 @@ curl -s http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-carol' -H 
 curl -i http://localhost:8080/api/orders/order-acl-1 -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
 # → 403 Forbidden
 curl -s http://localhost:8080/api/orders -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
-# → []
+# → {"items":[],"page":0,"size":20,"total":0,"hasNext":false}
 curl -i "http://localhost:8080/api/orders?customerId=c-carol" -H 'X-User-Id: c-dave' -H 'X-User-Role: CUSTOMER'
 # → 403 Forbidden
 ```
@@ -1820,7 +1878,7 @@ A refused request writes no event and leaves the key alone: the check runs befor
 
 > **Demo shortcut — protect this in production.** The rule is the one a real deployment keeps; what it is handed is not. The demo runs in the trusted-gateway mode without a gateway, so anyone who sends `X-User-Id: c-alice` is Alice, and anyone who adds `X-User-Role: ADMIN` is an operator. Behind real authentication the same classes decide on an identity the client cannot choose.
 
-> **Quarkus and Micronaut.** Both apps use the same `OwnerOrAdminAccess` and `OwnerOrAdminQueries` and answer the two tables above status for status. Each has its own small pieces: a `RequestCaller` that says where its integration keeps the request context (the request-scoped `StreamRuneRequestContextHolder` on Quarkus, the `ScopedValue` or the `StreamRuneContextHelper` thread-local on Micronaut), a mapper from `AccessRefusedException` and one from `AuthorizationException` to `403` (`AccessRefusedExceptionMapper` and `AuthorizationExceptionMapper`, `AccessRefusedExceptionHandler` and `AuthorizationExceptionHandler`), and the `OwnerOrAdminQueries` bean. Neither app uses Bean Validation on its request records, so each has a `RequestChecks` class with the same constraints written out, and a handler runs them before it asks the rule: a malformed request is a `400` in all three apps before the caller is decided. Each of the three apps has an `OwnerOrAdminRestAccessIT` that walks the tables over HTTP with their callers and asserts exactly which rows a list returns; the rule itself is unit-tested as a table in `queries` (`OwnerOrAdminAccessTest`), and the rows of the lists in `projections` (`OwnerOrAdminQueriesTest`).
+> **Quarkus and Micronaut.** Both apps use the same `OwnerOrAdminAccess` and `OwnerOrAdminQueries` and answer the two tables above status for status. Each has its own small pieces: a `RequestCaller` that says where its integration keeps the request context (the request-scoped `StreamRuneRequestContextHolder` on Quarkus, the `ScopedValue` or the `StreamRuneContextHelper` thread-local on Micronaut), a mapper from `AccessRefusedException` and one from `AuthorizationException` to `403` (`AccessRefusedExceptionMapper` and `AuthorizationExceptionMapper`, `AccessRefusedExceptionHandler` and `AuthorizationExceptionHandler`), and the `OwnerOrAdminQueries` bean. Neither app uses Bean Validation on its request records, so each has a `RequestChecks` class with the same constraints written out, and a handler runs them before it asks the rule: a malformed request is a `400` in all three apps before the caller is decided. The page of `GET /api/orders` is read the same way in all three: each hands every value of `page` and `size` to `ListPage.parse`, as text, before it asks `OwnerOrAdminQueries`, so a parameter given twice is a `400` in all three. Each of the three apps has an `OwnerOrAdminRestAccessIT` that walks the tables over HTTP with their callers and asserts exactly which rows a list returns; the rule itself is unit-tested as a table in `queries` (`OwnerOrAdminAccessTest`), and the rows of the lists in `projections` (`OwnerOrAdminQueriesTest`).
 
 ---
 

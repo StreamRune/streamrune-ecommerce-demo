@@ -415,6 +415,35 @@ saga_origin_smoke() {
   fi
   echo "  ✓ The inventory of $pid shows the reservation and the storefront shows it low in stock."
 
+  # The customer's order list is one page, an OrderPage the binary serializes by reflection. The
+  # order read model follows the saga by a poll of its projection.
+  local orders=""
+  for i in $(seq 1 20); do
+    orders=$(curl -s -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+      "$base/api/orders?page=0&size=1")
+    if printf '%s' "$orders" | grep -qF "\"orderId\":\"$oid\"" \
+        && printf '%s' "$orders" | grep -q '"page":0' \
+        && printf '%s' "$orders" | grep -q '"size":1' \
+        && printf '%s' "$orders" | grep -Eq '"total":[1-9]' \
+        && printf '%s' "$orders" | grep -q '"hasNext":'; then
+      break
+    fi
+    orders=""
+    sleep 1
+  done
+  if [ -z "$orders" ]; then
+    echo "  ✗ GET /api/orders?page=0&size=1 did not answer a page holding $oid within 20s."
+    echo "    orders: $(curl -s -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' "$base/api/orders?page=0&size=1")"
+    return 1
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-User-Role: CUSTOMER' -H 'X-User-Id: smoke-customer' \
+    "$base/api/orders?size=101")
+  if [ "$code" != "400" ]; then
+    echo "  ✗ GET /api/orders?size=101 was answered $code, not 400."
+    return 1
+  fi
+  echo "  ✓ The customer's order list is a page holding $oid; a size over 100 is refused."
+
   # The cancellation of the completed order is undone by the order cancellation process manager:
   # its stock is released and its payment refunded. In a native image the process manager's
   # commands and the events they store are records Jackson writes and reads by reflection. The

@@ -10,6 +10,7 @@ import io.micronaut.context.annotation.Factory;
 import io.micronaut.context.annotation.Requires;
 import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
+import jakarta.inject.Named;
 import jakarta.inject.Singleton;
 import jakarta.validation.Validation;
 import java.time.Duration;
@@ -26,6 +27,7 @@ import org.streamrune.core.SimpleEventTypeRegistry;
 import org.streamrune.core.StreamRuneMetrics;
 import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.saga.SagaDeadLetterStore;
 import org.streamrune.core.saga.SagaStore;
@@ -119,6 +121,23 @@ public class StreamRuneFactory {
   @Singleton
   public SseAuthorizer sseAuthorizer(OrderProjection orderProjection) {
     return new OwnerOrAdminStreamAccess(orderProjection::get)::isAuthorized;
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup by the
+   * framework's {@code ProjectionIndexDeclarer}: one customer's orders newest first, and every
+   * order newest first (see {@link OrderProjection}).
+   */
+  @Singleton
+  @Named("customerOrdersIndex")
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Singleton
+  @Named("ordersIndex")
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   /**

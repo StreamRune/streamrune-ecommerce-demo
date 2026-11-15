@@ -426,6 +426,16 @@ function OrderRow({ order }: { order: OrderView }) {
 
 // ─── Main Table ───────────────────────────────────────────────────────────────
 
+/** The orders in the order given, each id once: its first occurrence stays. */
+function uniqueById(orders: OrderView[]): OrderView[] {
+  const seen = new Set<string>();
+  return orders.filter((order) => {
+    if (seen.has(order.orderId)) return false;
+    seen.add(order.orderId);
+    return true;
+  });
+}
+
 interface OrderTableProps {
   customerId?: string;
 }
@@ -438,7 +448,17 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
   const allowed = hasPermission("OWN_DATA_VIEW");
   const ownOnly = allowed && role !== "ADMIN";
   const customerId = ownOnly ? (userId ?? undefined) : requestedCustomerId;
-  const { data: orders = [], isLoading } = useOrders(ownOnly ? undefined : customerId, allowed);
+  const {
+    data,
+    isLoading,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+  } = useOrders(ownOnly ? undefined : customerId, allowed);
+  // Offset pages: an order placed while the list is read shifts the later pages by one, so the
+  // next page can start with an order the last one ended with. Each order is shown once.
+  const orders = uniqueById(data?.pages.flatMap((page) => page.items) ?? []);
+  const total = data?.pages[data.pages.length - 1]?.total ?? 0;
 
   if (!allowed) {
     return <AccessRestricted message="Requires CUSTOMER or ADMIN role to view orders." />;
@@ -459,8 +479,9 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
         <div>
           <h1 className="text-2xl font-bold">Orders</h1>
           <p className="text-sm text-muted-foreground">
-            {orders.length} total{customerId ? ` for ${customerId}` : ""}
+            {total} total{customerId ? ` for ${customerId}` : ""}
             {ownOnly ? " (your own orders)" : ""}
+            {orders.length < total ? `, ${orders.length} shown` : ""}
           </p>
         </div>
         <PlaceOrderDialog key={customerId ?? "any"} initialCustomerId={customerId} />
@@ -491,6 +512,18 @@ export function OrderTable({ customerId: requestedCustomerId }: OrderTableProps)
           </TableBody>
         </Table>
       </div>
+
+      {hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            variant="outline"
+            onClick={() => void fetchNextPage()}
+            disabled={isFetchingNextPage}
+          >
+            {isFetchingNextPage ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

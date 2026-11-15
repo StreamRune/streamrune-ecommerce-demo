@@ -18,7 +18,8 @@ import {
   mockBackendRoutes,
   recordApiRequests,
   requestsTo,
-  BACKEND_URL,
+  isOrderList,
+  orderPage,
 } from "./helpers";
 
 function order(orderId: string, customerId: string) {
@@ -59,21 +60,21 @@ test.describe("Role switch inside a session — surface (no backend required)", 
     await mockBackendRoutes(page);
     // The backend's answer by caller: an ADMIN gets every order, cust-alice her own, and a
     // request without an identity is refused.
-    await page.route(`${BACKEND_URL}/api/orders`, (route) => {
+    await page.route(isOrderList, (route) => {
       const headers = route.request().headers();
       const userId = headers["x-user-id"];
       if (userId === "admin-1" && headers["x-user-role"] === "ADMIN") {
         return route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([order("order-a1", "cust-alice"), order("order-b1", "cust-bob")]),
+          body: orderPage([order("order-a1", "cust-alice"), order("order-b1", "cust-bob")]),
         });
       }
       if (userId === "cust-alice") {
         return route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([order("order-a1", "cust-alice")]),
+          body: orderPage([order("order-a1", "cust-alice")]),
         });
       }
       return route.fulfill({
@@ -100,7 +101,7 @@ test.describe("Role switch inside a session — surface (no backend required)", 
     expect(asCustomer.length).toBeGreaterThan(0);
     for (const request of asCustomer) {
       expect(request.userId).toBe("cust-alice");
-      expect(request.target).toBe("/api/orders");
+      expect(request.target).toBe("/api/orders?page=0&size=20");
     }
 
     // CUSTOMER → GUEST: no identity, no rows, and no order request at all.

@@ -122,4 +122,25 @@ class PlaceOrderTest {
     assertEquals("lines must name each product once", e.getMessage());
     assertFalse(e.getMessage().contains("SECRET"));
   }
+
+  @Test
+  void aCustomerIdAtTheLengthOfAnIdIsAccepted() {
+    String customerId = "c".repeat(255);
+
+    assertEquals(customerId, new OrderCommand.PlaceOrder("o-1", customerId, LINES).customerId());
+  }
+
+  @Test
+  void aCustomerIdLongerThanAnIdIsRefused_withoutEchoingIt() {
+    // The order read model indexes the customer id; a longer one would halt the order projection.
+    String customerId = "SECRET" + "x".repeat(256 - 6);
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new OrderCommand.PlaceOrder("o-1", customerId, LINES));
+
+    assertEquals("customerId must be at most 255 characters, got 256", e.getMessage());
+    assertFalse(e.getMessage().contains("SECRET"));
+  }
 }

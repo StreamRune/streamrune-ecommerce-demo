@@ -692,15 +692,24 @@ public record OrderView(
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
+import org.streamrune.core.Page;
+import org.streamrune.core.PageRequest;
+import org.streamrune.core.Sort;
+import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.FieldEquals;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.domain.order.*;
 import org.streamrune.ecommerce.domain.payment.PaymentEvent;
 import org.streamrune.ecommerce.domain.payment.PaymentStatus;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 @org.streamrune.core.ProjectionConfig(
     name = "orders",
@@ -825,14 +834,66 @@ public class OrderProjection extends BaseProjection {
     return findById(orderId, OrderView.class).orElse(null);
   }
 
-  public List<OrderView> listAll() {
-    return repository.findAll(projectionName(), OrderView.class);
+  /**
+   * The order of every list of orders: newest first, by {@code createdAt} descending. The
+   * repository breaks a tie by the order id, ascending, so the order is total and a page never
+   * overlaps the next on a list that does not change. It compares {@code createdAt} as the ISO-8601
+   * text the row holds, by code point: time order, except between two instants of the same second
+   * whose fractions print with different lengths.
+   */
+  public static final Sort NEWEST_FIRST =
+      new Sort(List.of(new Sort.Order("createdAt", SortDirection.DESC)));
+
+  /** The index that serves an {@code ADMIN}'s whole list, newest first ({@link #page}). */
+  public static final ProjectionIndex NEWEST_FIRST_INDEX =
+      ProjectionIndex.forSort(ProjectionName.of("orders"), NEWEST_FIRST);
+
+  /**
+   * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
+   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   */
+  public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
+      ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
+
+  /** The most rows {@link #listByCustomer} reads in one statement. */
+  private static final int LIST_PAGE_SIZE = 1000;
+
+  /** One page of every order, newest first; the repository sorts and pages the table. */
+  public Page<OrderView> page(ListPage page) {
+    return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST));
   }
 
+  /**
+   * One page of one customer's orders, newest first. The repository selects the customer's rows,
+   * sorts and pages them in one statement, served by {@link #CUSTOMER_NEWEST_FIRST_INDEX}.
+   */
+  public Page<OrderView> pageByCustomer(String customerId, ListPage page) {
+    return repository.findAllBy(
+        projectionName(), OrderView.class, ofCustomer(customerId), page.in(NEWEST_FIRST));
+  }
+
+  /**
+   * Every order of one customer, newest first, read through the same filtered read a thousand rows
+   * at a time.
+   */
   public List<OrderView> listByCustomer(String customerId) {
-    return repository.findAll(projectionName(), OrderView.class).stream()
-        .filter(o -> customerId.equals(o.customerId()))
-        .toList();
+    List<OrderView> orders = new ArrayList<>();
+    for (int page = 0; ; page++) {
+      Page<OrderView> rows =
+          repository.findAllBy(
+              projectionName(),
+              OrderView.class,
+              ofCustomer(customerId),
+              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
+      orders.addAll(rows.content());
+      if (!rows.hasNext()) {
+        return orders;
+      }
+    }
+  }
+
+  private static FieldEquals ofCustomer(String customerId) {
+    return FieldEquals.of("customerId", customerId);
   }
 }
 ```
@@ -4087,6 +4148,7 @@ import org.springframework.context.annotation.DependsOn;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
@@ -4410,6 +4472,20 @@ public class StreamRuneConfig {
   @Bean
   public OrderProjection orderProjection(ProjectionRepository repo) {
     return new OrderProjection(repo);
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   @Bean
@@ -4931,13 +5007,16 @@ package org.streamrune.ecommerce.projections.access;
 
 import java.util.List;
 import org.streamrune.core.StreamRuneContext;
+import org.streamrune.core.types.IdConstraints;
 import org.streamrune.ecommerce.domain.order.OrderCommand;
 import org.streamrune.ecommerce.projections.CustomerProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.queries.access.AccessRefusedException;
 import org.streamrune.ecommerce.queries.access.OwnerOrAdminAccess;
 import org.streamrune.ecommerce.queries.dto.CustomerView;
+import org.streamrune.ecommerce.queries.dto.OrderPage;
 import org.streamrune.ecommerce.queries.dto.OrderView;
+import org.streamrune.ecommerce.queries.paging.ListPage;
 
 /**
  * The customer and order read models as one caller may see them: {@link OwnerOrAdminAccess} applied
@@ -4954,7 +5033,8 @@ import org.streamrune.ecommerce.queries.dto.OrderView;
  *       404}).
  *   <li><b>A list:</b> an {@code ADMIN} gets every row; any other authenticated caller gets the
  *       rows that are their own, selected by their id before anything is returned; a request
- *       without an identity is refused.
+ *       without an identity is refused. The order list comes one page at a time ({@link ListPage}),
+ *       cut from the rows the caller may see.
  *   <li><b>A fulfillment saga:</b> whoever may read the order it fulfils. The saga of an order has
  *       the id {@code "fulfillment-" + orderId}, the id {@code OrderFulfillmentSaga} derives from
  *       {@code OrderPlaced}, so the order is known from the saga id and its owner is the customer
@@ -5025,25 +5105,34 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * The orders the caller may see. An {@code ADMIN} gets all of them, or those of {@code
-   * customerId} when the request names one. Any other authenticated caller gets their own orders
-   * and nothing else: the filter can repeat the caller's own id, and it cannot name another
-   * customer.
+   * One page of the orders the caller may see. An {@code ADMIN} gets all of them, or those of
+   * {@code customerId} when the request names one. Any other authenticated caller gets their own
+   * orders and nothing else: the filter can repeat the caller's own id, and it cannot name another
+   * customer. The page is cut from the caller's rows, so no page and no size reaches anybody
+   * else's.
    *
    * @param customerId the {@code customerId} filter of the request; {@code null} or empty for none
+   * @param page the page the request asks for ({@link ListPage#parse})
+   * @throws IllegalArgumentException for a filter no customer id can be: longer than 255 characters
+   *     or holding a control character, before the caller is decided; the message does not echo it
    * @throws AccessRefusedException for a request without an identity, and for a caller who is not
    *     an {@code ADMIN} and asks for another customer's orders
    */
-  public List<OrderView> orders(StreamRuneContext.RequestContext caller, String customerId) {
-    String identity = OwnerOrAdminAccess.requireIdentity(caller);
+  public OrderPage orders(
+      StreamRuneContext.RequestContext caller, String customerId, ListPage page) {
     boolean filtered = customerId != null && !customerId.isEmpty();
+    if (filtered) {
+      // A filter that no customer id can be is malformed, whoever sends it.
+      IdConstraints.requireBoundedAndPrintable(customerId, "customerId");
+    }
+    String identity = OwnerOrAdminAccess.requireIdentity(caller);
     if (OwnerOrAdminAccess.isAdmin(caller)) {
-      return filtered ? orders.listByCustomer(customerId) : orders.listAll();
+      return OrderPage.of(filtered ? orders.pageByCustomer(customerId, page) : orders.page(page));
     }
     if (filtered) {
       OwnerOrAdminAccess.requireCustomerAccess(caller, customerId);
     }
-    return orders.listByCustomer(identity);
+    return OrderPage.of(orders.pageByCustomer(identity, page));
   }
 
   /**

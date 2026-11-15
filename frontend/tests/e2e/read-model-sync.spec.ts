@@ -9,7 +9,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
-import { actAs, mockBackendRoutes, BACKEND_URL } from "./helpers";
+import { actAs, mockBackendRoutes, isOrderList, orderPage, BACKEND_URL } from "./helpers";
 
 function frame(offset: number, eventType: string, aggregateType = "order"): string {
   const data = JSON.stringify({
@@ -119,12 +119,12 @@ test.describe("Reads of a list after feed frames", () => {
     await actAs(page, "ADMIN");
     // The order's row reaches the read model ten seconds after its frame.
     let frameSentAt = Number.POSITIVE_INFINITY;
-    await page.route(`${BACKEND_URL}/api/orders`, (route) => {
+    await page.route(isOrderList, (route) => {
       const rowIsThere = Date.now() - frameSentAt >= 10_000;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(rowIsThere ? [ORDER] : []),
+        body: orderPage(rowIsThere ? [ORDER] : []),
       });
     });
     let connections = 0;

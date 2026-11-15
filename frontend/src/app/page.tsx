@@ -4,7 +4,7 @@ import { Package, ShoppingCart, Users, Zap } from "lucide-react";
 import { StatCard } from "@/components/domain/stat-card";
 import { EventFeed } from "@/components/domain/event-feed";
 import { useProducts } from "@/lib/queries";
-import { useOrders } from "@/lib/queries";
+import { useFirstOrders } from "@/lib/queries";
 import { useCustomers } from "@/lib/queries";
 import { useSSE } from "@/providers/sse-provider";
 import { useRole } from "@/providers/role-provider";
@@ -48,13 +48,14 @@ export default function DashboardPage() {
   const allowed = hasPermission("OWN_DATA_VIEW");
   const ownOnly = allowed && role !== "ADMIN";
   const { data: products = [] } = useProducts();
-  const { data: allowedOrders = [] } = useOrders(undefined, allowed);
+  // One page of five orders, the newest: the rows of the Recent Orders card, and the total for the
+  // Orders card.
+  const { data: firstOrders } = useFirstOrders(5, allowed);
   const { data: allowedCustomers = [] } = useCustomers(allowed);
-  const orders = allowed ? allowedOrders : [];
+  const recentOrders = allowed ? (firstOrders?.items ?? []) : [];
+  const orderCount = allowed ? (firstOrders?.total ?? 0) : 0;
   const customers = allowed ? allowedCustomers : [];
   const { recentEvents } = useSSE();
-
-  const recentOrders = orders.slice(0, 5);
 
   return (
     <div className="space-y-6">
@@ -74,11 +75,9 @@ export default function DashboardPage() {
         />
         <StatCard
           title="Orders"
-          value={allowed ? orders.length : "—"}
+          value={allowed ? orderCount : "—"}
           subtitle={
-            allowed
-              ? `${orders.filter((o) => o.status === "CREATED").length} pending${ownOnly ? ", your own" : ""}`
-              : REQUIRES_IDENTITY
+            allowed ? (ownOnly ? "Your own orders" : "Every customer's orders") : REQUIRES_IDENTITY
           }
           icon={ShoppingCart}
           href="/orders"

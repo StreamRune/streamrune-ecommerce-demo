@@ -56,6 +56,12 @@ public sealed interface OrderCommand extends Command {
    * the length rule. The payment id {@code "pay-" + orderId} is shorter by eight characters than
    * the saga id and fits whenever that does.
    *
+   * <p>The customer id is at most 255 characters, the longest id a registered customer can have.
+   * The order read model indexes it (the customer's order list), and a database index entry holds a
+   * bounded number of bytes: a longer customer id would be stored in {@code OrderPlaced} and then
+   * fail every save of the order's row, which halts the order projection. Refused here, nothing is
+   * written. The message never echoes the id.
+   *
    * <p>The lines are not empty and name each product once: stock is reserved per order and product,
    * so two lines of one product would be reserved once. The message never echoes a product id.
    */
@@ -71,6 +77,7 @@ public sealed interface OrderCommand extends Command {
 
     public PlaceOrder {
       requireValidOrderId(orderId);
+      requireValidCustomerId(customerId);
       if (lines == null || lines.isEmpty()) {
         throw new IllegalArgumentException("lines must not be empty");
       }
@@ -98,6 +105,21 @@ public sealed interface OrderCommand extends Command {
                 + MAX_ORDER_ID_LENGTH
                 + " characters, got "
                 + orderId.length());
+      }
+    }
+
+    /**
+     * The length rule of a customer id: at most {@value IdConstraints#MAX_LENGTH} characters, the
+     * longest id a registered customer can have, so that the order read model can index it. The
+     * message never echoes the id.
+     */
+    public static void requireValidCustomerId(String customerId) {
+      if (customerId != null && customerId.length() > IdConstraints.MAX_LENGTH) {
+        throw new IllegalArgumentException(
+            "customerId must be at most "
+                + IdConstraints.MAX_LENGTH
+                + " characters, got "
+                + customerId.length());
       }
     }
   }
@@ -283,6 +305,7 @@ import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
@@ -482,6 +505,20 @@ public class StreamRuneConfig {
   @Bean
   public OrderProjection orderProjection(ProjectionRepository repo) {
     return new OrderProjection(repo);
+  }
+
+  /**
+   * The indexes of the order list, declared on the projection repository at startup: one customer's
+   * orders newest first, and every order newest first (see {@link OrderProjection}).
+   */
+  @Bean
+  public ProjectionIndex customerOrdersIndex() {
+    return OrderProjection.CUSTOMER_NEWEST_FIRST_INDEX;
+  }
+
+  @Bean
+  public ProjectionIndex ordersIndex() {
+    return OrderProjection.NEWEST_FIRST_INDEX;
   }
 
   @Bean
