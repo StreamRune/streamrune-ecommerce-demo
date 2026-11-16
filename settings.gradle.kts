@@ -14,7 +14,7 @@ if (frameworkDir.isDirectory) {
             substitute(module("org.streamrune:streamrune-test")).using(project(":streamrune-test"))
             substitute(module("org.streamrune:streamrune-crypto-api")).using(project(":streamrune-crypto:streamrune-crypto-api"))
             substitute(module("org.streamrune:streamrune-postgres-crypto")).using(project(":streamrune-crypto:streamrune-postgres-crypto"))
-            substitute(module("org.streamrune:streamrune-postgres")).using(project(":streamrune-eventstore:streamrune-postgres"))
+            substitute(module("org.streamrune:streamrune-postgres")).using(project(":streamrune-postgres"))
             substitute(module("org.streamrune:streamrune-spring")).using(project(":streamrune-integration:streamrune-spring"))
             substitute(module("org.streamrune:streamrune-quarkus")).using(project(":streamrune-integration:streamrune-quarkus"))
             substitute(module("org.streamrune:streamrune-micronaut")).using(project(":streamrune-integration:streamrune-micronaut"))
