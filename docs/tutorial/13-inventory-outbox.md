@@ -221,7 +221,7 @@ public MultiProjectionRunner projectionRunner(
 }
 ```
 
-All four projections are now wired. The runner assigns each its own virtual thread and its own offset namespace.
+All four projections are now wired. The runner assigns each its own virtual thread and its own checkpoint row in the read-model store's `readmodel_checkpoint`.
 
 `InventoryProjection` is a **counter** (`v.reserved() + e.quantity()`). That is exactly why it must be `TRANSACTIONAL_LOCAL`: under at-least-once a crash between the write and the checkpoint would reserve the stock twice.
 
