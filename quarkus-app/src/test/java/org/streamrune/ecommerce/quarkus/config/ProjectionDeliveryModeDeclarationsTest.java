@@ -14,9 +14,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.streamrune.core.ProjectionConfig;
 import org.streamrune.core.projection.AtomicBatchProcessor;
+import org.streamrune.core.projection.CheckpointTarget;
 import org.streamrune.core.projection.Projection;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.projections.AuditProjection;
@@ -25,14 +28,16 @@ import org.streamrune.quarkus.StreamRuneQuarkusProperties;
 import org.streamrune.runtime.MultiProjectionRunner;
 import org.streamrune.test.InMemoryCryptoEngine;
 import org.streamrune.test.InMemoryEventStore;
+import org.streamrune.test.InMemoryOffsetStore;
 import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
  * The delivery modes the Quarkus app's discovered projections declare, read from the classes
  * exactly as the framework's discovery reads them, and the startup check applied to the demo's own
- * classes over a repository that is not the processor: once through the runner builder, and once
- * through the framework's discovery entry point (annotation read, processor resolution, startup
- * check), with the CDI collections stood in by plain lists.
+ * classes over a repository that belongs to no read-model store: once through the runner builder,
+ * and once through the framework's discovery entry point (annotation read, routing to a read-model
+ * store or the subscription checkpoint, startup check), with the CDI collections stood in by plain
+ * lists and the default read-model store by an in-memory one.
  */
 class ProjectionDeliveryModeDeclarationsTest {
 
@@ -55,6 +60,23 @@ class ProjectionDeliveryModeDeclarationsTest {
   }
 
   /**
+   * The read-model store discovery routes the four to: an in-memory repository that is also its own
+   * checkpoints and its own processor, as the PostgreSQL store's JdbcProjectionRepository and
+   * readmodel_checkpoint are. Named {@code postgres}, as the default store is.
+   */
+  private static ReadModelStore store(InMemoryProjectionRepository repository) {
+    return ReadModelStore.of("postgres", repository, repository, repository);
+  }
+
+  /** The subscription checkpoint discovery routes an unrouted at-least-once projection to. */
+  private static CheckpointTarget subscriptionCheckpoint() {
+    return new CheckpointTarget(
+        "subscription_checkpoint",
+        new InMemoryOffsetStore(),
+        AtomicBatchProcessor.nonAtomicAtLeastOnce());
+  }
+
+  /**
    * The mode the demo declares, applied to the demo's own class over the WRONG repository: refused.
    */
   @Test
@@ -69,9 +91,12 @@ class ProjectionDeliveryModeDeclarationsTest {
                         new InMemoryEventStore(
                             new StreamRuneProducer().eventTypeRegistry(),
                             new InMemoryCryptoEngine()))
-                    .offsetStore(processor)
-                    .atomicProcessor(processor)
-                    .register(ProjectionName.of("orders"), orders, declared(orders.getClass()))
+                    .register(
+                        ProjectionName.of("orders"),
+                        orders,
+                        ProjectionErrorStrategy.HALT,
+                        declared(orders.getClass()),
+                        store(processor).checkpointTarget())
                     .build())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'orders' declares TRANSACTIONAL_LOCAL and writes to")
@@ -80,15 +105,16 @@ class ProjectionDeliveryModeDeclarationsTest {
   }
 
   @Test
-  void discovery_buildsTheDemoShape_overOneProcessor() {
+  void discovery_buildsTheDemoShape_overOneReadModelStore() {
     var processor = new InMemoryProjectionRepository();
     assertThat(discover(processor, demoProjections(processor, processor, "none"))).isNotNull();
   }
 
   /**
-   * Each of the four, built over a repository that is not the processor, is refused at discovery
-   * and named with both identities. An AT_LEAST_ONCE_IDEMPOTENT declaration would be accepted over
-   * any repository, so this fails if one of the four declarations is flipped.
+   * Each of the four, built over a repository that belongs to no read-model store, is refused at
+   * discovery: routing cannot give it a transaction with its checkpoint. An
+   * AT_LEAST_ONCE_IDEMPOTENT declaration would be routed to the subscription checkpoint instead, so
+   * this fails if one of the four declarations is flipped.
    */
   @ParameterizedTest
   @ValueSource(strings = {"products", "orders", "customers", "inventory"})
@@ -96,10 +122,12 @@ class ProjectionDeliveryModeDeclarationsTest {
     var processor = new InMemoryProjectionRepository();
     var other = new InMemoryProjectionRepository();
     assertThatThrownBy(() -> discover(processor, demoProjections(processor, other, name)))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("'" + name + "' declares TRANSACTIONAL_LOCAL and writes to")
-        .hasMessageContaining(String.valueOf(other.writeTargetIdentity()))
-        .hasMessageContaining(String.valueOf(processor.writeTargetIdentity()));
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining(
+            "'"
+                + name
+                + "' (TRANSACTIONAL_LOCAL): its writeTarget() belongs to no read-model store")
+        .hasMessageContaining("'postgres'");
   }
 
   /**
@@ -120,8 +148,8 @@ class ProjectionDeliveryModeDeclarationsTest {
   }
 
   /**
-   * The framework's CONTINUOUS discovery, with the processor as the single AtomicBatchProcessor
-   * bean.
+   * The framework's CONTINUOUS discovery, with {@code processor}'s store as the single read-model
+   * store bean.
    */
   private static MultiProjectionRunner discover(
       InMemoryProjectionRepository processor, List<Projection> projections) {
@@ -130,9 +158,9 @@ class ProjectionDeliveryModeDeclarationsTest {
             instance(projections),
             new InMemoryEventStore(
                 new StreamRuneProducer().eventTypeRegistry(), new InMemoryCryptoEngine()),
-            processor,
+            instance(List.of(store(processor))),
+            subscriptionCheckpoint(),
             instance(List.of()),
-            instance(List.<AtomicBatchProcessor>of(processor)),
             instance(List.of()),
             instance(List.of()),
             instance(List.of()),
