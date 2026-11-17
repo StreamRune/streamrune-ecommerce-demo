@@ -23,6 +23,8 @@ import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.projections.AuditProjection;
+import org.streamrune.integration.ProjectionRoutes;
+import org.streamrune.integration.ReadModelStores;
 import org.streamrune.quarkus.ProjectionProducer;
 import org.streamrune.quarkus.StreamRuneQuarkusProperties;
 import org.streamrune.runtime.MultiProjectionRunner;
@@ -149,25 +151,33 @@ class ProjectionDeliveryModeDeclarationsTest {
 
   /**
    * The framework's CONTINUOUS discovery, with {@code processor}'s store as the single read-model
-   * store bean.
+   * store.
    */
   private static MultiProjectionRunner discover(
       InMemoryProjectionRepository processor, List<Projection> projections) {
-    return new ProjectionProducer()
-        .multiProjectionRunner(
+    var producer = new ProjectionProducer();
+    // The routes are a bean of their own: they route every registration (and refuse a projection
+    // over a repository no store owns); the runner is then built from them.
+    ProjectionRoutes routes =
+        producer.projectionRoutes(
             instance(projections),
-            new InMemoryEventStore(
-                new StreamRuneProducer().eventTypeRegistry(), new InMemoryCryptoEngine()),
-            instance(List.of(store(processor))),
-            subscriptionCheckpoint(),
-            instance(List.of()),
-            instance(List.of()),
-            instance(List.of()),
-            instance(List.of()),
-            instance(List.of()),
-            properties(),
             emptyConfig(),
-            StreamRuneTracing.NOOP);
+            new ReadModelStores(() -> Optional.of(store(processor)), List::of),
+            subscriptionCheckpoint(),
+            instance(List.of()));
+    return producer.multiProjectionRunner(
+        instance(projections),
+        new InMemoryEventStore(
+            new StreamRuneProducer().eventTypeRegistry(), new InMemoryCryptoEngine()),
+        instance(List.of(routes)),
+        instance(List.of()),
+        instance(List.of()),
+        instance(List.of()),
+        instance(List.of()),
+        instance(List.of()),
+        properties(),
+        emptyConfig(),
+        StreamRuneTracing.NOOP);
   }
 
   /** A CDI Instance over a fixed list of beans: only what discovery calls is answered. */

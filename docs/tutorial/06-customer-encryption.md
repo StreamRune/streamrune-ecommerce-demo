@@ -738,7 +738,7 @@ and give `projectionRunner` the projection as a parameter and a `"customers"` re
 @Bean(destroyMethod = "close")
 public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
-    @Qualifier("postgres") ReadModelStore readModelStore,
+    @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
     StreamRuneProperties properties,
     ProductProjection productProjection,
     CustomerProjection customerProjection,
@@ -958,7 +958,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      @Qualifier("postgres") ReadModelStore readModelStore,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       CustomerProjection customerProjection,

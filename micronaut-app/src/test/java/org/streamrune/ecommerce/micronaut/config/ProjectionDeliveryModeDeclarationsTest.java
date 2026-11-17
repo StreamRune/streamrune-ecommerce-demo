@@ -3,7 +3,6 @@ package org.streamrune.ecommerce.micronaut.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.micronaut.context.BeanContext;
 import io.micronaut.context.env.Environment;
 import java.lang.reflect.Proxy;
 import java.util.List;
@@ -23,6 +22,8 @@ import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.projections.AuditProjection;
+import org.streamrune.integration.ProjectionRoutes;
+import org.streamrune.integration.ReadModelStores;
 import org.streamrune.micronaut.ProjectionFactory;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
 import org.streamrune.runtime.MultiProjectionRunner;
@@ -152,42 +153,29 @@ class ProjectionDeliveryModeDeclarationsTest {
    */
   private static MultiProjectionRunner discover(
       InMemoryProjectionRepository processor, List<Projection> projections) {
-    return new ProjectionFactory()
-        .multiProjectionRunner(
+    var factory = new ProjectionFactory();
+    // The routes are a bean of their own: they route every registration (and refuse a projection
+    // over a repository no store owns); the runner is then built from them.
+    ProjectionRoutes routes =
+        factory.projectionRoutes(
             projections,
-            new InMemoryEventStore(
-                new StreamRuneFactory().eventTypeRegistry(), new InMemoryCryptoEngine()),
-            beanContextWith(store(processor)),
-            subscriptionCheckpoint(),
-            List.of(),
-            null,
-            null,
-            null,
-            null,
-            StreamRuneMicronautProperties.withDefaults(),
             emptyEnvironment(),
-            StreamRuneTracing.NOOP);
-  }
-
-  /**
-   * A bean context that answers only what discovery asks it: the read-model store beans, which the
-   * framework collects with {@code getBeansOfType}.
-   */
-  private static BeanContext beanContextWith(ReadModelStore store) {
-    return (BeanContext)
-        Proxy.newProxyInstance(
-            ProjectionDeliveryModeDeclarationsTest.class.getClassLoader(),
-            new Class<?>[] {BeanContext.class},
-            (proxy, method, args) ->
-                switch (method.getName()) {
-                  case "getBeansOfType" ->
-                      args[0] == ReadModelStore.class ? List.of(store) : List.of();
-                  case "hashCode" -> System.identityHashCode(proxy);
-                  case "equals" -> proxy == args[0];
-                  case "toString" -> "beanContextWith(" + store.name() + ")";
-                  default ->
-                      throw new UnsupportedOperationException("BeanContext." + method.getName());
-                });
+            new ReadModelStores(() -> Optional.of(store(processor)), List::of),
+            subscriptionCheckpoint(),
+            null);
+    return factory.multiProjectionRunner(
+        projections,
+        new InMemoryEventStore(
+            new StreamRuneFactory().eventTypeRegistry(), new InMemoryCryptoEngine()),
+        () -> routes,
+        List.of(),
+        null,
+        null,
+        null,
+        null,
+        StreamRuneMicronautProperties.withDefaults(),
+        emptyEnvironment(),
+        StreamRuneTracing.NOOP);
   }
 
   /** An environment with no streamrune.* overrides: every annotation value stands. */

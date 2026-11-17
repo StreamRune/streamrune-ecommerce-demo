@@ -4035,7 +4035,7 @@ The payment process manager and its subscription are what let an order run all t
 @Bean(destroyMethod = "close")
 public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
-    @Qualifier("postgres") ReadModelStore readModelStore,
+    @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
     StreamRuneProperties properties,
     ProductProjection productProjection,
     OrderProjection orderProjection,
@@ -4592,7 +4592,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      @Qualifier("postgres") ReadModelStore readModelStore,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,

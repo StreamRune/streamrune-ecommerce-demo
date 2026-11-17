@@ -203,7 +203,7 @@ A few things to notice:
 
 Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. This chapter adds the read side's beans: the `ProductProjection` in this step, the query bus and the offset store in Step 5, and the projection runner in Step 7, which ends with the whole class. The new types come from `org.streamrune.core.projection`, `org.streamrune.core.subscription`, `org.streamrune.postgres` and `org.streamrune.runtime` (the last two imported whole), from Spring's `org.springframework.beans.factory.annotation.Qualifier` and `javax.sql.DataSource`, and from the `projections` and `queries` modules.
 
-First, where the read models live: the **read-model store**. You do not declare it. With a `DataSource` in the context, the framework's Spring integration registers the default read-model store, a `PostgresReadModelStore` bean named `postgres`, on the application's database. It bundles three things:
+First, where the read models live: the **read-model store**. You do not declare it. With a `DataSource` in the context, the framework's Spring integration registers the default read-model store, a `PostgresReadModelStore` named `postgres` (bean name `streamRuneDefaultReadModelStore`), on the application's database. It bundles three things:
 
 - a `JdbcProjectionRepository`, which keeps each read model in a table of its own (`products_view` for the projection `"products"`);
 - the **checkpoints** of the projections that write there — how far into the event stream each one has read — in the table `readmodel_checkpoint`, beside the read models;
@@ -323,7 +323,7 @@ Add the runner to `StreamRuneConfig`:
 @Bean(destroyMethod = "close")
 public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
-    @Qualifier("postgres") ReadModelStore readModelStore,
+    @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
     StreamRuneProperties properties,
     ProductProjection productProjection,
     CacheInvalidator cacheInvalidator) {
@@ -356,7 +356,7 @@ private static SubscriptionConfig projectionPolling(StreamRuneProperties propert
 
 `StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval` and `streamrune.polling-jitter` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval=500ms` to keep their waits short.
 
-Each registration names the pair it reads its checkpoint from and commits through: `readModelStore.checkpointTarget()` is the store's `readmodel_checkpoint` together with its `JdbcProjectionRepository` as the processor. That five-argument `register(...)` also takes the error strategy: `ProjectionErrorStrategy.HALT` stops the projection on a batch that keeps failing (Chapter 14 introduces the others). The shorter `register(...)` forms take no target and read and commit through a runner-wide `offsetStore(...)` + `atomicProcessor(...)` pair, which this runner does not set: every registration names its own. `@Qualifier("postgres")` asks for the store by its name: it is the only read-model store in this demo, and the name keeps the choice explicit.
+Each registration names the pair it reads its checkpoint from and commits through: `readModelStore.checkpointTarget()` is the store's `readmodel_checkpoint` together with its `JdbcProjectionRepository` as the processor. That five-argument `register(...)` also takes the error strategy: `ProjectionErrorStrategy.HALT` stops the projection on a batch that keeps failing (Chapter 14 introduces the others). The shorter `register(...)` forms take no target and read and commit through a runner-wide `offsetStore(...)` + `atomicProcessor(...)` pair, which this runner does not set: every registration names its own. `@Qualifier("streamRuneDefaultReadModelStore")` asks for the store by its bean name. The store itself is named `postgres` (`ReadModelStore.name()`, the name a projection's health block reports), but the Spring integration registers the default store as a bean called `streamRuneDefaultReadModelStore`, and the qualifier matches the bean name, not the store name. The bean is a `@Fallback`, so with this single store an unqualified `ReadModelStore` parameter would resolve too; the demo names it anyway, so that the choice stays explicit and the runner keeps this store if a second one is ever added.
 
 Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own checkpoint row in `readmodel_checkpoint`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
 
@@ -501,7 +501,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      @Qualifier("postgres") ReadModelStore readModelStore,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       CacheInvalidator cacheInvalidator) {
