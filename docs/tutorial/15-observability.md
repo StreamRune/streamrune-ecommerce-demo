@@ -2712,8 +2712,7 @@ Expected response shape:
           "lag": 0,
           "errorCount": 0,
           "status": "UP",
-          "role": "LEADING"
-        ,
+          "role": "LEADING",
           "store": "postgres"
         },
         "relay.outbox-relay": {
