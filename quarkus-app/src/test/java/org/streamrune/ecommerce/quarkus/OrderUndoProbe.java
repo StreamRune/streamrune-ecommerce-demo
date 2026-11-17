@@ -98,12 +98,15 @@ final class OrderUndoProbe {
     return saga(orderId).map(LoadedSaga::status).orElse(null);
   }
 
-  /** The last global offset the subscription has checkpointed, or -1 before its first. */
+  /**
+   * The last global offset the event subscription has checkpointed in {@code
+   * subscription_checkpoint}, or -1 before its first.
+   */
   long checkpoint(String subscriptionName) throws SQLException {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps =
             conn.prepareStatement(
-                "SELECT last_offset FROM projection_offset WHERE projection_name = ?")) {
+                "SELECT last_offset FROM subscription_checkpoint WHERE projection_name = ?")) {
       ps.setString(1, subscriptionName);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getLong(1) : -1;
