@@ -76,7 +76,6 @@ import org.streamrune.ecommerce.queries.access.OwnerOrAdminStreamAccess;
 import org.streamrune.integration.DeadLetterUnkeyedReplaySetting;
 import org.streamrune.integration.SseAuthorizer;
 import org.streamrune.micronaut.StreamRuneMicronautProperties;
-import org.streamrune.postgres.JdbcProjectionRepository;
 import org.streamrune.postgres.PgAdvisoryLocker;
 import org.streamrune.postgres.PostgresAuditStore;
 import org.streamrune.postgres.PostgresDeadLetterQueue;
@@ -313,28 +312,6 @@ public class StreamRuneFactory {
   }
 
   /**
-   * Declared to return the CONCRETE {@link JdbcProjectionRepository} type, not the {@link
-   * ProjectionRepository} interface — Micronaut's compile-time bean introspection exposes a
-   * {@code @Factory} method's bean only under its declared return type's own hierarchy, so an
-   * interface-typed declaration would hide {@link
-   * org.streamrune.core.projection.AtomicBatchProcessor}, which {@code JdbcProjectionRepository}
-   * also implements. The framework's {@code
-   * org.streamrune.micronaut.ProjectionFactory#multiProjectionRunner} collects every {@code
-   * AtomicBatchProcessor} bean and selects the single one because the four projections declare
-   * {@code TRANSACTIONAL_LOCAL} and leadership is on ({@code
-   * streamrune.subscription.single-active-consumer.enabled} defaults to true; the rule is {@code
-   * org.streamrune.integration.ProjectionProcessorResolution}); had this stayed interface-typed,
-   * the list would be empty and startup would fail naming the four projections — loudly, instead of
-   * running them without the checkpoint transaction. The same object is what the four projections
-   * write through, so the write-target identity check verifies them. Mirrors how the framework's
-   * own {@code StreamRuneMicronautModule#jdbcProjectionRepository} default producer is declared.
-   */
-  @Singleton
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
-  }
-
-  /**
    * The aggregate lock, taken in PostgreSQL: an advisory lock per stream ({@code
    * pg_advisory_xact_lock}), held on a connection of the locker's own pool for the whole command.
    * Every backend on the database takes the same lock, so a command waits for a command on the same
@@ -403,6 +380,16 @@ public class StreamRuneFactory {
         .unwrap(HibernateValidatorFactory.class);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}): where the saga
+   * subscription and the process-manager subscriptions of {@link EcommerceSubscriptionLifecycle}
+   * keep their positions, and where the framework's runner keeps the checkpoint of an at-least-once
+   * projection that writes outside the read-model store. The four read-model projections keep
+   * theirs beside their read models, in the default read-model store's {@code
+   * readmodel_checkpoint}: the framework creates that store, {@code postgres}, on the {@code
+   * DataSource}, and its repository is the {@code ProjectionRepository} bean the projections below
+   * are built with.
+   */
   @Singleton
   public org.streamrune.core.projection.OffsetStore offsetStore(DataSource ds) {
     return new org.streamrune.postgres.PostgresOffsetStore(ds);
