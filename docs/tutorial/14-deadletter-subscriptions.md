@@ -1864,7 +1864,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      @Qualifier("postgres") ReadModelStore readModelStore,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -2441,7 +2441,7 @@ var replayer =
     new ProjectionDeadLetterReplayer(
         eventStore,
         projectionDlq,
-        readModelStore.processor());   // the processor the runner commits through
+        name -> readModelStore.checkpointTarget());   // the target the runner registers with
 
 ProjectionDeadLetterReplayer.ReplayResult result =
     replayer.replay(
@@ -2452,7 +2452,7 @@ ProjectionDeadLetterReplayer.ReplayResult result =
 // result.replayed(), result.failed(), result.fenced()
 ```
 
-- **The constructor takes the processor.** Its third argument is the `AtomicBatchProcessor` the projection's runner commits through — here `readModelStore.processor()`, the `JdbcProjectionRepository` of the read-model store the projection is registered on (`readModelStore.checkpointTarget()` in Step 4). A replay takes that processor's per-projection lock (the projection's checkpoint row in `readmodel_checkpoint`, `FOR UPDATE`), the lock a live batch takes, so a replay and a live batch of one projection never run at the same time, in one process or across replicas, and the replay is safe while the runner is live. A different processor here serializes nothing.
+- **The constructor takes the checkpoint target of each projection.** Its third argument is a `Function<ProjectionName, CheckpointTarget>`: for a projection name it returns the `CheckpointTarget` the projection's runner registration reads its checkpoint from and commits through — here `readModelStore.checkpointTarget()` (Step 4), for every projection of this demo's single store. With several read-model stores the function returns each projection's own store's target, so one replayer serves them all and a replay never runs on another store's processor; it returns `null` for a projection it does not know, and the replay is then refused. A replay uses only the target's processor — here the `JdbcProjectionRepository` of the store — and takes its per-projection lock (the projection's checkpoint row in `readmodel_checkpoint`, `FOR UPDATE`), the lock a live batch takes, so a replay and a live batch of one projection never run at the same time, in one process or across replicas, and the replay is safe while the runner is live. A different target here serializes nothing. (A constructor taking one `AtomicBatchProcessor`, as `readModelStore.processor()`, remains for a runner with a single default pair.)
 - **`replay(name, projection, mode, maxEntries)`** names the projection, passes the projection as it is registered (with its `CacheAwareProjection` wrapper, so the replay invalidates the cache too) and the delivery mode it is registered with. The mode decides what the projection is handed, exactly as for a live batch: under `TRANSACTIONAL_LOCAL` it is the replay transaction's repository, so a range is applied all-or-nothing. The call replays up to `maxEntries` entries, oldest range first, discards each entry it applied, and never moves the checkpoint: it fills the hole behind it. `ReplayResult` counts the entries replayed, the entries that failed and were kept, and the entries a self-fencing projection applied nothing of and were kept.
 - **Replay is refused for the non-atomic at-least-once processor.** `AtomicBatchProcessor.nonAtomicAtLeastOnce()` holds no per-projection lock, so `replay` throws an `IllegalStateException` for it before it reads an entry: beside a live batch both sides could read a row before either saves it, and one of the two writes would be lost. For such a registration stop the projection's runner and call `replayWithRunnerStopped(name, projection, maxEntries)`. The demo's runner commits through `JdbcProjectionRepository`, so `replay` is the method to call.
 
