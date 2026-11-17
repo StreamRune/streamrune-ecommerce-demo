@@ -144,12 +144,15 @@ wait_for_health() {
 schema_smoke() {
   # The database was empty when the binary started, so every table it now holds was created by the
   # binary: the framework's event store factory applies its event-store and crypto migration series
-  # at startup (streamrune.event-store.schema.auto-initialize=true). In a native image that only
-  # works when the migration scripts were registered as resources at build time. Each series
-  # records its baseline in its own Flyway history table; one table of each series is checked too.
+  # at startup (streamrune.event-store.schema.auto-initialize=true), and the default read-model
+  # store applies the read-model series (streamrune.read-model.schema.auto-initialize, which
+  # follows the event-store switch when unset). In a native image that only works when the
+  # migration scripts were registered as resources at build time. Each series records its baseline
+  # in its own Flyway history table; one table of each series is checked too.
   echo "  Checking the schema the binary created …"
   local applied
-  for history in flyway_schema_history_streamrune flyway_schema_history_crypto; do
+  for history in flyway_schema_history_streamrune flyway_schema_history_crypto \
+      flyway_schema_history_readmodel; do
     if ! applied=$(pg_sql "SELECT count(*) FROM $history WHERE success AND script LIKE 'V001%'" 2>/dev/null) \
         || [ "$applied" != "1" ]; then
       echo "  ✗ $history does not record the applied baseline (got: ${applied:-no such table})."
@@ -158,12 +161,12 @@ schema_smoke() {
   done
   local present
   present=$(pg_sql "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'
-      AND tablename IN ('event_stream', 'encryption_keys')")
-  if [ "$present" != "2" ]; then
-    echo "  ✗ event_stream and encryption_keys are not both present (found $present of 2)."
+      AND tablename IN ('event_stream', 'encryption_keys', 'readmodel_checkpoint')")
+  if [ "$present" != "3" ]; then
+    echo "  ✗ event_stream, encryption_keys and readmodel_checkpoint are not all present (found $present of 3)."
     return 1
   fi
-  echo "  ✓ The binary created the event-store and crypto schema on the empty database."
+  echo "  ✓ The binary created the event-store, crypto and read-model schema on the empty database."
   return 0
 }
 

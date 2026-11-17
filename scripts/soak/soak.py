@@ -1076,6 +1076,13 @@ class Run:
         self.dir, self.rid = Path(directory), rid
 
 
+# Every checkpoint of the backends, in the two tables the framework keeps them in: the event
+# store's subscription_checkpoint (the saga and process-manager subscriptions) and the read-model
+# store's readmodel_checkpoint (the four read-model projections, committed with their rows).
+CHECKPOINTS = ("SELECT projection_name, last_offset FROM subscription_checkpoint"
+               " UNION ALL SELECT projection_name, last_offset FROM readmodel_checkpoint")
+
+
 def drain(run, timeout, log):
     """Waits until the sagas of the run have ended, every subscription is at the head of the event
     store, the outbox is empty and every queued replay is resolved, or the timeout passes."""
@@ -1087,7 +1094,7 @@ def drain(run, timeout, log):
             status = sql_one(f"""
               SELECT (SELECT count(*) FROM saga_state WHERE saga_id LIKE 'fulfillment-soak-{run.rid}-%'
                         AND status NOT IN ('COMPLETED','COMPENSATED','FAILED')) AS sagas_open,
-                     (SELECT count(*) FROM projection_offset WHERE last_offset
+                     (SELECT count(*) FROM ({CHECKPOINTS}) c WHERE last_offset
                         < (SELECT coalesce(max(global_offset), 0) FROM event_stream)) AS subscriptions_behind,
                      (SELECT count(*) FROM outbox_events WHERE status IN ('PENDING','IN_PROGRESS')) AS outbox_open""")
             status["queued_replays_open"] = len(queued) - len(inbox_keys(queued))
@@ -1577,7 +1584,7 @@ def check(run, stop_apps=None):
             f"entries never received, {len(dupes)} received more than once ({len(unexplained)} outside a failure window)", bad)
 
     # 9. Projections equal to a rebuild from the event store.
-    behind = sql_rows("SELECT projection_name, last_offset FROM projection_offset WHERE last_offset "
+    behind = sql_rows(f"SELECT projection_name, last_offset FROM ({CHECKPOINTS}) c WHERE last_offset "
                       "< (SELECT coalesce(max(global_offset), 0) FROM event_stream)")
     diffs = sql_rows("""
       WITH st AS (SELECT DISTINCT ON (aggregate_id) aggregate_id AS id,

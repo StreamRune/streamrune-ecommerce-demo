@@ -77,8 +77,11 @@ streamrune:
   event-store:
     # The framework creates its own schema at startup (this is also the default): the event
     # store's Flyway series and, because a PostgreSQL-backed CryptoEngine bean is present, the
-    # crypto series, each on its own history table. The demo ships no DDL of its own; an empty
-    # database is all the app needs (the same in spring-app and quarkus-app).
+    # crypto series, each on its own history table; the default read-model store, postgres,
+    # applies the read-model series (readmodel_checkpoint, where the projections keep their
+    # checkpoints) under streamrune.read-model.schema.auto-initialize, which follows this switch
+    # when unset. The demo ships no DDL of its own; an empty database is all the app needs (the
+    # same in spring-app and quarkus-app).
     schema:
       auto-initialize: true
   outbox:

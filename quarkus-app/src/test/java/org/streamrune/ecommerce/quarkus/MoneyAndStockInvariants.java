@@ -42,7 +42,7 @@ final class MoneyAndStockInvariants {
            + (SELECT count(*)
                 FROM (VALUES ('order-fulfillment-saga'), ('payment-process-manager'),
                              ('order-cancellation'), ('order-shipment')) AS s(name)
-                LEFT JOIN projection_offset p ON p.projection_name = s.name
+                LEFT JOIN subscription_checkpoint p ON p.projection_name = s.name
                WHERE coalesce(p.last_offset, 0)
                    < (SELECT coalesce(max(global_offset), 0) FROM event_stream))
       """;
