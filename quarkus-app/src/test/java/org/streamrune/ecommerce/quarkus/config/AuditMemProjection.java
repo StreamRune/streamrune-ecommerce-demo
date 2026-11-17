@@ -11,8 +11,10 @@ import org.streamrune.test.InMemoryProjectionRepository;
 /**
  * A BaseProjection over ANOTHER store, declared at-least-once, discovered in the real app beside
  * the four TRANSACTIONAL_LOCAL PostgreSQL projections: its rows land in its own in-memory store,
- * never in the processor's database. The repository is a plain field, not a bean, so it does not
- * become a second AtomicBatchProcessor or ProjectionRepository bean.
+ * never in the read-model store's database. Its repository belongs to no read-model store, so the
+ * runner routes it to the event store's subscription checkpoint ({@code subscription_checkpoint}).
+ * The repository is a plain field, not a bean, so it does not become a second ProjectionRepository
+ * bean beside the read-model store's.
  */
 @Singleton
 @ProjectionConfig(

@@ -17,20 +17,28 @@ import org.streamrune.ecommerce.quarkus.PostgresTestResource;
 
 /**
  * An at-least-once projection over an in-memory store ({@link AuditMemProjection}) boots and runs
- * in the real app beside the four TRANSACTIONAL_LOCAL PostgreSQL projections: its rows land only in
- * its own store, its checkpoint lands in the processor's database, and the transactional four write
- * their rows into the processor's database. The framework's ProjectionProducer selected the single
- * JdbcProjectionRepository bean because the four declare TRANSACTIONAL_LOCAL.
+ * in the real app beside the four TRANSACTIONAL_LOCAL PostgreSQL projections. The framework's
+ * ProjectionProducer routes the four to the default read-model store, {@code postgres}, because
+ * they write through its repository: their rows and their checkpoints ({@code
+ * readmodel_checkpoint}) commit together in the app's database. The at-least-once projection writes
+ * to a repository that belongs to no store, so it is routed to the event store's subscription
+ * checkpoint: its checkpoint lands in {@code subscription_checkpoint}, and its rows land only in
+ * its own store, never in the read-model store's database.
  *
- * <p>Before it commits a projection's batch the processor makes sure that projection's {@code
- * <name>_view} table exists, whatever the projection's mode, so an empty {@code audit_mem_view} may
- * exist in its database; what must never land there is a row.
+ * <p>The subscription checkpoint's processor creates no {@code <name>_view} table, so {@code
+ * audit_mem_view} is normally absent; the check counts its rows, and an absent table holds none.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
 class ProjectionDeliveryModeE2EIT {
 
   private static final ProjectionName AUDIT_MEM = ProjectionName.of("audit_mem");
+
+  /** The default read-model store's checkpoints: the transactional four commit theirs here. */
+  private static final String READ_MODEL_CHECKPOINT = "readmodel_checkpoint";
+
+  /** The event store's subscription checkpoints: the unrouted at-least-once projection's. */
+  private static final String SUBSCRIPTION_CHECKPOINT = "subscription_checkpoint";
 
   @Inject DataSource dataSource;
 
@@ -67,11 +75,16 @@ class ProjectionDeliveryModeE2EIT {
     }
   }
 
-  private long lastOffset(String projection) throws SQLException {
+  /**
+   * The checkpoint of {@code projection} in {@code table}: {@code readmodel_checkpoint}, where the
+   * read-model store keeps the checkpoints of the projections routed to it, or {@code
+   * subscription_checkpoint}, the event store's, where an at-least-once projection that writes
+   * elsewhere keeps its own. -1 when the table holds no row for it.
+   */
+  private long lastOffset(String table, String projection) throws SQLException {
     try (var c = dataSource.getConnection();
         var ps =
-            c.prepareStatement(
-                "SELECT last_offset FROM projection_offset WHERE projection_name = ?")) {
+            c.prepareStatement("SELECT last_offset FROM " + table + " WHERE projection_name = ?")) {
       ps.setString(1, projection);
       try (var rs = ps.executeQuery()) {
         return rs.next() ? rs.getLong(1) : -1L;
@@ -99,9 +112,12 @@ class ProjectionDeliveryModeE2EIT {
         .pollInterval(Duration.ofMillis(200))
         .untilAsserted(
             () ->
-                assertThat(lastOffset("audit_mem"))
-                    .as("the at-least-once projection's checkpoint is in the processor's database")
+                assertThat(lastOffset(SUBSCRIPTION_CHECKPOINT, "audit_mem"))
+                    .as("the at-least-once projection's checkpoint is the subscription checkpoint")
                     .isGreaterThanOrEqualTo(1L));
+    assertThat(lastOffset(READ_MODEL_CHECKPOINT, "audit_mem"))
+        .as("the at-least-once projection keeps no checkpoint in the read-model store")
+        .isEqualTo(-1L);
     await()
         .atMost(Duration.ofSeconds(15))
         .pollInterval(Duration.ofMillis(200))
@@ -110,13 +126,20 @@ class ProjectionDeliveryModeE2EIT {
                 assertThat(productRows(pid))
                     .as("the TRANSACTIONAL_LOCAL four write where they should")
                     .isEqualTo(1L));
+    // The product's row and the products checkpoint commit together, in the read-model store.
+    assertThat(lastOffset(READ_MODEL_CHECKPOINT, "products"))
+        .as("a projection routed to the read-model store checkpoints beside its read model")
+        .isGreaterThanOrEqualTo(1L);
+    assertThat(lastOffset(SUBSCRIPTION_CHECKPOINT, "products"))
+        .as("a projection routed to the read-model store keeps no subscription checkpoint")
+        .isEqualTo(-1L);
 
     assertThat(auditMemRows())
-        .as("nothing of the at-least-once projection lands in the processor's database")
+        .as("nothing of the at-least-once projection lands in the read-model store's database")
         .isZero();
   }
 
-  /** Rows of {@code products_view} in the processor's database for one product id. */
+  /** Rows of {@code products_view} in the read-model store's database for one product id. */
   private long productRows(String productId) throws SQLException {
     if (regclass("public.products_view") == null) {
       return 0L;
@@ -131,7 +154,9 @@ class ProjectionDeliveryModeE2EIT {
     }
   }
 
-  /** Rows of {@code audit_mem_view} in the processor's database; an absent table holds none. */
+  /**
+   * Rows of {@code audit_mem_view} in the read-model store's database; an absent table holds none.
+   */
   private long auditMemRows() throws SQLException {
     if (regclass("public.audit_mem_view") == null) {
       return 0L;
