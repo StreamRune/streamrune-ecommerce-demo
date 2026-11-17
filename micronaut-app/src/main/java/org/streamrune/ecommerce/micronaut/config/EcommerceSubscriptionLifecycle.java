@@ -74,7 +74,13 @@ public class EcommerceSubscriptionLifecycle
   private static final Logger LOG = LoggerFactory.getLogger(EcommerceSubscriptionLifecycle.class);
 
   private final EventStore eventStore;
+
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where these
+   * subscriptions keep their positions.
+   */
   private final OffsetStore offsetStore;
+
   private final SagaRunner<OrderFulfillmentState> orderFulfillmentSagaRunner;
   private final SagaTimeoutRunner<OrderFulfillmentState> orderFulfillmentTimeoutRunner;
   private final PaymentProcessManager paymentProcessManager;

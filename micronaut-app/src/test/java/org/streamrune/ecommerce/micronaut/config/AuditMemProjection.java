@@ -12,10 +12,12 @@ import org.streamrune.test.InMemoryProjectionRepository;
 /**
  * A BaseProjection over ANOTHER store, declared at-least-once, discovered in the real app beside
  * the four TRANSACTIONAL_LOCAL PostgreSQL projections: its rows land in its own in-memory store,
- * never in the processor's database. Only the {@code test} environment (which {@code MicronautTest}
- * activates) creates the bean. The repository is a plain field, not a bean: a bean of that class
- * would be exposed under every type it implements, AtomicBatchProcessor included, and become a
- * second processor candidate.
+ * never in the read-model store's database. Its repository belongs to no read-model store, so the
+ * runner routes it to the event store's subscription checkpoint ({@code subscription_checkpoint}).
+ * Only the {@code test} environment (which {@code MicronautTest} activates) creates the bean. The
+ * repository is a plain field, not a bean: a bean of that class would be exposed under every type
+ * it implements, ProjectionRepository included, and the framework's default {@code
+ * ProjectionRepository} bean, the read-model store's repository, would step aside for it.
  */
 @Singleton
 @Requires(env = "test")
