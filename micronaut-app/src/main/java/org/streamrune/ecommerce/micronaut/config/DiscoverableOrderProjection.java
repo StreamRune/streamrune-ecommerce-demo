@@ -18,10 +18,10 @@ import org.streamrune.ecommerce.projections.OrderProjection;
  * The bean is produced by {@link StreamRuneFactory#orderProjection}. Safe for the Spring app, which
  * uses an explicit {@code MultiProjectionRunner} and never relies on annotation-based discovery.
  *
- * <p>It declares {@code TRANSACTIONAL_LOCAL}: it writes through the {@code
- * JdbcProjectionRepository} bean {@link StreamRuneFactory#projectionRepository} produces, which is
- * also the runner's processor, so its read-model writes and its checkpoint commit in one
- * transaction.
+ * <p>It declares {@code TRANSACTIONAL_LOCAL}: it writes through the framework's {@code
+ * ProjectionRepository} bean, the repository of the default read-model store {@code postgres}, so
+ * the projection runner routes it to that store, whose processor commits its read-model writes and
+ * its checkpoint (in {@code readmodel_checkpoint}) in one transaction.
  */
 @ProjectionConfig(name = "orders", deliveryMode = ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
 public class DiscoverableOrderProjection extends OrderProjection {

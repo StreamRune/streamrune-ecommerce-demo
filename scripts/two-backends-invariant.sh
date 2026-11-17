@@ -52,7 +52,7 @@ SELECT (SELECT count(*) FROM saga_state
      + (SELECT count(*)
           FROM (VALUES ('order-fulfillment-saga'), ('payment-process-manager'),
                        ('order-cancellation'), ('order-shipment')) AS s(name)
-          LEFT JOIN projection_offset p ON p.projection_name = s.name
+          LEFT JOIN subscription_checkpoint p ON p.projection_name = s.name
          WHERE coalesce(p.last_offset, 0)
              < (SELECT coalesce(max(global_offset), 0) FROM event_stream))"
 
@@ -240,7 +240,7 @@ while :; do
     sql "SELECT saga_id, status FROM saga_state WHERE saga_type = '$SAGA_TYPE' AND saga_id LIKE 'fulfillment-two-backends-$RUN-%' AND status NOT IN ('COMPLETED', 'COMPENSATED', 'FAILED')" >&2
     sql "SELECT s.name || ' at ' || coalesce(p.last_offset, 0) || ' of ' || (SELECT coalesce(max(global_offset), 0) FROM event_stream)
            FROM (VALUES ('order-fulfillment-saga'), ('payment-process-manager'), ('order-cancellation'), ('order-shipment')) AS s(name)
-           LEFT JOIN projection_offset p ON p.projection_name = s.name" >&2
+           LEFT JOIN subscription_checkpoint p ON p.projection_name = s.name" >&2
     exit 1
   fi
   sleep 2

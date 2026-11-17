@@ -201,18 +201,15 @@ A few things to notice:
 
 ### Step 4 — Register the beans
 
-Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. This chapter adds the read side's beans: the projection repository and the `ProductProjection` in this step, the query bus and the offset store in Step 5, and the projection runner in Step 7, which ends with the whole class. The new types come from `org.streamrune.core.projection`, `org.streamrune.core.subscription`, `org.streamrune.postgres` and `org.streamrune.runtime` (the last two imported whole), from Spring's `javax.sql.DataSource`, and from the `projections` and `queries` modules.
+Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. This chapter adds the read side's beans: the `ProductProjection` in this step, the query bus and the offset store in Step 5, and the projection runner in Step 7, which ends with the whole class. The new types come from `org.streamrune.core.projection`, `org.streamrune.core.subscription`, `org.streamrune.postgres` and `org.streamrune.runtime` (the last two imported whole), from Spring's `org.springframework.beans.factory.annotation.Qualifier` and `javax.sql.DataSource`, and from the `projections` and `queries` modules.
 
-First, the projection repository — a single shared instance backed by JDBC:
+First, where the read models live: the **read-model store**. You do not declare it. With a `DataSource` in the context, the framework's Spring integration registers the default read-model store, a `PostgresReadModelStore` named `postgres` (bean name `streamRuneDefaultReadModelStore`), on the application's database. It bundles three things:
 
-```java
-@Bean
-public JdbcProjectionRepository projectionRepository(DataSource ds) {
-  return new JdbcProjectionRepository(ds);
-}
-```
+- a `JdbcProjectionRepository`, which keeps each read model in a table of its own (`products_view` for the projection `"products"`);
+- the **checkpoints** of the projections that write there — how far into the event stream each one has read — in the table `readmodel_checkpoint`, beside the read models;
+- the **processor** that commits a batch, which is that same repository: it runs a batch's read-model writes and its checkpoint in one transaction, so a read model can never be ahead of or behind its checkpoint.
 
-Declare it by its **concrete type**. The same object plays two roles: every projection writes through it (`ProjectionRepository`), and the runner commits each batch with it (`AtomicBatchProcessor` — it runs the read-model write and the checkpoint in one transaction). The runner you wire at the end of this chapter takes it as its processor, and startup verifies that each `TRANSACTIONAL_LOCAL` projection writes to exactly this store. Bean proxies are fine — the check compares what the repository writes to, not the Java reference.
+The store creates `readmodel_checkpoint` itself when it is created at startup: it applies the framework's read-model Flyway series (`classpath:db/readmodel-migration`, recorded in the history table `flyway_schema_history_readmodel`), switched by `streamrune.read-model.schema.auto-initialize`, which follows `streamrune.event-store.schema.auto-initialize` when unset. Its repository is also the injectable `ProjectionRepository` bean, so every projection and query handler that takes a `ProjectionRepository` reads and writes the store. The runner you wire at the end of this chapter registers each projection on this store, and startup verifies that each `TRANSACTIONAL_LOCAL` projection writes to exactly the store's repository. Bean proxies are fine — the check compares what the repository writes to, not the Java reference.
 
 Then the `ProductProjection` bean, injecting the repository:
 
@@ -259,7 +256,7 @@ public CacheInvalidator cacheInvalidator(CachingQueryBus cachingBus) {
 }
 ```
 
-And add the `OffsetStore` bean — this records each projection's read position in PostgreSQL so a restart resumes from where it left off:
+And add the `OffsetStore` bean, the event store's own checkpoints:
 
 ```java
 @Bean
@@ -268,7 +265,9 @@ public OffsetStore offsetStore(DataSource ds) {
 }
 ```
 
-`PostgresOffsetStore` writes a row per projection name in the `projection_offset` table, which the framework's baseline created alongside `event_stream` on the application's first start (Chapter 1, Step 8). Each `MultiProjectionRunner` projection advances its own offset independently, so a slow projection does not block the others.
+`PostgresOffsetStore` writes a row per subscription name in the `subscription_checkpoint` table, which the framework's event-store baseline created alongside `event_stream` on the application's first start (Chapter 1, Step 8). An event subscription keeps its read position there, so a restart resumes from where it left off: the saga and the process managers of later chapters use it, and so does a projection that writes outside the read-model store (an `AT_LEAST_ONCE_IDEMPOTENT` one, see [Delivery modes](#delivery-modes--what-you-are-promising) below). The read models of this chapter do not: their checkpoints live beside them, in the read-model store's `readmodel_checkpoint`, because a checkpoint commits in one transaction with the rows it covers only when both are in the same database.
+
+**Two checkpoint tables, then.** `readmodel_checkpoint` holds the checkpoints of the projections that commit with their read models; `subscription_checkpoint` holds every other position. A runner reads each registration's checkpoint from the same table its processor writes: never give the runner of a `JdbcProjectionRepository` the `PostgresOffsetStore` as its offset store — it would read a checkpoint the processor never advances, re-read the batches already committed, and halt the projection with a `ProjectionCheckpointDivergedException`.
 
 ### Step 6 — Update `ProductQueryController`
 
@@ -324,23 +323,23 @@ Add the runner to `StreamRuneConfig`:
 @Bean(destroyMethod = "close")
 public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
-    OffsetStore offsetStore,
-    JdbcProjectionRepository projectionRepository,
+    @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
     StreamRuneProperties properties,
     ProductProjection productProjection,
     CacheInvalidator cacheInvalidator) {
   var runner =
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
-          .offsetStore(offsetStore)
           .subscriptionConfig(projectionPolling(properties))
-          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-          // checkpoint in ONE transaction.
-          .atomicProcessor(projectionRepository)
+          // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+          // its read-model write and its checkpoint in ONE transaction through, the read-model
+          // store's pair.
           .register(
               ProjectionName.of("products"),
               new CacheAwareProjection(productProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+              ProjectionErrorStrategy.HALT,
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+              readModelStore.checkpointTarget())
           .build();
   runner.start();
   return runner;
@@ -357,19 +356,21 @@ private static SubscriptionConfig projectionPolling(StreamRuneProperties propert
 
 `StreamRuneProperties` is the framework's bean for the `streamrune.*` block of `application.yml`. Its `streamrune.polling-interval` and `streamrune.polling-jitter` default to five seconds and one second, so a read model follows the event store by up to about six seconds: every "wait for the projection" in this tutorial is that interval. The framework reads the two properties itself where it builds the runner (the Quarkus and Micronaut apps); here you build the runner, so you hand them over. The demo's integration tests set `streamrune.polling-interval=500ms` to keep their waits short.
 
-Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own offset namespace in `PostgresOffsetStore`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
+Each registration names the pair it reads its checkpoint from and commits through: `readModelStore.checkpointTarget()` is the store's `readmodel_checkpoint` together with its `JdbcProjectionRepository` as the processor. That five-argument `register(...)` also takes the error strategy: `ProjectionErrorStrategy.HALT` stops the projection on a batch that keeps failing (Chapter 14 introduces the others). The shorter `register(...)` forms take no target and read and commit through a runner-wide `offsetStore(...)` + `atomicProcessor(...)` pair, which this runner does not set: every registration names its own. `@Qualifier("streamRuneDefaultReadModelStore")` asks for the store by its bean name. The store itself is named `postgres` (`ReadModelStore.name()`, the name a projection's health block reports), but the Spring integration registers the default store as a bean called `streamRuneDefaultReadModelStore`, and the qualifier matches the bean name, not the store name. The bean is a `@Fallback`, so with this single store an unqualified `ReadModelStore` parameter would resolve too; the demo names it anyway, so that the choice stays explicit and the runner keeps this store if a second one is ever added.
+
+Each projection is wrapped in a `CacheAwareProjection` decorator that calls `invalidator.onEventsProcessed(batch)` after every successful batch, keeping the `CachingQueryBus` cache in sync with the read model. The `MultiProjectionRunner` assigns each projection its own virtual thread and its own checkpoint row in `readmodel_checkpoint`, so they advance independently and a slow projection does not block the others. Spring destroys the runner (calling `close()`) on application shutdown via `destroyMethod = "close"`: each internal thread is interrupted at once, which cuts its sleeps and reads short but never a batch being committed — that batch finishes and records its checkpoint first — and the runner waits up to 30 seconds per thread for it to exit.
 
 #### Delivery modes — what you are promising
 
-Every `register(...)` call names a `ProjectionDeliveryMode`, and there is no default: the right value depends on where the projection writes. The runner checks each declaration against its processor when it is built, before it reads an event, and refuses with an `IllegalArgumentException` that names the projection, the mode and the fix — for example when a `TRANSACTIONAL_LOCAL` projection writes to a repository other than the one passed to `.atomicProcessor(...)`.
+Every `register(...)` call names a `ProjectionDeliveryMode`, and there is no default: the right value depends on where the projection writes. The runner checks each declaration against its processor when it is built, before it reads an event, and refuses with an `IllegalArgumentException` that names the projection, the mode and the fix — for example when a `TRANSACTIONAL_LOCAL` projection writes to a repository other than the one of the store it is registered on.
 
 | mode | what the framework guarantees | what the projection promises | typical write target |
 |---|---|---|---|
-| `TRANSACTIONAL_LOCAL` | the batch's read-model writes and the checkpoint are all-or-nothing; a redelivered or split-brain batch is rejected before any write | writes only through the handed repository during `process` | `JdbcProjectionRepository` (`<name>_view` tables) in the framework's database |
+| `TRANSACTIONAL_LOCAL` | the batch's read-model writes and the checkpoint are all-or-nothing; a redelivered or split-brain batch is rejected before any write | writes only through the handed repository during `process` | the read-model store's `JdbcProjectionRepository` (`<name>_view` tables, checkpoint in `readmodel_checkpoint`) |
 | `AT_LEAST_ONCE_IDEMPOTENT` | the checkpoint advances only after `process` returned; a crash or a rejected checkpoint redelivers the batch from the last checkpoint; the projection is never handed a transaction-scoped repository | applying the same event twice yields the same read model | anything: another `DataSource`, JPA, Redis, memory — or the framework's own `JdbcProjectionRepository`, written autocommit through the projection's captured reference |
 | `EXTERNAL_EFFECT` | as `TRANSACTIONAL_LOCAL`, for the outbox row | no external call in `process`; the receiver dedups by event id | an outbox row through the handed repository, relayed later by the application's relay |
 
-**An at-least-once projection is never handed the checkpoint transaction** — the runner passes `null` to `process(batch, repository)`, so its writes go where it sends them. **No mode makes an external effect exactly-once** — an HTTP call, a Kafka produce or an e-mail inside `process` is at-least-once under every mode and belongs behind the outbox (Chapter 13). The four PostgreSQL read models in this demo are `TRANSACTIONAL_LOCAL`; the in-memory `AuditProjection` of Chapter 10 is `AT_LEAST_ONCE_IDEMPOTENT`.
+**An at-least-once projection is never handed the checkpoint transaction** — the runner passes `null` to `process(batch, repository)`, so its writes go where it sends them. One that writes outside the read-model store is registered on the event store's subscription checkpoint instead of the store's pair — `offsetStore.subscriptionCheckpoint()`, which the integration also registers as the `CheckpointTarget` bean `streamRuneSubscriptionCheckpoint` — so its checkpoint lives in `subscription_checkpoint`. **No mode makes an external effect exactly-once** — an HTTP call, a Kafka produce or an e-mail inside `process` is at-least-once under every mode and belongs behind the outbox (Chapter 13). The four PostgreSQL read models in this demo are `TRANSACTIONAL_LOCAL`; the in-memory `AuditProjection` of Chapter 10 is `AT_LEAST_ONCE_IDEMPOTENT`.
 
 The whole class at the end of this chapter:
 
@@ -382,12 +383,15 @@ package org.streamrune.ecommerce.spring.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
@@ -440,14 +444,6 @@ public class StreamRuneConfig {
     return new ProductCreatedUpcaster();
   }
 
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
-  }
-
   // Interceptors
   @Bean
   public BeanValidationInterceptor validationInterceptor() {
@@ -481,6 +477,11 @@ public class StreamRuneConfig {
     return new ProductProjection(repo);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -500,23 +501,23 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       CacheInvalidator cacheInvalidator) {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;
@@ -598,6 +599,15 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
 
 (The table is `products_view` — `JdbcProjectionRepository` derives the table name by appending `_view` to the projection name (`"products"`). The JSONB column is `data`; `->>` extracts a field as text.)
 
+The projection's checkpoint sits beside it, in the read-model store's checkpoint table:
+
+```bash
+docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
+  -c "SELECT projection_name, last_offset FROM readmodel_checkpoint;"
+```
+
+One row, `products`, at the global offset of the last event the projection committed. The event store's `subscription_checkpoint` holds no row for it.
+
 You should see one row per product: `p-1` and `p-2`, `p-valid` from chapter 3 and `p-legacy` from chapter 4, the one the upcaster gives the category `Uncategorized`.
 
 ---
@@ -605,12 +615,13 @@ You should see one row per product: `p-1` and `p-2`, `p-valid` from chapter 3 an
 ## What We Learned
 
 - **`BaseProjection`** provides the `save`, `findById` and `delete` helpers and stores the read model under the projection's name (`"products"`, passed to its constructor). You extend it and implement `process(List<EventEnvelope>)`, writing only through the helpers.
-- **`ProjectionRepository`** is the persistence abstraction. The default implementation is `JdbcProjectionRepository`, which stores views as JSONB in PostgreSQL. Register it once as a Spring bean, by its concrete type, because the runner also uses it as its batch processor; all projections share the same instance.
+- **`ProjectionRepository`** is the persistence abstraction. The default implementation is `JdbcProjectionRepository`, which stores views as JSONB in PostgreSQL. You do not declare it: it is the repository of the default **read-model store** `postgres`, which the integration registers, and the injectable `ProjectionRepository` bean; all projections share the same instance.
+- **Two checkpoint tables.** The read-model store keeps the checkpoints of its projections in `readmodel_checkpoint`, committed in one transaction with their read models; the event store's `subscription_checkpoint` (`PostgresOffsetStore`) keeps the positions of event subscriptions and of projections that write elsewhere. A runner always reads a registration's checkpoint from the table its processor writes.
 - **`QueryBus`** and **`QueryHandler`** form the read-side routing layer, mirroring `CommandBus` and `Decider` on the write side. `SimpleQueryBus` is the in-process implementation: register handlers at startup with `register(Class, QueryHandler)`, then dispatch queries at runtime with `dispatch(query)`.
 - **`CachingQueryBus`** is a decorator that wraps any `QueryBus`. It caches responses for query types annotated with `@Cacheable` using Caffeine, with TTL and maximum entry count configured by the annotation.
 - **`@Cacheable`** declares caching policy directly on the query record. The `ttlSeconds` attribute controls expiry; `invalidateOn` lists the event types that should flush the cache when they are written to the store. A `scope` attribute (default `Scope.USER`) also partitions cache entries per calling user so one user's results are never served to another; `ListProducts` is an anonymous list endpoint, so it relies on the default and serves a single shared partition — switch to `Scope.GLOBAL` only when you are sure the result is identical for every caller.
 - **`CacheInvalidator`** is obtained from the `CachingQueryBus` and wired into the event pipeline. When the event store emits a batch of new events, `CacheAwareProjection` calls `invalidator.onEventsProcessed(batch)`, which checks each event type against every registered `@Cacheable.invalidateOn` list and evicts matching caches.
-- **`MultiProjectionRunner`** runs every projection on a virtual thread of its own, each with its own checkpoint in `PostgresOffsetStore`; a `TRANSACTIONAL_LOCAL` registration commits the read-model write and the checkpoint in one transaction.
+- **`MultiProjectionRunner`** runs every projection on a virtual thread of its own, each with its own checkpoint in the store it is registered on (`readModelStore.checkpointTarget()`); a `TRANSACTIONAL_LOCAL` registration commits the read-model write and the checkpoint in one transaction.
 - The **decoration order** matters: `CachingQueryBus → SimpleQueryBus` in this chapter. In chapter 10 it becomes `AuditingQueryBus → CachingQueryBus → SimpleQueryBus` — the audit bus wraps the caching bus, so cache hits are never logged (only uncached dispatches hit the handler and get audited). Each decorator is independently testable.
 
 ---

@@ -18,15 +18,16 @@ import org.streamrune.ecommerce.micronaut.AbstractIntegrationTest;
 
 /**
  * An at-least-once projection over an in-memory store ({@link AuditMemProjection}) boots and runs
- * in the real app beside the four TRANSACTIONAL_LOCAL PostgreSQL projections: the transactional
- * four write their rows into the processor's database, the at-least-once projection's checkpoint
- * lands there too, its rows land only in its own store, and none of them lands in the processor's
- * database. The framework's ProjectionFactory selected the single JdbcProjectionRepository bean
- * because the four declare TRANSACTIONAL_LOCAL.
+ * in the real app beside the four TRANSACTIONAL_LOCAL PostgreSQL projections. The framework's
+ * ProjectionFactory routes the four to the default read-model store, {@code postgres}, because they
+ * write through its repository: their rows and their checkpoints ({@code readmodel_checkpoint})
+ * commit together in the app's database. The at-least-once projection writes to a repository that
+ * belongs to no store, so it is routed to the event store's subscription checkpoint: its checkpoint
+ * lands in {@code subscription_checkpoint}, its rows land only in its own store, and none of them
+ * lands in the read-model store's database.
  *
- * <p>Before it commits a projection's batch the processor makes sure that projection's {@code
- * <name>_view} table exists, whatever the projection's mode, so an empty {@code audit_mem_view} may
- * exist in its database; what must never land there is a row.
+ * <p>The subscription checkpoint's processor creates no {@code <name>_view} table, so {@code
+ * audit_mem_view} is normally absent; the check counts its rows, and an absent table holds none.
  *
  * <p>The in-memory store is static, and every Micronaut test context in this module runs the
  * projection, some of them over another database. Its rows are keyed by global offset, so the store
@@ -37,6 +38,12 @@ import org.streamrune.ecommerce.micronaut.AbstractIntegrationTest;
 class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
 
   private static final ProjectionName AUDIT_MEM = ProjectionName.of("audit_mem");
+
+  /** The default read-model store's checkpoints: the transactional four commit theirs here. */
+  private static final String READ_MODEL_CHECKPOINT = "readmodel_checkpoint";
+
+  /** The event store's subscription checkpoints: the unrouted at-least-once projection's. */
+  private static final String SUBSCRIPTION_CHECKPOINT = "subscription_checkpoint";
 
   /**
    * Long enough for a fresh test context to take over leadership: when the previous context's
@@ -85,24 +92,30 @@ class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
                     .isEqualTo(1L));
     // The product's row and the products checkpoint commit together, so this checkpoint is at or
     // past the event the POST appended.
-    long productsCheckpoint = lastOffset("products");
+    long productsCheckpoint = lastOffset(READ_MODEL_CHECKPOINT, "products");
+    assertThat(lastOffset(SUBSCRIPTION_CHECKPOINT, "products"))
+        .as("a projection routed to the read-model store keeps no subscription checkpoint")
+        .isEqualTo(-1L);
 
     await()
         .atMost(PROPAGATION)
         .pollInterval(Duration.ofMillis(200))
         .untilAsserted(
             () ->
-                assertThat(lastOffset("audit_mem"))
-                    .as("the at-least-once projection's checkpoint is in the processor's database")
+                assertThat(lastOffset(SUBSCRIPTION_CHECKPOINT, "audit_mem"))
+                    .as("the at-least-once projection's checkpoint is the subscription checkpoint")
                     .isGreaterThanOrEqualTo(productsCheckpoint));
-    long checkpoint = lastOffset("audit_mem");
+    long checkpoint = lastOffset(SUBSCRIPTION_CHECKPOINT, "audit_mem");
+    assertThat(lastOffset(READ_MODEL_CHECKPOINT, "audit_mem"))
+        .as("the at-least-once projection keeps no checkpoint in the read-model store")
+        .isEqualTo(-1L);
 
     assertThat(
             AuditMemProjection.MEMORY.findById(AUDIT_MEM, String.valueOf(checkpoint), String.class))
         .as("the at-least-once projection applied the event at its checkpoint to its own store")
         .contains(eventTypeAt(checkpoint));
     assertThat(auditMemRows())
-        .as("nothing of the at-least-once projection lands in the processor's database")
+        .as("nothing of the at-least-once projection lands in the read-model store's database")
         .isZero();
   }
 
@@ -117,11 +130,16 @@ class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
     }
   }
 
-  private long lastOffset(String projection) throws SQLException {
+  /**
+   * The checkpoint of {@code projection} in {@code table}: {@code readmodel_checkpoint}, where the
+   * read-model store keeps the checkpoints of the projections routed to it, or {@code
+   * subscription_checkpoint}, the event store's, where an at-least-once projection that writes
+   * elsewhere keeps its own. -1 when the table holds no row for it.
+   */
+  private long lastOffset(String table, String projection) throws SQLException {
     try (var c = dataSource.getConnection();
         var ps =
-            c.prepareStatement(
-                "SELECT last_offset FROM projection_offset WHERE projection_name = ?")) {
+            c.prepareStatement("SELECT last_offset FROM " + table + " WHERE projection_name = ?")) {
       ps.setString(1, projection);
       try (var rs = ps.executeQuery()) {
         return rs.next() ? rs.getLong(1) : -1L;
@@ -142,7 +160,7 @@ class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
     }
   }
 
-  /** Rows of {@code products_view} in the processor's database for one product id. */
+  /** Rows of {@code products_view} in the read-model store's database for one product id. */
   private long productRows(String productId) throws SQLException {
     if (regclass("public.products_view") == null) {
       return 0L;
@@ -157,7 +175,9 @@ class ProjectionDeliveryModeE2EIT extends AbstractIntegrationTest {
     }
   }
 
-  /** Rows of {@code audit_mem_view} in the processor's database; an absent table holds none. */
+  /**
+   * Rows of {@code audit_mem_view} in the read-model store's database; an absent table holds none.
+   */
   private long auditMemRows() throws SQLException {
     if (regclass("public.audit_mem_view") == null) {
       return 0L;

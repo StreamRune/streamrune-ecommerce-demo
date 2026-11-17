@@ -489,11 +489,14 @@ public class StreamRuneProducer {
         new InventoryDecider());
   }
 
-  // Delivery: the four PostgreSQL read models declare TRANSACTIONAL_LOCAL; the framework's
-  // ProjectionProducer selects the single AtomicBatchProcessor bean (the default
-  // JdbcProjectionRepository, the same object these projections write through) because they demand
-  // it and because leadership is on — never because a DataSource exists. AuditProjection declares
-  // AT_LEAST_ONCE_IDEMPOTENT in the shared module and is handed no repository.
+  // Delivery: the four PostgreSQL read models declare TRANSACTIONAL_LOCAL and are built over the
+  // framework's ProjectionRepository bean, the repository of the default read-model store
+  // "postgres". The framework's ProjectionProducer routes each of them to that store because they
+  // write through its repository: their read-model writes and their checkpoints
+  // (readmodel_checkpoint)
+  // commit in one transaction. AuditProjection declares AT_LEAST_ONCE_IDEMPOTENT in the shared
+  // module, writes to no store's repository, and is routed to the event store's subscription
+  // checkpoint (subscription_checkpoint); it is handed no repository.
 
   /**
    * Product read model. {@link ProductProjection} (shared module) carries

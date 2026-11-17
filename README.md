@@ -66,7 +66,7 @@ The profile `tracing` adds Jaeger on port 16686, for the backend's traces with `
 
 `scripts/soak/soak.py` runs two Spring backends and the Quarkus backend on one database for hours under a steady mix of commands, queries and live streams, kills the saga's leader, stops RabbitMQ, pauses PostgreSQL and switches the payment gateway off on a schedule, and then checks that every command was applied once, every saga ended, the outbox was published, the read models equal the event store and no resource grows ([docs/soak.md](docs/soak.md)); `--duration 5m` is a smoke run.
 
-The database needs no schema script. The backend creates the framework's tables itself when it starts: `streamrune.event-store.schema.auto-initialize=true` has StreamRune apply the Flyway baselines it ships (event store and crypto), each recorded in its own history table, and the read-model tables are created by the projections on first use. The Micronaut and Quarkus apps do the same.
+The database needs no schema script. The backend creates the framework's tables itself when it starts: `streamrune.event-store.schema.auto-initialize=true` has StreamRune apply the Flyway baselines it ships (event store, crypto, and the read-model series with `readmodel_checkpoint`, where the projections keep their checkpoints), each recorded in its own history table, and the `<name>_view` tables are created by the projections on first use. The Micronaut and Quarkus apps do the same.
 
 ## Running Individually
 

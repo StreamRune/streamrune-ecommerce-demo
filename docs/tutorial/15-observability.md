@@ -1578,6 +1578,7 @@ import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -1588,8 +1589,10 @@ import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.tracing.StreamRuneTracing;
@@ -1783,14 +1786,6 @@ public class StreamRuneConfig {
   @Bean
   public OutboxEventMapper outboxEventMapper() {
     return new EcommerceIntegrationEventMapper();
-  }
-
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
   }
 
   @Bean
@@ -2114,6 +2109,11 @@ public class StreamRuneConfig {
     return new InventoryProjection(repo);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -2133,6 +2133,16 @@ public class StreamRuneConfig {
   /**
    * Runs the read models' projections, each on a thread of its own.
    *
+   * <p>{@code readModelStore} is the framework's default read-model store, {@code postgres} (a
+   * {@code PostgresReadModelStore}): the {@code JdbcProjectionRepository} every projection above
+   * writes through (it is the {@link ProjectionRepository} bean they are built with), its
+   * checkpoints in {@code readmodel_checkpoint}, and the same repository as the processor that
+   * commits a batch's read-model writes and its checkpoint in one transaction. The integration
+   * creates it on the application's {@code DataSource} and applies its migration series ({@code
+   * db/readmodel-migration}) at startup. Each registration reads and commits through {@code
+   * readModelStore.checkpointTarget()}, the pair of the two; the startup check verifies that every
+   * {@code TRANSACTIONAL_LOCAL} projection writes to that store's repository, and each one does.
+   *
    * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
@@ -2143,8 +2153,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -2157,30 +2166,37 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .tracing(tracing)
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction — the inventory counter can never double-reserve.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair — the inventory counter can never double-reserve.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("inventory"),
                 new CacheAwareProjection(inventoryProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;
@@ -2696,7 +2712,8 @@ Expected response shape:
           "lag": 0,
           "errorCount": 0,
           "status": "UP",
-          "role": "LEADING"
+          "role": "LEADING",
+          "store": "postgres"
         },
         "relay.outbox-relay": {
           "status": "UP",
@@ -2720,7 +2737,7 @@ Expected response shape:
 
 The `details` also hold one `relay.<name>` block for each retention sweeper, for the saga compensation-retry sweeper and for the saga's timeout runner (`relay.outbox-retention-sweeper`, `relay.inbox-retention-sweeper`, `relay.dead-letter-retention-sweeper`, `relay.saga-dead-letter-retention-sweeper`, and `relay.saga-compensation-retry:` and `relay.saga-timeout:` each followed by the saga state class), shortened here. The timeout runner is the application's (Chapter 11, Step 6); the integration finds the `SagaTimeoutRunner` bean and registers it like the relays it builds itself, so a timeout runner whose poll thread died turns the component `DOWN`. Once Step 6b has switched the per-stream SSE endpoint on, one more block appears, `relay.sse-event-feed`: the framework reports the feed of that endpoint like its other polling threads, `DOWN` when the thread has died, because the endpoint would go on admitting clients while no event reached them. `StreamRuneHealthIT` checks this list.
 
-Eight subscriptions are registered, each with its role: `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — the saga's and those of its three process managers (Chapter 11, Steps 5b, 5c and 6) — and the four projections, `products`, `orders`, `customers` and `inventory`, of which the sample shows the first (Chapter 11 gives the projection runner its lease). Each is built with `.healthContributor(...)`, so it registers with the auto-configured `SubscriptionHealthContributor` when it starts and adds a `subscription.<name>` block: `state` (`RUNNING`, `PAUSED`, `STOPPED`), `lag` (the events between its checkpoint and the head of the store), `errorCount`, `status`, and `role`, the subscription's role under its lease. With one backend all eight read `LEADING`. With two (Chapter 17) one backend reads `LEADING` and the other `STANDBY`; a standby is `RUNNING`, has no delivery errors and shares the leader's lag — the checkpoint is shared — so it reads `UP` while some backend leads and keeps up, and `DEGRADED` on both once the shared lag crosses `streamrune.subscription.health.lag-threshold` (1000 events unless configured). A listener that keeps failing — the payment process manager on a capture the store refuses, say — still shows first in the application log, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b): the block records it too. A subscription registered with `.healthContributor(...)` wraps its listener itself, so each page the listener throws on adds one to `errorCount`, and the block reads `DEGRADED` from the first failed page; a page the listener returns from sets `errorCount` back to `0`, and the status then follows the other rules again: `DEGRADED` while the lag is at the threshold or the subscription is paused, `DOWN` only when it is stopped or has halted for good (errors alone never make it `DOWN`), otherwise `UP`. A standby delivers no page, so it reports `errorCount` `0` and counts afresh when it leads again. The checkpoint does not move past the failing event, so the block's `lag` also grows with every event stored after it, and crossing the threshold is a second reason for `DEGRADED`, independent of the errors. The demo's `MultiProjectionRunner` hands the contributor to the runner of each projection, which registers under the projection's name (the framework's `SseEventFeed` is not a subscription of that contributor; it is the `relay.sse-event-feed` block above). `StreamRuneHealthIT` checks the eight subscription blocks, and the Quarkus and Micronaut `ObservabilitySmokeSuiteIT` check that the four subscriptions are registered and lead. The role is `UNGATED` for a subscription that takes no lease, and `NOT_REPORTED` for a registration that reports none.
+Eight subscriptions are registered, each with its role: `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — the saga's and those of its three process managers (Chapter 11, Steps 5b, 5c and 6) — and the four projections, `products`, `orders`, `customers` and `inventory`, of which the sample shows the first (Chapter 11 gives the projection runner its lease). Each is built with `.healthContributor(...)`, so it registers with the auto-configured `SubscriptionHealthContributor` when it starts and adds a `subscription.<name>` block: `state` (`RUNNING`, `PAUSED`, `STOPPED`), `lag` (the events between its checkpoint and the head of the store), `errorCount`, `status`, and `role`, the subscription's role under its lease. A projection's block adds `store`, the name of the read-model store it is routed to (`postgres` for all four here; the saga and process-manager blocks carry none), and its `lag` is measured against the checkpoint kept in that store. With one backend all eight read `LEADING`. With two (Chapter 17) one backend reads `LEADING` and the other `STANDBY`; a standby is `RUNNING`, has no delivery errors and shares the leader's lag — the checkpoint is shared — so it reads `UP` while some backend leads and keeps up, and `DEGRADED` on both once the shared lag crosses `streamrune.subscription.health.lag-threshold` (1000 events unless configured). A listener that keeps failing — the payment process manager on a capture the store refuses, say — still shows first in the application log, as the poll loop's `ERROR` line for every attempt (Chapter 11, Step 5b): the block records it too. A subscription registered with `.healthContributor(...)` wraps its listener itself, so each page the listener throws on adds one to `errorCount`, and the block reads `DEGRADED` from the first failed page; a page the listener returns from sets `errorCount` back to `0`, and the status then follows the other rules again: `DEGRADED` while the lag is at the threshold or the subscription is paused, `DOWN` only when it is stopped or has halted for good (errors alone never make it `DOWN`), otherwise `UP`. A standby delivers no page, so it reports `errorCount` `0` and counts afresh when it leads again. The checkpoint does not move past the failing event, so the block's `lag` also grows with every event stored after it, and crossing the threshold is a second reason for `DEGRADED`, independent of the errors. The demo's `MultiProjectionRunner` hands the contributor to the runner of each projection, which registers under the projection's name (the framework's `SseEventFeed` is not a subscription of that contributor; it is the `relay.sse-event-feed` block above). `StreamRuneHealthIT` checks the eight subscription blocks, and the Quarkus and Micronaut `ObservabilitySmokeSuiteIT` check that the four subscriptions are registered and lead. The role is `UNGATED` for a subscription that takes no lease, and `NOT_REPORTED` for a registration that reports none.
 
 **Metrics — command counter:**
 

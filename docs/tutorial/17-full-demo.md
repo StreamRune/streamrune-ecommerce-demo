@@ -976,6 +976,7 @@ import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -986,8 +987,10 @@ import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.tracing.StreamRuneTracing;
@@ -1181,14 +1184,6 @@ public class StreamRuneConfig {
   @Bean
   public OutboxEventMapper outboxEventMapper() {
     return new EcommerceIntegrationEventMapper();
-  }
-
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
   }
 
   @Bean
@@ -1523,6 +1518,11 @@ public class StreamRuneConfig {
     return new InventoryProjection(repo);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -1542,6 +1542,16 @@ public class StreamRuneConfig {
   /**
    * Runs the read models' projections, each on a thread of its own.
    *
+   * <p>{@code readModelStore} is the framework's default read-model store, {@code postgres} (a
+   * {@code PostgresReadModelStore}): the {@code JdbcProjectionRepository} every projection above
+   * writes through (it is the {@link ProjectionRepository} bean they are built with), its
+   * checkpoints in {@code readmodel_checkpoint}, and the same repository as the processor that
+   * commits a batch's read-model writes and its checkpoint in one transaction. The integration
+   * creates it on the application's {@code DataSource} and applies its migration series ({@code
+   * db/readmodel-migration}) at startup. Each registration reads and commits through {@code
+   * readModelStore.checkpointTarget()}, the pair of the two; the startup check verifies that every
+   * {@code TRANSACTIONAL_LOCAL} projection writes to that store's repository, and each one does.
+   *
    * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
@@ -1552,8 +1562,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("streamRuneDefaultReadModelStore") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -1566,30 +1575,37 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .tracing(tracing)
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction — the inventory counter can never double-reserve.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair — the inventory counter can never double-reserve.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("inventory"),
                 new CacheAwareProjection(inventoryProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;
@@ -2036,7 +2052,7 @@ The interceptor sleeps on the thread that dispatches the saga's command, after t
 1. It waits until both answer `/actuator/health` and checks that both health answers show the saga subscription's role; without `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always` it stops there and says so. Then it creates two products of its own with stock for three times as many units as there are orders.
 2. It places `ORDERS` orders (60 by default), one a second, alternating `http://localhost:8080` and `http://localhost:8091` — the `POST /api/orders` of Step 5. Every third order has two lines, one of each product, the second of two units. Right after placing it, the script starts a follow-up in the background for some of the orders: one in four is cancelled by its customer as soon as the order's read model has a row (the order answers `403` for a moment before that, and the script asks again for up to thirty seconds: when the backend that leads the projections dies, the read models pause until the survivor takes their leases); of the others, one in five is cancelled once it reads `CONFIRMED`, and one in seven is shipped by `admin-1` once it reads `CONFIRMED`, after which its customer's cancellation must answer `400`. A follow-up goes to whichever backend answers, because the leader may be dead at that moment. An order whose deadline cancelled it first needs no follow-up, and a shipment answered `400` means that happened between the read and the shipment.
 3. Halfway it reads both roles, exits `1` unless exactly one backend reads `LEADING`, and kills that one with `docker compose kill -s SIGKILL`. Whatever the leader had in flight — a saga step between two forward commands, a claim, a compensation — stops without a shutdown, and it does not give its lease back. The script waits until the other backend reads `LEADING` (at most 60 seconds; the lease expires 15 seconds after its last renewal), prints how long that took, starts the killed container again with `docker compose start` (so it keeps the settings above) and waits until it answers; it comes back as the standby.
-4. After the last order it waits for the follow-ups and exits `1` if any request was answered with a status other than the one expected. Then it waits until the run is quiet (at most five minutes): no `saga_state` row of this run's fulfillment sagas is outside `COMPLETED`, `COMPENSATED` and `FAILED` (a `FAULTED` saga counts as not ended), and the checkpoints of the four subscriptions that react to orders — `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment` — are at or past the last global offset of the event store. One statement reads the sagas, the four checkpoints and the head together, so a subscription that saves its checkpoint after its page, and the appends of that page, cannot slip between two reads. On a timeout it prints the open sagas and the four checkpoints against the head and exits `1`.
+4. After the last order it waits for the follow-ups and exits `1` if any request was answered with a status other than the one expected. Then it waits until the run is quiet (at most five minutes): no `saga_state` row of this run's fulfillment sagas is outside `COMPLETED`, `COMPENSATED` and `FAILED` (a `FAULTED` saga counts as not ended), and the checkpoints of the four subscriptions that react to orders — `order-fulfillment-saga`, `payment-process-manager`, `order-cancellation` and `order-shipment`, rows of the event store's `subscription_checkpoint` — are at or past the last global offset of the event store. One statement reads the sagas, the four checkpoints and the head together, so a subscription that saves its checkpoint after its page, and the appends of that page, cannot slip between two reads. On a timeout it prints the open sagas and the four checkpoints against the head and exits `1`.
 5. It prints this run's sagas by status, the number compensated at their deadline (an episode with no cause event), how many orders were cancelled and shipped and how many payments were refunded and voided, and each backend's count of fenced forward commands, then runs `scripts/money-and-stock-invariants.sql` (below) and exits `1` if it returns a row for this run's orders.
 
 ```bash

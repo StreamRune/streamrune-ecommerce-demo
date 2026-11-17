@@ -76,7 +76,8 @@ In `frontend/`, after `npm ci`:
   background.
 - **No schema scripts.** The applications create the framework's tables when they start
   (`streamrune.event-store.schema.auto-initialize=true` applies the Flyway migrations the framework
-  ships), and the projections create the read-model tables on first use.
+  ships, the read-model series with `readmodel_checkpoint` included), and the projections create
+  their `<name>_view` tables on first use.
 - **CI.** The required checks of a pull request are `Spring backend integration tests`,
   `Quarkus backend integration tests`, `Micronaut backend integration tests`, `Shared module tests`
   (which also runs `spotlessCheck` and the docs tests) and `dco`. CI checks out the framework's
