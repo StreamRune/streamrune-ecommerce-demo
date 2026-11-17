@@ -203,7 +203,7 @@ A few things to notice:
 
 Open `spring-app/src/main/java/org/streamrune/ecommerce/spring/config/StreamRuneConfig.java`. This chapter adds the read side's beans: the `ProductProjection` in this step, the query bus and the offset store in Step 5, and the projection runner in Step 7, which ends with the whole class. The new types come from `org.streamrune.core.projection`, `org.streamrune.core.subscription`, `org.streamrune.postgres` and `org.streamrune.runtime` (the last two imported whole), from Spring's `org.springframework.beans.factory.annotation.Qualifier` and `javax.sql.DataSource`, and from the `projections` and `queries` modules.
 
-First, where the read models live: the **read-model store**. You do not declare it. With a `DataSource` in the context, the framework's Spring integration registers the default read-model store, a `PostgresReadModelStore` bean named `postgres`, on the application's database. It bundles three things:
+First, where the read models live: the **read-model store**. You do not declare it. With a `DataSource` in the context, the framework's Spring integration registers the default read-model store, a `PostgresReadModelStore` named `postgres` (bean name `streamRuneDefaultReadModelStore`), on the application's database. It bundles three things:
 
 - a `JdbcProjectionRepository`, which keeps each read model in a table of its own (`products_view` for the projection `"products"`);
 - the **checkpoints** of the projections that write there — how far into the event stream each one has read — in the table `readmodel_checkpoint`, beside the read models;
