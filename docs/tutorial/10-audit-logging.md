@@ -300,13 +300,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.util.List;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
@@ -410,14 +413,6 @@ public class StreamRuneConfig {
   @Bean
   public EventUpcaster productCreatedUpcaster() {
     return new ProductCreatedUpcaster();
-  }
-
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
   }
 
   @Bean
@@ -573,6 +568,11 @@ public class StreamRuneConfig {
         subject -> List.of(StreamId.of(CustomerState.TYPE, AggregateId.of(subject.value()))));
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -592,8 +592,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("postgres") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -602,23 +601,28 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;
@@ -967,7 +971,7 @@ Each entry is an `AuditEntry` record capturing `eventId`, `aggregateType` and `a
 
 `AuditProjection` declares `@ProjectionConfig(name = "audit", deliveryMode = AT_LEAST_ONCE_IDEMPOTENT)` (the delivery modes are introduced in Chapter 5). It keeps its entries in memory, so they can never share the runner's checkpoint transaction, and the runner hands it no repository at all. A batch can be delivered twice even without a crash — a checkpoint commit that fails after `process` returned (a lost connection, a failed `COMMIT`) is retried from the unchanged checkpoint, and a dead-letter replay re-applies a range — so the projection dedups by `eventId`: an event whose id is already in the map is skipped. A redelivered batch is among the newest events, so its ids are still kept; an event delivered again after the map dropped it would be recorded again, as the newest. Appending blindly would break the guarantee the projection declares.
 
-The projection exposes a `listByAggregateType(String aggregateType)` method that filters entries by aggregate type. If you want to expose this through a REST endpoint, inject `AuditProjection` into a controller and call `listByAggregateType("order")`. Note that `AuditProjection` is not currently registered in the Spring app's `MultiProjectionRunner` (the Quarkus and Micronaut apps discover it through its annotation) — it is provided as an extension point for an audit read model. To activate it in the Spring app, declare an `AuditProjection` bean and register it like the other four projections, but with its own mode: `.register(ProjectionName.of("audit"), auditProjection, ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT)`. It may share the runner with the four `TRANSACTIONAL_LOCAL` read models.
+The projection exposes a `listByAggregateType(String aggregateType)` method that filters entries by aggregate type. If you want to expose this through a REST endpoint, inject `AuditProjection` into a controller and call `listByAggregateType("order")`. Note that `AuditProjection` is not currently registered in the Spring app's `MultiProjectionRunner` (the Quarkus and Micronaut apps discover it through its annotation) — it is provided as an extension point for an audit read model. To activate it in the Spring app, declare an `AuditProjection` bean and register it beside the other four projections, with its own mode and its own checkpoint target: `.register(ProjectionName.of("audit"), auditProjection, ProjectionErrorStrategy.HALT, ProjectionDeliveryMode.AT_LEAST_ONCE_IDEMPOTENT, subscriptionCheckpoint)`, where `subscriptionCheckpoint` is the `CheckpointTarget` bean `streamRuneSubscriptionCheckpoint` the integration registers (or `offsetStore.subscriptionCheckpoint()`). It writes outside the read-model store, so its checkpoint lives in the event store's `subscription_checkpoint`, not in `readmodel_checkpoint` with the read models (Chapter 5). It may share the runner with the four `TRANSACTIONAL_LOCAL` read models.
 
 ---
 

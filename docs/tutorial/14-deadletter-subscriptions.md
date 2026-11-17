@@ -755,7 +755,7 @@ The frontend's Adjust and Receive Shipment dialogs of Admin → Inventory keep t
 
 > **The real demo's `MultiProjectionRunner` does not use `PostgresProjectionDeadLetterStore`.** All four projections use the default error strategy (`HALT`). The per-projection DLQ wiring below is an optional production hardening step — include it in your project if you want failed event batches stored durably instead of halting the projection.
 
-The error strategy is set **per registration** using the four-argument `register` overload — name, projection, error strategy, delivery mode. To enable DLQ for the orders projection, give the `projectionRunner` bean a `PostgresProjectionDeadLetterStore projectionDlq` parameter, hand it to the builder, and register the orders projection with the strategy (the import is `org.streamrune.core.projection.ProjectionErrorStrategy`, since `StreamRuneConfig` imports `org.streamrune.core.projection` types individually rather than with a wildcard). The lines of the builder that change:
+The error strategy is set **per registration**: it is the third argument of the five-argument `register` overload the runner has used since Chapter 5 — name, projection, error strategy, delivery mode, checkpoint target. To enable DLQ for the orders projection, give the `projectionRunner` bean a `PostgresProjectionDeadLetterStore projectionDlq` parameter, hand it to the builder, and register the orders projection with `ProjectionErrorStrategy.DLQ` instead of `HALT`. The lines of the builder that change:
 
 ```java
 .deadLetterStore(projectionDlq) // required when any registration uses DLQ
@@ -763,13 +763,14 @@ The error strategy is set **per registration** using the four-argument `register
     ProjectionName.of("orders"),
     new CacheAwareProjection(orderProjection, cacheInvalidator),
     ProjectionErrorStrategy.DLQ,
-    ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+    ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+    readModelStore.checkpointTarget())
 ```
 
 Two things to note:
 
 - **`deadLetterStore` on the builder is shared** across all registrations that use `DLQ` strategy. The builder validates at `build()` time that a `deadLetterStore` is supplied whenever any registration requests `DLQ` — it throws `IllegalArgumentException` otherwise.
-- **If you are not using DLQ**, omit the `projectionDlq` parameter and the `.deadLetterStore(...)` call and leave every `register` call in the three-argument form — name, projection, delivery mode (as in Chapters 5–13).
+- **If you are not using DLQ**, omit the `projectionDlq` parameter and the `.deadLetterStore(...)` call and leave every `register` call on `ProjectionErrorStrategy.HALT` (as in Chapters 5–13).
 
 When `orderProjection.process(batch)` throws, the internal runner writes a `ProjectionDeadLetterEntry` containing the projection name, the offset range of the failed batch, the exception class, the exception message, and the timestamp — then continues processing the next batch. The other three projections are unaffected.
 
@@ -1311,6 +1312,7 @@ import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -1321,8 +1323,10 @@ import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.types.AggregateId;
@@ -1513,14 +1517,6 @@ public class StreamRuneConfig {
   @Bean
   public OutboxEventMapper outboxEventMapper() {
     return new EcommerceIntegrationEventMapper();
-  }
-
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
   }
 
   @Bean
@@ -1825,6 +1821,11 @@ public class StreamRuneConfig {
     return new InventoryProjection(repo);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -1844,6 +1845,16 @@ public class StreamRuneConfig {
   /**
    * Runs the read models' projections, each on a thread of its own.
    *
+   * <p>{@code readModelStore} is the framework's default read-model store, {@code postgres} (a
+   * {@code PostgresReadModelStore}): the {@code JdbcProjectionRepository} every projection above
+   * writes through (it is the {@link ProjectionRepository} bean they are built with), its
+   * checkpoints in {@code readmodel_checkpoint}, and the same repository as the processor that
+   * commits a batch's read-model writes and its checkpoint in one transaction. The integration
+   * creates it on the application's {@code DataSource} and applies its migration series ({@code
+   * db/readmodel-migration}) at startup. Each registration reads and commits through {@code
+   * readModelStore.checkpointTarget()}, the pair of the two; the startup check verifies that every
+   * {@code TRANSACTIONAL_LOCAL} projection writes to that store's repository, and each one does.
+   *
    * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
@@ -1853,8 +1864,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("postgres") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -1866,29 +1876,36 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction — the inventory counter can never double-reserve.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair — the inventory counter can never double-reserve.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("inventory"),
                 new CacheAwareProjection(inventoryProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;
@@ -2381,7 +2398,7 @@ public Map<String, Object> projectionStatus() {
 }
 ```
 
-`MultiProjectionRunner` does not expose per-projection pause/resume — it operates on the whole group. If you need to pause an individual projection in production (for example to replay it from a specific offset), the correct approach is to stop the entire runner, create a new `MultiProjectionRunner` with the corrected offset in the `OffsetStore`, and restart. The offset is persisted in `PostgresOffsetStore`, so the other projections resume exactly where they left off.
+`MultiProjectionRunner` does not expose per-projection pause/resume — it operates on the whole group. If you need to pause an individual projection in production (for example to replay it from a specific offset), the correct approach is to stop the entire runner, correct the projection's checkpoint in the read-model store's `readmodel_checkpoint`, and start a new `MultiProjectionRunner`. Every checkpoint is persisted there, so the other projections resume exactly where they left off.
 
 ### Step 7: Verify End-to-End
 
@@ -2424,7 +2441,7 @@ var replayer =
     new ProjectionDeadLetterReplayer(
         eventStore,
         projectionDlq,
-        projectionRepository);   // the processor the runner commits through
+        readModelStore.processor());   // the processor the runner commits through
 
 ProjectionDeadLetterReplayer.ReplayResult result =
     replayer.replay(
@@ -2435,7 +2452,7 @@ ProjectionDeadLetterReplayer.ReplayResult result =
 // result.replayed(), result.failed(), result.fenced()
 ```
 
-- **The constructor takes the processor.** Its third argument is the `AtomicBatchProcessor` the projection's runner commits through — here `projectionRepository`, the `JdbcProjectionRepository` handed to `.atomicProcessor(...)` in Step 4. A replay takes that processor's per-projection lock (the projection's checkpoint row, `FOR UPDATE`), the lock a live batch takes, so a replay and a live batch of one projection never run at the same time, in one process or across replicas, and the replay is safe while the runner is live. A different processor here serializes nothing.
+- **The constructor takes the processor.** Its third argument is the `AtomicBatchProcessor` the projection's runner commits through — here `readModelStore.processor()`, the `JdbcProjectionRepository` of the read-model store the projection is registered on (`readModelStore.checkpointTarget()` in Step 4). A replay takes that processor's per-projection lock (the projection's checkpoint row in `readmodel_checkpoint`, `FOR UPDATE`), the lock a live batch takes, so a replay and a live batch of one projection never run at the same time, in one process or across replicas, and the replay is safe while the runner is live. A different processor here serializes nothing.
 - **`replay(name, projection, mode, maxEntries)`** names the projection, passes the projection as it is registered (with its `CacheAwareProjection` wrapper, so the replay invalidates the cache too) and the delivery mode it is registered with. The mode decides what the projection is handed, exactly as for a live batch: under `TRANSACTIONAL_LOCAL` it is the replay transaction's repository, so a range is applied all-or-nothing. The call replays up to `maxEntries` entries, oldest range first, discards each entry it applied, and never moves the checkpoint: it fills the hole behind it. `ReplayResult` counts the entries replayed, the entries that failed and were kept, and the entries a self-fencing projection applied nothing of and were kept.
 - **Replay is refused for the non-atomic at-least-once processor.** `AtomicBatchProcessor.nonAtomicAtLeastOnce()` holds no per-projection lock, so `replay` throws an `IllegalStateException` for it before it reads an entry: beside a live batch both sides could read a row before either saves it, and one of the two writes would be lost. For such a registration stop the projection's runner and call `replayWithRunnerStopped(name, projection, maxEntries)`. The demo's runner commits through `JdbcProjectionRepository`, so `replay` is the method to call.
 
@@ -2443,21 +2460,22 @@ The lock does not lift the requirements on `process` described under `DLQ` at th
 
 **Scenario 2: Restart and catch up**
 
-A projection keeps its place in `projection_offset`, one row per projection, updated with every batch it commits. Read the checkpoints and the head of the store:
+A projection keeps its place in the read-model store's `readmodel_checkpoint`, one row per projection, updated in the same transaction as the read-model rows of every batch it commits. The subscriptions — the saga's and the process managers' — keep theirs in the event store's `subscription_checkpoint` (Chapter 5, Step 5). Read both and the head of the store:
 
 ```bash
 docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
-  -c "SELECT projection_name, last_offset FROM projection_offset ORDER BY projection_name;" \
+  -c "SELECT projection_name, last_offset FROM readmodel_checkpoint ORDER BY projection_name;" \
+  -c "SELECT projection_name, last_offset FROM subscription_checkpoint ORDER BY projection_name;" \
   -c "SELECT max(global_offset) AS head FROM event_stream;"
 ```
 
-With the application running and idle, every projection's `last_offset` is at the head, or one poll behind it (`projection_offset` also holds the checkpoints of the subscriptions, the saga's and the process managers'). Stop the application and start it again: on startup `MultiProjectionRunner.start()` reads each projection's checkpoint from `PostgresOffsetStore` and reads only the events stored after it, so nothing applied before the restart is applied twice. The event store keeps every event a writer appends while this application is down — with two backends on one database (Chapter 17), the other one goes on writing — and the projections apply them, in one or more batches, before they report `LIVE` again (Step 6).
+With the application running and idle, every `last_offset` is at the head, or one poll behind it. Stop the application and start it again: on startup `MultiProjectionRunner.start()` reads each projection's checkpoint from `readmodel_checkpoint` (through the store's `checkpointTarget()` it is registered with) and reads only the events stored after it, so nothing applied before the restart is applied twice. The event store keeps every event a writer appends while this application is down — with two backends on one database (Chapter 17), the other one goes on writing — and the projections apply them, in one or more batches, before they report `LIVE` again (Step 6).
 
 ---
 
 ## What We Learned
 
-**`ProjectionErrorStrategy`** is an enum with three values: `HALT`, `SKIP`, and `DLQ`. It is set per projection with `MultiProjectionRunner.builder().register(name, projection, strategy, mode)`; the demo registers every projection with the three-argument form, which keeps the default `HALT`. The choice is a tradeoff between fail-fast safety and production liveness.
+**`ProjectionErrorStrategy`** is an enum with three values: `HALT`, `SKIP`, and `DLQ`. It is set per projection with `MultiProjectionRunner.builder().register(name, projection, strategy, mode, target)`; the demo registers every projection with `HALT`, the default. The choice is a tradeoff between fail-fast safety and production liveness.
 
 **`ProjectionDeadLetterStore`** is the interface for persisting failed projection batches. `PostgresProjectionDeadLetterStore` is the durable implementation backed by a `projection_dead_letters` table. Each `ProjectionDeadLetterEntry` carries the projection name, the global offset range of the failed batch, the event count, the exception class and message, the consecutive error count at the time of failure, and the timestamp.
 

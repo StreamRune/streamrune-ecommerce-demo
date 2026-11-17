@@ -773,7 +773,7 @@ docker compose exec postgres psql -U postgres -d streamrune_ecommerce \
   -c "\dt"
 ```
 
-You should see several tables including `event_stream`, `snapshot_store`, `projection_offset`, and `audit_log`, plus the history table `flyway_schema_history_streamrune`.
+You should see several tables including `event_stream`, `snapshot_store`, `subscription_checkpoint`, and `audit_log`, plus the history table `flyway_schema_history_streamrune`. `subscription_checkpoint` is where an event subscription records how far into the event stream it has read. The projections of Chapter 5 keep their checkpoints elsewhere, beside their read models, in a table of the read-model store, `readmodel_checkpoint`: it appears once the application wires its first projection runner.
 
 The application exposes a health endpoint at `http://localhost:8080/actuator/health`. Open it in a browser or run:
 
