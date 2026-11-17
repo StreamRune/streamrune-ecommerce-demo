@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -18,8 +19,10 @@ import org.streamrune.core.outbox.OutboxEventMapper;
 import org.streamrune.core.outbox.OutboxOrderingMode;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionIndex;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.tracing.StreamRuneTracing;
@@ -213,14 +216,6 @@ public class StreamRuneConfig {
   @Bean
   public OutboxEventMapper outboxEventMapper() {
     return new EcommerceIntegrationEventMapper();
-  }
-
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
   }
 
   @Bean
@@ -555,6 +550,12 @@ public class StreamRuneConfig {
     return new InventoryProjection(repo);
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}): where the saga
+   * subscription and the process-manager subscriptions below keep their positions. The projections
+   * do not: they keep theirs beside their read models, in the read-model store's {@code
+   * readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -574,6 +575,16 @@ public class StreamRuneConfig {
   /**
    * Runs the read models' projections, each on a thread of its own.
    *
+   * <p>{@code readModelStore} is the framework's default read-model store, {@code postgres} (a
+   * {@code PostgresReadModelStore}): the {@code JdbcProjectionRepository} every projection above
+   * writes through (it is the {@link ProjectionRepository} bean they are built with), its
+   * checkpoints in {@code readmodel_checkpoint}, and the same repository as the processor that
+   * commits a batch's read-model writes and its checkpoint in one transaction. The integration
+   * creates it on the application's {@code DataSource} and applies its migration series ({@code
+   * db/readmodel-migration}) at startup. Each registration reads and commits through {@code
+   * readModelStore.checkpointTarget()}, the pair of the two; the startup check verifies that every
+   * {@code TRANSACTIONAL_LOCAL} projection writes to that store's repository, and each one does.
+   *
    * <p>{@code leadership(...)} gives each projection a lease named after it, the name it is
    * registered under: with more than one backend on the database one of them reads the events and
    * writes the projection's read model, and the others stand by. {@code healthContributor(...)}
@@ -584,8 +595,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("postgres") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       OrderProjection orderProjection,
@@ -598,30 +608,37 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
             .leadership(leadership.getIfAvailable(() -> SubscriptionLeadership.NOOP))
             .healthContributor(health.getIfAvailable(() -> SubscriptionHealthContributor.NOOP))
             .tracing(tracing)
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction — the inventory counter can never double-reserve.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair — the inventory counter can never double-reserve.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("orders"),
                 new CacheAwareProjection(orderProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("inventory"),
                 new CacheAwareProjection(inventoryProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;

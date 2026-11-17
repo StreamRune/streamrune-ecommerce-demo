@@ -24,7 +24,11 @@ import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.EventMetadata;
 import org.streamrune.core.IdGenerator;
 import org.streamrune.core.SimpleEventTypeRegistry;
+import org.streamrune.core.projection.AtomicBatchProcessor;
 import org.streamrune.core.projection.BaseProjection;
+import org.streamrune.core.projection.CheckpointTarget;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionLeadership;
 import org.streamrune.core.tracing.StreamRuneTracing;
 import org.streamrune.core.types.AggregateId;
@@ -40,6 +44,7 @@ import org.streamrune.ecommerce.projections.InventoryProjection;
 import org.streamrune.ecommerce.projections.OrderProjection;
 import org.streamrune.ecommerce.projections.ProductProjection;
 import org.streamrune.postgres.JdbcProjectionRepository;
+import org.streamrune.postgres.PostgresReadModelCheckpoints;
 import org.streamrune.runtime.CacheAwareProjection;
 import org.streamrune.runtime.CacheInvalidator;
 import org.streamrune.runtime.MultiProjectionRunner;
@@ -52,9 +57,10 @@ import org.streamrune.test.InMemoryProjectionRepository;
 
 /**
  * The Spring app wires its MultiProjectionRunner by hand (auto-discovery is off), so the delivery
- * mode rules are pinned on the same builder shape StreamRuneConfig#projectionRunner uses, over
- * in-memory stores, and on the real StreamRuneConfig#projectionRunner bean method, over
- * JdbcProjectionRepository objects that never open a connection.
+ * mode rules are pinned on the same builder shape StreamRuneConfig#projectionRunner uses (each
+ * registration reading and committing through the read-model store's checkpoint target), over an
+ * in-memory store, and on the real StreamRuneConfig#projectionRunner bean method, over a read-model
+ * store whose JdbcProjectionRepository and readmodel_checkpoint never open a connection.
  */
 class ProjectionDeliveryModeWiringTest {
 
@@ -115,30 +121,51 @@ class ProjectionDeliveryModeWiringTest {
                 });
   }
 
+  /**
+   * An in-memory read-model store: the repository is also its own checkpoints and its own
+   * processor, as the PostgreSQL store's JdbcProjectionRepository and readmodel_checkpoint are.
+   */
+  private static ReadModelStore memoryStore(InMemoryProjectionRepository repository) {
+    return ReadModelStore.of("memory", repository, repository, repository);
+  }
+
+  /** A read-model store over a JdbcProjectionRepository and readmodel_checkpoint, never opened. */
+  private static ReadModelStore unopenedPostgresStore(JdbcProjectionRepository repository) {
+    return ReadModelStore.of(
+        "postgres", repository, new PostgresReadModelCheckpoints(unusedDataSource()), repository);
+  }
+
   private static MultiProjectionRunner.Builder demoShape(
       InMemoryProjectionRepository processor, InMemoryEventStore events) {
     var invalidator = invalidator();
+    CheckpointTarget target = memoryStore(processor).checkpointTarget();
     return MultiProjectionRunner.builder()
         .eventStore(events)
-        .offsetStore(processor)
-        .atomicProcessor(processor)
         .batchSize(10)
         .register(
             ProjectionName.of("products"),
             new CacheAwareProjection(new ProductProjection(processor), invalidator),
-            TRANSACTIONAL_LOCAL)
+            ProjectionErrorStrategy.HALT,
+            TRANSACTIONAL_LOCAL,
+            target)
         .register(
             ProjectionName.of("orders"),
             new CacheAwareProjection(new OrderProjection(processor), invalidator),
-            TRANSACTIONAL_LOCAL)
+            ProjectionErrorStrategy.HALT,
+            TRANSACTIONAL_LOCAL,
+            target)
         .register(
             ProjectionName.of("customers"),
             new CacheAwareProjection(new CustomerProjection(processor), invalidator),
-            TRANSACTIONAL_LOCAL)
+            ProjectionErrorStrategy.HALT,
+            TRANSACTIONAL_LOCAL,
+            target)
         .register(
             ProjectionName.of("inventory"),
             new CacheAwareProjection(new InventoryProjection(processor), invalidator),
-            TRANSACTIONAL_LOCAL);
+            ProjectionErrorStrategy.HALT,
+            TRANSACTIONAL_LOCAL,
+            target);
   }
 
   @Test
@@ -162,12 +189,12 @@ class ProjectionDeliveryModeWiringTest {
                     .eventStore(
                         new InMemoryEventStore(
                             new StreamRuneConfig().eventTypeRegistry(), new InMemoryCryptoEngine()))
-                    .offsetStore(processor)
-                    .atomicProcessor(processor)
                     .register(
                         ProjectionName.of("orders"),
                         new OrderProjection(other),
-                        TRANSACTIONAL_LOCAL)
+                        ProjectionErrorStrategy.HALT,
+                        TRANSACTIONAL_LOCAL,
+                        memoryStore(processor).checkpointTarget())
                     .build())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'orders' declares TRANSACTIONAL_LOCAL and writes to")
@@ -178,10 +205,10 @@ class ProjectionDeliveryModeWiringTest {
   }
 
   /**
-   * The real bean method registers each of the four TRANSACTIONAL_LOCAL: built over a repository
-   * that is not the processor, that one projection is refused. An AT_LEAST_ONCE_IDEMPOTENT
-   * registration would be accepted over any repository, so this fails if one of the four is
-   * flipped.
+   * The real bean method registers each of the four TRANSACTIONAL_LOCAL on the read-model store's
+   * checkpoint target: built over a repository that is not the store's, that one projection is
+   * refused. An AT_LEAST_ONCE_IDEMPOTENT registration would be accepted over any repository, so
+   * this fails if one of the four is flipped.
    */
   @ParameterizedTest
   @ValueSource(strings = {"products", "orders", "customers", "inventory"})
@@ -194,8 +221,7 @@ class ProjectionDeliveryModeWiringTest {
                     .projectionRunner(
                         new InMemoryEventStore(
                             new StreamRuneConfig().eventTypeRegistry(), new InMemoryCryptoEngine()),
-                        new InMemoryOffsetStore(),
-                        processor,
+                        unopenedPostgresStore(processor),
                         defaultProperties(),
                         new ProductProjection("products".equals(name) ? other : processor),
                         new OrderProjection("orders".equals(name) ? other : processor),
@@ -236,12 +262,20 @@ class ProjectionDeliveryModeWiringTest {
                     null,
                     Instant.now()))),
         new Version(0));
+    // An at-least-once projection that writes to a store of its own keeps its checkpoint apart
+    // from the read-model store: the integrations route it to the subscription checkpoint.
+    var subscriptionCheckpoints = new InMemoryOffsetStore();
     var runner =
         demoShape(processor, events)
             .register(
                 ProjectionName.of("audit_mem"),
                 new AuditMemProjection(memory),
-                AT_LEAST_ONCE_IDEMPOTENT)
+                ProjectionErrorStrategy.HALT,
+                AT_LEAST_ONCE_IDEMPOTENT,
+                new CheckpointTarget(
+                    "subscription_checkpoint",
+                    subscriptionCheckpoints,
+                    AtomicBatchProcessor.nonAtomicAtLeastOnce()))
             .build();
     runner.start();
     try (runner) {
@@ -253,7 +287,10 @@ class ProjectionDeliveryModeWiringTest {
     assertThat(processor.hasReadModels(ProjectionName.of("audit_mem")))
         .as("nothing the at-least-once projection writes lands in the processor's store")
         .isFalse();
-    assertThat(processor.committedOffset(ProjectionName.of("audit_mem")))
+    assertThat(subscriptionCheckpoints.getLastOffset(ProjectionName.of("audit_mem")))
+        .as("its checkpoint lives in the subscription checkpoints, not in the read-model store")
         .isEqualTo(GlobalOffset.of(1));
+    assertThat(processor.committedOffset(ProjectionName.of("audit_mem")))
+        .isEqualTo(GlobalOffset.initial());
   }
 }
