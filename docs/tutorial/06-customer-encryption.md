@@ -738,8 +738,7 @@ and give `projectionRunner` the projection as a parameter and a `"customers"` re
 @Bean(destroyMethod = "close")
 public MultiProjectionRunner projectionRunner(
     EventStore eventStore,
-    OffsetStore offsetStore,
-    JdbcProjectionRepository projectionRepository,
+    @Qualifier("postgres") ReadModelStore readModelStore,
     StreamRuneProperties properties,
     ProductProjection productProjection,
     CustomerProjection customerProjection,
@@ -747,26 +746,29 @@ public MultiProjectionRunner projectionRunner(
   var runner =
       MultiProjectionRunner.builder()
           .eventStore(eventStore)
-          .offsetStore(offsetStore)
           .subscriptionConfig(projectionPolling(properties))
-          // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-          // checkpoint in ONE transaction.
-          .atomicProcessor(projectionRepository)
+          // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+          // its read-model write and its checkpoint in ONE transaction through, the read-model
+          // store's pair.
           .register(
               ProjectionName.of("products"),
               new CacheAwareProjection(productProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+              ProjectionErrorStrategy.HALT,
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+              readModelStore.checkpointTarget())
           .register(
               ProjectionName.of("customers"),
               new CacheAwareProjection(customerProjection, cacheInvalidator),
-              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+              ProjectionErrorStrategy.HALT,
+              ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+              readModelStore.checkpointTarget())
           .build();
   runner.start();
   return runner;
 }
 ```
 
-Without the registration `CustomerProjection` would be a dangling bean — Spring would create it but no projection runner would ever feed it events. With this change, `MultiProjectionRunner` assigns customers its own virtual thread and its own offset row in `PostgresOffsetStore`, independent of the products projection. `CustomerProjection` writes through the same `projectionRepository` bean as products, so it is `TRANSACTIONAL_LOCAL` too: the forget handler's `delete(customerId)` and the rest of the batch commit with the checkpoint, or not at all.
+Without the registration `CustomerProjection` would be a dangling bean — Spring would create it but no projection runner would ever feed it events. With this change, `MultiProjectionRunner` assigns customers its own virtual thread and its own checkpoint row in the read-model store's `readmodel_checkpoint`, independent of the products projection. `CustomerProjection` writes through the same `ProjectionRepository` bean as products — the read-model store's repository — and is registered on the same `readModelStore.checkpointTarget()`, so it is `TRANSACTIONAL_LOCAL` too: the forget handler's `delete(customerId)` and the rest of the batch commit with the checkpoint, or not at all.
 
 The whole class at the end of this chapter:
 
@@ -779,12 +781,15 @@ package org.streamrune.ecommerce.spring.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.streamrune.core.*;
 import org.streamrune.core.projection.OffsetStore;
 import org.streamrune.core.projection.ProjectionDeliveryMode;
+import org.streamrune.core.projection.ProjectionErrorStrategy;
 import org.streamrune.core.projection.ProjectionRepository;
+import org.streamrune.core.projection.ReadModelStore;
 import org.streamrune.core.subscription.SubscriptionConfig;
 import org.streamrune.core.types.AggregateId;
 import org.streamrune.core.types.ProjectionName;
@@ -868,14 +873,6 @@ public class StreamRuneConfig {
     return new ProductCreatedUpcaster();
   }
 
-  // Declared as the CONCRETE type: it is both the ProjectionRepository every projection writes
-  // through and the AtomicBatchProcessor the runner commits with. Startup verifies the pairing:
-  // every TRANSACTIONAL_LOCAL projection below must write to THIS object, and each one does.
-  @Bean
-  public JdbcProjectionRepository projectionRepository(DataSource ds) {
-    return new JdbcProjectionRepository(ds);
-  }
-
   // Interceptors
   @Bean
   public BeanValidationInterceptor validationInterceptor() {
@@ -937,6 +934,11 @@ public class StreamRuneConfig {
     return ForgetSubjectService.builder().cryptoEngine(cryptoEngine).withoutSnapshotPurge().build();
   }
 
+  /**
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
+   */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
     return new PostgresOffsetStore(ds);
@@ -956,8 +958,7 @@ public class StreamRuneConfig {
   @Bean(destroyMethod = "close")
   public MultiProjectionRunner projectionRunner(
       EventStore eventStore,
-      OffsetStore offsetStore,
-      JdbcProjectionRepository projectionRepository,
+      @Qualifier("postgres") ReadModelStore readModelStore,
       StreamRuneProperties properties,
       ProductProjection productProjection,
       CustomerProjection customerProjection,
@@ -965,19 +966,22 @@ public class StreamRuneConfig {
     var runner =
         MultiProjectionRunner.builder()
             .eventStore(eventStore)
-            .offsetStore(offsetStore)
             .subscriptionConfig(projectionPolling(properties))
-            // Every TRANSACTIONAL_LOCAL registration below commits its read-model write and its
-            // checkpoint in ONE transaction.
-            .atomicProcessor(projectionRepository)
+            // Every TRANSACTIONAL_LOCAL registration below reads its checkpoint from, and commits
+            // its read-model write and its checkpoint in ONE transaction through, the read-model
+            // store's pair.
             .register(
                 ProjectionName.of("products"),
                 new CacheAwareProjection(productProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .register(
                 ProjectionName.of("customers"),
                 new CacheAwareProjection(customerProjection, cacheInvalidator),
-                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL)
+                ProjectionErrorStrategy.HALT,
+                ProjectionDeliveryMode.TRANSACTIONAL_LOCAL,
+                readModelStore.checkpointTarget())
             .build();
     runner.start();
     return runner;

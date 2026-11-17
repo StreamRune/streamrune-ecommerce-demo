@@ -551,10 +551,9 @@ public class StreamRuneConfig {
   }
 
   /**
-   * The event store's subscription checkpoints ({@code subscription_checkpoint}): where the saga
-   * subscription and the process-manager subscriptions below keep their positions. The projections
-   * do not: they keep theirs beside their read models, in the read-model store's {@code
-   * readmodel_checkpoint} (see {@link #projectionRunner}).
+   * The event store's subscription checkpoints ({@code subscription_checkpoint}), where the event
+   * subscriptions keep their positions. The projections keep theirs beside their read models, in
+   * the read-model store's {@code readmodel_checkpoint} (see {@link #projectionRunner}).
    */
   @Bean
   public OffsetStore offsetStore(DataSource ds) {
