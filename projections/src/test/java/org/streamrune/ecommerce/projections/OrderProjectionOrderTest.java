@@ -80,11 +80,13 @@ class OrderProjectionOrderTest {
     assertThat(projection.newestByCustomer("carol", 5)).isEmpty();
     assertThatThrownBy(() -> projection.newestByCustomer("alice", -1))
         .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> projection.newestByCustomer("alice", 101))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void aCustomerWithManyOrdersCostsTheLimitAndPagesCoverEachOrderOnce() {
-    for (int i = 0; i < 2500; i++) {
+  void aCustomerWithManyOrdersReadsOnlyTheLimitInOneStatement() {
+    for (int i = 0; i < 250; i++) {
       save(order(String.format("m-%04d", i), "mia", NOON.plusSeconds(i)));
     }
     List<Integer> sizes = new ArrayList<>();
@@ -108,25 +110,23 @@ class OrderProjectionOrderTest {
     assertThat(counting.newestByCustomer("mia", 10)).hasSize(10);
     assertThat(sizes).containsExactly(10);
     sizes.clear();
-    var newest = counting.newestByCustomer("mia", 1500);
-    assertThat(newest).hasSize(1500);
-    // The second page continues where the first stopped: the newest 1500, each once.
+    var newest = counting.newestByCustomer("mia", 100);
     assertThat(newest)
         .extracting(OrderView::orderId)
         .containsExactlyElementsOf(
-            IntStream.iterate(2499, i -> i - 1)
-                .limit(1500)
+            IntStream.iterate(249, i -> i - 1)
+                .limit(100)
                 .mapToObj(i -> String.format("m-%04d", i))
                 .toList());
-    assertThat(sizes).containsExactly(1000, 1000);
+    assertThat(sizes).containsExactly(100);
 
     Set<String> seen = new HashSet<>();
-    for (int page = 0; page < 25; page++) {
+    for (int page = 0; page < 3; page++) {
       for (OrderView row : projection.pageByCustomer("mia", new ListPage(page, 100)).content()) {
         assertThat(seen.add(row.orderId())).as(row.orderId()).isTrue();
       }
     }
-    assertThat(seen).hasSize(2500);
+    assertThat(seen).hasSize(250);
   }
 
   @Test

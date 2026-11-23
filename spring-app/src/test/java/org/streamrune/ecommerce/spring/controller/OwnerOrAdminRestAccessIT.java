@@ -31,10 +31,11 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
  * ADMIN}. The endpoints that are for an {@code ADMIN} alone refuse the first three and an identity
  * without a role. For a list the test asserts exactly which rows come back. Every test registers
  * customers and places orders of its own, so a list read as a customer holds those rows and no
- * others; a list read as an {@code ADMIN} holds every row of the shared database, so the test
- * asserts the rows it knows to be there and, with the {@code customerId} filter, exactly one
- * customer's. The order list comes in pages: the test reads every page of an {@code ADMIN}'s list,
- * and walks the pages of one customer's list in {@link #theOrderListComesInPagesNewestFirst}.
+ * others; a list read as an {@code ADMIN} holds every row of the shared database (the saga list,
+ * the 100 highest saga ids of it), so the test asserts the rows it knows to be there and, with the
+ * {@code customerId} filter, exactly one customer's. The order list comes in pages: the test reads
+ * every page of an {@code ADMIN}'s list, and walks the pages of one customer's list in {@link
+ * #theOrderListComesInPagesNewestFirst}.
  */
 class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
 
@@ -584,10 +585,12 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     String alice = uniqueId("alice");
     String bob = uniqueId("bob");
     // The second order is the newer one and has the lower id (and so the lower saga id), so "the
-    // newest order's saga" and "the highest saga id" are different rows.
-    String a1 = "fulfillment-" + placedOrder(alice, uniqueId("o-9"));
-    String a2 = "fulfillment-" + placedOrder(alice, uniqueId("o-1"));
-    String b1 = "fulfillment-" + placedOrder(bob);
+    // newest order's saga" and "the highest saga id" are different rows. An ADMIN's list is the
+    // highest saga ids of the shared database, so the three orders are placed under ids that sort
+    // above those of every other test.
+    String a1 = "fulfillment-" + placedOrder(alice, "zz-" + uniqueId("o-9"));
+    String a2 = "fulfillment-" + placedOrder(alice, "zz-" + uniqueId("o-1"));
+    String b1 = "fulfillment-" + placedOrder(bob, "zz-" + uniqueId("o"));
     String list = "/api/saga/fulfillments";
 
     assertThat(get(list, null, null).statusCode()).isEqualTo(403);

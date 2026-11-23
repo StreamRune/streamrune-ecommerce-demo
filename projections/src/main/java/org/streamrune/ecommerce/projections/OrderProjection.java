@@ -1,11 +1,9 @@
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.Page;
-import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
@@ -164,9 +162,6 @@ public class OrderProjection extends BaseProjection {
   public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
       ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
 
-  /** The most rows {@link #newestByCustomer} reads in one statement. */
-  private static final int LIST_PAGE_SIZE = 1000;
-
   /** One page of every order, newest first; the repository sorts and pages the table. */
   public Page<OrderView> page(ListPage page) {
     return repository.findAll(projectionName(), OrderView.class, page.in(NEWEST_FIRST));
@@ -182,35 +177,20 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * The newest orders of one customer, newest first, at most {@code limit} of them. The same
-   * filtered read as {@link #pageByCustomer}, in whole pages of {@value #LIST_PAGE_SIZE} rows at
-   * most: up to that many it is one statement of {@code limit} rows; above it, the pages that hold
-   * the {@code limit}th row and no page past it, so fewer than {@value #LIST_PAGE_SIZE} rows past
-   * {@code limit} are read and cut. Every statement also counts the customer's orders, through the
-   * index: {@code limit} bounds the rows read, not the database's work.
+   * The newest orders of one customer, newest first, at most {@code limit} of them. The first page
+   * of {@link #pageByCustomer}: one statement of {@code limit} rows, which also counts the
+   * customer's orders through the index, so {@code limit} bounds the rows read, not the database's
+   * work.
    *
-   * @throws IllegalArgumentException for a negative {@code limit}
+   * @param limit the most orders to read, from 0 to {@value ListPage#MAX_SIZE}
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     ListPage#MAX_SIZE}
    */
   public List<OrderView> newestByCustomer(String customerId, int limit) {
-    if (limit < 0) {
-      throw new IllegalArgumentException("limit must not be negative");
+    if (limit < 0 || limit > ListPage.MAX_SIZE) {
+      throw new IllegalArgumentException("limit must be between 0 and " + ListPage.MAX_SIZE);
     }
-    // One page size for every page, so the offset of a page is the count of the rows before it.
-    int size = Math.min(LIST_PAGE_SIZE, limit);
-    List<OrderView> orders = new ArrayList<>();
-    for (int page = 0; orders.size() < limit && size > 0; page++) {
-      Page<OrderView> rows =
-          repository.findAllBy(
-              projectionName(),
-              OrderView.class,
-              ofCustomer(customerId),
-              PageRequest.of(page, size, NEWEST_FIRST));
-      orders.addAll(rows.content());
-      if (!rows.hasNext()) {
-        break;
-      }
-    }
-    return List.copyOf(orders.subList(0, Math.min(limit, orders.size())));
+    return limit == 0 ? List.of() : pageByCustomer(customerId, new ListPage(0, limit)).content();
   }
 
   private static FieldEquals ofCustomer(String customerId) {

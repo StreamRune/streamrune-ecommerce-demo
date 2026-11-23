@@ -185,10 +185,10 @@ public final class OwnerOrAdminQueries {
    * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}, of which the list
    * returns the {@code limit} highest saga ids; for any other authenticated caller the sagas of
    * their own newest {@code limit} orders, named by their ids. Only that many of the caller's
-   * orders are read, newest first, so a customer with many orders costs the list's {@code limit},
-   * not all their orders (see {@link OrderProjection#newestByCustomer} for the statements). The
-   * orders are the rows the order read model holds for the caller's id; an order takes one of the
-   * {@code limit} places whether or not its saga has a row, so a customer's list can hold fewer
+   * orders are read, newest first, so a customer with many orders reads the list's {@code limit}
+   * rows, not all their orders (see {@link OrderProjection#newestByCustomer} for the statements).
+   * The orders are the rows the order read model holds for the caller's id; an order takes one of
+   * the {@code limit} places whether or not its saga has a row, so a customer's list can hold fewer
    * than {@code limit} rows while older orders of theirs have sagas.
    *
    * @param limit the most rows the list returns, from 0 to {@value #MAX_FULFILLMENT_LIMIT}
