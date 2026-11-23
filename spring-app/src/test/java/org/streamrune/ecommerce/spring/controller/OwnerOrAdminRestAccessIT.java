@@ -601,9 +601,8 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
         .containsExactlyInAnyOrder(a1, a2);
     assertThat(ids(get(list + "?customerId=" + bob, alice, CUSTOMER), "sagaId"))
         .containsExactlyInAnyOrder(a1, a2);
-    // The page size narrows the caller's own rows: the highest saga id first.
-    assertThat(ids(get(list + "?limit=1", alice, CUSTOMER), "sagaId"))
-        .containsExactly(a1.compareTo(a2) > 0 ? a1 : a2);
+    // The limit narrows the caller's own rows to their newest order: the second one placed.
+    assertThat(ids(get(list + "?limit=1", alice, CUSTOMER), "sagaId")).containsExactly(a2);
     assertThat(ids(get(list + "?limit=0", alice, CUSTOMER), "sagaId")).isEmpty();
 
     // A row: the saga, its type, the framework's status and the state, which names the caller.

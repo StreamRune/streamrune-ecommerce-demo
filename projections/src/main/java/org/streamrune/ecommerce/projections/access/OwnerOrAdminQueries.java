@@ -178,19 +178,26 @@ public final class OwnerOrAdminQueries {
 
   /**
    * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
-   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
-   * the order read model holds for the caller's id, so an order without a row yet has no saga on
-   * the caller's list yet.
+   * authenticated caller the sagas of their own newest orders, named by their ids, at most {@code
+   * limit} of them, the number of rows the list returns. Only that many of the caller's orders are
+   * read, newest first, so a customer with many orders costs the list's {@code limit}, not all
+   * their orders. The orders are the rows the order read model holds for the caller's id, so an
+   * order without a row yet has no saga on the caller's list yet.
    *
+   * @param limit the most rows the list returns
    * @throws AccessRefusedException for a request without an identity
+   * @throws IllegalArgumentException for a negative {@code limit}
    */
-  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller, int limit) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
     if (OwnerOrAdminAccess.isAdmin(caller)) {
       return FulfillmentScope.all();
     }
     return FulfillmentScope.only(
-        orders.listByCustomer(identity).stream()
+        orders.newestByCustomer(identity, limit).stream()
             .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
             .toList());
   }

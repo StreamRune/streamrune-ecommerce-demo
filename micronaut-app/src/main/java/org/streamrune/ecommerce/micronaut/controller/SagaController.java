@@ -45,7 +45,7 @@ public class SagaController {
   @Get
   public List<Map<String, Object>> listSagas(
       @QueryValue(value = "limit", defaultValue = "50") int limit) {
-    FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.current(), limit);
     return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
   }
 

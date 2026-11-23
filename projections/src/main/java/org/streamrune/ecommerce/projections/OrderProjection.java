@@ -159,12 +159,12 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
-   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   * #newestByCustomer}): the customer id, then {@code createdAt} descending, then the id.
    */
   public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
       ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
 
-  /** The most rows {@link #listByCustomer} reads in one statement. */
+  /** The most rows {@link #newestByCustomer} reads in one statement. */
   private static final int LIST_PAGE_SIZE = 1000;
 
   /** One page of every order, newest first; the repository sorts and pages the table. */
@@ -182,23 +182,33 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * Every order of one customer, newest first, read through the same filtered read a thousand rows
-   * at a time.
+   * The newest orders of one customer, newest first, at most {@code limit} of them. The same
+   * filtered read as {@link #pageByCustomer}, one page a statement of at most {@value
+   * #LIST_PAGE_SIZE} rows, and no page past the one that holds the {@code limit}th row: a customer
+   * with more orders than {@code limit} costs the read of {@code limit} rows, not of all of them.
+   *
+   * @throws IllegalArgumentException for a negative {@code limit}
    */
-  public List<OrderView> listByCustomer(String customerId) {
+  public List<OrderView> newestByCustomer(String customerId, int limit) {
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    // One page size for every page, so the offset of a page is the count of the rows before it.
+    int size = Math.min(LIST_PAGE_SIZE, limit);
     List<OrderView> orders = new ArrayList<>();
-    for (int page = 0; ; page++) {
+    for (int page = 0; orders.size() < limit && size > 0; page++) {
       Page<OrderView> rows =
           repository.findAllBy(
               projectionName(),
               OrderView.class,
               ofCustomer(customerId),
-              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
+              PageRequest.of(page, size, NEWEST_FIRST));
       orders.addAll(rows.content());
       if (!rows.hasNext()) {
-        return orders;
+        break;
       }
     }
+    return orders.size() > limit ? List.copyOf(orders.subList(0, limit)) : orders;
   }
 
   private static FieldEquals ofCustomer(String customerId) {

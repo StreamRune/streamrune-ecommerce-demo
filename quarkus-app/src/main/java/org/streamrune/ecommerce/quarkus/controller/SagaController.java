@@ -48,7 +48,7 @@ public class SagaController {
   @GET
   public List<Map<String, Object>> listSagas(@QueryParam("limit") String limit) {
     int rows = RequestChecks.wholeNumber(limit, "limit", 50);
-    FulfillmentScope scope = queries.fulfillments(RequestCaller.of(requestContext));
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.of(requestContext), rows);
     return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, rows);
   }
 

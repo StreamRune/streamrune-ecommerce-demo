@@ -850,12 +850,12 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
-   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   * #newestByCustomer}): the customer id, then {@code createdAt} descending, then the id.
    */
   public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
       ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
 
-  /** The most rows {@link #listByCustomer} reads in one statement. */
+  /** The most rows {@link #newestByCustomer} reads in one statement. */
   private static final int LIST_PAGE_SIZE = 1000;
 
   /** One page of every order, newest first; the repository sorts and pages the table. */
@@ -873,23 +873,33 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * Every order of one customer, newest first, read through the same filtered read a thousand rows
-   * at a time.
+   * The newest orders of one customer, newest first, at most {@code limit} of them. The same
+   * filtered read as {@link #pageByCustomer}, one page a statement of at most {@value
+   * #LIST_PAGE_SIZE} rows, and no page past the one that holds the {@code limit}th row: a customer
+   * with more orders than {@code limit} costs the read of {@code limit} rows, not of all of them.
+   *
+   * @throws IllegalArgumentException for a negative {@code limit}
    */
-  public List<OrderView> listByCustomer(String customerId) {
+  public List<OrderView> newestByCustomer(String customerId, int limit) {
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    // One page size for every page, so the offset of a page is the count of the rows before it.
+    int size = Math.min(LIST_PAGE_SIZE, limit);
     List<OrderView> orders = new ArrayList<>();
-    for (int page = 0; ; page++) {
+    for (int page = 0; orders.size() < limit && size > 0; page++) {
       Page<OrderView> rows =
           repository.findAllBy(
               projectionName(),
               OrderView.class,
               ofCustomer(customerId),
-              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
+              PageRequest.of(page, size, NEWEST_FIRST));
       orders.addAll(rows.content());
       if (!rows.hasNext()) {
-        return orders;
+        break;
       }
     }
+    return orders.size() > limit ? List.copyOf(orders.subList(0, limit)) : orders;
   }
 
   private static FieldEquals ofCustomer(String customerId) {
@@ -5211,19 +5221,26 @@ public final class OwnerOrAdminQueries {
 
   /**
    * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
-   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
-   * the order read model holds for the caller's id, so an order without a row yet has no saga on
-   * the caller's list yet.
+   * authenticated caller the sagas of their own newest orders, named by their ids, at most {@code
+   * limit} of them, the number of rows the list returns. Only that many of the caller's orders are
+   * read, newest first, so a customer with many orders costs the list's {@code limit}, not all
+   * their orders. The orders are the rows the order read model holds for the caller's id, so an
+   * order without a row yet has no saga on the caller's list yet.
    *
+   * @param limit the most rows the list returns
    * @throws AccessRefusedException for a request without an identity
+   * @throws IllegalArgumentException for a negative {@code limit}
    */
-  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller, int limit) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
     if (OwnerOrAdminAccess.isAdmin(caller)) {
       return FulfillmentScope.all();
     }
     return FulfillmentScope.only(
-        orders.listByCustomer(identity).stream()
+        orders.newestByCustomer(identity, limit).stream()
             .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
             .toList());
   }
@@ -5359,10 +5376,12 @@ The controller takes `OwnerOrAdminQueries` and the `DataSource` in its construct
 ```java
 @GetMapping
 public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
-  FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+  FulfillmentScope scope = queries.fulfillments(RequestCaller.current(), limit);
   return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
 }
 ```
+
+The `limit` bounds the work on both sides. `fulfillments` takes it too and reads no more than that many of the customer's orders, newest first (`newestByCustomer`, the filtered read of Chapter 8), so the scope holds the sagas of the customer's `limit` newest orders and a customer with thousands of orders costs `limit` rows, not all of them; the statement then returns at most `limit` of those, the highest saga id first.
 
 `FULFILLMENT` is a constant of the controller, `SagaType.fromClass(OrderFulfillmentState.class)`: the type the saga store records the saga under, and the one the single read passes to `sagaStore.load`.
 
@@ -5425,7 +5444,7 @@ public class SagaController {
    */
   @GetMapping
   public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
-    FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.current(), limit);
     return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
   }
 
