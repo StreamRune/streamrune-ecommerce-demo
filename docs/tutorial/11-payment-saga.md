@@ -874,9 +874,11 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The newest orders of one customer, newest first, at most {@code limit} of them. The same
-   * filtered read as {@link #pageByCustomer}, one page a statement of at most {@value
-   * #LIST_PAGE_SIZE} rows, and no page past the one that holds the {@code limit}th row: a customer
-   * with more orders than {@code limit} costs the read of {@code limit} rows, not of all of them.
+   * filtered read as {@link #pageByCustomer}, in whole pages of {@value #LIST_PAGE_SIZE} rows at
+   * most: up to that many it is one statement of {@code limit} rows; above it, the pages that hold
+   * the {@code limit}th row and no page past it, so fewer than {@value #LIST_PAGE_SIZE} rows past
+   * {@code limit} are read and cut. Every statement also counts the customer's orders, through the
+   * index: {@code limit} bounds the rows read, not the database's work.
    *
    * @throws IllegalArgumentException for a negative {@code limit}
    */
@@ -899,7 +901,7 @@ public class OrderProjection extends BaseProjection {
         break;
       }
     }
-    return orders.size() > limit ? List.copyOf(orders.subList(0, limit)) : orders;
+    return List.copyOf(orders.subList(0, Math.min(limit, orders.size())));
   }
 
   private static FieldEquals ofCustomer(String customerId) {
@@ -5084,6 +5086,11 @@ import org.streamrune.ecommerce.queries.paging.ListPage;
  */
 public final class OwnerOrAdminQueries {
 
+  /**
+   * The most rows the fulfillment list may ask for: the most rows a page of the order list holds.
+   */
+  public static final int MAX_FULFILLMENT_LIMIT = ListPage.MAX_SIZE;
+
   private final CustomerProjection customers;
   private final OrderProjection orders;
 
@@ -5220,21 +5227,24 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
-   * authenticated caller the sagas of their own newest orders, named by their ids, at most {@code
-   * limit} of them, the number of rows the list returns. Only that many of the caller's orders are
-   * read, newest first, so a customer with many orders costs the list's {@code limit}, not all
-   * their orders. The orders are the rows the order read model holds for the caller's id, so an
-   * order without a row yet has no saga on the caller's list yet.
+   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}, of which the list
+   * returns the {@code limit} highest saga ids; for any other authenticated caller the sagas of
+   * their own newest {@code limit} orders, named by their ids. Only that many of the caller's
+   * orders are read, newest first, so a customer with many orders costs the list's {@code limit},
+   * not all their orders (see {@link OrderProjection#newestByCustomer} for the statements). The
+   * orders are the rows the order read model holds for the caller's id; an order takes one of the
+   * {@code limit} places whether or not its saga has a row, so a customer's list can hold fewer
+   * than {@code limit} rows while older orders of theirs have sagas.
    *
-   * @param limit the most rows the list returns
+   * @param limit the most rows the list returns, from 0 to {@value #MAX_FULFILLMENT_LIMIT}
    * @throws AccessRefusedException for a request without an identity
-   * @throws IllegalArgumentException for a negative {@code limit}
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     #MAX_FULFILLMENT_LIMIT}
    */
   public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller, int limit) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
-    if (limit < 0) {
-      throw new IllegalArgumentException("limit must not be negative");
+    if (limit < 0 || limit > MAX_FULFILLMENT_LIMIT) {
+      throw new IllegalArgumentException("limit must be between 0 and " + MAX_FULFILLMENT_LIMIT);
     }
     if (OwnerOrAdminAccess.isAdmin(caller)) {
       return FulfillmentScope.all();
@@ -5381,7 +5391,7 @@ public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") in
 }
 ```
 
-The `limit` bounds the work on both sides. `fulfillments` takes it too and reads no more than that many of the customer's orders, newest first (`newestByCustomer`, the filtered read of Chapter 8), so the scope holds the sagas of the customer's `limit` newest orders and a customer with thousands of orders costs `limit` rows, not all of them; the statement then returns at most `limit` of those, the highest saga id first.
+The `limit` (0 to 100, the most a page of the order list holds, 50 when the request names none; a value outside that is `400`) bounds the work on both sides, and it cuts the two roles' lists by different rules. For an `ADMIN` the statement returns the `limit` highest saga ids of every fulfillment saga. For anyone else `fulfillments` takes the limit too and reads no more than that many of the customer's orders, newest first (`newestByCustomer`, the filtered read of Chapter 8), so the scope holds the sagas of the customer's `limit` newest orders: a customer with thousands of orders reads `limit` rows, not all of them, and the statement returns those sagas, the highest saga id first. An order takes one of the `limit` places whether or not its saga has a row yet, so a customer's list can hold fewer than `limit` rows while older orders of theirs have sagas.
 
 `FULFILLMENT` is a constant of the controller, `SagaType.fromClass(OrderFulfillmentState.class)`: the type the saga store records the saga under, and the one the single read passes to `sagaStore.load`.
 
@@ -5438,9 +5448,13 @@ public class SagaController {
   }
 
   /**
-   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
-   * orders, selected by their ids where the rows are read. A request without an identity is
-   * refused.
+   * The fulfillment sagas, the highest saga id first, at most {@code limit} of them ({@code 0} to
+   * {@value OwnerOrAdminQueries#MAX_FULFILLMENT_LIMIT}, {@code 50} when the request names none; a
+   * value outside that is {@code 400}). An {@code ADMIN} gets the {@code limit} highest saga ids of
+   * every fulfillment saga. Anyone else gets the sagas of their own {@code limit} newest orders,
+   * selected by their ids where the rows are read; an order whose saga has no row yet still takes
+   * one of the places, so fewer than {@code limit} rows can come back while older orders have
+   * sagas. A request without an identity is refused.
    */
   @GetMapping
   public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {

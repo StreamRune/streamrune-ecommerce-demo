@@ -183,9 +183,11 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The newest orders of one customer, newest first, at most {@code limit} of them. The same
-   * filtered read as {@link #pageByCustomer}, one page a statement of at most {@value
-   * #LIST_PAGE_SIZE} rows, and no page past the one that holds the {@code limit}th row: a customer
-   * with more orders than {@code limit} costs the read of {@code limit} rows, not of all of them.
+   * filtered read as {@link #pageByCustomer}, in whole pages of {@value #LIST_PAGE_SIZE} rows at
+   * most: up to that many it is one statement of {@code limit} rows; above it, the pages that hold
+   * the {@code limit}th row and no page past it, so fewer than {@value #LIST_PAGE_SIZE} rows past
+   * {@code limit} are read and cut. Every statement also counts the customer's orders, through the
+   * index: {@code limit} bounds the rows read, not the database's work.
    *
    * @throws IllegalArgumentException for a negative {@code limit}
    */
@@ -208,7 +210,7 @@ public class OrderProjection extends BaseProjection {
         break;
       }
     }
-    return orders.size() > limit ? List.copyOf(orders.subList(0, limit)) : orders;
+    return List.copyOf(orders.subList(0, Math.min(limit, orders.size())));
   }
 
   private static FieldEquals ofCustomer(String customerId) {

@@ -1360,9 +1360,11 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The newest orders of one customer, newest first, at most {@code limit} of them. The same
-   * filtered read as {@link #pageByCustomer}, one page a statement of at most {@value
-   * #LIST_PAGE_SIZE} rows, and no page past the one that holds the {@code limit}th row: a customer
-   * with more orders than {@code limit} costs the read of {@code limit} rows, not of all of them.
+   * filtered read as {@link #pageByCustomer}, in whole pages of {@value #LIST_PAGE_SIZE} rows at
+   * most: up to that many it is one statement of {@code limit} rows; above it, the pages that hold
+   * the {@code limit}th row and no page past it, so fewer than {@value #LIST_PAGE_SIZE} rows past
+   * {@code limit} are read and cut. Every statement also counts the customer's orders, through the
+   * index: {@code limit} bounds the rows read, not the database's work.
    *
    * @throws IllegalArgumentException for a negative {@code limit}
    */
@@ -1385,7 +1387,7 @@ public class OrderProjection extends BaseProjection {
         break;
       }
     }
-    return orders.size() > limit ? List.copyOf(orders.subList(0, limit)) : orders;
+    return List.copyOf(orders.subList(0, Math.min(limit, orders.size())));
   }
 
   private static FieldEquals ofCustomer(String customerId) {
@@ -1394,7 +1396,7 @@ public class OrderProjection extends BaseProjection {
 }
 ```
 
-The reads of the list are pages, newest first: `NEWEST_FIRST` sorts by `createdAt` descending, and the repository breaks a tie by the id, so the order is total. `page` asks the repository for one page of every order (`findAll` with a `PageRequest`). `pageByCustomer` asks it for one page of one customer's orders: `findAllBy` takes a `FieldEquals`, an equality on one top-level field of the row, and selects, sorts, pages and counts in one statement, so no other customer's row leaves the database. `newestByCustomer` reads a customer's newest `limit` orders through the same filter, a thousand at a time at most and no page past the one that holds the last row it needs; the fulfillment list of Chapter 11 uses it, so a customer with thousands of orders costs the list's `limit`, not all of them. Both paged reads hand back the framework's `Page`, which knows its total and whether a page follows it. The repository compares a field as the text the row holds, by code point: `createdAt` is ISO-8601 text, which is time order except between two instants of the same second whose fractions print with different lengths.
+The reads of the list are pages, newest first: `NEWEST_FIRST` sorts by `createdAt` descending, and the repository breaks a tie by the id, so the order is total. `page` asks the repository for one page of every order (`findAll` with a `PageRequest`). `pageByCustomer` asks it for one page of one customer's orders: `findAllBy` takes a `FieldEquals`, an equality on one top-level field of the row, and selects, sorts, pages and counts in one statement, so no other customer's row leaves the database. `newestByCustomer` reads a customer's newest `limit` orders through the same filter: up to a thousand it is one statement of `limit` rows, above that whole pages of a thousand and no page past the one that holds the last row it needs. Every statement also counts the customer's orders through the index, so `limit` bounds the rows read, not the database's work. The fulfillment list of Chapter 11 uses it, so a customer with thousands of orders reads the list's `limit` rows, not all of them. Both paged reads hand back the framework's `Page`, which knows its total and whether a page follows it. The repository compares a field as the text the row holds, by code point: `createdAt` is ISO-8601 text, which is time order except between two instants of the same second whose fractions print with different lengths.
 
 The order's row shows its payment too, once there is one: Chapter 11 adds the payment aggregate, and its Step 1a gives `OrderView` a payment status that this projection sets from the payment events.
 

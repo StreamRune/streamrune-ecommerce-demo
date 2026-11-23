@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
@@ -109,7 +110,14 @@ class OrderProjectionOrderTest {
     sizes.clear();
     var newest = counting.newestByCustomer("mia", 1500);
     assertThat(newest).hasSize(1500);
-    assertThat(newest.getFirst().orderId()).isEqualTo("m-2499");
+    // The second page continues where the first stopped: the newest 1500, each once.
+    assertThat(newest)
+        .extracting(OrderView::orderId)
+        .containsExactlyElementsOf(
+            IntStream.iterate(2499, i -> i - 1)
+                .limit(1500)
+                .mapToObj(i -> String.format("m-%04d", i))
+                .toList());
     assertThat(sizes).containsExactly(1000, 1000);
 
     Set<String> seen = new HashSet<>();

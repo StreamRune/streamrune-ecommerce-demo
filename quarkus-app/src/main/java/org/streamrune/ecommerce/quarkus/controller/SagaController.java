@@ -41,9 +41,13 @@ public class SagaController {
   @Inject StreamRuneRequestContextHolder requestContext;
 
   /**
-   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
-   * orders, selected by their ids where the rows are read. A request without an identity is
-   * refused.
+   * The fulfillment sagas, the highest saga id first, at most {@code limit} of them ({@code 0} to
+   * {@value OwnerOrAdminQueries#MAX_FULFILLMENT_LIMIT}, {@code 50} when the request names none; a
+   * value outside that is {@code 400}). An {@code ADMIN} gets the {@code limit} highest saga ids of
+   * every fulfillment saga. Anyone else gets the sagas of their own {@code limit} newest orders,
+   * selected by their ids where the rows are read; an order whose saga has no row yet still takes
+   * one of the places, so fewer than {@code limit} rows can come back while older orders have
+   * sagas. A request without an identity is refused.
    */
   @GET
   public List<Map<String, Object>> listSagas(@QueryParam("limit") String limit) {

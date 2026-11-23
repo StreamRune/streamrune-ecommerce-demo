@@ -388,10 +388,30 @@ class OwnerOrAdminQueriesTest {
     assertThat(queries.fulfillments(caller("dave", "CUSTOMER"), 100).sagaIds()).hasSize(7);
     assertThat(queries.fulfillments(caller("dave", "CUSTOMER"), 0).sagaIds()).isEmpty();
     assertThat(reads).contains("orders.newestByCustomer(dave, 3)");
-    // An ADMIN's scope is every saga whatever the limit, and a limit below zero is no limit.
+    // An ADMIN's scope is every saga whatever the limit, and a limit below zero is refused.
     assertThat(queries.fulfillments(OPERATOR, 3).everySaga()).isTrue();
     assertThatThrownBy(() -> queries.fulfillments(ALICE, -1))
         .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(OPERATOR, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void theFulfillmentLimitHasTheMaximumOfAPageOfTheOrderList() {
+    int max = OwnerOrAdminQueries.MAX_FULFILLMENT_LIMIT;
+    assertThat(max).isEqualTo(ListPage.MAX_SIZE);
+    assertThat(queries.fulfillments(ALICE, max).everySaga()).isFalse();
+    assertThat(queries.fulfillments(OPERATOR, max).everySaga()).isTrue();
+    reads.clear();
+    assertThatThrownBy(() -> queries.fulfillments(ALICE, max + 1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(OPERATOR, max + 1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(ALICE, Integer.MAX_VALUE))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(reads).isEmpty();
+    // A request without an identity is refused first, whatever its limit.
+    assertRefused(() -> queries.fulfillments(ANONYMOUS, max + 1));
   }
 
   @Test
