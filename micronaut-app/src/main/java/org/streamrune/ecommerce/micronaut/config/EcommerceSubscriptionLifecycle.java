@@ -63,9 +63,9 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  * after {@code StreamRuneLifecycle} has started the projection runner and outbox poller. All
  * injected collaborators (EventStore, OffsetStore, the saga runner) are fully initialised before
  * these subscriptions start. The framework applies the inbox retention window to the saga runner in
- * its own {@code StartupEvent} listener; {@link #getOrder()} places this listener after every
- * framework listener, so the runner's key-age guard is armed before its subscription delivers the
- * first event.
+ * its own {@code StartupEvent} listener; {@link #getOrder()} places this listener after it, so the
+ * runner's key-age guard is armed before its subscription delivers the first event, and before the
+ * framework's saga parallelism check, which needs the saga's subscription built.
  */
 @Singleton
 public class EcommerceSubscriptionLifecycle
@@ -122,13 +122,16 @@ public class EcommerceSubscriptionLifecycle
   }
 
   /**
-   * Last among the {@code StartupEvent} listeners: after the framework's configurers, its startup
-   * validators and its own runner starters, so the demo's subscriptions start on a validated,
-   * configured app.
+   * After the framework's configurers, its startup validators and its own runner starters, so the
+   * demo's subscriptions start on a validated, configured app; and before the framework's saga
+   * parallelism check ({@code SagaParallelismStartupCheck}, at {@link Ordered#LOWEST_PRECEDENCE}),
+   * which runs last: it reads the subscriptions each saga runner is bound to, so the saga's
+   * subscription must be built when it runs. Its startup line then names the subscription, and a
+   * {@code streamrune.saga.subscriptions.order-fulfillment-saga.parallelism} key names a known one.
    */
   @Override
   public int getOrder() {
-    return Ordered.LOWEST_PRECEDENCE;
+    return Ordered.LOWEST_PRECEDENCE - 100;
   }
 
   @Override

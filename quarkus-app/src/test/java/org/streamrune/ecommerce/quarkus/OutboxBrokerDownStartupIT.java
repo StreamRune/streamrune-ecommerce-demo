@@ -56,6 +56,12 @@ import org.testcontainers.rabbitmq.RabbitMQContainer;
  * replays by ({@link #RUNNER_AND_BUS_DIFFER}): the runner takes the {@code
  * streamrune.dead-letter.*} policy the framework builds the bus with. The profile writes the app's
  * log to {@link #STARTUP_LOG} as well, which the file handler starts afresh when the app boots.
+ *
+ * <p>The app logs the framework's startup line for the order-fulfillment saga ({@link
+ * #SAGA_PARALLELISM_LINE}), and its saga steps fit the application's pool: neither the warning that
+ * they can hold more than half of it nor the refusal of the start ({@link #SAGA_BUDGET_EXCEEDED})
+ * is logged. The line names the saga's subscription: the app builds it in a {@code StartupEvent}
+ * observer at the default priority, which runs before the framework's check.
  */
 @QuarkusTest
 @QuarkusTestResource(PostgresTestResource.class)
@@ -65,6 +71,23 @@ class OutboxBrokerDownStartupIT {
   /** How the framework's warning that the retry runner and its command bus differ begins. */
   private static final String RUNNER_AND_BUS_DIFFER =
       "DeadLetterRetryRunner replays by maxRetries=";
+
+  /**
+   * The framework's startup line for the order-fulfillment saga: the subscription it is delivered
+   * through, the default parallelism of 4, which the integration binds as {@code
+   * streamrune.saga.parallelism}, and one connection of the application's pool per step, since the
+   * aggregate locker has a pool of its own.
+   */
+  private static final String SAGA_PARALLELISM_LINE =
+      "StreamRune: saga type org.streamrune.ecommerce.commands.saga.OrderFulfillmentState"
+          + " (subscription 'order-fulfillment-saga'): parallelism 4"
+          + " (streamrune.saga.parallelism); its steps hold up to 4 connections at once";
+
+  /**
+   * How the framework's warning that the saga steps can hold more than half the application's pool
+   * begins, and its refusal of a start whose aggregate locks can take all of it.
+   */
+  private static final String SAGA_BUDGET_EXCEEDED = "StreamRune: saga steps can hold up to";
 
   /** The log of the app of this profile, from its start. */
   private static final Path STARTUP_LOG = Path.of("build", "broker-down-startup.log");
@@ -110,7 +133,10 @@ class OutboxBrokerDownStartupIT {
     assertThat(Files.readString(STARTUP_LOG))
         .as("the retry runner and the command bus answer a keyed re-send by the same rules")
         .contains("Installed features")
-        .doesNotContain(RUNNER_AND_BUS_DIFFER);
+        .doesNotContain(RUNNER_AND_BUS_DIFFER)
+        .as("the saga's parallelism and the connections its steps hold, within the pool")
+        .contains(SAGA_PARALLELISM_LINE)
+        .doesNotContain(SAGA_BUDGET_EXCEEDED);
 
     String productId = "q-broker-down-" + System.nanoTime();
     given()
