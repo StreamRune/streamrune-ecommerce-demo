@@ -41,6 +41,11 @@ import org.streamrune.ecommerce.queries.paging.ListPage;
  */
 public final class OwnerOrAdminQueries {
 
+  /**
+   * The most rows the fulfillment list may ask for: the most rows a page of the order list holds.
+   */
+  public static final int MAX_FULFILLMENT_LIMIT = ListPage.MAX_SIZE;
+
   private final CustomerProjection customers;
   private final OrderProjection orders;
 
@@ -177,20 +182,30 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
-   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
-   * the order read model holds for the caller's id, so an order without a row yet has no saga on
-   * the caller's list yet.
+   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}, of which the list
+   * returns the {@code limit} highest saga ids; for any other authenticated caller the sagas of
+   * their own newest {@code limit} orders, named by their ids. Only that many of the caller's
+   * orders are read, newest first, so a customer with many orders reads the list's {@code limit}
+   * rows, not all their orders (see {@link OrderProjection#newestByCustomer} for the statements).
+   * The orders are the rows the order read model holds for the caller's id; an order takes one of
+   * the {@code limit} places whether or not its saga has a row, so a customer's list can hold fewer
+   * than {@code limit} rows while older orders of theirs have sagas.
    *
+   * @param limit the most rows the list returns, from 0 to {@value #MAX_FULFILLMENT_LIMIT}
    * @throws AccessRefusedException for a request without an identity
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     #MAX_FULFILLMENT_LIMIT}
    */
-  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller, int limit) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (limit < 0 || limit > MAX_FULFILLMENT_LIMIT) {
+      throw new IllegalArgumentException("limit must be between 0 and " + MAX_FULFILLMENT_LIMIT);
+    }
     if (OwnerOrAdminAccess.isAdmin(caller)) {
       return FulfillmentScope.all();
     }
     return FulfillmentScope.only(
-        orders.listByCustomer(identity).stream()
+        orders.newestByCustomer(identity, limit).stream()
             .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
             .toList());
   }

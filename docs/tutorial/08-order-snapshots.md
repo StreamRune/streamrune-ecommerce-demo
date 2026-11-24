@@ -1248,11 +1248,9 @@ Create `projections/src/main/java/org/streamrune/ecommerce/projections/OrderProj
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.Page;
-import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
@@ -1336,13 +1334,10 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
-   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   * #newestByCustomer}): the customer id, then {@code createdAt} descending, then the id.
    */
   public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
       ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
-
-  /** The most rows {@link #listByCustomer} reads in one statement. */
-  private static final int LIST_PAGE_SIZE = 1000;
 
   /** One page of every order, newest first; the repository sorts and pages the table. */
   public Page<OrderView> page(ListPage page) {
@@ -1359,23 +1354,20 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * Every order of one customer, newest first, read through the same filtered read a thousand rows
-   * at a time.
+   * The newest orders of one customer, newest first, at most {@code limit} of them. The first page
+   * of {@link #pageByCustomer}: one statement of {@code limit} rows, which also counts the
+   * customer's orders through the index, so {@code limit} bounds the rows read, not the database's
+   * work.
+   *
+   * @param limit the most orders to read, from 0 to {@value ListPage#MAX_SIZE}
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     ListPage#MAX_SIZE}
    */
-  public List<OrderView> listByCustomer(String customerId) {
-    List<OrderView> orders = new ArrayList<>();
-    for (int page = 0; ; page++) {
-      Page<OrderView> rows =
-          repository.findAllBy(
-              projectionName(),
-              OrderView.class,
-              ofCustomer(customerId),
-              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
-      orders.addAll(rows.content());
-      if (!rows.hasNext()) {
-        return orders;
-      }
+  public List<OrderView> newestByCustomer(String customerId, int limit) {
+    if (limit < 0 || limit > ListPage.MAX_SIZE) {
+      throw new IllegalArgumentException("limit must be between 0 and " + ListPage.MAX_SIZE);
     }
+    return limit == 0 ? List.of() : pageByCustomer(customerId, new ListPage(0, limit)).content();
   }
 
   private static FieldEquals ofCustomer(String customerId) {
@@ -1384,7 +1376,7 @@ public class OrderProjection extends BaseProjection {
 }
 ```
 
-The reads of the list are pages, newest first: `NEWEST_FIRST` sorts by `createdAt` descending, and the repository breaks a tie by the id, so the order is total. `page` asks the repository for one page of every order (`findAll` with a `PageRequest`). `pageByCustomer` asks it for one page of one customer's orders: `findAllBy` takes a `FieldEquals`, an equality on one top-level field of the row, and selects, sorts, pages and counts in one statement, so no other customer's row leaves the database. `listByCustomer` reads a customer's every order through the same filter, a thousand at a time; the fulfillment list of Chapter 11 uses it. Both paged reads hand back the framework's `Page`, which knows its total and whether a page follows it. The repository compares a field as the text the row holds, by code point: `createdAt` is ISO-8601 text, which is time order except between two instants of the same second whose fractions print with different lengths.
+The reads of the list are pages, newest first: `NEWEST_FIRST` sorts by `createdAt` descending, and the repository breaks a tie by the id, so the order is total. `page` asks the repository for one page of every order (`findAll` with a `PageRequest`). `pageByCustomer` asks it for one page of one customer's orders: `findAllBy` takes a `FieldEquals`, an equality on one top-level field of the row, and selects, sorts, pages and counts in one statement, so no other customer's row leaves the database. `newestByCustomer` reads a customer's newest `limit` orders (0 to 100, a page) through the same filter: one statement of `limit` rows. The statement also counts the customer's orders through the index, so `limit` bounds the rows read, not the database's work. The fulfillment list of Chapter 11 uses it, so a customer with thousands of orders reads the list's `limit` rows, not all of them. Both paged reads hand back the framework's `Page`, which knows its total and whether a page follows it. The repository compares a field as the text the row holds, by code point: `createdAt` is ISO-8601 text, which is time order except between two instants of the same second whose fractions print with different lengths.
 
 The order's row shows its payment too, once there is one: Chapter 11 adds the payment aggregate, and its Step 1a gives `OrderView` a payment status that this projection sets from the payment events.
 

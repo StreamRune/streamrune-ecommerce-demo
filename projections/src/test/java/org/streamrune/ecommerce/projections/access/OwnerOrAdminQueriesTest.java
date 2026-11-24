@@ -348,7 +348,7 @@ class OwnerOrAdminQueriesTest {
 
   @Test
   void anAdminListsEverySaga() {
-    FulfillmentScope scope = queries.fulfillments(OPERATOR);
+    FulfillmentScope scope = queries.fulfillments(OPERATOR, 50);
 
     assertThat(scope.everySaga()).isTrue();
     assertThat(scope.sagaIds()).isEmpty();
@@ -357,29 +357,68 @@ class OwnerOrAdminQueriesTest {
 
   @Test
   void aCustomerListsTheFulfillmentsOfTheirOwnOrdersByTheirIds() {
-    assertThat(queries.fulfillments(ALICE).everySaga()).isFalse();
-    assertThat(queries.fulfillments(ALICE).sagaIds())
+    assertThat(queries.fulfillments(ALICE, 50).everySaga()).isFalse();
+    assertThat(queries.fulfillments(ALICE, 50).sagaIds())
         .containsExactlyInAnyOrder("fulfillment-o-a1", "fulfillment-o-a2");
-    assertThat(queries.fulfillments(BOB).everySaga()).isFalse();
-    assertThat(queries.fulfillments(BOB).sagaIds()).containsExactly("fulfillment-o-b1");
+    assertThat(queries.fulfillments(BOB, 50).everySaga()).isFalse();
+    assertThat(queries.fulfillments(BOB, 50).sagaIds()).containsExactly("fulfillment-o-b1");
     // An identity without an order, and an identity without a role: their own, which is nothing.
-    assertThat(queries.fulfillments(CAROL).everySaga()).isFalse();
-    assertThat(queries.fulfillments(CAROL).sagaIds()).isEmpty();
-    assertThat(queries.fulfillments(caller("alice", null)).everySaga()).isFalse();
-    assertThat(queries.fulfillments(caller("alice", null)).sagaIds())
+    assertThat(queries.fulfillments(CAROL, 50).everySaga()).isFalse();
+    assertThat(queries.fulfillments(CAROL, 50).sagaIds()).isEmpty();
+    assertThat(queries.fulfillments(caller("alice", null), 50).everySaga()).isFalse();
+    assertThat(queries.fulfillments(caller("alice", null), 50).sagaIds())
         .containsExactlyInAnyOrder("fulfillment-o-a1", "fulfillment-o-a2");
 
     assertThat(reads)
         .as("a customer's list comes from the read of their own orders, never from all orders")
         .doesNotContain("orders.page()")
-        .contains("orders.listByCustomer(alice)", "orders.listByCustomer(bob)");
+        .contains("orders.newestByCustomer(alice, 50)", "orders.newestByCustomer(bob, 50)");
+  }
+
+  @Test
+  void aCustomerWithMoreOrdersThanTheLimitListsAtMostTheLimitNewestFirst() {
+    Instant start = Instant.parse("2026-11-15T12:00:00Z");
+    for (int i = 0; i < 7; i++) {
+      String id = "o-d" + i;
+      repository.save(ProjectionName.of("orders"), id, order(id, "dave", start.plusSeconds(i)));
+    }
+
+    assertThat(queries.fulfillments(caller("dave", "CUSTOMER"), 3).sagaIds())
+        .containsExactly("fulfillment-o-d6", "fulfillment-o-d5", "fulfillment-o-d4");
+    assertThat(queries.fulfillments(caller("dave", "CUSTOMER"), 100).sagaIds()).hasSize(7);
+    assertThat(queries.fulfillments(caller("dave", "CUSTOMER"), 0).sagaIds()).isEmpty();
+    assertThat(reads).contains("orders.newestByCustomer(dave, 3)");
+    // An ADMIN's scope is every saga whatever the limit, and a limit below zero is refused.
+    assertThat(queries.fulfillments(OPERATOR, 3).everySaga()).isTrue();
+    assertThatThrownBy(() -> queries.fulfillments(ALICE, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(OPERATOR, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void theFulfillmentLimitHasTheMaximumOfAPageOfTheOrderList() {
+    int max = OwnerOrAdminQueries.MAX_FULFILLMENT_LIMIT;
+    assertThat(max).isEqualTo(ListPage.MAX_SIZE);
+    assertThat(queries.fulfillments(ALICE, max).everySaga()).isFalse();
+    assertThat(queries.fulfillments(OPERATOR, max).everySaga()).isTrue();
+    reads.clear();
+    assertThatThrownBy(() -> queries.fulfillments(ALICE, max + 1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(OPERATOR, max + 1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> queries.fulfillments(ALICE, Integer.MAX_VALUE))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(reads).isEmpty();
+    // A request without an identity is refused first, whatever its limit.
+    assertRefused(() -> queries.fulfillments(ANONYMOUS, max + 1));
   }
 
   @Test
   void theFulfillmentListIsRefusedWithoutAnIdentity() {
-    assertRefused(() -> queries.fulfillments(ANONYMOUS));
-    assertRefused(() -> queries.fulfillments(ROLE_WITHOUT_IDENTITY));
-    assertRefused(() -> queries.fulfillments(NO_CONTEXT));
+    assertRefused(() -> queries.fulfillments(ANONYMOUS, 50));
+    assertRefused(() -> queries.fulfillments(ROLE_WITHOUT_IDENTITY, 50));
+    assertRefused(() -> queries.fulfillments(NO_CONTEXT, 50));
 
     assertThat(reads).isEmpty();
   }
@@ -495,9 +534,9 @@ class OwnerOrAdminQueriesTest {
     }
 
     @Override
-    public List<OrderView> listByCustomer(String customerId) {
-      reads.add("orders.listByCustomer(" + customerId + ")");
-      return super.listByCustomer(customerId);
+    public List<OrderView> newestByCustomer(String customerId, int limit) {
+      reads.add("orders.newestByCustomer(" + customerId + ", " + limit + ")");
+      return super.newestByCustomer(customerId, limit);
     }
   }
 }

@@ -692,11 +692,9 @@ public record OrderView(
 package org.streamrune.ecommerce.projections;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import org.streamrune.core.EventEnvelope;
 import org.streamrune.core.Page;
-import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.BaseProjection;
@@ -850,13 +848,10 @@ public class OrderProjection extends BaseProjection {
 
   /**
    * The index that serves one customer's list, newest first ({@link #pageByCustomer}, {@link
-   * #listByCustomer}): the customer id, then {@code createdAt} descending, then the id.
+   * #newestByCustomer}): the customer id, then {@code createdAt} descending, then the id.
    */
   public static final ProjectionIndex CUSTOMER_NEWEST_FIRST_INDEX =
       ProjectionIndex.forFilter(ProjectionName.of("orders"), "customerId", NEWEST_FIRST);
-
-  /** The most rows {@link #listByCustomer} reads in one statement. */
-  private static final int LIST_PAGE_SIZE = 1000;
 
   /** One page of every order, newest first; the repository sorts and pages the table. */
   public Page<OrderView> page(ListPage page) {
@@ -873,23 +868,20 @@ public class OrderProjection extends BaseProjection {
   }
 
   /**
-   * Every order of one customer, newest first, read through the same filtered read a thousand rows
-   * at a time.
+   * The newest orders of one customer, newest first, at most {@code limit} of them. The first page
+   * of {@link #pageByCustomer}: one statement of {@code limit} rows, which also counts the
+   * customer's orders through the index, so {@code limit} bounds the rows read, not the database's
+   * work.
+   *
+   * @param limit the most orders to read, from 0 to {@value ListPage#MAX_SIZE}
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     ListPage#MAX_SIZE}
    */
-  public List<OrderView> listByCustomer(String customerId) {
-    List<OrderView> orders = new ArrayList<>();
-    for (int page = 0; ; page++) {
-      Page<OrderView> rows =
-          repository.findAllBy(
-              projectionName(),
-              OrderView.class,
-              ofCustomer(customerId),
-              PageRequest.of(page, LIST_PAGE_SIZE, NEWEST_FIRST));
-      orders.addAll(rows.content());
-      if (!rows.hasNext()) {
-        return orders;
-      }
+  public List<OrderView> newestByCustomer(String customerId, int limit) {
+    if (limit < 0 || limit > ListPage.MAX_SIZE) {
+      throw new IllegalArgumentException("limit must be between 0 and " + ListPage.MAX_SIZE);
     }
+    return limit == 0 ? List.of() : pageByCustomer(customerId, new ListPage(0, limit)).content();
   }
 
   private static FieldEquals ofCustomer(String customerId) {
@@ -5074,6 +5066,11 @@ import org.streamrune.ecommerce.queries.paging.ListPage;
  */
 public final class OwnerOrAdminQueries {
 
+  /**
+   * The most rows the fulfillment list may ask for: the most rows a page of the order list holds.
+   */
+  public static final int MAX_FULFILLMENT_LIMIT = ListPage.MAX_SIZE;
+
   private final CustomerProjection customers;
   private final OrderProjection orders;
 
@@ -5210,20 +5207,30 @@ public final class OwnerOrAdminQueries {
   }
 
   /**
-   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}; for any other
-   * authenticated caller the sagas of their own orders, named by their ids. The orders are the rows
-   * the order read model holds for the caller's id, so an order without a row yet has no saga on
-   * the caller's list yet.
+   * Which fulfillment sagas the caller may list: every saga for an {@code ADMIN}, of which the list
+   * returns the {@code limit} highest saga ids; for any other authenticated caller the sagas of
+   * their own newest {@code limit} orders, named by their ids. Only that many of the caller's
+   * orders are read, newest first, so a customer with many orders reads the list's {@code limit}
+   * rows, not all their orders (see {@link OrderProjection#newestByCustomer} for the statements).
+   * The orders are the rows the order read model holds for the caller's id; an order takes one of
+   * the {@code limit} places whether or not its saga has a row, so a customer's list can hold fewer
+   * than {@code limit} rows while older orders of theirs have sagas.
    *
+   * @param limit the most rows the list returns, from 0 to {@value #MAX_FULFILLMENT_LIMIT}
    * @throws AccessRefusedException for a request without an identity
+   * @throws IllegalArgumentException for a {@code limit} below 0 or above {@value
+   *     #MAX_FULFILLMENT_LIMIT}
    */
-  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller) {
+  public FulfillmentScope fulfillments(StreamRuneContext.RequestContext caller, int limit) {
     String identity = OwnerOrAdminAccess.requireIdentity(caller);
+    if (limit < 0 || limit > MAX_FULFILLMENT_LIMIT) {
+      throw new IllegalArgumentException("limit must be between 0 and " + MAX_FULFILLMENT_LIMIT);
+    }
     if (OwnerOrAdminAccess.isAdmin(caller)) {
       return FulfillmentScope.all();
     }
     return FulfillmentScope.only(
-        orders.listByCustomer(identity).stream()
+        orders.newestByCustomer(identity, limit).stream()
             .map(order -> OrderCommand.PlaceOrder.SAGA_ID_PREFIX + order.orderId())
             .toList());
   }
@@ -5359,10 +5366,12 @@ The controller takes `OwnerOrAdminQueries` and the `DataSource` in its construct
 ```java
 @GetMapping
 public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
-  FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+  FulfillmentScope scope = queries.fulfillments(RequestCaller.current(), limit);
   return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
 }
 ```
+
+The `limit` (0 to 100, the most a page of the order list holds, 50 when the request names none; a value outside that is `400`) bounds the rows read on both sides, and it cuts the two roles' lists by different rules. For an `ADMIN` the statement returns the `limit` highest saga ids of every fulfillment saga. For anyone else `fulfillments` takes the limit too and reads no more than that many of the customer's orders, newest first (`newestByCustomer`, the filtered read of Chapter 8), so the scope holds the sagas of the customer's `limit` newest orders: a customer with thousands of orders reads `limit` rows, not all of them, and the statement returns those sagas, the highest saga id first. An order takes one of the `limit` places whether or not its saga has a row yet, so a customer's list can hold fewer than `limit` rows while older orders of theirs have sagas.
 
 `FULFILLMENT` is a constant of the controller, `SagaType.fromClass(OrderFulfillmentState.class)`: the type the saga store records the saga under, and the one the single read passes to `sagaStore.load`.
 
@@ -5419,13 +5428,17 @@ public class SagaController {
   }
 
   /**
-   * Every fulfillment saga for an {@code ADMIN}; for anyone else the sagas of the caller's own
-   * orders, selected by their ids where the rows are read. A request without an identity is
-   * refused.
+   * The fulfillment sagas, the highest saga id first, at most {@code limit} of them ({@code 0} to
+   * {@value OwnerOrAdminQueries#MAX_FULFILLMENT_LIMIT}, {@code 50} when the request names none; a
+   * value outside that is {@code 400}). An {@code ADMIN} gets the {@code limit} highest saga ids of
+   * every fulfillment saga. Anyone else gets the sagas of their own {@code limit} newest orders,
+   * selected by their ids where the rows are read; an order whose saga has no row yet still takes
+   * one of the places, so fewer than {@code limit} rows can come back while older orders have
+   * sagas. A request without an identity is refused.
    */
   @GetMapping
   public List<Map<String, Object>> listSagas(@RequestParam(defaultValue = "50") int limit) {
-    FulfillmentScope scope = queries.fulfillments(RequestCaller.current());
+    FulfillmentScope scope = queries.fulfillments(RequestCaller.current(), limit);
     return FulfillmentSagaRows.read(dataSource, FULFILLMENT, scope, limit);
   }
 

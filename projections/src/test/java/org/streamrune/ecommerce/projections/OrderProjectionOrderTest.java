@@ -1,14 +1,23 @@
 package org.streamrune.ecommerce.projections;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
+import org.streamrune.core.PageRequest;
 import org.streamrune.core.Sort;
 import org.streamrune.core.SortDirection;
 import org.streamrune.core.projection.ProjectionIndex;
+import org.streamrune.core.projection.ProjectionRepository;
 import org.streamrune.core.types.ProjectionName;
 import org.streamrune.ecommerce.domain.common.Money;
 import org.streamrune.ecommerce.domain.order.OrderStatus;
@@ -60,11 +69,64 @@ class OrderProjectionOrderTest {
   }
 
   @Test
-  void aCustomersWholeListIsReadThroughTheFilter() {
-    assertThat(projection.listByCustomer("alice"))
+  void aCustomersNewestOrdersAreReadThroughTheFilterUpToTheLimit() {
+    assertThat(projection.newestByCustomer("alice", 100))
         .extracting(OrderView::orderId)
         .containsExactly("o-3", "o-1", "o-2", "o-0");
-    assertThat(projection.listByCustomer("carol")).isEmpty();
+    assertThat(projection.newestByCustomer("alice", 2))
+        .extracting(OrderView::orderId)
+        .containsExactly("o-3", "o-1");
+    assertThat(projection.newestByCustomer("alice", 0)).isEmpty();
+    assertThat(projection.newestByCustomer("carol", 5)).isEmpty();
+    assertThatThrownBy(() -> projection.newestByCustomer("alice", -1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> projection.newestByCustomer("alice", 101))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aCustomerWithManyOrdersReadsOnlyTheLimitInOneStatement() {
+    for (int i = 0; i < 250; i++) {
+      save(order(String.format("m-%04d", i), "mia", NOON.plusSeconds(i)));
+    }
+    List<Integer> sizes = new ArrayList<>();
+    ProjectionRepository recording =
+        (ProjectionRepository)
+            Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] {ProjectionRepository.class},
+                (proxy, method, args) -> {
+                  if (method.getName().equals("findAllBy")) {
+                    sizes.add(((PageRequest) args[3]).size());
+                  }
+                  try {
+                    return method.invoke(repository, args);
+                  } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                  }
+                });
+    OrderProjection counting = new OrderProjection(recording);
+
+    assertThat(counting.newestByCustomer("mia", 10)).hasSize(10);
+    assertThat(sizes).containsExactly(10);
+    sizes.clear();
+    var newest = counting.newestByCustomer("mia", 100);
+    assertThat(newest)
+        .extracting(OrderView::orderId)
+        .containsExactlyElementsOf(
+            IntStream.iterate(249, i -> i - 1)
+                .limit(100)
+                .mapToObj(i -> String.format("m-%04d", i))
+                .toList());
+    assertThat(sizes).containsExactly(100);
+
+    Set<String> seen = new HashSet<>();
+    for (int page = 0; page < 3; page++) {
+      for (OrderView row : projection.pageByCustomer("mia", new ListPage(page, 100)).content()) {
+        assertThat(seen.add(row.orderId())).as(row.orderId()).isTrue();
+      }
+    }
+    assertThat(seen).hasSize(250);
   }
 
   @Test

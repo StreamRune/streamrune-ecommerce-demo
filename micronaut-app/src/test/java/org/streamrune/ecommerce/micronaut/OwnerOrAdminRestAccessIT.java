@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.streamrune.ecommerce.projections.access.OwnerOrAdminQueries;
 
 /**
  * Who gets what from the REST API of the running Micronaut app, over real HTTP. The rule is {@code
@@ -31,10 +32,11 @@ import org.junit.jupiter.api.Test;
  * ADMIN}. The endpoints that are for an {@code ADMIN} alone refuse the first three and an identity
  * without a role. For a list the test asserts exactly which rows come back. Every test registers
  * customers and places orders of its own, so a list read as a customer holds those rows and no
- * others; a list read as an {@code ADMIN} holds every row of the shared database, so the test
- * asserts the rows it knows to be there and, with the {@code customerId} filter, exactly one
- * customer's. The order list comes in pages: the test reads every page of an {@code ADMIN}'s list,
- * and walks the pages of one customer's list in {@link #theOrderListComesInPagesNewestFirst}.
+ * others; a list read as an {@code ADMIN} holds every row of the shared database (the saga list,
+ * the 100 highest saga ids of it), so the test asserts the rows it knows to be there and, with the
+ * {@code customerId} filter, exactly one customer's. The order list comes in pages: the test reads
+ * every page of an {@code ADMIN}'s list, and walks the pages of one customer's list in {@link
+ * #theOrderListComesInPagesNewestFirst}.
  */
 @MicronautTest(transactional = false)
 class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
@@ -586,14 +588,18 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
       throws Exception {
     String alice = uniqueId("alice");
     String bob = uniqueId("bob");
-    String a1 = "fulfillment-" + placedOrder(alice);
-    String a2 = "fulfillment-" + placedOrder(alice);
-    String b1 = "fulfillment-" + placedOrder(bob);
+    // The second order is the newer one and has the lower id (and so the lower saga id), so "the
+    // newest order's saga" and "the highest saga id" are different rows. An ADMIN's list is the
+    // highest saga ids of the shared database, so the three orders are placed under ids that sort
+    // above those of every other test.
+    String a1 = "fulfillment-" + placedOrder(alice, "zz-" + uniqueId("o-9"));
+    String a2 = "fulfillment-" + placedOrder(alice, "zz-" + uniqueId("o-1"));
+    String b1 = "fulfillment-" + placedOrder(bob, "zz-" + uniqueId("o"));
     String list = "/api/saga/fulfillments";
 
     assertThat(get(list, null, null).statusCode()).isEqualTo(403);
     assertThat(get(list, null, ADMIN).statusCode()).isEqualTo(403);
-    assertThat(get(list + "?limit=1000", null, null).statusCode()).isEqualTo(403);
+    assertThat(get(list + "?limit=100", null, null).statusCode()).isEqualTo(403);
 
     assertThat(ids(get(list, alice, CUSTOMER), "sagaId")).containsExactlyInAnyOrder(a1, a2);
     assertThat(ids(get(list, bob, CUSTOMER), "sagaId")).containsExactly(b1);
@@ -601,13 +607,13 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     // An identity without an order: an empty list, not everybody's.
     assertThat(ids(get(list, uniqueId("carol"), CUSTOMER), "sagaId")).isEmpty();
     // No parameter widens the list, and naming another customer selects nothing of theirs.
-    assertThat(ids(get(list + "?limit=1000&offset=0&all=true", alice, CUSTOMER), "sagaId"))
+    assertThat(ids(get(list + "?limit=100&offset=0&all=true", alice, CUSTOMER), "sagaId"))
         .containsExactlyInAnyOrder(a1, a2);
     assertThat(ids(get(list + "?customerId=" + bob, alice, CUSTOMER), "sagaId"))
         .containsExactlyInAnyOrder(a1, a2);
-    // The page size narrows the caller's own rows: the highest saga id first.
-    assertThat(ids(get(list + "?limit=1", alice, CUSTOMER), "sagaId"))
-        .containsExactly(a1.compareTo(a2) > 0 ? a1 : a2);
+    // The limit narrows the caller's own rows to the sagas of their newest orders: the second one
+    // placed, which has the lower saga id.
+    assertThat(ids(get(list + "?limit=1", alice, CUSTOMER), "sagaId")).containsExactly(a2);
     assertThat(ids(get(list + "?limit=0", alice, CUSTOMER), "sagaId")).isEmpty();
 
     // A row: the saga, its type, the framework's status and the state, which names the caller.
@@ -622,8 +628,12 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     }
     assertThat(get(list, alice, CUSTOMER).body()).doesNotContain(bob, b1);
 
-    // An ADMIN lists every saga.
-    assertThat(ids(get(list + "?limit=100000", OPERATOR, ADMIN), "sagaId")).contains(a1, a2, b1);
+    // An ADMIN lists every saga: the highest saga ids up to the limit.
+    assertThat(
+            ids(
+                get(list + "?limit=" + OwnerOrAdminQueries.MAX_FULFILLMENT_LIMIT, OPERATOR, ADMIN),
+                "sagaId"))
+        .contains(a1, a2, b1);
     assertThat(ids(get(list + "?limit=1", OPERATOR, ADMIN), "sagaId")).hasSize(1);
 
     // A page size that cannot be read is a 400 for a caller the rule lets in, a 403 for the rest.
@@ -631,6 +641,17 @@ class OwnerOrAdminRestAccessIT extends AbstractIntegrationTest {
     assertThat(get(list + "?limit=-1", OPERATOR, ADMIN).statusCode()).isEqualTo(400);
     assertThat(get(list + "?limit=-1", null, null).statusCode()).isEqualTo(403);
     assertThat(get(list + "?limit=-1", null, ADMIN).statusCode()).isEqualTo(403);
+
+    // The same maximum as a page of the order list: one more is refused, whoever asks.
+    int tooMany = OwnerOrAdminQueries.MAX_FULFILLMENT_LIMIT + 1;
+    assertThat(
+            get(list + "?limit=" + OwnerOrAdminQueries.MAX_FULFILLMENT_LIMIT, alice, CUSTOMER)
+                .statusCode())
+        .isEqualTo(200);
+    assertThat(get(list + "?limit=" + tooMany, alice, CUSTOMER).statusCode()).isEqualTo(400);
+    assertThat(get(list + "?limit=" + tooMany, OPERATOR, ADMIN).statusCode()).isEqualTo(400);
+    assertThat(get(list + "?limit=" + tooMany, null, null).statusCode()).isEqualTo(403);
+    assertThat(get(list + "?limit=2147483647", alice, CUSTOMER).statusCode()).isEqualTo(400);
   }
 
   // --- the endpoints that are for an ADMIN, and the open ones ---
