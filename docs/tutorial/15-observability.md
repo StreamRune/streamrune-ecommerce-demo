@@ -2808,7 +2808,7 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.steps.in_flight |
 - `streamrune.saga.page.effective_parallelism` (distribution summary): for each page whose steps ran on more than one thread, the sum of its step times divided by the page's wall time. Near 4 the workers were busy; near 1 while the saga subscription lags, the page waited for one long saga.
 - `streamrune.saga.page.failed` (counter): the pages that were not acknowledged, which the subscription delivers again (Chapter 11, Step 6). Its `stop` tag says why: `connection` when the page stopped on a connection-class failure (a lost connection, a pool that handed out none in time, too many connections), `third_failure` when three or more of its steps failed, and `none` when one saga's failure ended only that saga's part. It is registered on its first failed page, so it answers `404` until then.
 
-At one order a second, the pace of Chapter 17's two-backend run, the leader's `streamrune.saga.steps.in_flight` stayed between 0 and 2 and `streamrune.saga.page.pending` at 0. The same run with `PAUSE_SECONDS=0 ORDERS=120` puts them to work: on the leader `streamrune.saga.steps.in_flight` stood at 4 with `streamrune.saga.page.pending` up to 93, and after the run the summary read:
+At one order a second, the pace of Chapter 17's two-backend run, the leader's `streamrune.saga.steps.in_flight` stayed low, mostly between 0 and 2, with `streamrune.saga.page.pending` at or near 0. The same run with `PAUSE_SECONDS=0 ORDERS=120` puts them to work: on the leader `streamrune.saga.steps.in_flight` stood at 4 with `streamrune.saga.page.pending` up to 93. The meters are the leader's: a standby steps no page, so the four endpoints answer `404` there, and the summary answers `404` on any backend until a page has held the steps of two sagas. Ask the backend that leads once the run has ended, the one the script did not kill (8080 in the run Chapter 17 prints, 8091 when the script killed `backend`). There the summary read:
 
 ```bash
 curl -s http://localhost:8080/actuator/metrics/streamrune.saga.page.effective_parallelism | jq .
@@ -2843,7 +2843,7 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.page.effective_pa
 }
 ```
 
-`COUNT` is the pages with steps on more than one thread, `TOTAL` the sum of their ratios, and `MAX` the busiest page, its four workers busy nearly all of its wall time. `TOTAL` divided by `COUNT` is the mean.
+`COUNT` is the pages with steps on more than one thread, `TOTAL` the sum of their ratios, and `MAX` the busiest page of the last two minutes or so, its four workers busy nearly all of its wall time. The maximum is Micrometer's and it decays: asked a few minutes after the last such page it reads `0.0`, while `COUNT` and `TOTAL` stay. `TOTAL` divided by `COUNT` is the mean.
 
 **Metrics — the aggregate lock's pool:**
 

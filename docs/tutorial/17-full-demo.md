@@ -2202,6 +2202,7 @@ docker compose --profile two-backends down -v
 | Audit logging | 10 | ✅ |
 | Saga orchestration | 11 | ✅ |
 | Saga deadline (timeout runner) and forward fence across two backends | 11, 17 | ✅ |
+| Parallel saga steps (parallelism, connection budget, page meters) | 11, 15, 17 | ✅ |
 | Circuit breaker | 12 | ✅ |
 | Transactional outbox | 13 | ✅ |
 | Outbox ordering modes (strict default, audited skip) | 13, 14 | ✅ |
