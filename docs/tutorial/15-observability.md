@@ -296,7 +296,7 @@ http post /api/orders                          SERVER    Spring MVC, through Mic
 
 **What follows, in traces of their own.** Everything the order sets off runs later, on other threads, and starts a trace of its own. The bus stores the span of each command in the metadata of the events it appends, and a span that handles those events carries a *link* to it; Jaeger shows a link under the span's *References*, and opens the linked trace from there:
 
-- `subscription/order-fulfillment-saga/deliver` (kind `CONSUMER`, `streamrune.batch.size`) delivers a batch of events to the saga runner, linked to the command of its first event. Under it, `saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/step` handles `OrderPlaced`, with `streamrune.saga.id=fulfillment-o-trace-1` and `streamrune.saga.step.outcome=ADVANCED`, linked to `command/PlaceOrder`. The command the step dispatches runs on the saga's thread, so `command/InitiatePayment` and its lock, load and append nest under the step.
+- `subscription/order-fulfillment-saga/deliver` (kind `CONSUMER`, `streamrune.batch.size`) delivers a batch of events to the saga runner, linked to the command of its first event. Under it, `saga/org.streamrune.ecommerce.commands.saga.OrderFulfillmentState/step` handles `OrderPlaced`, with `streamrune.saga.id=fulfillment-o-trace-1` and `streamrune.saga.step.outcome=ADVANCED`, linked to `command/PlaceOrder`. The command the step dispatches runs on the saga's thread, so `command/InitiatePayment` and its lock, load and append nest under the step. A batch with the events of several sagas holds one `saga/…/step` span per event under the one delivery span, and the steps of different sagas overlap in time, up to four at once: each runs on a worker thread, which the runner hands the delivery's trace context, and the delivery span ends after the last of them.
 - `subscription/payment-process-manager/deliver` holds `command/CapturePayment`, whose append writes the payment's outbox entry (`streamrune.outbox.entry.count=1`).
 - The next steps of the saga follow the same shape: one linked to `CapturePayment` dispatches `command/ReserveStock`, one linked to `ReserveStock` dispatches `command/ConfirmOrder`, and the last, linked to `ConfirmOrder`, ends with `streamrune.saga.step.outcome=COMPLETED`.
 - `outbox/relay` covers one batch the outbox poller claimed, with `streamrune.outbox.published` and `streamrune.outbox.failed`. Under it, one `outbox/publish` (kind `PRODUCER`) per entry hands it to RabbitMQ, with `streamrune.outbox.entry.id` and `streamrune.outbox.payload.type` (`PaymentCaptured`, `OrderConfirmed`), linked to the command whose append wrote the entry.
@@ -374,7 +374,7 @@ The pool's meters carry Hikari's names and the pool's name as their tag, `pool=s
 | `hikaricp.connections.acquire` | Timer | How long a command waited for its connection |
 | `hikaricp.connections.usage` | Timer | How long a command held it |
 
-**What saturation looks like.** `active` stands at `max` and `pending` is above zero: every lock connection is held, and the next commands wait for one. A burst that drains within the ten seconds shows as a peak of `pending` and a longer `acquire`. One that does not shows in `timeout`: each of those commands fails its attempt with a `LockException`, the bus tries it again, and once its attempts are spent it is dead-lettered (Chapter 12, Step 2b; Chapter 14), so the dead-letter gauges of Step 2 rise with it. Alert on `pending` above zero for longer than a burst lasts, and on any `timeout`. A pool that saturates under the load it must carry is too small for it: size it, and the application's pool with it, for the commands each backend runs at once, below PostgreSQL's `max_connections` (Chapter 17). The application's own pool reports the same names under its own `pool` tag, which is why the query of Step 7 names the tag.
+**What saturation looks like.** `active` stands at `max` and `pending` is above zero: every lock connection is held, and the next commands wait for one. A burst that drains within the ten seconds shows as a peak of `pending` and a longer `acquire`. One that does not shows in `timeout`: each of those commands fails its attempt with a `LockException`, the bus tries it again, and once its attempts are spent it is dead-lettered (Chapter 12, Step 2b; Chapter 14), so the dead-letter gauges of Step 2 rise with it. Alert on `pending` above zero for longer than a burst lasts, and on any `timeout`. A pool that saturates under the load it must carry is too small for it: size it, and the application's pool with it, for the commands each backend runs at once — the saga's steps among them, up to four at once (Chapter 11, Step 6) — below PostgreSQL's `max_connections` (Chapter 17). The application's own pool reports the same names under its own `pool` tag, which is why the query of Step 7 names the tag.
 
 > **Quarkus and Micronaut.** Both apps hand the locker the same tracker on the app's `MeterRegistry`: `StreamRuneProducer#aggregateLocker`, whose pool has the application pool's size, twenty, and `StreamRuneFactory#aggregateLocker`, whose pool has ten. Quarkus serves the meters at `/q/metrics` in Prometheus' format (`hikaricp_connections_active{pool="streamrune-advisory-lock"}`), Micronaut at `/metrics/hikaricp.connections.active`. The `AggregateLockerWiringIT` of each app checks the meters: the pool's size, the gauge of the waiting commands, the counter of the waits that ran out, and a held lock counted as an active connection.
 
@@ -2773,6 +2773,77 @@ curl -s http://localhost:8080/actuator/metrics/streamrune.saga.delivery_retried 
 ```
 
 `streamrune.saga.delivery_retried`, tagged `saga.type`, counts the saga steps the runner ran again in place because its write of the saga row lost the compare-and-swap to another writer — a twin delivery, a deadline claim, another backend. The step reads the row that won and routes the event on it, without a backoff and without the subscription redelivering the page; one sample per run again, at most two per event (`streamrune.saga.cas_conflicts` counts the conflicts themselves). It needs no alert. With the saga subscription leading on one backend the writers rarely meet: a few samples around a handover, when a deposed leader may still finish a step the new one runs, or when a deadline falls inside a step. Like the fence counter, it is registered on its first sample.
+
+**Metrics — saga steps in parallel:**
+
+The saga runner steps the sagas of a page four at a time (Chapter 11, Step 6). Four meters, each tagged `saga.type`, show how the page uses its workers; a runner at a parallelism of 1 records none of them. The two gauges appear once the runner has stepped its first page, and read `0.0` while no page is in hand:
+
+```bash
+curl -s http://localhost:8080/actuator/metrics/streamrune.saga.steps.in_flight | jq .
+```
+
+```json
+{
+  "availableTags": [
+    {
+      "tag": "saga.type",
+      "values": [
+        "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState"
+      ]
+    }
+  ],
+  "description": "Saga steps running now in a page of events",
+  "measurements": [
+    {
+      "statistic": "VALUE",
+      "value": 0.0
+    }
+  ],
+  "name": "streamrune.saga.steps.in_flight"
+}
+```
+
+- `streamrune.saga.steps.in_flight` (gauge): the steps running now, at most the parallelism. It standing at 4 while the next gauge is above zero means the four workers, not the number of sagas, limit the page.
+- `streamrune.saga.page.pending` (gauge): the steps of the page in hand that have not started yet, the queue behind the running ones.
+- `streamrune.saga.page.effective_parallelism` (distribution summary): for each page whose steps ran on more than one thread, the sum of its step times divided by the page's wall time. Near 4 the workers were busy; near 1 while the saga subscription lags, the page waited for one long saga.
+- `streamrune.saga.page.failed` (counter): the pages that were not acknowledged, which the subscription delivers again (Chapter 11, Step 6). Its `stop` tag says why: `connection` when the page stopped on a connection-class failure (a lost connection, a pool that handed out none in time, too many connections), `third_failure` when three or more of its steps failed, and `none` when one saga's failure ended only that saga's part. It is registered on its first failed page, so it answers `404` until then.
+
+At one order a second, the pace of Chapter 17's two-backend run, the leader's `streamrune.saga.steps.in_flight` stayed between 0 and 2 and `streamrune.saga.page.pending` at 0. The same run with `PAUSE_SECONDS=0 ORDERS=120` puts them to work: on the leader `streamrune.saga.steps.in_flight` stood at 4 with `streamrune.saga.page.pending` up to 93, and after the run the summary read:
+
+```bash
+curl -s http://localhost:8080/actuator/metrics/streamrune.saga.page.effective_parallelism | jq .
+```
+
+```json
+{
+  "availableTags": [
+    {
+      "tag": "saga.type",
+      "values": [
+        "org.streamrune.ecommerce.commands.saga.OrderFulfillmentState"
+      ]
+    }
+  ],
+  "description": "Sum of a page's saga step times divided by its wall time",
+  "measurements": [
+    {
+      "statistic": "COUNT",
+      "value": 10.0
+    },
+    {
+      "statistic": "TOTAL",
+      "value": 35.814705495991724
+    },
+    {
+      "statistic": "MAX",
+      "value": 3.903030041072194
+    }
+  ],
+  "name": "streamrune.saga.page.effective_parallelism"
+}
+```
+
+`COUNT` is the pages with steps on more than one thread, `TOTAL` the sum of their ratios, and `MAX` the busiest page, its four workers busy nearly all of its wall time. `TOTAL` divided by `COUNT` is the mean.
 
 **Metrics — the aggregate lock's pool:**
 

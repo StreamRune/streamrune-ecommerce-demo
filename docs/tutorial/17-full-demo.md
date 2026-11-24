@@ -614,9 +614,9 @@ The terminal prints `: connected` within a second and nothing of the events abov
 
 Everything so far ran one backend. A production service runs several against one database — replicas, or two versions side by side during a rolling restart — and each of them runs the order-fulfillment saga's subscription and its timeout runner (Chapter 11, Step 6). They do not all deliver: the saga runner carries a lease, `"saga:" + saga type`, and the saga subscription built with `.sagaRunner(...)` takes it. One backend holds it, delivers the saga's events, claims its deadlines and retries its compensations; the others read nothing and ask for the lease every polling interval, and take over when the leader stops (within one interval) or dies (within the lease's 15 seconds plus one interval). The three process managers' subscriptions have a lease each — `payment-process-manager`, `order-cancellation` and `order-shipment` — so each of the four leases sits on one backend, and not necessarily the same one: after a restart the saga may lead on one backend and the cancellation process manager on the other. The four projections have a lease each as well, named after the projection — `products`, `orders`, `customers` and `inventory` (Chapter 11): one backend reads the events and writes each read model, and the other answers its reads from the same tables. When the backend that leads them dies, the read models pause until the survivor takes their leases, up to the lease's 15 seconds plus one polling interval. A backend's query cache is evicted only by the projections it runs, each of which reads every event: a backend that leads none of them — usually the standby, since the backend that starts first takes every lease — serves a list of products it cached until its 60 seconds run out (Chapter 5). The step lock that keeps a deadline claim from compensating underneath a step in flight is memory and holds within one backend, which is where the steps and the claims run. Around a handover two backends overlap for a moment — a dead backend's last transaction stays open until the database ends it (a killed process usually closes its connections at once; a backend cut off by the network keeps them until the idle-in-transaction bound), and a deposed leader may finish the page it was delivering — and there the saga runner's forward fence keeps a forward command and its saga's compensation in order. The Compose file has a profile to watch it work.
 
-**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12), a wait the pool's meters show (`hikaricp.connections.pending`, tagged `pool=streamrune-advisory-lock`, Chapter 15). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. A Quarkus backend on the same database brings two pools of its own: `quarkus-app` sets `quarkus.datasource.jdbc.max-size=20`, the size its lock pool takes too, so it holds up to forty. Left at Quarkus' default of fifty it would hold up to a hundred, and beside two Spring backends the database would refuse connections before any load; with twenty, two Spring backends and one Quarkus backend hold up to eighty, besides the listeners. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
+**The aggregate lock holds across the backends.** Both backends write the same aggregates: an order placed on either, the stock its saga reserves wherever the saga leads, a shipment received on whichever backend a client reaches. The lock the command bus takes around a command decides what two such commands do. An in-process lock — the framework's default, `LocalStripedLocker` — serializes the commands of one aggregate within one backend and nothing across them: two backends writing one inventory both load it, the second append fails its version check, the bus reloads and tries again, and after three conflicts in a row the command is refused with `AGGREGATE_VERSION_CONFLICT` and dead-lettered (Chapter 12, Step 2b; Chapter 14). Nothing is lost or written twice either way — the version check holds — but under load a client meets refusals that one backend never gives. The demo therefore takes the lock in PostgreSQL (`aggregateLocker`, `PgAdvisoryLocker`, Chapter 12): every backend asks the database for the same advisory lock per stream, so a command on one backend waits for a command on the same aggregate on the other, up to `streamrune.lock-timeout`, and runs once it is free; when every connection of its lock pool is taken, it first waits up to ten seconds for one of them (Chapter 12), a wait the pool's meters show (`hikaricp.connections.pending`, tagged `pool=streamrune-advisory-lock`, Chapter 15). What it costs: each command holds a connection of the locker's own pool from the lock to its end, besides the connection of the application's pool it borrows for its load and its append, plus the round trip that takes the lock. The saga's steps are such commands, up to four at once on the backend that leads the saga (Chapter 11, Step 6); each backend's startup log states the connections they can hold (below). Each backend opens two pools of ten, so two backends hold up to forty pooled connections, besides one for each of the framework's listeners (`LISTEN`), which keeps a connection of its own; together they stay well below PostgreSQL's default `max_connections` of 100. A Quarkus backend on the same database brings two pools of its own: `quarkus-app` sets `quarkus.datasource.jdbc.max-size=20`, the size its lock pool takes too, so it holds up to forty. Left at Quarkus' default of fifty it would hold up to a hundred, and beside two Spring backends the database would refuse connections before any load; with twenty, two Spring backends and one Quarkus backend hold up to eighty, besides the listeners. Size the two pools and the listeners of every replica together below it. `TwoInstanceSagaIT` shows the lock across two Spring contexts on one database: a stock adjustment on one waits for the lock a price change on the other holds, and 200 shipments received through both at once are all applied, without a version conflict or a dead-lettered command.
 
-**The profile.** The Compose file gets a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take four settings from the environment, with defaults that change nothing:
+**The profile.** The Compose file gets a second backend, `backend-2`, under the profile `two-backends`: the same image with the same environment, on port 8091 (8090 is the notifications service). Both backends also take five settings from the environment, with defaults that change nothing:
 
 | Variable | Property | Default | Effect |
 |---|---|---|---|
@@ -624,6 +624,7 @@ Everything so far ran one backend. A production service runs several against one
 | `APP_SAGA_TIMEOUT_POLL_INTERVAL` | `app.saga.timeout-poll-interval` | `10s` | How often each backend's timeout runner looks for sagas past their deadline |
 | `APP_CHAOS_SAGA_COMMAND_DELAY_MAX` | `app.chaos.saga-command-delay-max` | `0ms` | A random delay of 0 to this long before every command a saga dispatches |
 | `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | `management.endpoint.health.show-details` | `never` | With `always`, `/actuator/health` lists each subscription with its `role`: `LEADING` or `STANDBY` (Chapter 15) |
+| `STREAMRUNE_SAGA_PARALLELISM` | `streamrune.saga.parallelism` | unset: the framework's `4` | How many steps of the order-fulfillment saga run at once, 1 to 64 (Chapter 11, Step 6). Unset, Compose leaves it out of the container. Each backend logs the value at startup, and a `WARN` from 6 on: its steps can then hold more than half of the application pool's ten connections |
 
 `backend-2` also gets the tracing settings of Chapter 15, `MANAGEMENT_TRACING_EXPORT_ENABLED` (`false` unless set) and the endpoint of the `jaeger` service: started with both profiles, `--profile two-backends --profile tracing`, the two backends send their spans to one Jaeger, both as the service `ecommerce-spring`. StreamRune's attributes name types and ids, never the process; what tells the backends apart is the resource attribute `service.instance.id` of Chapter 15, which Jaeger shows under each span's *Process*: the container's host name, its short id, which `docker ps` lists under `CONTAINER ID`. A saga's steps carry the id of the backend that led it when they ran, so a takeover shows as the next step under the other id; which backend leads now is the `role` in each one's `/actuator/health`.
 
@@ -680,6 +681,10 @@ services:
       APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
       APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
+      # How many steps of the order-fulfillment saga run at once (streamrune.saga.parallelism, 1 to
+      # 64): taken from the shell when set there, left out otherwise, so the framework's default
+      # of 4 holds.
+      STREAMRUNE_SAGA_PARALLELISM:
       # The details of /actuator/health (never unless set): with always, they list each
       # subscription with its role under its lease — LEADING or STANDBY.
       MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
@@ -720,6 +725,7 @@ services:
       APP_SAGA_FULFILLMENT_TIMEOUT: ${APP_SAGA_FULFILLMENT_TIMEOUT:-15m}
       APP_SAGA_TIMEOUT_POLL_INTERVAL: ${APP_SAGA_TIMEOUT_POLL_INTERVAL:-10s}
       APP_CHAOS_SAGA_COMMAND_DELAY_MAX: ${APP_CHAOS_SAGA_COMMAND_DELAY_MAX:-0ms}
+      STREAMRUNE_SAGA_PARALLELISM:
       MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
       MANAGEMENT_TRACING_EXPORT_ENABLED: ${MANAGEMENT_TRACING_EXPORT_ENABLED:-false}
       MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
@@ -770,14 +776,37 @@ volumes:
   pgdata:
 ```
 
-A deadline of one and a half seconds, timeout runners that look every 200 ms and saga commands delayed by up to 300 ms make a fulfillment take about as long as its deadline: some complete, some are compensated at their deadline, and some deadlines pass while a forward command is on its way to the event store. Start both backends that way, with the health details on (build the JARs first, as in Step 1):
+A deadline of one and a half seconds, timeout runners that look every 200 ms and saga commands delayed by up to 500 ms make a fulfillment take about as long as its deadline: some complete, some are compensated at their deadline, and some deadlines pass while a forward command is on its way to the event store. The delay is set for the four saga steps the leader runs at once by default (Chapter 11, Step 6): the steps of different sagas overlap, so each saga's commands, not a queue of sagas, decide how long a fulfillment takes. Start both backends that way, with the health details on (build the JARs first, as in Step 1):
 
 ```bash
 ./gradlew :spring-app:bootJar :notifications-service:bootJar
 MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always APP_SAGA_FULFILLMENT_TIMEOUT=1500ms \
-  APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms \
+  APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=500ms \
   docker compose --profile two-backends up -d --build
 ```
+
+Each backend logs the saga's parallelism as it starts, the line of Chapter 11 (Step 6), beside the forward fence's line:
+
+```bash
+docker compose --profile two-backends logs backend backend-2 | grep "StreamRune: saga"
+```
+
+```text
+backend-1    | 2026-11-24T22:07:18.881Z  INFO 1 --- [           main] o.s.s.SagaEventPathRetentionConfigurer   : StreamRune: saga forward fence on on 1 SagaRunner bean(s) that name none themselves (streamrune.saga.forward-fence=auto, following streamrune.subscription.single-active-consumer.enabled=true)
+backend-1    | 2026-11-24T22:07:18.936Z  INFO 1 --- [           main] o.s.spring.SagaParallelismStartupCheck   : StreamRune: saga type org.streamrune.ecommerce.commands.saga.OrderFulfillmentState (subscription 'order-fulfillment-saga'): parallelism 4 (streamrune.saga.parallelism); its steps hold up to 4 connections at once
+backend-2-1  | 2026-11-24T22:07:18.807Z  INFO 1 --- [           main] o.s.s.SagaEventPathRetentionConfigurer   : StreamRune: saga forward fence on on 1 SagaRunner bean(s) that name none themselves (streamrune.saga.forward-fence=auto, following streamrune.subscription.single-active-consumer.enabled=true)
+backend-2-1  | 2026-11-24T22:07:18.870Z  INFO 1 --- [           main] o.s.spring.SagaParallelismStartupCheck   : StreamRune: saga type org.streamrune.ecommerce.commands.saga.OrderFulfillmentState (subscription 'order-fulfillment-saga'): parallelism 4 (streamrune.saga.parallelism); its steps hold up to 4 connections at once
+```
+
+Both backends print it, the standby too: the line describes the runner each of them has, and the steps run on the one that leads. Parallelism 4 came from `streamrune.saga.parallelism`, the global property, at its default. The steps hold up to four of the ten connections of the backend's application pool at once; their locks take connections of the locker's own pool.
+
+`STREAMRUNE_SAGA_PARALLELISM=6` in front of the same `docker compose up` gives both backends 6 from the same property, `parallelism 6 (streamrune.saga.parallelism); its steps hold up to 6 connections at once`, and each of them adds a `WARN` after the line:
+
+```text
+StreamRune: saga steps can hold up to 6 connections at once (1 per step, 6 steps over 1 saga type(s)), more than half of the connection pool's maximum of 10. Raise the pool, or lower streamrune.saga.parallelism.
+```
+
+The backend still starts; the warning says that the saga's steps alone can take more than half of the pool the backend's requests, projections and other listeners share.
 
 Which backend leads shows in each one's health:
 
@@ -786,7 +815,7 @@ curl -s http://localhost:8080/actuator/health | jq '.components.streamRune.detai
 curl -s http://localhost:8091/actuator/health | jq '.components.streamRune.details["subscription.order-fulfillment-saga"].role'
 ```
 
-**Keep the four variables on every later `docker compose up` of this stack.** Compose interpolates them when it starts a service and recreates a service whose configuration changed: a later `docker compose --profile two-backends up -d <service>` from a shell without them — to restart the frontend, say, which depends on `backend` — recreates `backend` with the defaults (a fifteen-minute deadline, no health details), and `backend-2` too when the command names it, and `scripts/two-backends-invariant.sh` then stops at its first check, the health details. Export the four in the shell you work in, or put them in an `.env` file next to `docker-compose.yml`, which Compose reads on every run.
+**Keep the four variables on every later `docker compose up` of this stack.** Compose interpolates them when it starts a service and recreates a service whose configuration changed: a later `docker compose --profile two-backends up -d <service>` from a shell without them — to restart the frontend, say, which depends on `backend` — recreates `backend` with the defaults (a fifteen-minute deadline, no health details), and `backend-2` too when the command names it, and `scripts/two-backends-invariant.sh` then stops at its first check, the health details. Export the four in the shell you work in, or put them in an `.env` file next to `docker-compose.yml`, which Compose reads on every run. The same goes for `STREAMRUNE_SAGA_PARALLELISM` when you set it: a backend recreated without it runs on the default of 4.
 
 One answers `"LEADING"`, the other `"STANDBY"` — usually the backend that started first. The projections and the process managers report theirs under their own names, `subscription.products` or `subscription.payment-process-manager`, say. Both serve every request: an order placed on the standby is stored by it, and the leader's saga subscription picks up its `OrderPlaced` from the shared event store.
 
@@ -2071,8 +2100,8 @@ Killing the leader, backend-2 (http://localhost:8091), with SIGKILL after 30 ord
  Container streamrune-ecommerce-demo-backend-2-1 Killing 
  Container streamrune-ecommerce-demo-backend-2-1 Killed 
   ✓ http://localhost:8080 leads the saga 14 s after the kill.
- Container streamrune-ecommerce-demo-rabbitmq-1 Waiting 
  Container streamrune-ecommerce-demo-postgres-1 Waiting 
+ Container streamrune-ecommerce-demo-rabbitmq-1 Waiting 
  Container streamrune-ecommerce-demo-postgres-1 Healthy 
  Container streamrune-ecommerce-demo-rabbitmq-1 Healthy 
  Container streamrune-ecommerce-demo-backend-2-1 Starting 
@@ -2082,19 +2111,19 @@ Waiting for http://localhost:8091/actuator/health (180s) …
   ✓ backend-2 is back, as standby: STANDBY.
 Waiting until every order-fulfillment saga has ended and the order-flow subscriptions are at the head of the event store (at most 5 minutes) …
 Order-fulfillment sagas of this run by status:
-COMPENSATED|8
-COMPLETED|52
+COMPENSATED|11
+COMPLETED|49
 Compensated at their deadline (an episode with no cause event):
-4
+9
 Orders of this run cancelled, shipped, with their payment refunded and with their payment voided:
-26 | 5 | 26 | 0
+30 | 4 | 30 | 0
 Forward commands refused at their commit on http://localhost:8080 since it started: 0
 Forward commands refused at their commit on http://localhost:8091 since it started: 0
 Checking money and stock (scripts/money-and-stock-invariants.sql) …
 ✓ Money and stock end consistent with every order, and no forward command came after its saga's compensation.
 ```
 
-The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many orders end cancelled, how many forward commands a claim catches in flight — the last line does not. (Sixty orders a second apart leave the leader time to confirm most of them; with `PAUSE_SECONDS=0 ORDERS=120` the leader falls behind its deadline, nearly every saga is compensated and every one of those orders is cancelled, with its payment refunded or voided and its stock released, which is the heavier test of the undo.)
+The counts differ from run to run — which backend leads, how long the takeover takes (the dead leader's lease runs out 15 seconds after its last renewal, renewed every 5), how many sagas meet their deadline, how many orders end cancelled, how many forward commands a claim catches in flight — the last line does not. (Sixty orders a second apart leave the leader time to confirm most of them; with `PAUSE_SECONDS=0 ORDERS=120` the leader's four steps at a time fall behind the deadline — one run compensated 102 of the 120 sagas, 77 of them at their deadline — and every one of those orders is cancelled, with its payment refunded or voided and its stock released, which is the heavier test of the undo.)
 
 **What the invariant queries check.** `scripts/money-and-stock-invariants.sql` holds nine `SELECT` statements. Each returns one row per inconsistency — the columns `violation` (what it checks, in words), `order_id` and `detail` — and none once the run is quiet. The script pipes the file to `psql`, and the three apps' integration tests and `TwoInstanceSagaIT` run the same file over their databases, keeping the rows whose `order_id` starts with the test's own prefix, because a shared test database also holds orders other test classes left inconsistent on purpose. Each statement reads the event log (`event_stream`) and, for the last, the command inbox:
 

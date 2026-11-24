@@ -18,6 +18,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.streamrune.core.metrics.MetricNames;
 import org.streamrune.core.tracing.TraceAttributes;
+import org.streamrune.integration.SagaParallelismSetting;
 
 /**
  * Every StreamRune meter name the tutorial and the README give, dotted ({@code
@@ -29,9 +30,12 @@ import org.streamrune.core.tracing.TraceAttributes;
  * <p>A dotted name counts as a meter name when its second segment is one a {@link MetricNames}
  * constant uses ({@code commands}, {@code events}, {@code outbox}, ...). Configuration properties
  * share some of those namespaces; they are told apart by their shape: a property segment contains a
- * hyphen ({@code streamrune.outbox.retention-max-age}) or the key ends in {@code .enabled}. The
- * attribute keys of the framework's spans share them too ({@code streamrune.outbox.entry.id}): a
- * {@link TraceAttributes} constant is a span's attribute, not a meter.
+ * hyphen ({@code streamrune.outbox.retention-max-age}) or the key ends in {@code .enabled}, and the
+ * saga parallelism keys, which have neither, are the framework's {@link SagaParallelismSetting}
+ * names: {@code streamrune.saga.parallelism} and the prefix {@code streamrune.saga.subscriptions.}
+ * of a subscription's key. The attribute keys of the framework's spans share them too ({@code
+ * streamrune.outbox.entry.id}): a {@link TraceAttributes} constant is a span's attribute, not a
+ * meter.
  */
 class TutorialMetricNamesTest {
 
@@ -80,6 +84,7 @@ class TutorialMetricNamesTest {
           String name = dotted.group();
           if (!families.contains(name.split("\\.")[1])
               || name.endsWith(".enabled")
+              || isSagaParallelismKey(name)
               || spanAttributes.contains(name)) {
             continue;
           }
@@ -111,6 +116,15 @@ class TutorialMetricNamesTest {
 
     assertThat(checked).anyMatch(c -> c.startsWith("15-observability.md:"));
     assertThat(unknown).as("meter names the framework does not register").isEmpty();
+  }
+
+  /**
+   * The saga parallelism property, or the start of a subscription's key, {@code
+   * streamrune.saga.subscriptions.<name>.parallelism}, which the pattern cuts before the name.
+   */
+  private static boolean isSagaParallelismKey(String name) {
+    return name.equals(SagaParallelismSetting.PROPERTY)
+        || (name + ".").equals(SagaParallelismSetting.SUBSCRIPTIONS_PREFIX);
   }
 
   /** The meter names {@link MetricNames} publishes; its other constants are tag keys. */
