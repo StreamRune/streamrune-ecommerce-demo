@@ -128,6 +128,8 @@ public class EcommerceSubscriptionLifecycle
    * which runs last: it reads the subscriptions each saga runner is bound to, so the saga's
    * subscription must be built when it runs. Its startup line then names the subscription, and a
    * {@code streamrune.saga.subscriptions.order-fulfillment-saga.parallelism} key names a known one.
+   * The listeners that set no order, the demo's {@code SeedDataRunner} among them, run after this
+   * one.
    */
   @Override
   public int getOrder() {

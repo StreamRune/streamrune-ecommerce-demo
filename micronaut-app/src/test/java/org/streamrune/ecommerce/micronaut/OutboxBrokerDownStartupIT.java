@@ -36,7 +36,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.slf4j.LoggerFactory;
+import org.streamrune.ecommerce.micronaut.config.EcommerceSubscriptionLifecycle;
 import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
+import org.streamrune.micronaut.SagaParallelismStartupCheck;
 import org.streamrune.runtime.BackgroundRelayHealthContributor;
 import org.streamrune.runtime.BackgroundRelayHealthContributor.ComponentHealth;
 import org.streamrune.runtime.DeadLetterRetryRunner;
@@ -73,6 +75,9 @@ import org.testcontainers.rabbitmq.RabbitMQContainer;
  * they can hold more than half of it nor the refusal of the start ({@link #SAGA_BUDGET_EXCEEDED})
  * is logged. The line names the saga's subscription: the app builds it in a {@code StartupEvent}
  * listener ordered before the framework's check ({@code EcommerceSubscriptionLifecycle#getOrder}).
+ * The test also compares the two orders: two listeners of the same order run in the order their
+ * beans happen to be registered, which can name the subscription in this run and not in another
+ * packaging of the app.
  */
 @MicronautTest(transactional = false)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -141,6 +146,10 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
 
   @Inject MeterRegistry meters;
 
+  @Inject EcommerceSubscriptionLifecycle subscriptionLifecycle;
+
+  @Inject SagaParallelismStartupCheck sagaParallelismCheck;
+
   @AfterAll
   void stopBroker() {
     rabbit.stop();
@@ -172,6 +181,9 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
                 event.getLevel() == Level.INFO
                     && event.getFormattedMessage().equals(SAGA_PARALLELISM_LINE))
         .noneMatch(event -> event.getFormattedMessage().startsWith(SAGA_BUDGET_EXCEEDED));
+    assertThat(subscriptionLifecycle.getOrder())
+        .as("the demo's subscriptions start before the framework's saga parallelism check")
+        .isLessThan(sagaParallelismCheck.getOrder());
 
     String productId = "m-broker-down-" + System.nanoTime();
     HttpResponse<String> created =

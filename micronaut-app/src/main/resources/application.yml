@@ -74,8 +74,10 @@ streamrune:
     # the order's customer or an ADMIN stamps the running saga, so the saga's own cancellation
     # follows within about 10 to 20 seconds. The framework default is 60s.
     compensation-retry-interval: 10s
-    # How many steps of one saga type run at once (1 to 64, the framework default 4), for every saga
-    # type, and for the saga delivered through one subscription, which wins over the global value.
+    # parallelism: how many steps of one saga type run at once (1 to 64, the framework default 4),
+    # for every saga type.
+    # subscriptions.<name>.parallelism: the same for the saga delivered through that subscription;
+    # it wins over the global value.
     # The demo sets neither and runs on 4. A step holds one connection of the application's pool
     # (Hikari's default of ten, as the app sets no size) for its load and its append; its aggregate
     # lock takes a connection of the locker's own pool (StreamRuneFactory#aggregateLocker). The
