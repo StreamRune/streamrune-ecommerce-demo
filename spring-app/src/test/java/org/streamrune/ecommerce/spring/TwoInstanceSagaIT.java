@@ -62,15 +62,20 @@ import org.streamrune.spring.StreamRuneHealthIndicator;
  * streamrune.subscription.single-active-consumer.lease-ttl}) instead of 15 s.
  *
  * <p>The deadline is short ({@code app.saga.fulfillment-timeout=2s}), the timeout runners poll
- * every 200 ms, and every saga command waits a random 0 to 300 ms first ({@code
- * app.chaos.saga-command-delay-max}): a fulfillment takes about as long as its deadline, so some
- * complete, some are compensated at their deadline, and some deadlines pass while a forward command
- * is in flight. Eight client threads place 100 orders, alternating the two backends; after 50
- * orders the test closes the backend whose saga subscription leads (read in this process from the
- * subscription bean's {@code leaseRole()}), waits for the other to lead, and starts a new backend
- * in its place. Closing a context gives its leases back, so the survivor takes over within one
- * polling interval. Exactly one backend leads before the restart, the survivor leads after it, and
- * exactly one leads once the new backend is up.
+ * every 200 ms, and every saga command waits a random 0 to 750 ms first ({@code
+ * app.chaos.saga-command-delay-max}). The saga runner runs the steps of different sagas at the same
+ * time, four at a time (the framework's default, which the delay is set for), and the subscription
+ * reads the next page when the last of those steps has ended. A fulfillment's commands (the
+ * payment, one reservation per line, the confirmation) wait 1.1 s on average, 1.5 s with two lines;
+ * between its steps it waits about a second more, for the subscriptions' next poll and for the
+ * slowest step of the page it was delivered in. A fulfillment takes about as long as its deadline,
+ * so some complete, some are compensated at their deadline, and some deadlines pass while a forward
+ * command is in flight. Eight client threads place 100 orders, alternating the two backends; after
+ * 50 orders the test closes the backend whose saga subscription leads (read in this process from
+ * the subscription bean's {@code leaseRole()}), waits for the other to lead, and starts a new
+ * backend in its place. Closing a context gives its leases back, so the survivor takes over within
+ * one polling interval. Exactly one backend leads before the restart, the survivor leads after it,
+ * and exactly one leads once the new backend is up.
  *
  * <p>A forward command refused at its commit is counted and logged, not asserted: the leader runs
  * every step and claims every deadline, and a refusal needs a claim that lands underneath a step in
@@ -150,8 +155,12 @@ class TwoInstanceSagaIT {
 
   private static final Duration CLIENT_PAUSE_MAX = Duration.ofSeconds(12);
 
-  /** Every saga command waits a random time up to this first. */
-  private static final String SAGA_COMMAND_DELAY_MAX = "300ms";
+  /**
+   * Every saga command waits a random time up to this first: three or four commands to an order,
+   * and about a second between a saga's steps, make a fulfillment take about as long as its
+   * deadline.
+   */
+  private static final String SAGA_COMMAND_DELAY_MAX = "750ms";
 
   private static final String SAGA_TYPE = SagaType.fromClass(OrderFulfillmentState.class).value();
 
@@ -232,10 +241,11 @@ class TwoInstanceSagaIT {
                     }
                     // Each client pauses CLIENT_PAUSE_MIN to CLIENT_PAUSE_MAX between two orders,
                     // about one order a second over the eight. The leading backend's saga
-                    // subscription runs every step of both backends' orders, one at a time, and
-                    // each order's three forward commands wait 450 ms on average there: at this
-                    // pace the subscription keeps up, so a fulfillment takes about as long as its
-                    // deadline instead of waiting behind a backlog of every order placed at once.
+                    // subscription runs every step of both backends' orders, the sagas of a page
+                    // four at a time, and an order's three or four forward commands wait 1.1 s or
+                    // 1.5 s on average there: at this pace the subscription keeps up, so a
+                    // fulfillment takes about as long as its deadline instead of waiting behind a
+                    // backlog of every order placed at once.
                     Thread.sleep(
                         ThreadLocalRandom.current()
                             .nextLong(CLIENT_PAUSE_MIN.toMillis(), CLIENT_PAUSE_MAX.toMillis()));
@@ -308,31 +318,44 @@ class TwoInstanceSagaIT {
             });
 
     Map<String, Integer> byStatus = countByStatus();
+    String fulfillmentSagas =
+        " FROM saga_state WHERE saga_type = '"
+            + SAGA_TYPE
+            + "' AND saga_id LIKE 'fulfillment-"
+            + ORDER_PREFIX
+            + "%'";
+    String completedSagas = fulfillmentSagas + " AND status = 'COMPLETED'";
     int timeoutCompensations =
         queryInt(
-            "SELECT count(*) FROM saga_state WHERE saga_type = '"
-                + SAGA_TYPE
-                + "' AND saga_id LIKE 'fulfillment-"
-                + ORDER_PREFIX
-                + "%'"
+            "SELECT count(*)"
+                + fulfillmentSagas
                 + " AND status = 'COMPENSATED' AND episode_cause_event_id IS NULL");
-    int completed =
+    int completed = queryInt("SELECT count(*)" + completedSagas);
+    // How long the completed fulfillments took, from the saga's start to its COMPLETED. The
+    // sagas the deadline claimed are not in it, and a claim waits for a step in flight, so the
+    // median can lie past the deadline.
+    int completedMedianMillis =
         queryInt(
-            "SELECT count(*) FROM saga_state WHERE saga_type = '"
-                + SAGA_TYPE
-                + "' AND saga_id LIKE 'fulfillment-"
-                + ORDER_PREFIX
-                + "%' AND status = 'COMPLETED'");
+            "SELECT coalesce(round(1000 * percentile_cont(0.5) WITHIN GROUP"
+                + " (ORDER BY extract(epoch FROM updated_at - created_at))), 0)::int"
+                + completedSagas);
+    int completedMaxMillis =
+        queryInt(
+            "SELECT coalesce(round(1000 * max(extract(epoch FROM updated_at - created_at))), 0)::int"
+                + completedSagas);
     long fencedSurvivor = fenced(slots[1 - closedSlot[0]]);
     long fencedRestarted = fenced(slots[closedSlot[0]]);
     LOG.info(
         "Two-instance run: fulfillment sagas by status {}; of the test's orders, completed {} and"
-            + " compensated at their deadline {}; slot {} led and was closed in {} ms, slot {} led"
+            + " compensated at their deadline {}; the completed took {} ms (median), at most {} ms;"
+            + " slot {} led and was closed in {} ms, slot {} led"
             + " {} ms after that; forward commands fenced {} (closed leader {}, survivor {},"
             + " restarted backend {})",
         byStatus,
         completed,
         timeoutCompensations,
+        completedMedianMillis,
+        completedMaxMillis,
         closedSlot[0],
         closing[0].toMillis(),
         1 - closedSlot[0],
