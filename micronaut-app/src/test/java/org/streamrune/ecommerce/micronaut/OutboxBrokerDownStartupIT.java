@@ -36,7 +36,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.slf4j.LoggerFactory;
+import org.streamrune.ecommerce.micronaut.config.EcommerceSubscriptionLifecycle;
 import org.streamrune.ecommerce.micronaut.config.RabbitMqFactory;
+import org.streamrune.micronaut.SagaParallelismStartupCheck;
 import org.streamrune.runtime.BackgroundRelayHealthContributor;
 import org.streamrune.runtime.BackgroundRelayHealthContributor.ComponentHealth;
 import org.streamrune.runtime.DeadLetterRetryRunner;
@@ -67,6 +69,15 @@ import org.testcontainers.rabbitmq.RabbitMQContainer;
  * from the instance of this class on ({@link #frameworkLog}), which is built before the application
  * context starts: the line that says where request identities come from shows that the start was
  * read.
+ *
+ * <p>The app logs the framework's startup line for the order-fulfillment saga ({@link
+ * #SAGA_PARALLELISM_LINE}), and its saga steps fit the application's pool: neither the warning that
+ * they can hold more than half of it nor the refusal of the start ({@link #SAGA_BUDGET_EXCEEDED})
+ * is logged. The line names the saga's subscription: the app builds it in a {@code StartupEvent}
+ * listener ordered before the framework's check ({@code EcommerceSubscriptionLifecycle#getOrder}).
+ * The test also compares the two orders: two listeners of the same order run in the order their
+ * beans happen to be registered, which can name the subscription in this run and not in another
+ * packaging of the app.
  */
 @MicronautTest(transactional = false)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -77,6 +88,23 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
   /** How the framework's warning that the retry runner and its command bus differ begins. */
   private static final String RUNNER_AND_BUS_DIFFER =
       "DeadLetterRetryRunner replays by maxRetries=";
+
+  /**
+   * The framework's startup line for the order-fulfillment saga: the subscription it is delivered
+   * through, the default parallelism of 4, which the integration binds as {@code
+   * streamrune.saga.parallelism}, and one connection of the application's pool per step, since the
+   * aggregate locker has a pool of its own.
+   */
+  private static final String SAGA_PARALLELISM_LINE =
+      "StreamRune: saga type org.streamrune.ecommerce.commands.saga.OrderFulfillmentState"
+          + " (subscription 'order-fulfillment-saga'): parallelism 4"
+          + " (streamrune.saga.parallelism); its steps hold up to 4 connections at once";
+
+  /**
+   * How the framework's warning that the saga steps can hold more than half the application's pool
+   * begins, and its refusal of a start whose aggregate locks can take all of it.
+   */
+  private static final String SAGA_BUDGET_EXCEEDED = "StreamRune: saga steps can hold up to";
 
   /** What the framework logs from the construction of this instance on. */
   private final ListAppender<ILoggingEvent> frameworkLog = new ListAppender<>();
@@ -118,6 +146,10 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
 
   @Inject MeterRegistry meters;
 
+  @Inject EcommerceSubscriptionLifecycle subscriptionLifecycle;
+
+  @Inject SagaParallelismStartupCheck sagaParallelismCheck;
+
   @AfterAll
   void stopBroker() {
     rabbit.stop();
@@ -142,7 +174,16 @@ class OutboxBrokerDownStartupIT implements TestPropertyProvider {
             event ->
                 event.getLevel() == Level.WARN
                     && event.getLoggerName().equals(DeadLetterRetryRunner.class.getName())
-                    && event.getFormattedMessage().startsWith(RUNNER_AND_BUS_DIFFER));
+                    && event.getFormattedMessage().startsWith(RUNNER_AND_BUS_DIFFER))
+        .as("the saga's parallelism and the connections its steps hold, within the pool")
+        .anyMatch(
+            event ->
+                event.getLevel() == Level.INFO
+                    && event.getFormattedMessage().equals(SAGA_PARALLELISM_LINE))
+        .noneMatch(event -> event.getFormattedMessage().startsWith(SAGA_BUDGET_EXCEEDED));
+    assertThat(subscriptionLifecycle.getOrder())
+        .as("the demo's subscriptions start before the framework's saga parallelism check")
+        .isLessThan(sagaParallelismCheck.getOrder());
 
     String productId = "m-broker-down-" + System.nanoTime();
     HttpResponse<String> created =

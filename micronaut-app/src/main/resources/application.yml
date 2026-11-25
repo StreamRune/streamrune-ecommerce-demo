@@ -74,6 +74,22 @@ streamrune:
     # the order's customer or an ADMIN stamps the running saga, so the saga's own cancellation
     # follows within about 10 to 20 seconds. The framework default is 60s.
     compensation-retry-interval: 10s
+    # parallelism: how many steps of one saga type run at once (1 to 64, the framework default 4),
+    # for every saga type.
+    # subscriptions.<name>.parallelism: the same for the saga delivered through that subscription;
+    # it wins over the global value.
+    # The demo sets neither and runs on 4. A step holds one connection of the application's pool
+    # (Hikari's default of ten, as the app sets no size) for its load and its append; its aggregate
+    # lock takes a connection of the locker's own pool (StreamRuneFactory#aggregateLocker). The
+    # startup log prints one line per saga type with its parallelism, the property that decided it
+    # and the connections its steps hold, and a WARN when that is more than half the application's
+    # pool. The environment variable STREAMRUNE_SAGA_PARALLELISM sets the global value; the
+    # subscription key keeps the subscription's name as written, which a variable cannot spell, so
+    # it belongs in this file.
+    # parallelism: 4
+    # subscriptions:
+    #   order-fulfillment-saga:
+    #     parallelism: 4
   event-store:
     # The framework creates its own schema at startup (this is also the default): the event
     # store's Flyway series and, because a PostgreSQL-backed CryptoEngine bean is present, the

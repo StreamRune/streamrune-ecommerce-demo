@@ -55,6 +55,11 @@ import org.testcontainers.rabbitmq.RabbitMQContainer;
  * <p>The app starts without the dead-letter retry runner's warning that its command bus answers a
  * keyed command that fails again under its key by another policy or inbox window than the runner
  * replays by ({@link #RUNNER_AND_BUS_DIFFER}): the bus the app builds takes the runner's.
+ *
+ * <p>The app logs the framework's startup line for the order-fulfillment saga ({@link
+ * #SAGA_PARALLELISM_LINE}), and its saga steps fit the application's pool: neither the warning that
+ * they can hold more than half of it nor the refusal of the start ({@link #SAGA_BUDGET_EXCEEDED})
+ * is logged.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class OutboxBrokerDownStartupIT {
@@ -62,6 +67,23 @@ class OutboxBrokerDownStartupIT {
   /** How the framework's warning that the retry runner and its command bus differ begins. */
   private static final String RUNNER_AND_BUS_DIFFER =
       "DeadLetterRetryRunner replays by maxRetries=";
+
+  /**
+   * The framework's startup line for the order-fulfillment saga: the subscription it is delivered
+   * through, the default parallelism of 4, which the integration binds as {@code
+   * streamrune.saga.parallelism}, and one connection of the application's pool per step, since the
+   * aggregate locker has a pool of its own.
+   */
+  private static final String SAGA_PARALLELISM_LINE =
+      "StreamRune: saga type org.streamrune.ecommerce.commands.saga.OrderFulfillmentState"
+          + " (subscription 'order-fulfillment-saga'): parallelism 4"
+          + " (streamrune.saga.parallelism); its steps hold up to 4 connections at once";
+
+  /**
+   * How the framework's warning that the saga steps can hold more than half the application's pool
+   * begins, and its refusal of a start whose aggregate locks can take all of it.
+   */
+  private static final String SAGA_BUDGET_EXCEEDED = "StreamRune: saga steps can hold up to";
 
   private static final String DATABASE = "broker_down";
 
@@ -94,7 +116,10 @@ class OutboxBrokerDownStartupIT {
         .as("the app's log from its start")
         .contains("Tomcat started on port")
         .as("the retry runner and the command bus answer a keyed re-send by the same rules")
-        .doesNotContain(RUNNER_AND_BUS_DIFFER);
+        .doesNotContain(RUNNER_AND_BUS_DIFFER)
+        .as("the saga's parallelism and the connections its steps hold, within the pool")
+        .contains(SAGA_PARALLELISM_LINE)
+        .doesNotContain(SAGA_BUDGET_EXCEEDED);
 
     HttpResponse<String> health = get("/actuator/health");
     assertThat(health.statusCode()).as("health: %s", health.body()).isEqualTo(200);

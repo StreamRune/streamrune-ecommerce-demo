@@ -42,6 +42,11 @@ subprojects {
         useJUnitPlatform()
         jvmArgs("--enable-preview")
         jvmArgs(graalJitWorkaround)
+        // The Compose stack's saga parallelism lever (docker-compose.yml) stays out of the tests,
+        // which assert the framework's default of 4, also when a shell has it exported. It is
+        // removed when the task runs: read while the build is configured, the environment would
+        // be stored with a configuration cache entry and reused by every build that reuses it.
+        doFirst { (this as Test).environment.remove("STREAMRUNE_SAGA_PARALLELISM") }
     }
 
     tasks.withType<JavaExec> {

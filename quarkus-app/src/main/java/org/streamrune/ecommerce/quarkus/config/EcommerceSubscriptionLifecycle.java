@@ -61,7 +61,10 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  * injected collaborators (EventStore, OffsetStore, the saga runner) are fully initialized before
  * these subscriptions are started. The framework applies the inbox retention window to the saga
  * runner in an earlier {@code StartupEvent} observer ({@code LIBRARY_BEFORE} priority), so the
- * runner's key-age guard is armed before its subscription delivers the first event.
+ * runner's key-age guard is armed before its subscription delivers the first event. This observer
+ * must stay at the default priority ({@code APPLICATION + 500}), below the {@code LIBRARY_AFTER +
+ * 500} of the framework's saga parallelism check ({@code SagaParallelismStartupCheck}), which reads
+ * the subscriptions each saga runner is bound to and so needs the saga's subscription built.
  */
 @ApplicationScoped
 public class EcommerceSubscriptionLifecycle {

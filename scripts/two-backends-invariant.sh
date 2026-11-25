@@ -10,7 +10,7 @@
 #
 # Usage (from the repository root, with the JARs built as the README's Quick Start shows):
 #   MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS=always APP_SAGA_FULFILLMENT_TIMEOUT=1500ms \
-#     APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=300ms \
+#     APP_SAGA_TIMEOUT_POLL_INTERVAL=200ms APP_CHAOS_SAGA_COMMAND_DELAY_MAX=500ms \
 #     docker compose --profile two-backends up -d --build
 #   scripts/two-backends-invariant.sh
 #   docker compose --profile two-backends down -v
@@ -20,11 +20,13 @@
 # set to always; without it the script stops at the start and says so.
 #
 # With the defaults (a 15-minute deadline, no delay) no saga reaches its deadline and the checks
-# hold without a deadline in the run; the three variables above make some deadlines pass while a
-# forward command is in flight. Every compensation cancels the order, and the cancellation's undo
-# releases the order's stock and voids or refunds its payment whatever the saga row recorded.
-# ORDERS (default 60) sets the number of orders, PAUSE_SECONDS (default 1) the pause
-# between two of them. Exit status: 0 when the checks hold, 1 when one does not, a request the
+# hold without a deadline in the run; the three variables above make a fulfillment take about as
+# long as its deadline, with the leader running four saga steps at once (the default of
+# STREAMRUNE_SAGA_PARALLELISM): some complete, some are compensated at their deadline, and some
+# deadlines pass while a forward command is in flight. Every compensation cancels the order, and
+# the cancellation's undo releases the order's stock and voids or refunds its payment whatever the
+# saga row recorded. ORDERS (default 60) sets the number of orders, PAUSE_SECONDS (default 1) the
+# pause between two of them. Exit status: 0 when the checks hold, 1 when one does not, a request the
 # script sends is answered with an unexpected status, or the sagas and subscriptions did not
 # settle within five minutes.
 
