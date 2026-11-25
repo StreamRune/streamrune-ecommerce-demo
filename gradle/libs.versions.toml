@@ -28,7 +28,7 @@ postgresql = "42.7.14"
 # recommended" WARN that 10.22.0 logged). The framework's event store applies its schema at startup, so no demo
 # module declares these two aliases; Flyway reaches the apps through streamrune-postgres.
 flyway = "13.11.1"
-slf4j = "2.0.16"
+slf4j = "2.0.20"
 
 # Validation
 jakarta-validation = "3.0.2"
