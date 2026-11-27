@@ -160,7 +160,7 @@ class ProjectionDeliveryModeDeclarationsTest {
         factory.projectionRoutes(
             projections,
             emptyEnvironment(),
-            new ReadModelStores(() -> Optional.of(store(processor)), List::of),
+            new ReadModelStores("postgres", () -> Optional.of(store(processor)), List::of),
             subscriptionCheckpoint(),
             null);
     return factory.multiProjectionRunner(

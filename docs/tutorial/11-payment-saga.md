@@ -5626,6 +5626,25 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 
 ```java
 void onStop(@Observes ShutdownEvent event) {
+  stop();
+}
+
+void onBeforeDestroy(
+    @Observes(notifyObserver = Reception.IF_EXISTS) @BeforeDestroyed(ApplicationScoped.class)
+        Object event) {
+  stop();
+}
+
+@PreDestroy
+void onDestroy() {
+  stop();
+}
+
+synchronized void stop() {
+  if (stopped) {
+    return;
+  }
+  stopped = true;
   closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
   closeQuietly(orderShipmentSubscription, "order-shipment subscription");
   orderShipmentSubscription = null;
@@ -5640,6 +5659,8 @@ void onStop(@Observes ShutdownEvent event) {
   closeQuietly(orderFulfillmentTimeoutRunner, "order-fulfillment saga's timeout runner");
 }
 ```
+
+Quarkus fires no `ShutdownEvent` when a start is refused (the saga parallelism check, say), yet it still shuts the container down. So the Quarkus lifecycle stops what it started from three places: the `ShutdownEvent`, the container's `@BeforeDestroyed(ApplicationScoped.class)` event, which comes before the `DataSource` is destroyed so the subscriptions still resign their leases, and `@PreDestroy` as the fallback. `stop()` runs once; the later calls do nothing.
 
 The Quarkus producer of the timeout runner:
 
