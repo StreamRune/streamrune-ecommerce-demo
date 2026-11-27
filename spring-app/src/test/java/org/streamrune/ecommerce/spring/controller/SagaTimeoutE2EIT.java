@@ -37,7 +37,6 @@ import org.streamrune.ecommerce.spring.AbstractIntegrationTest;
 import org.streamrune.runtime.PollingEventSubscription;
 import org.streamrune.runtime.SagaRunner;
 import org.streamrune.runtime.SagaTimeoutRunner;
-import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
 
 /**
  * End-to-end proof of the saga-timeout sweep against the demo's real {@link
@@ -55,11 +54,11 @@ import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
  * first sweep.
  *
  * <p>Time is made deterministic by injecting a fixed {@link Clock} into the runner and exercising
- * its package-private {@code pollOnce()} (the framework feature mirrored from {@code
- * DeadLetterRetryRunner}). {@code pollOnce()} computes the cutoff as {@code clock.now() - timeout};
- * a saga is swept only when its stored {@code updated_at} is strictly before that cutoff. We anchor
- * both clocks to the saga row's actual {@code updated_at} so the boundary is exact — no {@code
- * Thread.sleep} on wall-clock time.
+ * its {@code pollOnce()} (the framework feature mirrored from {@code DeadLetterRetryRunner}).
+ * {@code pollOnce()} computes the cutoff as {@code clock.now() - timeout}; a saga is swept only
+ * when its stored {@code updated_at} is strictly before that cutoff. We anchor both clocks to the
+ * saga row's actual {@code updated_at} so the boundary is exact — no {@code Thread.sleep} on
+ * wall-clock time.
  *
  * <p>Non-vacuity contrast: a saga that has NOT yet timed out (cutoff before its {@code updated_at})
  * yields no compensation; the same saga once past the cutoff yields exactly its compensation, the
@@ -208,7 +207,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     // cutoff = now - TIMEOUT = (updatedAt + TIMEOUT - 1s) - TIMEOUT = updatedAt - 1s  < updatedAt
     var bus1 = new RecordingCommandBus();
     Clock beforeTimeout = Clock.fixed(updatedAt.plus(TIMEOUT).minusSeconds(1), ZoneOffset.UTC);
-    SagaTimeoutRunnerTestAccess.pollOnce(runnerWithClock(bus1, beforeTimeout));
+    runnerWithClock(bus1, beforeTimeout).pollOnce();
     assertThat(compensationsFor(bus1, saga))
         .as("saga not past its timeout must not be compensated (non-vacuity guard)")
         .isEmpty();
@@ -217,7 +216,7 @@ class SagaTimeoutE2EIT extends AbstractIntegrationTest {
     // cutoff = now - TIMEOUT = (updatedAt + TIMEOUT + 60s) - TIMEOUT = updatedAt + 60s > updatedAt
     var bus2 = new RecordingCommandBus();
     Clock pastTimeout = Clock.fixed(updatedAt.plus(TIMEOUT).plusSeconds(60), ZoneOffset.UTC);
-    SagaTimeoutRunnerTestAccess.pollOnce(runnerWithClock(bus2, pastTimeout));
+    runnerWithClock(bus2, pastTimeout).pollOnce();
 
     // The compensation in every state is the order's cancellation (see OrderFulfillmentSaga); its
     // OrderCancelled starts the undo of the stock and the payment.

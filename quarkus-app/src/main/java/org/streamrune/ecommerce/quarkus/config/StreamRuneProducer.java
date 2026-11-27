@@ -2,26 +2,16 @@ package org.streamrune.ecommerce.quarkus.config;
 
 import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.smallrye.config.ConfigValue;
-import io.smallrye.config.EnvConfigSource;
-import io.smallrye.config.SmallRyeConfig;
-import io.smallrye.config.SmallRyeConfigBuilder;
-import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Alternative;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Named;
 import jakarta.inject.Singleton;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import javax.sql.DataSource;
-import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.streamrune.core.CommandBus;
 import org.streamrune.core.DeadLetterQueue;
 import org.streamrune.core.DeadLetterRetryPolicy;
@@ -104,106 +94,6 @@ import org.streamrune.runtime.gdpr.ForgetSubjectService;
  */
 @ApplicationScoped
 public class StreamRuneProducer {
-
-  /**
-   * Binds the framework's {@code streamrune.*} {@link StreamRuneQuarkusProperties}
-   * {@code @ConfigMapping}.
-   *
-   * <p>Workaround for a composite-build gap: {@code streamrune-quarkus} ships a Jandex index +
-   * {@code beans.xml}, so Quarkus discovers the {@code @ConfigMapping} interface (as a synthetic
-   * bean) and auto-registers the {@code @Provider} {@link
-   * org.streamrune.quarkus.StreamRuneRequestFilter}, which injects it. But under this repo's Gradle
-   * composite build ({@code includeBuild("../streamrune")}) the mapping is never registered as a
-   * runtime config mapping, so the filter fails to resolve it at boot with {@code SRCFG00027: Could
-   * not find a mapping for org.streamrune.quarkus.StreamRuneQuarkusProperties}. This alternative
-   * producer binds the mapping against a throwaway {@link SmallRyeConfig} whose single source
-   * <b>delegates every lookup to the live Quarkus config</b> ({@link
-   * SmallRyeConfig#getConfigValue}). Every value therefore comes from Quarkus's own resolution —
-   * identical to what a {@code @ConfigProperty} injection sees — so e.g. {@code
-   * properties.outbox().enabled()} always agrees with the {@code streamrune.outbox.enabled} that
-   * {@code RabbitMqProducer} reads (rebuilding the config from copied sources + profiles instead
-   * resolves profile/ordinal precedence differently and can disagree, silently disabling the
-   * OutboxPoller). Wins over the failing synthetic bean via {@code @Alternative} +
-   * {@code @Priority}; harmless when StreamRune is consumed as a published jar.
-   */
-  @Produces
-  @Singleton
-  @Alternative
-  @Priority(1)
-  public StreamRuneQuarkusProperties streamRuneQuarkusProperties() {
-    return bind((SmallRyeConfig) ConfigProvider.getConfig());
-  }
-
-  /**
-   * Binds {@link StreamRuneQuarkusProperties} over a throwaway configuration whose one source
-   * delegates to {@code quarkusConfig} (see {@link #streamRuneQuarkusProperties()}).
-   *
-   * <p>The delegate lists every property name of the live configuration except the names an
-   * environment variable gives. SmallRye checks that every {@code streamrune.*} name maps to a
-   * property of the mapping, and skips a name that comes from the environment: the name of a
-   * variable is lossy ({@code _} stands for {@code .}, {@code -} and more), so {@code
-   * STREAMRUNE_TRACING_EVENT_STORE_ENABLED} is listed as {@code
-   * streamrune.tracing.event.store.enabled}, a name no property has. Listed under the delegate's
-   * name it would fail the check, and the application would not start. The value still reaches the
-   * mapping: each property is looked up by its own name, {@code
-   * streamrune.tracing.event-store.enabled}, which the live configuration matches to the variable.
-   * A misspelled key in {@code application.properties} or a system property is still refused.
-   */
-  static StreamRuneQuarkusProperties bind(SmallRyeConfig quarkusConfig) {
-    ConfigSource delegating =
-        new ConfigSource() {
-          @Override
-          public Set<String> getPropertyNames() {
-            Set<String> names = new HashSet<>();
-            for (String name : quarkusConfig.getPropertyNames()) {
-              if (!fromEnvironment(quarkusConfig.getConfigValue(name))) {
-                names.add(name);
-              }
-            }
-            return names;
-          }
-
-          @Override
-          public String getValue(String propertyName) {
-            var value = quarkusConfig.getConfigValue(propertyName);
-            return value == null ? null : value.getValue();
-          }
-
-          @Override
-          public String getName() {
-            return "streamrune-quarkus-properties-delegate";
-          }
-
-          @Override
-          public int getOrdinal() {
-            return 100;
-          }
-        };
-    return new SmallRyeConfigBuilder()
-        .withSources(delegating)
-        // Register the same Quarkus Duration converter the runtime uses.
-        // StreamRuneQuarkusProperties
-        // has several Duration-typed properties (lockTimeout, circuitBreakerCooldown, the
-        // *retention
-        // max-age settings). Raw SmallRye only parses ISO-8601 ("PT5S"); the live Quarkus config
-        // additionally accepts the relaxed form ("5s", "30m"). Without this converter a relaxed
-        // streamrune.* duration would bind here differently than everywhere else in the app (or
-        // fail
-        // the @ConfigMapping build outright), silently diverging this throwaway config from
-        // Quarkus's
-        // own resolution — the exact hazard this delegating producer exists to avoid.
-        .withConverter(
-            Duration.class, 100, new io.quarkus.runtime.configuration.DurationConverter())
-        .withMapping(StreamRuneQuarkusProperties.class)
-        .build()
-        .getConfigMapping(StreamRuneQuarkusProperties.class);
-  }
-
-  /** Whether the live configuration takes {@code value} from an environment variable. */
-  private static boolean fromEnvironment(ConfigValue value) {
-    String source = value == null ? null : value.getSourceName();
-    return source != null && source.startsWith(EnvConfigSource.NAME);
-  }
 
   /**
    * Per-subject AES-256 crypto engine backing the {@code @Encrypted} fields on {@code

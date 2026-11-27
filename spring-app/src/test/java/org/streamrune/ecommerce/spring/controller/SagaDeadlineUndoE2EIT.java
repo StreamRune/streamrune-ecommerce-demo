@@ -44,7 +44,6 @@ import org.streamrune.ecommerce.spring.config.PaymentGatewaySimulator;
 import org.streamrune.runtime.PollingEventSubscription;
 import org.streamrune.runtime.SagaRunner;
 import org.streamrune.runtime.SagaTimeoutRunner;
-import org.streamrune.runtime.SagaTimeoutRunnerTestAccess;
 import org.streamrune.runtime.VirtualThreadCommandBus;
 
 /**
@@ -274,7 +273,7 @@ class SagaDeadlineUndoE2EIT {
             .clock(Clock.fixed(Instant.now().plus(TIMEOUT).plusSeconds(60), ZoneOffset.UTC))
             .sagaRunner(context.getBean("orderFulfillmentSagaRunner", SagaRunner.class))
             .build();
-    SagaTimeoutRunnerTestAccess.pollOnce(runner);
+    runner.pollOnce();
   }
 
   /** Creates the product in the catalogue, which prices the order's line, and stocks it. */

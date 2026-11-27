@@ -5625,7 +5625,28 @@ Everything above gets an order from `OrderPlaced` to `COMPLETED` on the happy pa
 **The timeout runner in the three apps.** Spring builds it in `StreamRuneConfig#orderFulfillmentTimeoutRunner` (Step 6). Quarkus produces the same runner in `StreamRuneProducer#orderFulfillmentTimeoutRunner`, and Micronaut in `StreamRuneFactory#orderFulfillmentTimeoutRunner`; in both, `EcommerceSubscriptionLifecycle` starts it after the saga subscription and closes it after that subscription on shutdown, since neither integration starts a timeout runner an application declares. Closing the saga subscription first gives the saga's lease back, so the timeout runner stops on a backend that does not lead. The two lifecycle classes build the saga subscription with `.sagaRunner(...)` and `.healthContributor(...)` and the subscriptions of the payment, order cancellation and order shipment process managers with `.leadership(...)` and `.healthContributor(...)`, as Spring does; their saga runners take the integration's `SubscriptionLeadership` bean in `.leadership(...)` (Micronaut's is `@Nullable`: absent when leadership is off). The Quarkus lifecycle's shutdown:
 
 ```java
-void onStop(@Observes ShutdownEvent event) {
+void onStop(@Observes @Priority(Interceptor.Priority.APPLICATION) ShutdownEvent event) {
+  stop();
+}
+
+void onBeforeDestroy(
+    @Observes(notifyObserver = Reception.IF_EXISTS)
+        @Priority(Interceptor.Priority.APPLICATION)
+        @BeforeDestroyed(ApplicationScoped.class)
+        Object event) {
+  stop();
+}
+
+@PreDestroy
+void onDestroy() {
+  stop();
+}
+
+synchronized void stop() {
+  if (stopped) {
+    return;
+  }
+  stopped = true;
   closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
   closeQuietly(orderShipmentSubscription, "order-shipment subscription");
   orderShipmentSubscription = null;
@@ -5640,6 +5661,8 @@ void onStop(@Observes ShutdownEvent event) {
   closeQuietly(orderFulfillmentTimeoutRunner, "order-fulfillment saga's timeout runner");
 }
 ```
+
+Quarkus fires no `ShutdownEvent` when a start is refused (the saga parallelism check, say), yet it still shuts the container down. So the Quarkus lifecycle stops what it started from three places: the `ShutdownEvent`, the container's `@BeforeDestroyed(ApplicationScoped.class)` event, which comes before the `DataSource` is destroyed so the subscriptions still resign their leases, and `@PreDestroy` as the fallback. `stop()` runs once; the later calls do nothing. Both observers carry `@Priority(Interceptor.Priority.APPLICATION)` on the event parameter, which runs them before the framework's own lifecycle observers, which run at a later priority: the subscriptions stop while their leases are held and the command bus is open, and only then does the framework close the shared leadership and the bus.
 
 The Quarkus producer of the timeout runner:
 

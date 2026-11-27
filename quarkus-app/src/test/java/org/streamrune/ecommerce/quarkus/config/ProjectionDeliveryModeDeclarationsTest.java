@@ -162,7 +162,7 @@ class ProjectionDeliveryModeDeclarationsTest {
         producer.projectionRoutes(
             instance(projections),
             emptyConfig(),
-            new ReadModelStores(() -> Optional.of(store(processor)), List::of),
+            new ReadModelStores("postgres", () -> Optional.of(store(processor)), List::of),
             subscriptionCheckpoint(),
             instance(List.of()));
     return producer.multiProjectionRunner(

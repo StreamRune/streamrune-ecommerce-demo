@@ -2,8 +2,13 @@ package org.streamrune.ecommerce.quarkus.config;
 
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.BeforeDestroyed;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.event.Reception;
+import jakarta.interceptor.Interceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.streamrune.core.EventStore;
@@ -65,6 +70,16 @@ import org.streamrune.runtime.SubscriptionHealthContributor;
  * must stay at the default priority ({@code APPLICATION + 500}), below the {@code LIBRARY_AFTER +
  * 500} of the framework's saga parallelism check ({@code SagaParallelismStartupCheck}), which reads
  * the subscriptions each saga runner is bound to and so needs the saga's subscription built.
+ *
+ * <p>Shutdown: Quarkus fires no {@link ShutdownEvent} after a refused start, yet still shuts the
+ * container down. So everything started here is stopped from the {@link ShutdownEvent} and, as
+ * well, from the container's {@code @BeforeDestroyed(ApplicationScoped.class)} event, which comes
+ * before any application-scoped bean (the {@code DataSource} among them) is destroyed, so the
+ * subscriptions resign their leases while the pool is open. {@code @PreDestroy} is the fallback.
+ * The stop runs once: the second and later calls do nothing. Both observers run at {@code
+ * Interceptor.Priority.APPLICATION}, before the framework's lifecycle observers, which run at a
+ * later priority and close the shared {@code SubscriptionLeadership} and the command bus: the
+ * subscriptions stop while their leases are held and the bus still takes commands.
  */
 @ApplicationScoped
 public class EcommerceSubscriptionLifecycle {
@@ -93,6 +108,9 @@ public class EcommerceSubscriptionLifecycle {
   private PollingEventSubscription paymentProcessSubscription;
   private PollingEventSubscription orderCancellationSubscription;
   private PollingEventSubscription orderShipmentSubscription;
+
+  /** Whether {@link #stop()} has run; the stop is idempotent. */
+  private boolean stopped;
 
   public EcommerceSubscriptionLifecycle(
       EventStore eventStore,
@@ -168,7 +186,34 @@ public class EcommerceSubscriptionLifecycle {
     LOG.info("StreamRune: started the demo's DeadLetterRetryRunner");
   }
 
-  void onStop(@Observes ShutdownEvent event) {
+  void onStop(@Observes @Priority(Interceptor.Priority.APPLICATION) ShutdownEvent event) {
+    stop();
+  }
+
+  /**
+   * Stops what this bean started when the container is about to destroy its beans: the only stop
+   * after a refused start, and the one that still finds the {@code DataSource} open.
+   */
+  void onBeforeDestroy(
+      @Observes(notifyObserver = Reception.IF_EXISTS)
+          @Priority(Interceptor.Priority.APPLICATION)
+          @BeforeDestroyed(ApplicationScoped.class)
+          Object event) {
+    stop();
+  }
+
+  /** The fallback when the container destroys this bean without the events above. */
+  @PreDestroy
+  void onDestroy() {
+    stop();
+  }
+
+  /** Stops everything {@link #onStart} started, once; never throws. */
+  synchronized void stop() {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
     closeQuietly(deadLetterRetryRunner, "DeadLetterRetryRunner");
     closeQuietly(orderShipmentSubscription, "order-shipment subscription");
     orderShipmentSubscription = null;
